@@ -1,0 +1,60 @@
+name: Feature request
+description: Propose a new flag, output format, filter, or workflow.
+labels: [enhancement, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a **new mutation operator** specifically, use the "New operator" template — it has a different shape.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the user need first, not the implementation. "I'm trying to X, but fermut only lets me Y."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: CLI flag shape, config-file key, expected behavior. Snippets and example commands help.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you weighed and why they're worse.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - CLI flag / subcommand
+        - Filter
+        - Output format
+        - Test runner integration
+        - Configuration (fermut.toml / pyproject.toml)
+        - Performance / parallelism
+        - Documentation
+        - Other (specify above)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: breaking
+    attributes:
+      label: Compatibility
+      options:
+        - label: This proposal is additive (no existing CLI / config / report shape changes).
+        - label: This proposal is breaking — I've noted the migration path in the proposal above.
+
+  - type: textarea
+    id: prior-art
+    attributes:
+      label: Prior art
+      description: How does mutmut / poodle / cosmic-ray / another tool handle this?

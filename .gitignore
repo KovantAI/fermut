@@ -1,0 +1,14 @@
+/target
+**/__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.fermut/
+*.log
+.DS_Store
+.claude
+.cursor
+benchmarks/parity/*.json
+
+# mkdocs build output
+/site

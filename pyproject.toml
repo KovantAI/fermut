@@ -1,0 +1,47 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "fermut"
+description = "Rust-powered, ty-aware mutation testing for Python"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Kovant AB" }]
+maintainers = [{ name = "Kovant AB" }]
+keywords = [
+    "mutation-testing",
+    "mutation",
+    "testing",
+    "python",
+    "rust",
+    "ty",
+    "pytest",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/KovantAI/fermut"
+Issues = "https://github.com/KovantAI/fermut/issues"
+
+[tool.maturin]
+bindings = "bin"
+strip = true

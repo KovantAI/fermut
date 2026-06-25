@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    # OS-independent. Run once on ubuntu — don't duplicate on mac/windows.
+    name: fmt + clippy (stable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }} / ${{ matrix.toolchain }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Stable on all three platforms catches OS-specific regressions.
+        # Beta on ubuntu only gives a single-week heads-up before the next
+        # stable lands.
+        include:
+          - os: ubuntu-latest
+            toolchain: stable
+          - os: macos-latest
+            toolchain: stable
+          - os: windows-latest
+            toolchain: stable
+          - os: ubuntu-latest
+            toolchain: beta
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          prefix-key: "v1-rust"
+          key: ${{ matrix.os }}-${{ matrix.toolchain }}
+      - run: cargo test --all-features --locked
+
+  e2e:
+    # End-to-end tests that drive the `fermut` binary against examples/sample,
+    # which shells out to `pytest`. These are #[ignore]'d in `cargo test` so the
+    # lint/test/msrv jobs need no Python; this job sets up the env and runs them.
+    name: e2e (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: e2e
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      # `baseline` gates on `fermut doctor`, which requires pytest, coverage,
+      # pytest-cov (per-test contexts) and ty (mutant pre-filter) to all pass.
+      - run: pip install pytest coverage pytest-cov ty
+      - run: cargo test --all-features --locked --test e2e -- --include-ignored
+
+  msrv:
+    # Build-check against the declared MSRV in Cargo.toml. Tests + clippy run
+    # on stable; this job only catches accidental use of post-MSRV features.
+    name: cargo check (MSRV 1.83)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: "1.83"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: msrv
+      - run: cargo check --all-targets --all-features --locked

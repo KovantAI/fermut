@@ -1,0 +1,166 @@
+# Reference Python repos under benchmark.
+#
+# Each entry: url + ref pinned for reproducibility, plus the source path and
+# test command the mutation tools should drive. `target_paths` is what each
+# mutation tool mutates; `test_cmd` is forwarded verbatim to the tool's pytest
+# runner (each adapter rewrites flags as needed).
+#
+# Refs are tags rather than branches so a cold clone always lands on the same
+# commit. Bump them deliberately when refreshing the suite.
+
+[more-itertools]
+url = "https://github.com/more-itertools/more-itertools.git"
+ref = "v10.5.0"
+src_path = "more_itertools"
+test_path = "tests"
+# `.[testing]` does not pull pytest on this tag — install it explicitly or
+# every mutant errors at pytest spawn and the score falsely defaults to 100%.
+install_cmd = "pip install -e .[testing] && pip install pytest"
+test_cmd = "pytest tests"
+# Loop scenario edits this file with a no-op then reverts.
+loop_edit_file = "more_itertools/recipes.py"
+
+[click]
+url = "https://github.com/pallets/click.git"
+ref = "8.1.7"
+src_path = "src/click"
+test_path = "tests"
+install_cmd = "pip install -e . && pip install pytest"
+test_cmd = "pytest tests"
+loop_edit_file = "src/click/core.py"
+# NOTE: mutmut 3.x cannot mutate click — circular import (mutmut's own CLI
+# uses click, so mutated click breaks mutmut's bootstrap). Use mutmut 2.x
+# data for click. mutmut_also_copy / mutmut_deselect would be needed for a
+# 3.x run but are irrelevant here.
+
+[typer]
+url = "https://github.com/fastapi/typer.git"
+ref = "0.26.7"
+src_path = "typer"
+test_path = "tests"
+# Non-editable install so mutmut 3.x's `mutants/typer` sys.path win isn't
+# shadowed by an editable .pth pointing at original typer. fermut sets
+# its own PYTHONPATH=mirror/src and is unaffected by the change.
+install_cmd = "pip install . && pip install pytest pytest-xdist coverage[toml] rich shellingham"
+test_cmd = "pytest tests"
+loop_edit_file = "typer/main.py"
+# mutmut 3.x copies tree to mutants/. typer tests import docs_src/* fixtures.
+mutmut_also_copy = ["docs_src", "scripts"]
+# Test depends on filesystem-order arg expansion: runs `tutorial001 README.md
+# pyproject.toml` and asserts first match is README.md. In mutants/ cwd
+# globbing yields a different order — test sees pyproject.toml first.
+mutmut_deselect = [
+  "tests/test_tutorial/test_multiple_values/test_arguments_with_multiple_values/test_tutorial001.py::test_main",
+  "tests/test_types_file.py::test_binary_stderr",
+]
+# Mutate only typer/main.py + typer/core.py — full pkg = 7020 mutants, too slow.
+fermut_exclude = [
+  "__init__.py",
+  "__main__.py",
+  "_click/**",
+  "_completion_classes.py",
+  "_completion_shared.py",
+  "_types.py",
+  "_typing.py",
+  "cli.py",
+  "colors.py",
+  "completion.py",
+  "models.py",
+  "params.py",
+  "rich_utils.py",
+  "testing.py",
+  "utils.py",
+]
+
+[starlette]
+url = "https://github.com/encode/starlette.git"
+ref = "0.52.1"
+src_path = "starlette"
+test_path = "tests"
+# Pinned: httpx<0.28 (JSON serialization), pytest<8 (PytestUnraisableExc),
+# anyio<4.5 (deprecation-emission test in 0.41.x is sensitive to anyio
+# internals; 0.52.x is newer + tolerant but kept pin for stability).
+install_cmd = "pip install -e . && pip install 'pytest<8' httpx 'anyio<4.5' trio itsdangerous jinja2 python-multipart pyyaml typing_extensions"
+test_cmd = "pytest tests"
+loop_edit_file = "starlette/routing.py"
+
+[pyjwt]
+url = "https://github.com/jpadilla/pyjwt.git"
+ref = "2.13.0"
+src_path = "jwt"
+test_path = "tests"
+install_cmd = "pip install -e . && pip install pytest 'cryptography>=3.4.0'"
+test_cmd = "pytest tests"
+loop_edit_file = "jwt/api_jwt.py"
+
+[trio]
+url = "https://github.com/python-trio/trio.git"
+ref = "v0.33.0"
+src_path = "src/trio"
+# Trio's tests live inside the package (src/trio/_tests, _core/_tests).
+# Pytest plugin must be loaded explicitly.
+test_path = "src/trio/_tests"
+install_cmd = "pip install -e . && pip install pytest pytest-trio attrs sortedcontainers idna outcome sniffio trustme astor PyYAML pyOpenSSL isort"
+test_cmd = "pytest -p trio._tests.pytest_plugin --import-mode=importlib src/trio/_tests"
+loop_edit_file = "src/trio/_core/_run.py"
+pytest_extra_args = ["-p", "trio._tests.pytest_plugin", "--import-mode=importlib"]
+# NOTE: mutmut 3.x is infeasible for trio — tests introspect source line
+# numbers, exported symbols, and frames, which mutmut's trampoline
+# injection breaks file-wide. Even after ignoring obvious offenders, the
+# mutation run produced no recorded outcomes after 3h+. fermut handles it
+# because each mutant run is judged on rc-change, not absolute baseline.
+mutmut_ignore = [
+  "src/trio/_tests/test_deprecate.py",
+  "src/trio/_tests/test_exports.py",
+  "src/trio/_tests/test_tracing.py",
+]
+
+[markupsafe]
+url = "https://github.com/pallets/markupsafe.git"
+ref = "3.0.3"
+src_path = "src/markupsafe"
+test_path = "tests"
+# Test deps live in PEP-735 `[dependency-groups]`, which `pip install -e .`
+# does not pull — install pytest explicitly. Has an optional C speedups
+# extension with a pure-Python fallback; editable build picks up the C one
+# when a compiler is present.
+install_cmd = "pip install -e . && pip install pytest"
+test_cmd = "pytest tests"
+loop_edit_file = "src/markupsafe/__init__.py"
+
+[jinja2]
+url = "https://github.com/pallets/jinja2.git"
+ref = "3.1.6"
+src_path = "src/jinja2"
+test_path = "tests"
+# MarkupSafe pulled as a runtime dep by `-e .`. Babel needed for the i18n /
+# ext tests; trio for the async tests (test_async imports trio directly);
+# pytest from the (uninstalled) dependency-group.
+install_cmd = "pip install -e . && pip install pytest Babel trio"
+test_cmd = "pytest tests"
+loop_edit_file = "src/jinja2/environment.py"
+
+[werkzeug]
+url = "https://github.com/pallets/werkzeug.git"
+ref = "3.1.8"
+src_path = "src/werkzeug"
+test_path = "tests"
+# `[dependency-groups].tests` = cffi, cryptography, ephemeral-port-reserve,
+# pytest, pytest-timeout, watchdog. The serving/reloader/security tests fail
+# to collect without them. Large package (~15k LoC) — runs are heavy even
+# with the coverage filter.
+install_cmd = "pip install -e . && pip install pytest pytest-timeout cryptography cffi ephemeral-port-reserve watchdog"
+test_cmd = "pytest tests"
+loop_edit_file = "src/werkzeug/http.py"
+
+[flask]
+url = "https://github.com/pallets/flask.git"
+ref = "3.1.3"
+src_path = "src/flask"
+test_path = "tests"
+# Runtime deps (werkzeug, jinja2, click, itsdangerous, blinker, markupsafe)
+# come via `-e .`. `[dependency-groups].tests` = asgiref, greenlet, pytest,
+# python-dotenv (async + cli + reloader tests need them).
+install_cmd = "pip install -e . && pip install pytest asgiref greenlet python-dotenv"
+test_cmd = "pytest tests"
+loop_edit_file = "src/flask/app.py"

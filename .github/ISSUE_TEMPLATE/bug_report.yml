@@ -1,0 +1,96 @@
+name: Bug report
+description: fermut behaved unexpectedly — wrong output, crash, regression, etc.
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please include enough detail that we can reproduce.
+        For security issues, do **not** open a public issue — see [SECURITY.md](https://github.com/KovantAI/fermut/blob/main/SECURITY.md).
+
+  - type: input
+    id: fermut-version
+    attributes:
+      label: fermut version
+      description: Output of `fermut --version`.
+      placeholder: fermut 0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: rustc-version
+    attributes:
+      label: rustc version
+      description: Output of `rustc --version`.
+      placeholder: rustc 1.83.0 (… …)
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      placeholder: 3.12.x
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux (x86_64)
+        - Linux (aarch64)
+        - macOS (Intel)
+        - macOS (Apple Silicon)
+        - Windows
+        - Other (specify in repro)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runner
+    attributes:
+      label: Test runner
+      options:
+        - pytest (default)
+        - unittest
+        - n/a (issue is about `list` / `show` / generation)
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command + flags
+      description: Full command line that triggered the issue.
+      render: shell
+      placeholder: |
+        fermut run pkg/ --tests tests/ --diff-only main --coverage coverage.json
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include stack traces, error messages, and stderr if relevant.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal Python reproducer
+      description: The smallest input that triggers the issue. Inline snippet or a public link.
+      render: python
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant `fermut.toml` / `[tool.fermut]` (redacted)
+      render: toml

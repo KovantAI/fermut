@@ -1,0 +1,64 @@
+name: Mutation gate
+
+# Fails the PR build if any mutant on a changed line survives. Posts a
+# Markdown summary back as a PR comment so reviewers see the score inline.
+
+on:
+  pull_request:
+    paths:
+      - "**/*.py"
+      - "pyproject.toml"
+      - "fermut.toml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  mutate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0 # full history so `--diff-only main` can compute the merge base
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.12"
+
+      - name: install project + fermut
+        run: |
+          uv sync
+          uv tool install fermut
+
+      - name: build coverage data
+        run: |
+          uv run coverage run -m pytest
+          uv run coverage json -o coverage.json
+
+      - name: run fermut on changed lines
+        run: |
+          uv tool run fermut run src/ \
+              --tests tests/ \
+              --diff-only origin/${{ github.base_ref }} \
+              --coverage coverage.json \
+              --hypothesis-seed 1234 \
+              --markdown fermut-report.md \
+              --json fermut-report.json
+        # Exit code is non-zero when survivors exist — pulls the gate.
+
+      - name: sticky PR comment
+        if: always() && hashFiles('fermut-report.md') != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        # Edits the previous fermut comment in place via the `<!-- fermut:report -->`
+        # marker, so the PR doesn't accumulate one comment per CI run.
+        run: uv tool run fermut pr-comment --markdown fermut-report.md
+
+      - name: upload JSON report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fermut-pr-report
+          path: fermut-report.json

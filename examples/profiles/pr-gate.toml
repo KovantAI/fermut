@@ -1,0 +1,18 @@
+# fermut profile: pr-gate — Pre-merge CI gate: diff-only + coverage + narrow ops. Fastest.
+# re-run `fermut init --profile <name> --force` to switch.
+#
+# Generate with:  fermut init --profile pr-gate
+#
+# Run on a PR:
+#   coverage run -m pytest && coverage json -o coverage.json
+#   fermut run src/ --markdown fermut.md
+
+source_root = "src"
+tests = "tests"
+runner = "pytest"
+ty_filter = true
+timeout = 15
+coverage = "coverage.json"
+diff_only = "main"
+hypothesis_seed = 12345
+ops = ["arith-op-swap", "compare-op-swap", "boundary-shift", "return-value-to-none"]

@@ -1,0 +1,194 @@
+site_name: fermut
+site_description: Rust-powered, ty-aware mutation testing for Python
+site_url: https://fermut.readthedocs.io/
+repo_url: https://github.com/KovantAI/fermut
+repo_name: KovantAI/fermut
+edit_uri: edit/main/docs/
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.tracking
+    - navigation.indexes
+    - navigation.path
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - content.tabs.link
+    - search.suggest
+    - search.highlight
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep orange
+      accent: deep orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep orange
+      accent: deep orange
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+  - pymdownx.keys
+
+nav:
+  - Introduction: index.md
+  - Getting started:
+      - getting-started/index.md
+      - Installation: getting-started/installation.md
+      - First steps: getting-started/first-steps.md
+      - Features: getting-started/features.md
+      - Getting help: getting-started/getting-help.md
+  - Guides:
+      - guides/index.md
+      - CI quickstart: guides/ci-quickstart.md
+      - Integrations: guides/integrations.md
+      - Working on projects: guides/projects.md
+      - Tightening the inner loop: guides/inner-loop.md
+      - Coding agents: guides/coding-agents.md
+      - Claude Code playbook: guides/claude-code-skill.md
+      - Survivor triage: guides/survivor-triage.md
+      - Equivalent mutants: guides/equivalent-mutants.md
+      - Trends: guides/trends.md
+      - Coverage: guides/coverage.md
+      - Jupyter notebooks: guides/notebooks.md
+      - Filters: guides/filters.md
+      - Migrate from mutmut: guides/migrate-from-mutmut.md
+      - Migrate from cosmic-ray: guides/migrate-from-cosmic-ray.md
+  - Concepts:
+      - concepts/index.md
+      - Mutation testing: concepts/mutation-testing.md
+      - Projects: concepts/projects.md
+      - Configuration: concepts/configuration.md
+      - Caching: concepts/caching.md
+      - Landscape: concepts/landscape.md
+      - Glossary: concepts/glossary.md
+  - Reference:
+      - reference/index.md
+      - CLI:
+          - reference/cli/index.md
+          - fermut init: reference/cli/init.md
+          - fermut run: reference/cli/run.md
+          - fermut coverage: reference/cli/coverage.md
+          - fermut list: reference/cli/list.md
+          - fermut show: reference/cli/show.md
+          - fermut next: reference/cli/next.md
+          - fermut explain: reference/cli/explain.md
+          - fermut suggest: reference/cli/suggest.md
+          - fermut autofix: reference/cli/autofix.md
+          - fermut merge: reference/cli/merge.md
+          - fermut trend: reference/cli/trend.md
+          - fermut score: reference/cli/score.md
+          - fermut dashboard: reference/cli/dashboard.md
+          - fermut doctor: reference/cli/doctor.md
+          - fermut pr-comment: reference/cli/pr-comment.md
+          - fermut clean: reference/cli/clean.md
+          - fermut migrate: reference/cli/migrate.md
+          - fermut mcp: reference/cli/mcp.md
+          - fermut completions: reference/cli/completions.md
+      - Configuration: reference/configuration.md
+      - Operators:
+          - reference/operators/index.md
+          - Stable: reference/operators/stable.md
+          - Experimental: reference/operators/experimental.md
+          - Parity: reference/operators/parity.md
+          - Selecting: reference/operators/selecting.md
+          - Docstring skip: reference/operators/docstring-skip.md
+          - Inline ignore: reference/operators/inline-ignore.md
+      - Environment variables: reference/environment-variables.md
+      - Shell completion:
+          - reference/shell-completion/index.md
+          - bash: reference/shell-completion/bash.md
+          - zsh: reference/shell-completion/zsh.md
+          - fish: reference/shell-completion/fish.md
+          - powershell: reference/shell-completion/powershell.md
+          - elvish: reference/shell-completion/elvish.md
+      - Troubleshooting:
+          - reference/troubleshooting/index.md
+          - Errored outcomes: reference/troubleshooting/errored-outcomes.md
+          - Timeouts: reference/troubleshooting/timeouts.md
+          - Phantom survivors: reference/troubleshooting/phantom-survivors.md
+          - Score swings: reference/troubleshooting/score-swings.md
+          - Coverage rejected: reference/troubleshooting/coverage-rejected.md
+          - ty not found: reference/troubleshooting/ty-not-found.md
+          - PR comment fails: reference/troubleshooting/pr-comment-fails.md
+          - Diff-only empty: reference/troubleshooting/diff-only-empty.md
+          - Permission denied: reference/troubleshooting/permission-denied.md
+          - Missing mutants: reference/troubleshooting/missing-mutants.md
+      - Internals:
+          - reference/internals/index.md
+          - Adding an operator: reference/internals/adding-operators.md
+      - Benchmarks: reference/benchmarks.md
+      - Parity: reference/parity.md
+      - Policies:
+          - reference/policies/index.md
+          - Versioning: reference/policies/versioning.md
+          - MSRV: reference/policies/msrv.md
+          - Python versions: reference/policies/python-versions.md
+          - Platforms: reference/policies/platforms.md
+          - Distribution: reference/policies/distribution.md
+          - Security: reference/policies/security.md
+      - License: reference/license.md
+  - Roadmap: roadmap.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/KovantAI/fermut
+
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - javascripts/repo-stats.js
+
+# Strict mode: fail the build on broken internal links so RTD doesn't ship
+# a doc set with rot. Toggle off locally if you intentionally leave dangling
+# links during work-in-progress.
+strict: true

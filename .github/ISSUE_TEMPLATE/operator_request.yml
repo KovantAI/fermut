@@ -1,0 +1,95 @@
+name: New mutation operator
+description: Propose a new mutation operator (e.g. swap, replacement, drop).
+labels: [enhancement, operator, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        See [CONTRIBUTING.md → "Adding a new mutation operator"](https://github.com/KovantAI/fermut/blob/main/CONTRIBUTING.md#adding-a-new-mutation-operator) for the implementation outline.
+        Existing operators are listed in `README.md`'s **Mutation operators** section — check there first.
+
+  - type: input
+    id: name
+    attributes:
+      label: Proposed operator name
+      description: kebab-case, prefix `exp:` if experimental.
+      placeholder: e.g. `dict-key-swap` or `exp:loop-direction-reverse`
+    validations:
+      required: true
+
+  - type: textarea
+    id: example
+    attributes:
+      label: Mutation example
+      description: Show the before/after on a small Python snippet.
+      render: python
+      placeholder: |
+        # before
+        d = {"a": 1, "b": 2}
+        # after
+        d = {"b": 1, "a": 2}
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ast-node
+    attributes:
+      label: AST node the visitor would hook
+      options:
+        - Expr::BinOp
+        - Expr::BoolOp
+        - Expr::Compare
+        - Expr::UnaryOp
+        - Expr::Call
+        - Expr::Dict
+        - Expr::List / Tuple / Set
+        - Expr::Subscript / Slice
+        - Expr::Lambda
+        - Expr::NumberLiteral / StringLiteral / BytesLiteral
+        - Stmt::Assign / AugAssign
+        - Stmt::Return / Break / Continue
+        - Stmt::If / While / Assert
+        - Stmt::For
+        - Stmt::Try / ExceptHandler
+        - Stmt::FunctionDef / ClassDef (decorator / default-arg territory)
+        - Other (explain below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: tier
+    attributes:
+      label: Stable or experimental?
+      description: Experimental is the right call for high-noise / often-equivalent / type-unsafe operators.
+      options:
+        - stable (always emitted)
+        - experimental (require `--experimental`)
+    validations:
+      required: true
+
+  - type: textarea
+    id: rationale
+    attributes:
+      label: Why is this operator worth adding?
+      description: What bug class does it catch that existing operators don't?
+    validations:
+      required: true
+
+  - type: textarea
+    id: prior-art
+    attributes:
+      label: Prior art
+      description: Does mutmut / poodle / cosmic-ray ship this operator? Under what name?
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Implementation checklist (informational)
+      options:
+        - label: Variant added to `Operator` enum.
+        - label: Variant added to `Operator::all()`.
+        - label: "`name()`, `is_experimental()` updated."
+        - label: Visitor hook in `src/mutator/visitor.rs`.
+        - label: Emission test in `operator_emission_tests`.
+        - label: README operator table updated.
+        - label: CHANGELOG entry added.

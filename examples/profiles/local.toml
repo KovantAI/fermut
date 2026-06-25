@@ -1,0 +1,18 @@
+# fermut profile: local — Dev loop: 25% sample of mutants, short timeout, no coverage.
+# re-run `fermut init --profile <name> --force` to switch.
+#
+# Generate with:  fermut init --profile local --force
+#
+# Run while iterating on a single file:
+#   fermut run src/myproject/auth.py
+#
+# Bump sample_seed to rotate to a different 25% slice. Pass `--sample 1.0`
+# on the CLI for a full local run without re-init.
+
+source_root = "src"
+tests = "tests"
+runner = "pytest"
+ty_filter = true
+timeout = 15
+sample = 0.25
+sample_seed = 0

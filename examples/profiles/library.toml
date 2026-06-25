@@ -1,0 +1,15 @@
+# fermut profile: library — Library: all stable ops, no experimental, pinned Hypothesis seed.
+# re-run `fermut init --profile <name> --force` to switch.
+#
+# Generate with:  fermut init --profile library --force
+#
+# Run on the whole package:
+#   fermut run src/ --markdown fermut.md
+
+source_root = "src"
+tests = "tests"
+runner = "pytest"
+ty_filter = true
+timeout = 30
+experimental = false
+hypothesis_seed = 12345

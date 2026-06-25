@@ -1,0 +1,8 @@
+# Pinned for reproducible Read the Docs builds.
+# Bump together to keep mkdocs-material + plugins compatible.
+mkdocs==1.6.1
+mkdocs-material==9.5.49
+pymdown-extensions==10.21.3
+# pymdownx >=10.14 handles Pygments 2.20 (older pymdownx broke on filename=None).
+# Pinned for reproducible RTD builds.
+pygments==2.20.0

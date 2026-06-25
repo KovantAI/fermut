@@ -1,0 +1,45 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch
+    labels:
+      - ci
+      - dependencies
+
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: deps
+    groups:
+      rust-minor-patch:
+        update-types:
+          - minor
+          - patch
+    labels:
+      - rust
+      - dependencies
+    ignore:
+      # Pinned to a ruff release tag in Cargo.toml; bump these together by
+      # editing the tag, not individually.
+      - dependency-name: "ruff_python_parser"
+      - dependency-name: "ruff_python_ast"
+      - dependency-name: "ruff_text_size"

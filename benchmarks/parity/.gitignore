@@ -1,0 +1,5 @@
+# Regenerable comparison datasets + outputs (multi-MB). The scripts, README,
+# and docs/reference/parity.md are the durable artifacts; re-run to rebuild.
+*.json
+report*.md
+operators*.md

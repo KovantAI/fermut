@@ -1,0 +1,22 @@
+[
+  {"query": "can you run fermut on my shipping module and get the mutation score above 80? write whatever tests are needed to kill the survivors", "should_trigger": true},
+  {"query": "i just finished writing unit tests for billing/invoice.py — are they actually any good or would real bugs slip through? not just line coverage, i mean do they catch logic errors", "should_trigger": true},
+  {"query": "we have a PR that changes the discount calc in pricing.py. before i merge, can you confirm my new tests actually exercise the changed lines and would fail if the logic broke?", "should_trigger": true},
+  {"query": "my test suite is at 95% coverage but i keep shipping bugs. how do i find the tests that are passing without really asserting anything?", "should_trigger": true},
+  {"query": "kill the survivors in src/auth — there's a fermut last.json in .fermut already", "should_trigger": true},
+  {"query": "set up mutation testing for this fastapi backend and tell me which modules have the weakest tests", "should_trigger": true},
+  {"query": "i see a .fermut/last.json and a bunch of SURVIVED lines, what do i do with these", "should_trigger": true},
+  {"query": "we use mutmut today but it's slow — can you run the mutation analysis a faster way and triage what survived?", "should_trigger": true},
+  {"query": "which of my tests actually catch the off-by-one in the pagination helper? i think the boundary isn't tested", "should_trigger": true},
+  {"query": "score how strong the tests are for the orders package and prioritize what to fix first", "should_trigger": true},
+  {"query": "generate a coverage report for the whole repo and show me the percentage per file", "should_trigger": false},
+  {"query": "my pytest run is failing to collect tests/integration — ModuleNotFoundError on msgraph, how do i fix the imports?", "should_trigger": false},
+  {"query": "which tests execute line 42 of core.py? i want the per-test coverage contexts", "should_trigger": false},
+  {"query": "specifically use mutmut (not anything else) to mutation test this package, my CI is pinned to it", "should_trigger": false},
+  {"query": "my tests are flaky — they pass locally but fail in CI intermittently, help me find the nondeterminism", "should_trigger": false},
+  {"query": "write unit tests for the new shipping_cost function, i don't have any tests yet", "should_trigger": false},
+  {"query": "the test suite takes 20 minutes, can you help me speed it up / parallelize pytest?", "should_trigger": false},
+  {"query": "review this PR diff for correctness bugs and style issues", "should_trigger": false},
+  {"query": "is my type coverage good? run mypy/ty and tell me which functions lack annotations", "should_trigger": false},
+  {"query": "benchmark how fast this function is and find the bottleneck", "should_trigger": false}
+]

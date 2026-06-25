@@ -1,0 +1,69 @@
+name: Mutation (nightly full sweep)
+
+# Runs the full mutation suite every night against `main`. No diff filter, no
+# sampling — exhaustive. Result lands as an HTML artifact and, on regression,
+# files a tracking issue.
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  mutate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.12"
+
+      - name: install project + fermut
+        run: |
+          uv sync
+          uv tool install fermut
+
+      - name: build coverage data
+        run: |
+          uv run coverage run -m pytest
+          uv run coverage json -o coverage.json
+
+      - name: full mutation sweep
+        id: mutate
+        continue-on-error: true
+        run: |
+          uv tool run fermut run src/ \
+              --tests tests/ \
+              --coverage coverage.json \
+              --hypothesis-seed 1234 \
+              --experimental \
+              --jobs 8 \
+              --json fermut-report.json \
+              --html fermut-report.html \
+              --junit fermut-report.xml
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fermut-nightly
+          path: |
+            fermut-report.json
+            fermut-report.html
+            fermut-report.xml
+
+      - name: open issue on regression
+        if: steps.mutate.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+              --title "Nightly mutation regression on $(date -u +%Y-%m-%d)" \
+              --label mutation,regression \
+              --body "Survivors detected on the nightly full sweep. Download the [fermut-nightly artifact](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for the HTML report."

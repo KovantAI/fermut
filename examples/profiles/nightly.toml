@@ -1,0 +1,14 @@
+# fermut profile: nightly — Cron full sweep: every op + experimental, no diff filter.
+# re-run `fermut init --profile <name> --force` to switch.
+#
+# Generate with:  fermut init --profile nightly --force
+#
+# Run on a schedule (see examples/github-actions/nightly-full-sweep.yml):
+#   fermut run src/ --json nightly.json --html nightly.html --markdown nightly.md
+
+source_root = "src"
+tests = "tests"
+runner = "pytest"
+ty_filter = true
+timeout = 60
+experimental = true

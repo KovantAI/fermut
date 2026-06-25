@@ -1,0 +1,83 @@
+name: Mutation (sharded)
+
+# Splits the full mutation sweep across 8 parallel runners. Each shard writes
+# a JSON report; a merge job combines them into a single HTML artifact and a
+# Markdown commit comment.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutate:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.12"
+
+      - name: install project + fermut
+        run: |
+          uv sync
+          uv tool install fermut
+
+      - name: run shard ${{ matrix.shard }}/8
+        run: |
+          uv tool run fermut run src/ \
+              --tests tests/ \
+              --shard ${{ matrix.shard }}/8 \
+              --hypothesis-seed 1234 \
+              --cache-path ".fermut/cache-${{ matrix.shard }}.json" \
+              --json "shard-${{ matrix.shard }}.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: shard-${{ matrix.shard }}
+          path: shard-${{ matrix.shard }}.json
+
+  merge:
+    needs: mutate
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+
+      - name: install fermut
+        run: uv tool install fermut
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: shards
+          merge-multiple: true
+
+      - name: merge shard reports
+        run: |
+          uv tool run fermut merge shards/shard-*.json \
+              --json combined.json \
+              --html report.html \
+              --markdown report.md \
+              --junit report.xml
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fermut-report
+          path: |
+            combined.json
+            report.html
+            report.md
+            report.xml

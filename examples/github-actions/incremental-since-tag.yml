@@ -1,0 +1,65 @@
+name: Mutation (since last release)
+
+# Mutates only what's changed since the most recent semver tag — useful for
+# tracking how much net mutation debt has accumulated between releases.
+# Trigger manually or on tag push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Git ref or date to compare against (defaults to the latest semver tag)."
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  mutate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.12"
+
+      - name: install project + fermut
+        run: |
+          uv sync
+          uv tool install fermut
+
+      - name: resolve since-ref
+        id: since
+        run: |
+          if [ -n "${{ github.event.inputs.since }}" ]; then
+            ref="${{ github.event.inputs.since }}"
+          else
+            # Fall back to most recent semver tag, or 7 days ago if none exist.
+            ref=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo '7 days ago')
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Comparing against: $ref"
+
+      - name: run fermut since ${{ steps.since.outputs.ref }}
+        run: |
+          uv tool run fermut run src/ \
+              --tests tests/ \
+              --since "${{ steps.since.outputs.ref }}" \
+              --hypothesis-seed 1234 \
+              --markdown fermut-incremental.md \
+              --json fermut-incremental.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fermut-incremental
+          path: |
+            fermut-incremental.json
+            fermut-incremental.md

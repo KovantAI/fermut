@@ -1,0 +1,52 @@
+# Mutation tools under benchmark.
+#
+# Adapter-specific notes live in src/bench/adapters/<tool>.py. This file gives
+# the orchestrator install pins, the per-run command template, cache locations
+# to nuke for a cold run, and a score-regex used to scrape the final mutation
+# score from stdout when JSON output isn't available.
+#
+# `cmd` placeholders: {src} {tests} {jobs}. Adapters render the rest.
+
+[fermut]
+# fermut is built from this repo so benchmarks track the working tree.
+# The adapter builds the wheel on demand via maturin and caches it under
+# benchmarks/fixtures/.wheels/<git-sha>[-dirty-<digest>]/. Install just
+# pip-installs the cached wheel; rebuilds happen automatically when HEAD
+# or the working tree changes.
+install_cmd = "pip install --force-reinstall $FERMUT_WHEEL"
+version_cmd = "fermut --version"
+cache_dirs = [".fermut"]
+score_regex = "score[^0-9]*([0-9]+(?:\\.[0-9]+)?)\\s*%"
+# Summary line: `<N> mutants — killed: ...`. Captures total mutant count
+# so the report can show that test collection sized the way we expect.
+mutants_regex = "([0-9]+)\\s+mutants\\s+—"
+
+[mutmut]
+# 3.x is a full rewrite — drops Pony ORM (no 3.13 crash, no deadlock on
+# 3.11), config is `[mutmut]` in setup.cfg / pyproject.toml, cache lives
+# under `mutants/`, CI/CD stats via `mutmut export-cicd-stats` →
+# `mutants/mutmut-cicd-stats.json`. Adapter writes setup.cfg per worktree.
+install_cmd = "pip install 'mutmut>=3.6,<4'"
+version_cmd = "mutmut --version"
+cache_dirs = ["mutants"]
+# Score line in `mutmut run` output: `N/total  🎉 K  🫥 …  ⏰ …  🤔 …  🙁 …`
+# But canonical score comes from cicd-stats JSON — regex is a fallback only.
+score_regex = "🎉\\s*([0-9]+)"
+mutants_regex = "([0-9]+)/[0-9]+\\s*🎉"
+
+[cosmic-ray]
+install_cmd = "pip install 'cosmic-ray>=8.3'"
+version_cmd = "cosmic-ray --version"
+# session.sqlite is the per-run state; killed by adapter explicitly.
+cache_dirs = ["cosmic-ray.session.sqlite", ".cosmic-ray"]
+score_regex = "surviving mutants:\\s*([0-9]+)\\s*\\(([0-9.]+)%\\)"
+# `total jobs: N` printed by `cosmic-ray dump`.
+mutants_regex = "total jobs:\\s*([0-9]+)"
+
+[poodle]
+install_cmd = "pip install 'poodle-test>=1.4'"
+version_cmd = "poodle --version"
+cache_dirs = [".poodle-cache", "poodle-report"]
+score_regex = "Mutation Score:\\s*([0-9]+(?:\\.[0-9]+)?)%"
+# `Trials: N` line in poodle's summary.
+mutants_regex = "Trials:\\s*([0-9]+)"

@@ -1,0 +1,16 @@
+.yes svg { fill: var(--md-typeset-color, #2e7d32); color: #2e7d32; }
+.no svg  { fill: #c62828; color: #c62828; }
+.yes, .no { vertical-align: -2px; }
+
+/* Hide site name at top of left sidebar (uv-style — title stays in header). */
+.md-nav--primary > .md-nav__title {
+  display: none;
+}
+
+/* Repo stats (stars + open PRs) injected by javascripts/repo-stats.js. */
+.md-source__fact .md-source__icon {
+  height: 0.9em;
+  width: 0.9em;
+  vertical-align: -1px;
+  margin-right: 2px;
+}

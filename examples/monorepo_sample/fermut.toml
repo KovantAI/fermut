@@ -1,0 +1,14 @@
+# Monorepo fixture: uv workspace with two member packages.
+# `source_root` points at the packages dir so fermut walks both pkg_a and pkg_b.
+
+source_root = "packages"
+jobs = 4
+timeout = 30
+ty_filter = false
+experimental = false
+ops = [
+    "arith-op-swap",
+    "compare-op-swap",
+    "boundary-shift",
+    "return-value-to-none",
+]

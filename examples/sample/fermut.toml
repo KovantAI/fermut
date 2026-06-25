@@ -1,0 +1,24 @@
+# Example config consumed by the bundled sample (examples/sample/).
+# All keys are optional; this file demonstrates the common keys.
+
+source_root = "src"
+tests = "tests"
+jobs = 4
+timeout = 30
+ty_filter = false       # sample has no `ty` installed in CI
+experimental = false
+# NOTE: this `ops` whitelist restricts mutation to 4 operators. A full run
+# therefore reports most mutants as `skipped (operator ...)` and a HIGHER
+# score than the default catalogue would (~82% here vs ~65% with all
+# operators on). It keeps the demo fast and focused — NOT a recommended
+# production setting. Delete the `ops`/`skip_ops` keys to exercise the full
+# operator set.
+ops = [
+    "arith-op-swap",
+    "compare-op-swap",
+    "boundary-shift",
+    "return-value-to-none",
+]
+skip_ops = ["number-shift"]
+# diff_only = "main"
+# coverage = "coverage.json"

@@ -30,6 +30,13 @@ updates:
     commit-message:
       prefix: deps
     groups:
+      # All astral-sh/ruff git crates share one release tag in Cargo.toml.
+      # Group them so dependabot bumps them together in one PR instead of
+      # opening a separate PR per crate (which leaves the tag inconsistent).
+      astral-ruff:
+        patterns:
+          - "ruff_*"
+          - "ty_*"
       rust-minor-patch:
         update-types:
           - minor
@@ -37,9 +44,3 @@ updates:
     labels:
       - rust
       - dependencies
-    ignore:
-      # Pinned to a ruff release tag in Cargo.toml; bump these together by
-      # editing the tag, not individually.
-      - dependency-name: "ruff_python_parser"
-      - dependency-name: "ruff_python_ast"
-      - dependency-name: "ruff_text_size"

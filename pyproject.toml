@@ -1,12 +1,13 @@
 [build-system]
-requires = ["maturin>=1.5,<2"]
+requires = ["maturin>=1.8,<2"]
 build-backend = "maturin"
 
 [project]
 name = "fermut"
 description = "Rust-powered, ty-aware mutation testing for Python"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
 requires-python = ">=3.10"
 authors = [{ name = "Kovant AB" }]
 maintainers = [{ name = "Kovant AB" }]
@@ -22,7 +23,6 @@ keywords = [
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",

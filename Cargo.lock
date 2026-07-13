@@ -315,7 +315,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -595,7 +595,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -650,7 +650,7 @@ dependencies = [
  "ruff_notebook",
  "ruff_python_ast",
  "ruff_python_parser",
- "ruff_text_size",
+ "ruff_text_size 0.0.4",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1902,7 +1902,7 @@ dependencies = [
  "ruff_python_parser",
  "ruff_python_trivia",
  "ruff_source_file",
- "ruff_text_size",
+ "ruff_text_size 0.0.0",
  "rustc-hash",
  "salsa",
  "same-file",
@@ -1925,7 +1925,7 @@ source = "git+https://github.com/astral-sh/ruff?tag=0.15.18#6686f63404207bfdffe8
 dependencies = [
  "get-size2",
  "is-macro",
- "ruff_text_size",
+ "ruff_text_size 0.0.0",
  "serde",
 ]
 
@@ -1971,7 +1971,7 @@ dependencies = [
  "rand 0.10.1",
  "ruff_diagnostics",
  "ruff_source_file",
- "ruff_text_size",
+ "ruff_text_size 0.0.0",
  "serde",
  "serde_json",
  "serde_with",
@@ -1998,7 +1998,7 @@ dependencies = [
  "ruff_cache",
  "ruff_python_trivia",
  "ruff_source_file",
- "ruff_text_size",
+ "ruff_text_size 0.0.0",
  "rustc-hash",
  "salsa",
  "serde",
@@ -2029,7 +2029,7 @@ dependencies = [
  "memchr",
  "ruff_python_ast",
  "ruff_python_trivia",
- "ruff_text_size",
+ "ruff_text_size 0.0.0",
  "rustc-hash",
  "static_assertions",
  "thin-vec",
@@ -2054,7 +2054,7 @@ source = "git+https://github.com/astral-sh/ruff?tag=0.15.18#6686f63404207bfdffe8
 dependencies = [
  "itertools",
  "ruff_source_file",
- "ruff_text_size",
+ "ruff_text_size 0.0.0",
  "unicode-ident",
 ]
 
@@ -2065,7 +2065,7 @@ source = "git+https://github.com/astral-sh/ruff?tag=0.15.18#6686f63404207bfdffe8
 dependencies = [
  "get-size2",
  "memchr",
- "ruff_text_size",
+ "ruff_text_size 0.0.0",
  "serde",
 ]
 
@@ -2077,6 +2077,11 @@ dependencies = [
  "get-size2",
  "serde",
 ]
+
+[[package]]
+name = "ruff_text_size"
+version = "0.0.4"
+source = "git+https://github.com/astral-sh/ruff?tag=0.15.21#3e1f63645109e69f9bccc7be354c5ee4672fb8f3"
 
 [[package]]
 name = "rusqlite"
@@ -2109,7 +2114,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2510,7 +2515,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2740,7 +2745,7 @@ dependencies = [
  "ruff_memory_usage",
  "ruff_options_metadata",
  "ruff_python_ast",
- "ruff_text_size",
+ "ruff_text_size 0.0.0",
  "rustc-hash",
  "salsa",
  "serde",
@@ -2776,7 +2781,7 @@ dependencies = [
  "ruff_python_ast",
  "ruff_python_parser",
  "ruff_python_trivia",
- "ruff_text_size",
+ "ruff_text_size 0.0.0",
  "rustc-hash",
  "salsa",
  "schemars",
@@ -2817,7 +2822,7 @@ dependencies = [
  "ruff_python_stdlib",
  "ruff_python_trivia",
  "ruff_source_file",
- "ruff_text_size",
+ "ruff_text_size 0.0.0",
  "rustc-hash",
  "salsa",
  "serde",
@@ -2846,7 +2851,7 @@ dependencies = [
  "ruff_python_ast",
  "ruff_python_trivia",
  "ruff_source_file",
- "ruff_text_size",
+ "ruff_text_size 0.0.0",
  "strum",
  "strum_macros",
  "tracing",
@@ -3213,7 +3218,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

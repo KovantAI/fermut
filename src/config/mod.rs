@@ -109,6 +109,8 @@ pub enum CacheScope {
 pub enum RunnerKind {
     #[default]
     Pytest,
+    /// pytest-CLI-compatible drop-in; driven by the same runner as `Pytest`.
+    Rstest,
     Unittest,
 }
 

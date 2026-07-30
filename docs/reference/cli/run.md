@@ -23,7 +23,7 @@ fermut run [PATH] [flags...]
 | `--sample <r>`              | `1.0`                            | Test only this fraction of mutants (0.0–1.0), deterministic.         |
 | `--sample-seed <N>`         | `0`                              | Seed for `--sample` selection.                                       |
 | `--shard <i/n>`             | off                              | Distributed exec: process only the i-th of n disjoint slices.        |
-| `--runner pytest\|unittest` | `pytest`                         | Pick the Python test runner.                                          |
+| `--runner pytest\|rstest\|unittest` | `pytest`                 | Pick the Python test runner. `rstest` is a pytest-CLI-compatible drop-in. |
 | `--python <PATH>`           | auto-discover                    | Interpreter (path) or virtualenv (dir) to run pytest with — fermut invokes `<python> -m pytest`, no PATH reliance. Omitted → auto-discovers an active venv / nearby `.venv`, else a bare `pytest` on PATH. See [Choosing the interpreter](#python-interpreter). |
 | `--isolation auto\|copy\|hardlink\|reflink` | `auto` | How worker mirrors are populated. See [Isolation modes](#isolation-modes). |
 | `--annotate`                | auto in GHA                      | Emit `::error` / `::warning` annotations for CI.                     |

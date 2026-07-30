@@ -175,9 +175,11 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
     let timeout = Duration::from_secs(cfg.timeout_secs);
     let baseline_timeout = Duration::from_secs(cfg.baseline_timeout_secs);
     let isolation = cfg.isolation;
-    match cfg.runner {
-        RunnerKind::Pytest => Box::new(pytest::PytestRunner::new(
-            tests,
+    // `rstest` is a pytest-CLI-compatible drop-in, so it reuses the pytest
+    // runner wholesale — only the framework executable name differs.
+    let pytest_compatible = |exe: &'static str| -> Box<dyn Runner> {
+        Box::new(pytest::PytestRunner::new(
+            tests.clone(),
             timeout,
             baseline_timeout,
             cfg.hypothesis_seed,
@@ -185,7 +187,12 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
             isolation,
             cfg.coverage.clone(),
             cfg.python.clone(),
-        )),
+            exe,
+        ))
+    };
+    match cfg.runner {
+        RunnerKind::Pytest => pytest_compatible("pytest"),
+        RunnerKind::Rstest => pytest_compatible("rstest"),
         RunnerKind::Unittest => Box::new(unittest::UnittestRunner::new(
             tests,
             timeout,

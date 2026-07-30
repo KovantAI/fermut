@@ -390,6 +390,7 @@ fn test_suite_fingerprint(tests_path: &Path) -> String {
 fn runner_cache_tag(kind: RunnerKind) -> &'static str {
     match kind {
         RunnerKind::Pytest => "pytest",
+        RunnerKind::Rstest => "rstest",
         RunnerKind::Unittest => "unittest",
     }
 }

@@ -209,7 +209,8 @@ enum Cmd {
         #[arg(long, value_name = "I/N", value_parser = parse_shard_spec)]
         shard: Option<(u32, u32)>,
 
-        /// Test runner. `pytest` (default) or `unittest`.
+        /// Test runner. `pytest` (default), `rstest` (pytest-compatible
+        /// drop-in), or `unittest`.
         #[arg(long, value_enum)]
         runner: Option<RunnerCli>,
 
@@ -1039,6 +1040,7 @@ impl From<TrendGroupByCli> for TrendGroupBy {
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum RunnerCli {
     Pytest,
+    Rstest,
     Unittest,
 }
 
@@ -1046,6 +1048,7 @@ impl From<RunnerCli> for crate::config::RunnerKind {
     fn from(r: RunnerCli) -> Self {
         match r {
             RunnerCli::Pytest => Self::Pytest,
+            RunnerCli::Rstest => Self::Rstest,
             RunnerCli::Unittest => Self::Unittest,
         }
     }

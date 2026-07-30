@@ -64,6 +64,26 @@ fn run_finds_known_survivor() {
 }
 
 #[test]
+#[ignore = "requires rstest (pytest-compatible drop-in) + ty on PATH; enable once env is set up"]
+fn run_finds_known_survivor_with_rstest() {
+    // `rstest` shares the pytest runner, so the same weak `in_range` boundary
+    // test must leave a survivor — proving the `--runner rstest` path drives
+    // the sample suite identically to `--runner pytest`.
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("run")
+        .arg(sample_path().join("src"))
+        .arg("--tests")
+        .arg(sample_path().join("tests"))
+        .arg("--runner")
+        .arg("rstest")
+        .arg("--no-ty-filter")
+        .assert()
+        .failure() // survivors → exit 1
+        .stdout(contains("SURVIVED"));
+}
+
+#[test]
 #[ignore = "requires pytest + coverage on PATH; enable once env is set up"]
 fn baseline_reports_grade_and_anchors_trend() {
     let sample = sample_path();

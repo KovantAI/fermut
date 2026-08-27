@@ -39,10 +39,12 @@ pub struct Mutant {
     /// continuation line — an element of a multi-line collection literal, an
     /// argument of a wrapped call.
     ///
-    /// coverage.py records execution per *statement*, so a continuation line
-    /// never appears in per-line coverage data even when the statement ran.
-    /// Coverage lookups therefore fall back to this line; see
-    /// [`crate::filter::coverage::CoverageContexts::tests_for_mutant`].
+    /// A continuation line can be absent from per-line coverage data even when
+    /// the statement ran — CPython folds a collection literal of three or more
+    /// constant elements onto the literal's first line, so the element lines
+    /// emit no line event. Coverage lookups therefore fall back to this line;
+    /// see [`crate::filter::coverage::CoverageContexts::tests_for_mutant`] for
+    /// which continuation lines are affected and which are not.
     ///
     /// Defaults to `0` when absent from deserialized input (a report written
     /// by an older version), which disables the fallback.

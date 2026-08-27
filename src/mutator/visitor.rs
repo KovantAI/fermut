@@ -980,10 +980,12 @@ mod operator_emission_tests {
 
     #[test]
     fn stmt_line_is_the_head_of_a_multi_line_statement() {
-        // coverage.py records this whole assignment against line 1, so every
-        // mutant on lines 2-3 must carry stmt_line 1 or the coverage filter
-        // drops it as uncovered with no test able to rescue it.
-        let src = "ITEMS = [\n    (\"a\", \"read\"),\n    (\"b\", \"write\"),\n]\n";
+        // Three constant elements, so CPython folds the literal onto line 1
+        // and no test context ever lands on lines 2-4. Every mutant there must
+        // carry stmt_line 1 or the coverage filter drops it as uncovered with
+        // no test able to rescue it. Fewer than three elements would still be
+        // traced per line, and would not exhibit the bug this pins.
+        let src = "ITEMS = [\n    \"read\",\n    \"write\",\n    \"admin\",\n]\n";
         let mutants = collect(Path::new("test.py"), src).unwrap();
 
         let on_elements: Vec<_> = mutants.iter().filter(|m| m.line > 1).collect();

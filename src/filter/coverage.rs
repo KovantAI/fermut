@@ -26,12 +26,20 @@
 //!    mutant only needs a handful of tests instead of the full suite.
 //!
 //! Both consult a mutant through [`CoverageContexts::tests_for_mutant`], which
-//! falls back to the head line of the mutant's enclosing statement. coverage.py
-//! is statement-granular: a continuation line — an element of a multi-line
-//! collection literal, an argument of a wrapped call — never appears in
-//! per-line coverage data, even when the statement around it ran under a test.
-//! Without the fallback every mutant on such a line is dropped as "uncovered"
-//! and no test can rescue it.
+//! falls back to the head line of the mutant's enclosing statement. Some
+//! continuation lines never appear in the contexts map even though the
+//! statement around them ran: CPython folds a collection literal of three or
+//! more constant elements into a single constant load attributed to the
+//! literal's first line, so the element lines emit no line event and can carry
+//! no test context. Without the fallback every mutant on such a line is
+//! dropped as "uncovered" and no test can rescue it.
+//!
+//! This is narrower than "coverage.py is statement-granular". That holds for
+//! the report's `executed_lines`, which collapses continuation lines onto the
+//! statement head — but not for the per-line `contexts` map fermut reads, where
+//! a wrapped call's argument lines, a boolean operand on its own line and a
+//! literal below the folding threshold do each get their own entry. See
+//! `docs/guides/coverage.md`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -667,9 +675,8 @@ mod tests {
         assert!(!f.admits(&make_mutant(py.clone(), 99)).unwrap());
     }
 
-    /// A mutant on a continuation line of a multi-line statement: coverage.py
-    /// only ever records the statement's head line, so a strict per-line
-    /// lookup drops it and no test can rescue it.
+    /// A mutant on a continuation line whose own line carries no context, so a
+    /// strict per-line lookup drops it and no test can rescue it.
     fn continuation_mutant(file: PathBuf, line: u32, stmt_line: u32) -> Mutant {
         Mutant {
             stmt_line,
@@ -681,10 +688,16 @@ mod tests {
     fn filter_admits_mutant_on_continuation_line_of_covered_statement() {
         let tmp = tempfile::tempdir().unwrap();
         let py = tmp.path().join("foo.py");
-        // DEFAULT_ITEMS = [        <- line 1, the only line coverage.py records
-        //     ("a", "/x"),        <- line 2, where the mutants land
+        // DEFAULT_ITEMS = [        <- line 1, the head the fold attributes to
+        //     "read",             <- lines 2-4, where the mutants land; three
+        //     "write",               constant elements, so CPython folds them
+        //     "admin",               onto line 1 and they get no context
         // ]
-        std::fs::write(&py, "DEFAULT_ITEMS = [\n    (\"a\", \"/x\"),\n]\n").unwrap();
+        std::fs::write(
+            &py,
+            "DEFAULT_ITEMS = [\n    \"read\",\n    \"write\",\n    \"admin\",\n]\n",
+        )
+        .unwrap();
 
         let doc = r#"{
             "files": {
@@ -707,6 +720,38 @@ mod tests {
         assert_eq!(
             ctx.tests_for_mutant(&m).unwrap(),
             &["tests/test_a.py::test_x".to_string()]
+        );
+    }
+
+    #[test]
+    fn own_line_context_wins_over_the_statement_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let py = tmp.path().join("foo.py");
+        std::fs::write(&py, "x = 1\n").unwrap();
+
+        // Both lines carry contexts, and the head's set is the looser one: a
+        // test that short-circuits before the continuation line still records
+        // the head. The tighter own-line set must win, or selection silently
+        // widens to every test that merely entered the statement.
+        let doc = r#"{
+            "files": {
+                "foo.py": {
+                    "contexts": {
+                        "1": ["tests/test_a.py::test_head|run",
+                              "tests/test_a.py::test_elt|run"],
+                        "2": ["tests/test_a.py::test_elt|run"]
+                    }
+                }
+            }
+        }"#;
+        let path = write_doc(tmp.path(), doc);
+        let ctx = CoverageContexts::from_json(&path, tmp.path(), tmp.path()).unwrap();
+
+        let m = continuation_mutant(py.clone(), 2, 1);
+        assert_eq!(
+            ctx.tests_for_mutant(&m).unwrap(),
+            &["tests/test_a.py::test_elt".to_string()],
+            "the fallback must not be reached when the mutated line has contexts"
         );
     }
 

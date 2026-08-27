@@ -113,6 +113,51 @@ when navigating an unfamiliar area.
 3. Wire dispatch in `src/runner/mod.rs::build`.
 4. Document in `README.md` under "Test runners".
 
+## Mutation testing fermut itself
+
+fermut mutation-tests Python. Its own Rust source is mutation-tested by
+[cargo-mutants](https://mutants.rs), configured in `.cargo/mutants.toml`.
+
+```sh
+cargo install cargo-mutants --locked
+
+# Just what your branch changed — the run you actually want day to day.
+cargo mutants --in-diff <(git diff origin/main...)
+
+# One module.
+cargo mutants --file 'src/mutator/**'
+
+# Whole crate: ~2200 mutants, hours. Overnight job, not an inner-loop one.
+cargo mutants
+```
+
+Each mutant rebuilds the crate (~1 min on a warm cache) and reruns
+`cargo test --all-features`, so wall-clock is dominated by builds, not tests.
+`--jobs N` runs N mutants at once; each one still wants a couple of cores, so
+`CARGO_BUILD_JOBS=2 cargo mutants --jobs 4` is a reasonable ceiling on a 10-core
+machine — higher and the machine thrashes without going faster.
+
+Results land in `mutants.out/`: `caught.txt`, `missed.txt`, `timeout.txt`,
+`unviable.txt`.
+
+**A survivor in `missed.txt` is a question, not a defect.** Three honest answers:
+
+1. The assertion is genuinely missing — add it. This is the case worth having
+   the tool for.
+2. The mutant is equivalent to the original, or changes only a log line or an
+   error message we deliberately don't assert on. Leave it.
+3. The whole file is untestable-by-design plumbing. Add it to `exclude_globs` in
+   `.cargo/mutants.toml` with a comment saying why, rather than letting it drown
+   the signal for everyone else.
+
+`src/main.rs`, `src/cli/mod.rs`, `src/watch.rs`, and `src/llm/client.rs` are
+already excluded on those grounds.
+
+The `Mutants` CI workflow runs `--in-diff` on every PR and posts the outcome to
+the job summary. It is **advisory** — not a required check, and it does not run
+on `main`. Adding an assertion because a mutant survived is a judgement call for
+the reviewer, not a merge gate.
+
 ## Style
 
 - **Rustfmt**: `rustfmt.toml` is committed; CI rejects unformatted code.

@@ -1,0 +1,37 @@
+# cargo-mutants configuration.
+#
+# Mutation testing for fermut's own Rust source: cargo-mutants injects small
+# changes ("mutants") into our code and reports the ones `cargo test` still
+# passes on. A surviving mutant is a line the suite does not actually assert on.
+#
+# Whole crate (~2200 mutants, hours):  cargo mutants
+# One module:                          cargo mutants --file 'src/mutator/**'
+# Just this branch's changes:          cargo mutants --in-diff <(git diff origin/main...)
+#
+# See "Mutation testing fermut itself" in CONTRIBUTING.md.
+
+# Match what CI tests. --all-features keeps the ty-embedded and LLM paths
+# compiled, so mutants in them are reachable.
+additional_cargo_args = ["--all-features"]
+
+# The unit suite runs in seconds, but a mutant can turn a loop bound into an
+# infinite loop. Give the baseline headroom before declaring a timeout, and
+# never time out under a minute on a cold or loaded machine.
+timeout_multiplier = 5.0
+minimum_test_timeout = 60
+
+# Files where every mutant would survive for reasons a test can't fix, and so
+# would bury the real signal. Removing these drops ~90 mutants.
+exclude_globs = [
+    # Thin main() wrapper around cli::run.
+    "src/main.rs",
+    # clap derive structs, tracing setup, and subcommand dispatch. Covered by
+    # the compiler and by e2e, not by assertions.
+    "src/cli/mod.rs",
+    # Filesystem-watch event loop. Untested by design.
+    "src/watch.rs",
+    # Outbound HTTP to the LLM provider. Not exercised offline.
+    "src/llm/client.rs",
+    # Not part of the tested surface.
+    "benchmarks/**",
+]

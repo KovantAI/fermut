@@ -1,0 +1,89 @@
+name: Mutants
+
+# Mutation-test fermut's own Rust source with cargo-mutants.
+#
+# The full crate is ~2200 mutants and takes hours, so this workflow only tests
+# mutants inside the PR's own diff (`--in-diff`). A PR that touches nothing
+# mutable finishes in the time it takes to build the baseline.
+#
+# Advisory, not a gate: it does not run on `main` and is not a required check.
+# Surviving mutants are a prompt to add an assertion, and sometimes the honest
+# answer is "that line does not need one".
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  in-diff:
+    name: cargo mutants (PR diff)
+    runs-on: ubuntu-latest
+    # A cold build of the ruff/ty git dependencies alone takes ~15 min, and each
+    # mutant rebuilds the crate on top of it.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # `--in-diff` needs the base commit, which a depth-1 checkout lacks.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: mutants
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
+        with:
+          tool: cargo-mutants
+
+      # The default PR checkout is the merge commit, so base.sha is an ancestor
+      # of HEAD and this diff is exactly what the PR changes.
+      - name: Diff against the PR base
+        run: git diff "${{ github.event.pull_request.base.sha }}" > /tmp/pr.diff
+
+      # `--in-diff` restricts mutants to the lines this PR added or changed.
+      # continue-on-error keeps the job advisory: surviving mutants are reported
+      # in the summary below rather than failing the check. cargo-mutants uses
+      # distinct non-zero exit codes per outcome; we deliberately don't branch
+      # on them, so a tool upgrade can't silently turn this into a gate.
+      - name: Run cargo mutants
+        continue-on-error: true
+        run: cargo mutants --in-diff /tmp/pr.diff
+
+      - name: Summarise
+        if: always()
+        run: |
+          out=mutants.out
+          [ -d "$out" ] || { echo "No mutants.out — the run did not get that far." >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          {
+            echo "### cargo-mutants (PR diff)"
+            echo
+            echo "| outcome | count |"
+            echo "|---|---|"
+            for f in caught missed timeout unviable; do
+              if [ -f "$out/$f.txt" ]; then
+                echo "| $f | $(wc -l < "$out/$f.txt" | tr -d ' ') |"
+              fi
+            done
+            if [ -s "$out/missed.txt" ]; then
+              echo
+              echo "<details><summary>Surviving mutants</summary>"
+              echo
+              echo '```'
+              cat "$out/missed.txt"
+              echo '```'
+              echo
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutants.out
+          path: mutants.out
+          if-no-files-found: ignore

@@ -122,7 +122,8 @@ fermut mutation-tests Python. Its own Rust source is mutation-tested by
 cargo install cargo-mutants --locked
 
 # Just what your branch changed — the run you actually want day to day.
-cargo mutants --in-diff <(git diff origin/main...)
+# (--src-prefix/--dst-prefix matter; see the note below.)
+cargo mutants --in-diff <(git diff --src-prefix=a/ --dst-prefix=b/ origin/main...)
 
 # One module.
 cargo mutants --file 'src/mutator/**'
@@ -131,11 +132,26 @@ cargo mutants --file 'src/mutator/**'
 cargo mutants
 ```
 
-Each mutant rebuilds the crate (~1 min on a warm cache) and reruns
-`cargo test --all-features`, so wall-clock is dominated by builds, not tests.
-`--jobs N` runs N mutants at once; each one still wants a couple of cores, so
-`CARGO_BUILD_JOBS=2 cargo mutants --jobs 4` is a reasonable ceiling on a 10-core
-machine — higher and the machine thrashes without going faster.
+Each mutant rebuilds the crate and reruns `cargo test --all-features`. Measured
+on a 10-core machine over a 136-mutant run: **median 15s per mutant** (6.6s
+build + 8.4s test), p90 37s, plus a one-off ~70s baseline build. Timeouts cost
+the full 60s.
+
+`--jobs N` runs N mutants at once, and each one still wants a couple of cores:
+`CARGO_BUILD_JOBS=2 cargo mutants --jobs 4` is about the ceiling on 10 cores.
+Going to `--jobs 6` without capping `CARGO_BUILD_JOBS` pushed load average past
+40 and made each build **ten times slower** (67s instead of 6.6s) — oversubscribe
+and you lose more than you gain.
+
+One trap with `--in-diff`: if your git has `diff.mnemonicPrefix` or
+`diff.noprefix` set, `git diff` emits `c/`…`w/` (or bare) path prefixes,
+cargo-mutants matches no files, and the run reports a clean "No mutants to
+filter" instead of an error. Force the prefixes it expects:
+
+```sh
+git diff --src-prefix=a/ --dst-prefix=b/ origin/main... > /tmp/pr.diff
+cargo mutants --in-diff /tmp/pr.diff
+```
 
 Results land in `mutants.out/`: `caught.txt`, `missed.txt`, `timeout.txt`,
 `unviable.txt`.

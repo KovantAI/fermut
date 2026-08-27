@@ -42,8 +42,26 @@ jobs:
 
       # The default PR checkout is the merge commit, so base.sha is an ancestor
       # of HEAD and this diff is exactly what the PR changes.
+      #
+      # The explicit prefixes are not cosmetic: cargo-mutants matches `a/`…`b/`
+      # paths, and a git configured with `diff.mnemonicPrefix` or `diff.noprefix`
+      # emits something else, whereupon `--in-diff` matches nothing and the run
+      # reports a clean "No mutants to filter" rather than failing.
       - name: Diff against the PR base
-        run: git diff "${{ github.event.pull_request.base.sha }}" > /tmp/pr.diff
+        run: |
+          git diff --src-prefix=a/ --dst-prefix=b/ \
+            "${{ github.event.pull_request.base.sha }}" > /tmp/pr.diff
+          wc -l < /tmp/pr.diff | xargs echo "diff lines:"
+
+      # Cheap (no build) — makes a zero-mutant run visibly zero-mutant instead
+      # of indistinguishable from a silently misparsed diff.
+      - name: Count mutants in the diff
+        id: count
+        run: |
+          cargo mutants --list --in-diff /tmp/pr.diff > /tmp/list.txt
+          n=$(grep -c '^src/' /tmp/list.txt || true)
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+          echo "mutants in diff: $n"
 
       # `--in-diff` restricts mutants to the lines this PR added or changed.
       # continue-on-error keeps the job advisory: surviving mutants are reported
@@ -51,6 +69,7 @@ jobs:
       # distinct non-zero exit codes per outcome; we deliberately don't branch
       # on them, so a tool upgrade can't silently turn this into a gate.
       - name: Run cargo mutants
+        if: steps.count.outputs.count != '0'
         continue-on-error: true
         run: cargo mutants --in-diff /tmp/pr.diff
 
@@ -58,6 +77,12 @@ jobs:
         if: always()
         run: |
           out=mutants.out
+          if [ "${{ steps.count.outputs.count }}" = "0" ]; then
+            echo "### cargo-mutants (PR diff)" >> "$GITHUB_STEP_SUMMARY"
+            echo >> "$GITHUB_STEP_SUMMARY"
+            echo "No mutable lines in this diff — nothing to test." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           [ -d "$out" ] || { echo "No mutants.out — the run did not get that far." >> "$GITHUB_STEP_SUMMARY"; exit 0; }
           {
             echo "### cargo-mutants (PR diff)"

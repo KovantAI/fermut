@@ -24,6 +24,14 @@
 //! 2. **Select:** for the lines that do have contexts, only those tests are
 //!    passed to pytest per mutant. Cuts wall time dramatically when each
 //!    mutant only needs a handful of tests instead of the full suite.
+//!
+//! Both consult a mutant through [`CoverageContexts::tests_for_mutant`], which
+//! falls back to the head line of the mutant's enclosing statement. coverage.py
+//! is statement-granular: a continuation line — an element of a multi-line
+//! collection literal, an argument of a wrapped call — never appears in
+//! per-line coverage data, even when the statement around it ran under a test.
+//! Without the fallback every mutant on such a line is dropped as "uncovered"
+//! and no test can rescue it.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -339,6 +347,24 @@ impl CoverageContexts {
             .and_then(|per_line| per_line.get(&line))
             .map(|v| v.as_slice())
     }
+
+    /// Test node ids that executed a mutant, or `None` if none recorded.
+    ///
+    /// Tries the mutated line first, then the head line of the enclosing
+    /// statement — the line coverage.py attributes the whole statement's
+    /// execution to. Both the filter and per-mutant test selection go through
+    /// here so they cannot disagree about whether a mutant is covered.
+    pub fn tests_for_mutant(&self, m: &Mutant) -> Option<&[String]> {
+        if let Some(tests) = self.tests_for(&m.file, m.line) {
+            if !tests.is_empty() {
+                return Some(tests);
+            }
+        }
+        if m.stmt_line == 0 || m.stmt_line == m.line {
+            return None;
+        }
+        self.tests_for(&m.file, m.stmt_line)
+    }
 }
 
 /// Coverage.py tags every context with a phase suffix: `|run`, `|setup`,
@@ -497,7 +523,7 @@ impl Filter for CoverageFilter {
     }
 
     fn admits(&self, m: &Mutant) -> Result<bool> {
-        match self.ctx.tests_for(&m.file, m.line) {
+        match self.ctx.tests_for_mutant(m) {
             Some(tests) if !tests.is_empty() => Ok(true),
             _ => {
                 // One uncovered mutant per untested line on large targets would
@@ -506,7 +532,8 @@ impl Filter for CoverageFilter {
                 debug!(
                     file = %m.file.display(),
                     line = m.line,
-                    "no test context for line; skipping mutant"
+                    stmt_line = m.stmt_line,
+                    "no test context for line or its statement head; skipping mutant"
                 );
                 Ok(false)
             }
@@ -533,6 +560,7 @@ mod tests {
             original: "+".into(),
             replacement: "-".into(),
             line,
+            stmt_line: line,
         }
     }
 
@@ -637,6 +665,96 @@ mod tests {
 
         assert!(f.admits(&make_mutant(py.clone(), 1)).unwrap());
         assert!(!f.admits(&make_mutant(py.clone(), 99)).unwrap());
+    }
+
+    /// A mutant on a continuation line of a multi-line statement: coverage.py
+    /// only ever records the statement's head line, so a strict per-line
+    /// lookup drops it and no test can rescue it.
+    fn continuation_mutant(file: PathBuf, line: u32, stmt_line: u32) -> Mutant {
+        Mutant {
+            stmt_line,
+            ..make_mutant(file, line)
+        }
+    }
+
+    #[test]
+    fn filter_admits_mutant_on_continuation_line_of_covered_statement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let py = tmp.path().join("foo.py");
+        // DEFAULT_ITEMS = [        <- line 1, the only line coverage.py records
+        //     ("a", "/x"),        <- line 2, where the mutants land
+        // ]
+        std::fs::write(&py, "DEFAULT_ITEMS = [\n    (\"a\", \"/x\"),\n]\n").unwrap();
+
+        let doc = r#"{
+            "files": {
+                "foo.py": {
+                    "contexts": { "1": ["tests/test_a.py::test_x|run"] }
+                }
+            }
+        }"#;
+        let path = write_doc(tmp.path(), doc);
+        let ctx = CoverageContexts::from_json(&path, tmp.path(), tmp.path()).unwrap();
+        let f = CoverageFilter::new(ctx.clone());
+
+        let m = continuation_mutant(py.clone(), 2, 1);
+        assert!(
+            f.admits(&m).unwrap(),
+            "mutant on a continuation line of a covered statement must not be dropped"
+        );
+        // Selection must agree with the filter, or the admitted mutant would
+        // run against an empty test set.
+        assert_eq!(
+            ctx.tests_for_mutant(&m).unwrap(),
+            &["tests/test_a.py::test_x".to_string()]
+        );
+    }
+
+    #[test]
+    fn filter_still_skips_when_the_statement_head_is_uncovered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let py = tmp.path().join("foo.py");
+        std::fs::write(&py, "x = 1\n").unwrap();
+
+        let doc = r#"{
+            "files": {
+                "foo.py": {
+                    "contexts": { "1": ["tests/test_a.py::test_x|run"] }
+                }
+            }
+        }"#;
+        let path = write_doc(tmp.path(), doc);
+        let ctx = CoverageContexts::from_json(&path, tmp.path(), tmp.path()).unwrap();
+        let f = CoverageFilter::new(ctx.clone());
+
+        // Statement spans lines 40-41; neither is covered.
+        let m = continuation_mutant(py.clone(), 41, 40);
+        assert!(!f.admits(&m).unwrap());
+        assert!(ctx.tests_for_mutant(&m).is_none());
+    }
+
+    #[test]
+    fn absent_stmt_line_disables_the_fallback() {
+        // `stmt_line: 0` is what a report written before the field existed
+        // deserializes to. It must behave exactly like a per-line lookup
+        // rather than resolving to line 1.
+        let tmp = tempfile::tempdir().unwrap();
+        let py = tmp.path().join("foo.py");
+        std::fs::write(&py, "x = 1\n").unwrap();
+
+        let doc = r#"{
+            "files": {
+                "foo.py": {
+                    "contexts": { "1": ["tests/test_a.py::test_x|run"] }
+                }
+            }
+        }"#;
+        let path = write_doc(tmp.path(), doc);
+        let ctx = CoverageContexts::from_json(&path, tmp.path(), tmp.path()).unwrap();
+
+        assert!(ctx
+            .tests_for_mutant(&continuation_mutant(py.clone(), 2, 0))
+            .is_none());
     }
 
     #[test]

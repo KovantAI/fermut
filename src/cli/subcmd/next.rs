@@ -422,6 +422,7 @@ mod tests {
             original: "x".into(),
             replacement: "y".into(),
             line,
+            stmt_line: line,
         }
     }
 

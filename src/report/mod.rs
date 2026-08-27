@@ -323,6 +323,7 @@ mod tests {
             original: "+".into(),
             replacement: "-".into(),
             line: 2,
+            stmt_line: 2,
         }
     }
 
@@ -595,6 +596,7 @@ pub(crate) mod testing {
             original: "+".into(),
             replacement: "-".into(),
             line: 2,
+            stmt_line: 2,
         }
     }
 }

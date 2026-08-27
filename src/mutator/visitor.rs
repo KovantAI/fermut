@@ -38,6 +38,7 @@ pub fn collect(path: &Path, source: &str) -> Result<Vec<Mutant>> {
         out: Vec::new(),
         docstrings,
         ignores,
+        stmt_line: 0,
     };
     for stmt in &module.body {
         collector.visit_stmt(stmt);
@@ -68,6 +69,10 @@ struct Collector<'a> {
     out: Vec<Mutant>,
     docstrings: HashSet<TextRange>,
     ignores: IgnoreMap,
+    /// First line of the statement currently being visited. Mutants record it
+    /// so coverage lookups can fall back to the line coverage.py actually
+    /// attributes execution to — see `Mutant::stmt_line`.
+    stmt_line: u32,
 }
 
 impl<'a> Collector<'a> {
@@ -106,6 +111,13 @@ impl<'a> Collector<'a> {
             original: original.to_string(),
             replacement: replacement.to_string(),
             line,
+            // Every mutant is emitted while visiting a statement, so this is
+            // set; fall back to `line` rather than fabricate a head line.
+            stmt_line: if self.stmt_line == 0 {
+                line
+            } else {
+                self.stmt_line
+            },
         });
     }
 
@@ -250,6 +262,10 @@ impl<'a> Collector<'a> {
 
 impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
     fn visit_stmt(&mut self, stmt: &'ast Stmt) {
+        // Innermost enclosing statement wins, and is restored on the way out,
+        // so a nested body's mutants do not inherit the outer statement's head.
+        let outer_stmt_line = self.stmt_line;
+        self.stmt_line = self.line_of(stmt.range());
         match stmt {
             Stmt::AugAssign(a) => self.handle_aug_assign(a),
             Stmt::Return(r) => self.handle_return(r),
@@ -273,6 +289,7 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
             _ => {}
         }
         walk_stmt(self, stmt);
+        self.stmt_line = outer_stmt_line;
     }
 
     fn visit_expr(&mut self, expr: &'ast Expr) {
@@ -959,6 +976,55 @@ mod operator_emission_tests {
         );
         // Sanity: other mutations on the function body still emit.
         assert!(ops.contains(&Operator::ReturnValueToNone));
+    }
+
+    #[test]
+    fn stmt_line_is_the_head_of_a_multi_line_statement() {
+        // coverage.py records this whole assignment against line 1, so every
+        // mutant on lines 2-3 must carry stmt_line 1 or the coverage filter
+        // drops it as uncovered with no test able to rescue it.
+        let src = "ITEMS = [\n    (\"a\", \"read\"),\n    (\"b\", \"write\"),\n]\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+
+        let on_elements: Vec<_> = mutants.iter().filter(|m| m.line > 1).collect();
+        assert!(
+            !on_elements.is_empty(),
+            "expected string mutants on the element lines"
+        );
+        for m in on_elements {
+            assert_eq!(m.stmt_line, 1, "{}", m.describe());
+        }
+    }
+
+    #[test]
+    fn stmt_line_equals_line_for_single_line_statements() {
+        let src = "x = 1 + 2\ny = 3 + 4\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+        assert!(!mutants.is_empty());
+        for m in &mutants {
+            assert_eq!(m.stmt_line, m.line, "{}", m.describe());
+        }
+    }
+
+    #[test]
+    fn stmt_line_uses_the_innermost_enclosing_statement() {
+        // The `return` on line 3 must not inherit the `def` on line 1, and the
+        // multi-line `return` tuple on lines 5-6 must map back to line 5.
+        let src =
+            "def f(a):\n    if a:\n        return 1 + 2\n    return (\n        3 + 4,\n    )\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+
+        let inner = mutants
+            .iter()
+            .find(|m| m.line == 3 && m.original == "+")
+            .expect("arith mutant on line 3");
+        assert_eq!(inner.stmt_line, 3);
+
+        let wrapped = mutants
+            .iter()
+            .find(|m| m.line == 5 && m.original == "+")
+            .expect("arith mutant on line 5");
+        assert_eq!(wrapped.stmt_line, 4, "head of the multi-line return");
     }
 
     #[test]

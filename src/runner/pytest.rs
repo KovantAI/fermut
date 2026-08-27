@@ -97,7 +97,7 @@ impl Runner for PytestRunner {
             match self
                 .coverage
                 .as_ref()
-                .and_then(|ctx| ctx.tests_for(&mutant.file, mutant.line))
+                .and_then(|ctx| ctx.tests_for_mutant(mutant))
             {
                 Some(ids) if !ids.is_empty() => {
                     for id in ids {

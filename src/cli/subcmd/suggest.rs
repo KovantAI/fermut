@@ -649,6 +649,7 @@ mod tests {
             original: "<=".into(),
             replacement: "<".into(),
             line,
+            stmt_line: line,
         }
     }
 
@@ -797,6 +798,7 @@ mod tests {
             original: "<=".into(),
             replacement: "<".into(),
             line: 2,
+            stmt_line: 2,
         };
         let report = Report::new(vec![
             MutantOutcome::survived(mutant.clone()),

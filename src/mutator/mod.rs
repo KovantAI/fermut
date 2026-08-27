@@ -31,7 +31,23 @@ pub struct Mutant {
     pub range: TextRange,
     pub original: String,
     pub replacement: String,
+    /// Line the mutated range starts on. This is what reports, annotations and
+    /// ids show — the place a reader looks to find the mutation.
     pub line: u32,
+    /// First line of the statement enclosing the mutated range. Equal to
+    /// `line` for a single-line statement; earlier when the range sits on a
+    /// continuation line — an element of a multi-line collection literal, an
+    /// argument of a wrapped call.
+    ///
+    /// coverage.py records execution per *statement*, so a continuation line
+    /// never appears in per-line coverage data even when the statement ran.
+    /// Coverage lookups therefore fall back to this line; see
+    /// [`crate::filter::coverage::CoverageContexts::tests_for_mutant`].
+    ///
+    /// Defaults to `0` when absent from deserialized input (a report written
+    /// by an older version), which disables the fallback.
+    #[serde(default)]
+    pub stmt_line: u32,
 }
 
 impl Mutant {
@@ -66,6 +82,7 @@ mod tests {
             original: "<=".into(),
             replacement: "<".into(),
             line: 14,
+            stmt_line: 14,
         }
     }
 

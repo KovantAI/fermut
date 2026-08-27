@@ -14,4 +14,4 @@ benchmarks/parity/*.json
 /site
 
 # cargo-mutants run output
-/mutants.out
+/mutants.out*

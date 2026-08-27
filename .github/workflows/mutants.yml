@@ -33,12 +33,21 @@ jobs:
           # `--in-diff` needs the base commit, which a depth-1 checkout lacks.
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # Restores ~/.cargo — the registry and the git checkouts of the pinned
+      # ruff/ty deps, which saves the clone. It does NOT save the compile:
+      # cargo-mutants builds each mutant in a scratch copy of the tree and
+      # leaves the top-level target/ behind unless `copy_target` is set, so the
+      # ~15 min above is paid on every run. Turning that around needs
+      # `copy_target = true` plus a warm-up build, traded against copying a
+      # multi-GB target dir per mutant — measure before reaching for it.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: mutants
       - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
-          tool: cargo-mutants
+          # Pinned: the config schema below rejects unknown keys, so a release
+          # that renames one would fail the Count step on every PR.
+          tool: cargo-mutants@27.1.0
 
       # The default PR checkout is the merge commit, so base.sha is an ancestor
       # of HEAD and this diff is exactly what the PR changes.

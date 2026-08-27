@@ -32,6 +32,4 @@ exclude_globs = [
     "src/watch.rs",
     # Outbound HTTP to the LLM provider. Not exercised offline.
     "src/llm/client.rs",
-    # Not part of the tested surface.
-    "benchmarks/**",
 ]

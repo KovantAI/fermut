@@ -112,6 +112,7 @@ mod tests {
             original: "+".into(),
             replacement: "-".into(),
             line: 7,
+            stmt_line: 7,
         }
     }
 

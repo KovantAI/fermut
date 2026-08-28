@@ -462,6 +462,7 @@ mod tests {
             original: "1".into(),
             replacement: repl.to_string(),
             line: 1,
+            stmt_line: 1,
         }
     }
 

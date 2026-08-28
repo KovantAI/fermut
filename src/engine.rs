@@ -401,7 +401,7 @@ fn compute_mutant_scope(prefix: &str, cfg: &Config, mutant: &Mutant) -> String {
     let mut h = Sha256::new();
     h.update(prefix.as_bytes());
     if let Some(ctx) = &cfg.coverage {
-        if let Some(tests) = ctx.tests_for(&mutant.file, mutant.line) {
+        if let Some(tests) = ctx.tests_for_mutant(mutant) {
             let mut sorted: Vec<&String> = tests.iter().collect();
             sorted.sort();
             for t in sorted {
@@ -528,6 +528,7 @@ mod tests {
             original: original.into(),
             replacement: replacement.into(),
             line: 1,
+            stmt_line: 1,
         }
     }
 
@@ -790,6 +791,7 @@ mod tests {
             original: "return None".into(),
             replacement: "return".into(),
             line: 2,
+            stmt_line: 2,
         };
         let out = MutantOutcome::survived(m.clone());
         let pipeline = EquivPipeline::default_pipeline();

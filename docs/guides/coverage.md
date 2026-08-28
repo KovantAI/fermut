@@ -116,8 +116,10 @@ The `pr-gate` profile sets this by default.
 For each mutant:
 
 1. Find the source line the mutant targets.
-2. Look up the per-test contexts that hit that line.
-3. If **no test** touched the line → the mutant is skipped (it would
+2. Look up the per-test contexts that hit that line. If there are none,
+   retry on the **first line of the enclosing statement** — see
+   *Continuation lines* below.
+3. If **no test** touched either line → the mutant is skipped (it would
    always survive — there's nothing to kill it).
 4. Otherwise, narrow the pytest invocation to **only those tests**
    via `-k` or `--last-failed-no-failures none` plus an explicit
@@ -127,6 +129,37 @@ Mutants dropped at step 3 appear in the JSON report as outcome
 `skipped` with `filter: "coverage"`, alongside skips from the ty /
 ruff / diff / sample filters. Counted in the `skipped` summary; not
 counted toward the mutation score.
+
+### Continuation lines
+
+coverage.py records execution per **statement**, so a line in the middle
+of a multi-line statement can be missing from the coverage data even
+though the statement around it ran. The clearest case is a collection
+literal:
+
+```python
+DEFAULT_ITEMS = [          # line 1 — the only line coverage records
+    ("a", "read"),         # line 2 — mutants land here
+    ("b", "write"),        # line 3
+    ("c", "write"),        # line 4
+]
+```
+
+CPython (measured on 3.12–3.14) folds a list of three or more constant
+elements into a single constant load attributed to line 1, so lines 2–4
+never get a line event — no test
+can put a context on them, not even one that reloads the module inside
+the test.
+
+The filter therefore falls back to the head line of the mutant's
+enclosing statement. A test that asserts on the data kills the mutants
+that change it; without the fallback every mutant on a data-only diff
+inside such a literal is dropped as "uncovered", and no test can rescue
+it.
+
+Per-mutant test selection uses the same lookup, so a mutant admitted
+via its statement head runs against the tests that executed that
+statement.
 
 ## Refreshing the coverage file
 

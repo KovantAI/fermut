@@ -289,6 +289,7 @@ mod tests {
             original: original.into(),
             replacement: replacement.into(),
             line: 1,
+            stmt_line: 1,
         }
     }
 

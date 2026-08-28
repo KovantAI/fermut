@@ -260,7 +260,7 @@ fn build_coverage_signal(coverage_path: &Path, m: &Mutant) -> Result<CoverageSig
             });
         }
     };
-    match ctx.tests_for(&m.file, m.line) {
+    match ctx.tests_for_mutant(m) {
         Some(tests) if !tests.is_empty() => Ok(CoverageSignal {
             covered: true,
             tests: tests.to_vec(),
@@ -271,7 +271,8 @@ fn build_coverage_signal(coverage_path: &Path, m: &Mutant) -> Result<CoverageSig
         _ => Ok(CoverageSignal {
             covered: false,
             tests: Vec::new(),
-            note: "no test executes this line; add one that exercises it at all".to_string(),
+            note: "no test executes this line or the statement around it; add one that exercises it at all"
+                .to_string(),
         }),
     }
 }
@@ -899,6 +900,7 @@ mod tests {
             original: ">=".into(),
             replacement: ">".into(),
             line,
+            stmt_line: line,
         }
     }
 

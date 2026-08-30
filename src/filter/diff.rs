@@ -2,9 +2,13 @@
 //!
 //! Two modes:
 //!
-//! - **diff-only** (`--diff-only <base>`) — branch-relative. Equivalent to
-//!   `git diff --unified=0 --relative <base>...HEAD`: only lines changed on
-//!   the current branch since it diverged from `<base>`.
+//! - **diff-only** (`--diff-only <base>`) — branch-relative. Diffs from the
+//!   merge-base of `<base>` and `HEAD` to the working tree: lines changed on
+//!   the current branch since it diverged from `<base>`, *including*
+//!   uncommitted edits. (Anchoring at the merge-base is what a three-dot
+//!   `<base>...HEAD` gives, but three-dot is commit-to-commit only and would
+//!   silently ignore working-tree changes — so we resolve the merge-base and
+//!   run a plain two-dot `git diff <merge-base>`.)
 //! - **since** (`--since <spec>`) — point-relative. `<spec>` is resolved as
 //!   either a git ref (commit SHA / tag / branch / `HEAD~5` / etc.) or a date
 //!   string (`2025-12-01`, `'1 week ago'`). Diff includes the working tree:
@@ -28,10 +32,13 @@ pub struct DiffFilter {
 }
 
 impl DiffFilter {
-    /// Branch-relative diff: lines changed on this branch since `base`.
+    /// Branch-relative diff: lines changed on this branch since `base`,
+    /// including uncommitted working-tree edits. Anchored at the merge-base of
+    /// `base` and `HEAD` (branch-divergence point), then diffed two-dot against
+    /// the working tree so current, unstaged work is scoped in.
     pub fn from_git(base: &str, cwd: &Path) -> Result<Self> {
-        let spec = format!("{base}...HEAD");
-        let stdout = git_diff(&["--unified=0", "--relative", &spec], cwd)?;
+        let merge_base = git_merge_base(base, cwd)?;
+        let stdout = git_diff(&["--unified=0", "--relative", &merge_base], cwd)?;
         Ok(Self {
             changed: parse_unified_diff(&stdout, cwd),
             label: "diff-only",
@@ -63,6 +70,30 @@ impl Filter for DiffFilter {
             .map(|set| set.contains(&m.line))
             .unwrap_or(false))
     }
+}
+
+/// Resolve the merge-base (branch-divergence point) of `base` and `HEAD`.
+/// Reuses `git_diff_error` for a friendly message on the common failures
+/// (outside a repo, base ref not resolvable).
+fn git_merge_base(base: &str, cwd: &Path) -> Result<String> {
+    let out = Command::new("git")
+        .args(["merge-base", base, "HEAD"])
+        .current_dir(cwd)
+        .output()
+        .context("could not run `git` — is it installed and on PATH?")?;
+    if !out.status.success() {
+        return Err(git_diff_error(
+            &String::from_utf8_lossy(&out.stderr),
+            out.status,
+        ));
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        return Err(anyhow!(
+            "git merge-base of {base:?} and HEAD is empty — unrelated histories?"
+        ));
+    }
+    Ok(s)
 }
 
 fn git_diff(args: &[&str], cwd: &Path) -> Result<String> {
@@ -250,6 +281,46 @@ mod tests {
         assert_eq!(
             parse_hunk_header("@@ -10,3 +20,5 @@ def foo():"),
             Some((20, 5))
+        );
+    }
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git on PATH")
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    /// Regression: `--diff-only` must scope in uncommitted working-tree edits
+    /// on the branch, matching `--since`. The old three-dot `base...HEAD` was
+    /// commit-to-commit only and silently dropped unstaged work, filtering out
+    /// every mutant. Anchors at the merge-base but diffs against the tree.
+    #[test]
+    fn diff_only_includes_uncommitted_branch_edits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        git(cwd, &["init", "-q", "-b", "main"]);
+        git(cwd, &["config", "user.email", "t@t"]);
+        git(cwd, &["config", "user.name", "t"]);
+        std::fs::write(cwd.join("f.py"), "a\nb\nc\n").unwrap();
+        git(cwd, &["add", "."]);
+        git(cwd, &["commit", "-qm", "base"]);
+        git(cwd, &["checkout", "-qb", "feat"]);
+        // Uncommitted edit to line 2 on the branch.
+        std::fs::write(cwd.join("f.py"), "a\nB\nc\n").unwrap();
+
+        let filter = DiffFilter::from_git("main", cwd).unwrap();
+        let key = cwd.join("f.py");
+        let key = key.canonicalize().unwrap_or(key);
+        let set = filter.changed.get(&key).cloned().unwrap_or_default();
+        assert_eq!(
+            set,
+            [2u32].into_iter().collect(),
+            "diff-only should scope in the uncommitted edit to line 2"
         );
     }
 

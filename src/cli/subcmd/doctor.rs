@@ -355,6 +355,13 @@ fn check_runner(runner: crate::config::RunnerKind) -> Check {
             "pipx install pytest  (or `uv add --dev pytest`)",
             /* required */ true,
         ),
+        crate::config::RunnerKind::Rstest => check_tool(
+            "rstest",
+            &["rstest", "--version"],
+            "configured runner",
+            "pipx install rstest  (or `uv add --dev rstest`)",
+            /* required */ true,
+        ),
         crate::config::RunnerKind::Unittest => {
             // Stdlib; presence implies Python is present.
             Check::ok("runner", "unittest (stdlib)")

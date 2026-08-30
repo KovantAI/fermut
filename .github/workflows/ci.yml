@@ -65,7 +65,9 @@ jobs:
           python-version: "3.12"
       # `baseline` gates on `fermut doctor`, which requires pytest, coverage,
       # pytest-cov (per-test contexts) and ty (mutant pre-filter) to all pass.
-      - run: pip install pytest coverage pytest-cov ty
+      # `rstest` is a pytest-compatible drop-in runner; the `--runner rstest`
+      # e2e test spawns it from PATH, so it must be installed alongside pytest.
+      - run: pip install pytest coverage pytest-cov ty rstest
       - run: cargo test --all-features --locked --test e2e -- --include-ignored
 
   msrv:

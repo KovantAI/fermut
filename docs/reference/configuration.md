@@ -37,7 +37,7 @@ TOML primitives: `string`, `bool`, `int`, `float`, `array<string>`.
 | `tests`            | `string` (path) | `<source_root>/tests`                           | Test directory.                                                                                  |
 | `jobs`             | `int`           | logical CPU count                               | Parallel workers (one mutant per worker at a time).                                              |
 | `timeout`          | `int` (s)       | `30`                                            | Per-mutant test timeout.                                                                          |
-| `runner`           | `string`        | `"pytest"`                                      | `"pytest"` or `"unittest"`.                                                                       |
+| `runner`           | `string`        | `"pytest"`                                      | `"pytest"`, `"rstest"` (pytest-compatible drop-in), or `"unittest"`.                              |
 | `python`           | `string` (path) | auto-discover                                   | Interpreter or virtualenv dir to run pytest with (`<python> -m pytest`). CLI `--python`. See [Choosing the interpreter](cli/run.md#python-interpreter). |
 | `ty_filter`        | `bool`          | `true`                                          | Enable the ty pre-filter.                                                                         |
 | `ruff_filter`      | `bool`          | `false`                                         | Enable the ruff lint pre-filter.                                                                  |

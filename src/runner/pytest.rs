@@ -1,9 +1,13 @@
-//! pytest runner.
+//! pytest-compatible runner.
 //!
-//! Invokes `pytest -x --tb=no -q [--hypothesis-seed=N] [<extra args>]
+//! Invokes `<exe> -x --tb=no -q [--hypothesis-seed=N] [<extra args>]
 //! <mirrored-tests>` per mutant inside the per-worker project mirror managed
 //! by [`with_worker_mirror`](super::with_worker_mirror). Exit 0 → mutant
 //! survived; non-zero → killed; wall-clock past `--timeout` → timed out.
+//!
+//! `exe` is the framework executable — `pytest`, or `rstest` (a pytest-CLI-
+//! compatible drop-in). Both accept the same flags and node-id positionals, so
+//! one implementation drives either; only the program name differs.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -31,9 +35,11 @@ pub struct PytestRunner {
     extra_args: Vec<String>,
     isolation: IsolationMode,
     coverage: Option<Arc<CoverageContexts>>,
-    /// Interpreter to run pytest with. `Some` → `<python> -m pytest`;
-    /// `None` → bare `pytest` resolved from `PATH` (historical behavior).
+    /// Interpreter to run the framework with. `Some` → `<python> -m <exe>`;
+    /// `None` → bare `<exe>` resolved from `PATH` (historical behavior).
     python: Option<PathBuf>,
+    /// Framework executable / module name: `pytest` or the `rstest` drop-in.
+    exe: &'static str,
 }
 
 impl PytestRunner {
@@ -47,6 +53,7 @@ impl PytestRunner {
         isolation: IsolationMode,
         coverage: Option<Arc<CoverageContexts>>,
         python: Option<PathBuf>,
+        exe: &'static str,
     ) -> Self {
         Self {
             tests,
@@ -57,21 +64,22 @@ impl PytestRunner {
             isolation,
             coverage,
             python,
+            exe,
         }
     }
 
-    /// Base command that launches pytest. With a configured interpreter we go
-    /// through `<python> -m pytest` so the run uses *that* interpreter's
-    /// pytest (and its venv's installed packages) with no reliance on `PATH`.
-    /// Without one we keep spawning a bare `pytest` console script from PATH.
-    fn pytest_command(&self) -> Command {
+    /// Base command that launches the framework. With a configured interpreter
+    /// we go through `<python> -m <exe>` so the run uses *that* interpreter's
+    /// framework (and its venv's installed packages) with no reliance on `PATH`.
+    /// Without one we keep spawning a bare `<exe>` console script from PATH.
+    fn framework_command(&self) -> Command {
         match &self.python {
             Some(py) => {
                 let mut cmd = Command::new(py);
-                cmd.arg("-m").arg("pytest");
+                cmd.arg("-m").arg(self.exe);
                 cmd
             }
-            None => Command::new("pytest"),
+            None => Command::new(self.exe),
         }
     }
 }
@@ -81,7 +89,7 @@ impl Runner for PytestRunner {
         with_worker_mirror(&self.tests, self.isolation, |mirror| {
             let _guard = apply_patch(mirror, mutant)?;
 
-            let mut cmd = self.pytest_command();
+            let mut cmd = self.framework_command();
             cmd.arg("-x").arg("--tb=no").arg("-q");
             if let Some(seed) = self.hypothesis_seed {
                 cmd.arg(format!("--hypothesis-seed={seed}"));
@@ -128,11 +136,11 @@ impl Runner for PytestRunner {
             // intended. The baseline run (separate) still captures + surfaces
             // output so a red unmutated suite is diagnosable.
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
-            let mut child = cmd.spawn().context("spawning pytest")?;
+            let mut child = cmd.spawn().context("spawning test runner")?;
 
             match child
                 .wait_timeout(self.timeout)
-                .context("waiting on pytest")?
+                .context("waiting on test runner")?
             {
                 Some(status) => {
                     if status.success() {
@@ -158,7 +166,7 @@ impl Runner for PytestRunner {
         // `--timeout`, which sizes a coverage-selected subset) so a hung suite
         // can't stall the whole run forever.
         let mirror = build_mirror(&self.tests, self.isolation)?;
-        let mut cmd = self.pytest_command();
+        let mut cmd = self.framework_command();
         cmd.arg("--tb=line").arg("-q");
         if let Some(seed) = self.hypothesis_seed {
             cmd.arg(format!("--hypothesis-seed={seed}"));

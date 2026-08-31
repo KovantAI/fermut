@@ -13,9 +13,8 @@ operators, caching — works unchanged.
 
 ```sh
 jupytext --set-formats ipynb,py:percent analysis.ipynb   # pair once
-pytest --cov=analysis --cov-context=test
-coverage json -o coverage.json --show-contexts
-fermut run analysis.py --tests tests/ --coverage coverage.json
+fermut coverage --source analysis --tests tests/          # writes .coverage
+fermut run analysis.py --tests tests/ --coverage .coverage
 ```
 
 ## Why not mutate `.ipynb` directly
@@ -95,13 +94,22 @@ def test_scale():
 
 ```sh
 jupytext --sync analysis.ipynb                       # analysis.ipynb -> analysis.py
+fermut coverage --source analysis --tests tests/     # writes .coverage
+fermut run analysis.py --tests tests/ --coverage .coverage
+```
+
+`fermut coverage` runs the suite and writes a `.coverage` database
+fermut reads directly (no `coverage json` export step). Or, manually:
+
+```sh
 pytest --cov=analysis --cov-context=test
 coverage json -o coverage.json --show-contexts
 fermut run analysis.py --tests tests/ --coverage coverage.json
 ```
 
-The resulting `coverage.json` carries the per-test contexts fermut
-needs — each line tagged with the pytest nodeID that hit it:
+Either way the coverage data carries the per-test contexts fermut
+needs — each line tagged with the pytest nodeID that hit it (a
+`coverage.json` export shows them as):
 
 ```json
 "contexts": {
@@ -121,10 +129,12 @@ neither goes stale against the notebook:
 
 ```sh
 jupytext --sync analysis.ipynb && \
-  pytest --cov=analysis --cov-context=test && \
-  coverage json -o coverage.json --show-contexts && \
-  fermut run analysis.py --tests tests/ --coverage coverage.json
+  fermut coverage --source analysis --tests tests/ && \
+  fermut run analysis.py --tests tests/ --coverage .coverage
 ```
+
+(Or the manual `pytest --cov … && coverage json …` export, passed as
+`--coverage coverage.json`.)
 
 Commit the paired `.py` (or regenerate in CI) so the mutation target
 is always present.

@@ -28,9 +28,7 @@ jobs:
       - run: |
           uv sync
           uv tool install fermut
-      - run: |
-          uv run pytest --cov=src --cov-context=test
-          uv run coverage json -o coverage.json --show-contexts
+      - run: uv tool run fermut coverage --source src --tests tests/
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: .fermut/cache.json
@@ -41,7 +39,7 @@ jobs:
           uv tool run fermut run src/ \
               --tests tests/ \
               --diff-only origin/${{ github.base_ref }} \
-              --coverage coverage.json \
+              --coverage .coverage \
               --markdown fermut-report.md \
               --trend
       - if: always() && hashFiles('fermut-report.md') != ''
@@ -53,6 +51,10 @@ jobs:
 
 Key points:
 
+- `fermut coverage` runs the suite and writes the `.coverage`
+  database fermut reads directly (no `coverage json` export step). Or,
+  manually: `pytest --cov=src --cov-context=test && coverage json -o
+  coverage.json --show-contexts`, passed as `--coverage coverage.json`.
 - `fetch-depth: 0` is required so `--diff-only` can compute the
   merge base.
 - `actions/cache` keyed on lockfile + sources persists the result
@@ -147,9 +149,7 @@ jobs:
       - run: |
           uv sync
           uv tool install fermut
-      - run: |
-          uv run pytest --cov=src --cov-context=test
-          uv run coverage json -o coverage.json --show-contexts
+      - run: uv tool run fermut coverage --source src --tests tests/
 
       - name: restore fermut history
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
@@ -163,7 +163,7 @@ jobs:
         run: |
           uv tool run fermut run src/ \
               --tests tests/ \
-              --coverage coverage.json \
+              --coverage .coverage \
               --ops "" \
               --experimental \
               --timeout 60 \

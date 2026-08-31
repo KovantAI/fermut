@@ -148,9 +148,9 @@ CLI, so any CI works — translate the steps:
 2. Install Python + the project's deps.
 3. Install fermut (`uv tool install fermut`, `pipx install fermut`,
    or `pip install fermut`).
-4. Run `pytest --cov=src --cov-context=test` then
-   `coverage json --show-contexts`.
-5. `fermut run src/ --tests tests/ --diff-only <base-ref> --coverage coverage.json --no-verify-baseline --markdown report.md --trend`
+4. Run `fermut coverage` to build a `.coverage` database (or, manually:
+   `pytest --cov=src --cov-context=test` then `coverage json --show-contexts`).
+5. `fermut run src/ --tests tests/ --diff-only <base-ref> --coverage .coverage --no-verify-baseline --markdown report.md --trend`
    (`--no-verify-baseline` is safe here because step 4 already ran the full
    suite in this same job; drop it if your CI splits those steps across jobs.)
 6. Optional: post the markdown report to the PR via your platform's

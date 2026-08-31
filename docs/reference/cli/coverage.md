@@ -34,9 +34,13 @@ line as covered — so before appending, `fermut coverage` deletes the
 changed test files' contexts from the database, forcing their coverage
 to be rebuilt from scratch.
 
-Change detection is by file modification time vs the database's. It
-acts at test-**file** granularity: editing any test in a file
-re-measures that whole file.
+Change detection is by file **content** hash — fermut stores each test
+file's hash in a `.coverage`-adjacent sidecar and re-measures a file
+only when its current content hashes differently. It deliberately does
+**not** use modification time: a fresh CI checkout rewrites every
+mtime, which would force a full re-measure every run; content hashing
+is stable across checkouts. It acts at test-**file** granularity:
+editing any test in a file re-measures that whole file.
 
 ## Wiring it into `fermut run`
 

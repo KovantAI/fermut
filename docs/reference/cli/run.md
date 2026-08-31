@@ -110,8 +110,10 @@ mutant to only the tests that exercised the mutated line.
 
 ## Incremental runs (`--since`)
 
-`--diff-only main` is branch-relative — diffs the current branch against
-its merge base with `main`. Right tool for PR-time gates.
+`--diff-only main` is branch-relative — a three-dot diff (`git diff
+main...HEAD`) against the merge base with `main`, so it scopes to this
+branch's **committed** changes only (uncommitted edits are not included;
+use `--since` for those). Right tool for PR-time gates.
 
 For "what's changed since I last ran fermut?", "only test the last
 week", or "run against a specific tag", use `--since`:

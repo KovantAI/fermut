@@ -269,15 +269,16 @@ source_root = "src"
 tests = "tests"
 runner = "pytest"
 pytest_args = ["-x", "-q"]
-coverage = "coverage.json"
+coverage = ".coverage"
 ```
 
 ```yaml
 # .github/workflows/fermut.yml — after
 - run: uv tool install fermut
-- run: |
-    pytest --cov=src --cov-context=test
-    coverage json -o coverage.json --show-contexts
+# `fermut coverage` writes the .coverage database fermut reads directly.
+# Or, manually: pytest --cov=src --cov-context=test && coverage json -o
+# coverage.json --show-contexts  (then set coverage = "coverage.json").
+- run: fermut coverage
 - run: fermut run src/ --tests tests/ \
         --diff-only origin/${{ github.base_ref }} \
         --markdown fermut-report.md

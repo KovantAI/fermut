@@ -113,14 +113,30 @@ exclude_lines =
 !!! danger "Do NOT set `dynamic_context = test_function`"
     That setting produces context strings like `module.test_func`, which fermut cannot pass to pytest. Pytest expects `tests/file_test.py::test_func`. Use `pytest --cov-context=test` instead (next step).
 
-### Generate `coverage.json`
+### Generate coverage
+
+The one command — `fermut coverage` — runs the suite and writes a
+`.coverage` SQLite database fermut reads directly (no `coverage json`
+export step). It's incremental: after the first run it re-measures only
+the test files whose content changed.
+
+```bash
+fermut coverage --source <src-dir> --tests "$PWD/tests"
+```
+
+Then pass `--coverage "$PWD/.coverage"` in place of
+`--coverage "$PWD/coverage.json"` on every `run`/`explain` below.
+
+Or, manually — the `coverage.json` export the rest of this page's
+commands assume (the `.coveragerc` and context-format notes below apply
+to this path):
 
 ```bash
 uv run pytest --cov=<src-dir> --cov-context=test --cov-report= -q
 uv run coverage json --rcfile=.coveragerc --show-contexts -o coverage.json
 ```
 
-`--show-contexts` is **mandatory**. Without it:
+`--show-contexts` is **mandatory** on the manual path. Without it:
 
 ```
 coverage.json at coverage.json has no per-test contexts.
@@ -299,12 +315,18 @@ The highest-signal field is `coverage.tests` — these are tests that *executed*
 After Claude writes the killing test:
 
 1. Run it locally: `uv run pytest tests/new_test.py -q` — confirm green
-2. Regenerate coverage:
+2. Regenerate coverage — `fermut coverage` re-measures only the changed
+   test file and updates `.coverage`:
+   ```bash
+   fermut coverage --source src --tests "$PWD/tests"
+   ```
+   Or, manually, refresh `coverage.json`:
    ```bash
    uv run pytest --cov=src --cov-context=test --cov-report= -q
    uv run coverage json --rcfile=.coveragerc --show-contexts -o coverage.json
    ```
-3. Re-run fermut with same flags
+3. Re-run fermut with same flags (match `--coverage` to whichever file
+   you wrote)
 
 ### Stage 7 — Cache behavior
 

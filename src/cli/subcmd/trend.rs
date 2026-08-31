@@ -39,6 +39,12 @@ pub struct TrendOpts {
     /// after the table. Currently only `File` is supported (operator-
     /// grouping requires the run report, which trend doesn't load).
     pub group_by: Option<TrendGroupBy>,
+    /// Fail instead of silently skipping unreadable history lines. The loader
+    /// drops malformed and newer-schema entries so one bad line can't poison
+    /// the trend; under `--strict` any such drop is an error, so a CI job can
+    /// assert the trend and regression gate see every recorded point rather
+    /// than a silently truncated set.
+    pub strict: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -70,7 +76,20 @@ pub fn trend(opts: TrendOpts) -> Result<()> {
         .history_path
         .clone()
         .unwrap_or_else(|| history::default_history_path(&history::resolve_root(&opts.path)));
-    let entries = history::load(&history_path)?;
+    let (entries, stats) = history::load_with_stats(&history_path)?;
+    // Integrity check on the raw store, before any filtering — a dropped line
+    // is dropped regardless of branch/date window.
+    if opts.strict && stats.dropped() > 0 {
+        anyhow::bail!(
+            "history at {} has {} unreadable line(s) ({} malformed, {} newer-schema) — \
+             the trend and regression gate would be computed over a silently truncated set. \
+             Inspect the file's entries by hand, then re-run. (Drop --strict to skip them.)",
+            history_path.display(),
+            stats.dropped(),
+            stats.malformed,
+            stats.newer_schema,
+        );
+    }
 
     let since_norm = opts
         .since

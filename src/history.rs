@@ -533,34 +533,69 @@ pub fn append(path: &Path, entry: &HistoryEntry) -> Result<()> {
     res
 }
 
-/// Load every well-formed entry from `path`, in file order (oldest first).
-/// Malformed lines are silently skipped — older fermut versions may have
-/// written entries we no longer understand, and a single bad line should
-/// not poison `fermut trend`.
-pub fn load(path: &Path) -> Result<Vec<HistoryEntry>> {
+/// Counts of history lines dropped at load time, so a caller (e.g. `fermut
+/// trend --strict`) can tell "the trend is computed over every recorded point"
+/// from "some points were silently discarded". A non-empty line that fails to
+/// parse is `malformed`; a well-formed entry stamped with a schema newer than
+/// this binary understands is `newer_schema`. Empty lines are not counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LoadStats {
+    pub loaded: usize,
+    pub malformed: usize,
+    pub newer_schema: usize,
+}
+
+impl LoadStats {
+    /// Non-empty lines that did not become a loaded entry.
+    pub fn dropped(&self) -> usize {
+        self.malformed + self.newer_schema
+    }
+}
+
+/// Load every well-formed entry from `path`, in file order (oldest first),
+/// alongside a count of what was dropped. Malformed and newer-schema lines are
+/// skipped — older/newer fermut versions may have written entries we don't
+/// understand, and a single bad line should not poison `fermut trend` — but the
+/// stats let a strict caller refuse to report over a silently truncated set.
+pub fn load_with_stats(path: &Path) -> Result<(Vec<HistoryEntry>, LoadStats)> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), LoadStats::default()))
+        }
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
     let mut out = Vec::new();
+    let mut stats = LoadStats::default();
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
         }
-        if let Ok(entry) = serde_json::from_str::<HistoryEntry>(line) {
-            if entry.schema_version > CURRENT_SCHEMA_V {
-                warn!(
-                    v = entry.schema_version,
-                    current = CURRENT_SCHEMA_V,
-                    "skipping history entry with newer schema version"
-                );
-                continue;
+        match serde_json::from_str::<HistoryEntry>(line) {
+            Ok(entry) => {
+                if entry.schema_version > CURRENT_SCHEMA_V {
+                    warn!(
+                        v = entry.schema_version,
+                        current = CURRENT_SCHEMA_V,
+                        "skipping history entry with newer schema version"
+                    );
+                    stats.newer_schema += 1;
+                    continue;
+                }
+                out.push(entry);
             }
-            out.push(entry);
+            Err(_) => stats.malformed += 1,
         }
     }
-    Ok(out)
+    stats.loaded = out.len();
+    Ok((out, stats))
+}
+
+/// Load every well-formed entry from `path`, in file order (oldest first).
+/// Malformed lines are silently skipped — see [`load_with_stats`] for the
+/// dropped-line counts a strict caller needs.
+pub fn load(path: &Path) -> Result<Vec<HistoryEntry>> {
+    load_with_stats(path).map(|(entries, _)| entries)
 }
 
 fn iso8601_now() -> String {
@@ -742,6 +777,50 @@ mod tests {
         let loaded = load(&p).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].killed, 1);
+    }
+
+    #[test]
+    fn load_with_stats_counts_malformed_and_newer_schema() {
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("history.jsonl");
+        let valid = HistoryEntry {
+            schema_version: CURRENT_SCHEMA_V,
+            timestamp: "2026-06-04T12:00:00Z".into(),
+            mutation_score: 50.0,
+            killed: 1,
+            survived: 1,
+            timed_out: 0,
+            skipped: 0,
+            errored: 0,
+            equivalent: 0,
+            total: Some(2),
+            duration_ms: None,
+            config_hash: None,
+            git_sha: None,
+            git_branch: None,
+            survivor_ids: None,
+            baseline: false,
+        };
+        let good = serde_json::to_string(&valid).unwrap();
+        // A well-formed entry stamped one schema version ahead of this binary.
+        let newer = format!(
+            r#"{{"v":{},"timestamp":"t","mutation_score":80.0,"killed":4,"survived":1,"timed_out":0,"skipped":0,"errored":0}}"#,
+            CURRENT_SCHEMA_V + 1
+        );
+        // valid, malformed, newer-schema, blank line (ignored, not counted).
+        std::fs::write(&p, format!("{good}\nnot json\n{newer}\n\n")).unwrap();
+
+        let (entries, stats) = load_with_stats(&p).unwrap();
+        assert_eq!(entries.len(), 1, "only the one in-range entry loads");
+        assert_eq!(stats.loaded, 1);
+        assert_eq!(stats.malformed, 1);
+        assert_eq!(stats.newer_schema, 1);
+        assert_eq!(stats.dropped(), 2);
+
+        // Missing file → all zeros, no error.
+        let (empty, s0) = load_with_stats(&tmp.path().join("nope.jsonl")).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(s0.dropped(), 0);
     }
 
     #[test]

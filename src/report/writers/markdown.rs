@@ -150,6 +150,7 @@ mod tests {
             total: Some(2),
             duration_ms: None,
             config_hash: None,
+            fermut_version: None,
             git_sha: None,
             git_branch: None,
             survivor_ids: None,

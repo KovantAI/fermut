@@ -420,6 +420,7 @@ mod tests {
             total: None,
             duration_ms: None,
             config_hash: None,
+            fermut_version: None,
             git_sha: None,
             git_branch: branch.map(str::to_string),
             survivor_ids: None,

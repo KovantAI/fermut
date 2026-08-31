@@ -574,6 +574,7 @@ mod tests {
             total: None,
             duration_ms: None,
             config_hash: None,
+            fermut_version: None,
             git_sha: None,
             git_branch: None,
             survivor_ids: survivors.map(|s| s.iter().map(|x| x.to_string()).collect()),

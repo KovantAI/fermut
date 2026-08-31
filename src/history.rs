@@ -1,8 +1,8 @@
 //! Per-run history log (`.fermut/history.jsonl`).
 //!
 //! Each `fermut run` appends one JSON line summarising the run: timestamp,
-//! mutation score, status counts, and (when discoverable) the git
-//! sha/branch. The file is JSON-lines so appends are cheap, partial reads
+//! mutation score, status counts, the fermut version, and (when discoverable)
+//! the git sha/branch. The file is JSON-lines so appends are cheap, partial reads
 //! survive truncation, and the schema can extend without breaking older
 //! readers (downstream just ignores unknown fields).
 //!
@@ -67,6 +67,14 @@ pub struct HistoryEntry {
     /// Optional for back-compat with entries written before this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_hash: Option<String>,
+    /// fermut version that produced this entry (`CARGO_PKG_VERSION`). fermut is
+    /// specified `>=`, not `==`, so a lockfile refresh can change the running
+    /// version between runs; recording it lets the trend attribute a score
+    /// shift to a tool upgrade rather than a code change. `None` for entries
+    /// written before this field existed. Removes the manual injection the
+    /// trend merge workflow used to do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fermut_version: Option<String>,
     /// Short git sha, if the working tree is a git repo. `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_sha: Option<String>,
@@ -127,6 +135,7 @@ impl HistoryEntry {
             total: Some(total),
             duration_ms,
             config_hash,
+            fermut_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             git_sha: git_short_sha(project_root),
             git_branch: current_git_branch(project_root),
             survivor_ids: Some(survivor_ids),
@@ -644,6 +653,25 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn from_report_stamps_current_fermut_version() {
+        use crate::mutator::{Mutant, Operator};
+        use ruff_text_size::TextRange;
+        let m = Mutant {
+            id: "x".into(),
+            file: PathBuf::from("a.py"),
+            operator: Operator::ArithOpSwap,
+            range: TextRange::new(0u32.into(), 1u32.into()),
+            original: "+".into(),
+            replacement: "-".into(),
+            line: 1,
+            stmt_line: 1,
+        };
+        let report = Report::new(vec![MutantOutcome::killed(m)]);
+        let e = HistoryEntry::from_report(&report, Path::new("."), None, None);
+        assert_eq!(e.fermut_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
     fn append_then_load_roundtrips_entries() {
         let tmp = tempdir().unwrap();
         let p = tmp.path().join("history.jsonl");
@@ -660,6 +688,7 @@ mod tests {
             total: Some(8),
             duration_ms: Some(1234),
             config_hash: Some("deadbeef".into()),
+            fermut_version: Some("9.9.9".into()),
             git_sha: Some("abc1234".into()),
             git_branch: Some("main".into()),
             survivor_ids: None,
@@ -691,6 +720,7 @@ mod tests {
             total: Some(9),
             duration_ms: None,
             config_hash: None,
+            fermut_version: None,
             git_sha: None,
             git_branch: None,
             survivor_ids: None,
@@ -732,6 +762,7 @@ mod tests {
             total: Some(2),
             duration_ms: None,
             config_hash: None,
+            fermut_version: None,
             git_sha: None,
             git_branch: None,
             survivor_ids: None,
@@ -768,6 +799,7 @@ mod tests {
                         total: None,
                         duration_ms: None,
                         config_hash: None,
+                        fermut_version: None,
                         git_sha: None,
                         git_branch: None,
                         survivor_ids: None,
@@ -805,6 +837,7 @@ mod tests {
             total: None,
             duration_ms: None,
             config_hash: None,
+            fermut_version: None,
             git_sha: None,
             git_branch: None,
             survivor_ids: None,
@@ -953,6 +986,7 @@ mod tests {
             total: None,
             duration_ms: None,
             config_hash: None,
+            fermut_version: None,
             git_sha: None,
             git_branch: branch.map(str::to_string),
             survivor_ids: None,

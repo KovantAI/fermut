@@ -59,12 +59,14 @@ pub struct HistoryEntry {
     /// back-compat with entries written before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
-    /// Stable hex digest of the run-shape config (runner, timeout, hseed,
-    /// pytest_args, coverage on/off, operator allow/deny, experimental).
-    /// Entries with the same hash were generated from the same shape so
-    /// their scores are comparable; a mismatch in the trend window means
-    /// the comparison is across configurations, not just across code.
-    /// Optional for back-compat with entries written before this field.
+    /// Stable hex digest of the run-shape config: runner, timeout, hseed,
+    /// pytest_args, coverage on/off, operator allow/deny, experimental,
+    /// parity, diff scope (`--since`/`--diff-only`), `--sample`, and
+    /// `--exclude`. Entries with the same hash were generated from the same
+    /// shape *and the same mutant universe*, so their scores are comparable; a
+    /// mismatch in the trend window means the comparison spans configurations
+    /// or scopes, not just code. Optional for back-compat with entries written
+    /// before this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_hash: Option<String>,
     /// Short git sha, if the working tree is a git repo. `None` otherwise.
@@ -140,7 +142,13 @@ impl HistoryEntry {
 /// older entries; bump the prefix if the inputs ever change.
 pub fn config_hash(cfg: &Config) -> String {
     let mut h = Sha256::new();
-    h.update(b"v1|runner=");
+    // v2: folds in the mutant-universe / comparability inputs the score
+    // actually depends on but v1 ignored — parity operators, diff scope
+    // (`--since`/`--diff-only`), `--sample`, and `--exclude`. Two runs with
+    // different values here are NOT comparable, so a diff-scoped or sampled run
+    // must no longer hash identically to a full run (which is what forced the
+    // PR gate onto `--no-history` and the trend merge onto a manual `ci_scope`).
+    h.update(b"v2|runner=");
     h.update(format!("{:?}", cfg.runner).as_bytes());
     h.update(b"|python=");
     match &cfg.python {
@@ -189,6 +197,50 @@ pub fn config_hash(cfg: &Config) -> String {
     for o in sorted {
         h.update(b"|");
         h.update(o.as_bytes());
+    }
+    // Parity operators expand the mutant set, so a parity run's score is not
+    // comparable to a non-parity one.
+    h.update(b"|parity=");
+    h.update(if cfg.parity { &b"on"[..] } else { &b"off"[..] });
+    // Diff scope. A run restricted to changed lines scores over a different
+    // universe than a full run; `--since` and `--diff-only` are mutually
+    // exclusive at the parser. The spec/base string is included so a full run
+    // and a `--since origin/main` run get distinct hashes.
+    h.update(b"|scope=");
+    if let Some(spec) = &cfg.since {
+        h.update(b"since:");
+        h.update(spec.as_bytes());
+    } else if let Some(base) = &cfg.diff_base {
+        h.update(b"diff:");
+        h.update(base.as_bytes());
+    } else {
+        h.update(b"full");
+    }
+    // Sampling tests only a fraction of mutants, so a sampled score is a noisy
+    // estimate, not comparable to a full run. Ratio + seed both matter: a
+    // different seed selects a different subset.
+    h.update(b"|sample=");
+    match cfg.sample_ratio {
+        Some(r) => {
+            h.update(b"ratio:");
+            h.update(r.to_bits().to_le_bytes());
+            h.update(b":seed:");
+            h.update(cfg.sample_seed.unwrap_or(0).to_le_bytes());
+        }
+        None => h.update(b"none"),
+    }
+    // Excluded paths change which files produce mutants at all. Sorted so the
+    // hash is order-independent.
+    h.update(b"|exclude=");
+    if cfg.exclude.is_empty() {
+        h.update(b"none");
+    } else {
+        let mut ex = cfg.exclude.clone();
+        ex.sort();
+        for g in ex {
+            h.update(b"|");
+            h.update(g.as_bytes());
+        }
     }
     hex::encode(h.finalize())
 }
@@ -642,6 +694,114 @@ pub(crate) fn current_git_branch(dir: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// Minimal `Config` for exercising `config_hash`. Only the fields the hash
+    /// reads are meaningful; the rest are inert defaults.
+    fn cfg() -> Config {
+        use crate::config::{CacheScope, IsolationMode, RunnerKind};
+        Config {
+            source_root: PathBuf::from("."),
+            tests: None,
+            jobs: None,
+            timeout_secs: 30,
+            ty_filter: false,
+            ruff_filter: false,
+            experimental: false,
+            parity: false,
+            ops_allow: None,
+            ops_deny: Default::default(),
+            diff_base: None,
+            since: None,
+            coverage_path: None,
+            coverage: None,
+            hypothesis_seed: None,
+            pytest_args: Vec::new(),
+            cache: false,
+            cache_path: PathBuf::from(".fermut/cache.json"),
+            history: false,
+            history_path: PathBuf::from(".fermut/history.jsonl"),
+            sample_ratio: None,
+            sample_seed: None,
+            shard: None,
+            runner: RunnerKind::Pytest,
+            python: None,
+            isolation: IsolationMode::Auto,
+            equiv_detect: false,
+            cache_scope: CacheScope::File,
+            fail_under: None,
+            exclude: Vec::new(),
+            verify_baseline: false,
+            baseline_timeout_secs: 300,
+        }
+    }
+
+    #[test]
+    fn config_hash_is_stable_for_identical_config() {
+        assert_eq!(config_hash(&cfg()), config_hash(&cfg()));
+    }
+
+    #[test]
+    fn config_hash_distinguishes_scope_sample_exclude_parity() {
+        let base = config_hash(&cfg());
+
+        // Diff scope: full vs --since vs --diff-only, and two different --since
+        // specs, must all differ — a diff-scoped run is no longer mistaken for
+        // a full run in the trend store.
+        let since = config_hash(&Config {
+            since: Some("origin/main".into()),
+            ..cfg()
+        });
+        let since2 = config_hash(&Config {
+            since: Some("v1.2.0".into()),
+            ..cfg()
+        });
+        let diff = config_hash(&Config {
+            diff_base: Some("origin/main".into()),
+            ..cfg()
+        });
+        assert_ne!(base, since, "full vs --since must differ");
+        assert_ne!(since, since2, "different --since specs must differ");
+        assert_ne!(base, diff, "full vs --diff-only must differ");
+        assert_ne!(since, diff, "--since vs --diff-only must differ");
+
+        // Sampling: presence and seed both change comparability.
+        let s1 = config_hash(&Config {
+            sample_ratio: Some(0.5),
+            sample_seed: Some(0),
+            ..cfg()
+        });
+        let s2 = config_hash(&Config {
+            sample_ratio: Some(0.5),
+            sample_seed: Some(1),
+            ..cfg()
+        });
+        assert_ne!(base, s1, "sampled run must differ from full");
+        assert_ne!(s1, s2, "different sample seeds must differ");
+
+        // Exclude: presence and content, order-independent.
+        let e1 = config_hash(&Config {
+            exclude: vec!["a/**".into()],
+            ..cfg()
+        });
+        let e_ab = config_hash(&Config {
+            exclude: vec!["a/**".into(), "b/**".into()],
+            ..cfg()
+        });
+        let e_ba = config_hash(&Config {
+            exclude: vec!["b/**".into(), "a/**".into()],
+            ..cfg()
+        });
+        assert_ne!(base, e1, "an exclude must differ from none");
+        assert_ne!(e1, e_ab, "different exclude sets must differ");
+        assert_eq!(e_ab, e_ba, "exclude order must not matter");
+
+        // Parity operators expand the mutant set.
+        let parity = config_hash(&Config {
+            parity: true,
+            ..cfg()
+        });
+        assert_ne!(base, parity, "parity run must differ from non-parity");
+    }
 
     #[test]
     fn append_then_load_roundtrips_entries() {

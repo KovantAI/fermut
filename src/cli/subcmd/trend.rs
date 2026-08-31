@@ -39,11 +39,12 @@ pub struct TrendOpts {
     /// after the table. Currently only `File` is supported (operator-
     /// grouping requires the run report, which trend doesn't load).
     pub group_by: Option<TrendGroupBy>,
-    /// Fail instead of silently skipping unreadable history lines. The loader
-    /// drops malformed and newer-schema entries so one bad line can't poison
-    /// the trend; under `--strict` any such drop is an error, so a CI job can
-    /// assert the trend and regression gate see every recorded point rather
-    /// than a silently truncated set.
+    /// Fail instead of silently skipping malformed history lines. The loader
+    /// drops corrupt lines so one bad line can't poison the trend; under
+    /// `--strict` a malformed line is an error, so a CI job can catch a
+    /// truncated history file. Newer-schema lines are warned, not failed — an
+    /// older binary can't read them and can't repair them, so failing on them
+    /// would only wedge CI during a version rollout.
     pub strict: bool,
 }
 
@@ -77,17 +78,18 @@ pub fn trend(opts: TrendOpts) -> Result<()> {
         .clone()
         .unwrap_or_else(|| history::default_history_path(&history::resolve_root(&opts.path)));
     let (entries, stats) = history::load_with_stats(&history_path)?;
-    // Integrity check on the raw store, before any filtering — a dropped line
-    // is dropped regardless of branch/date window.
-    if opts.strict && stats.dropped() > 0 {
+    // Integrity check on malformed lines only. A malformed line doesn't parse,
+    // so it carries no branch/date and can't be attributed to a query window —
+    // the check is necessarily global. Newer-schema lines are readable in
+    // principle (just by a newer binary) and are only warned, not failed, so
+    // `--strict` doesn't wedge an old binary during a version rollout.
+    if opts.strict && stats.malformed > 0 {
         anyhow::bail!(
-            "history at {} has {} unreadable line(s) ({} malformed, {} newer-schema) — \
-             the trend and regression gate would be computed over a silently truncated set. \
+            "history at {} has {} malformed line(s) that could not be parsed — \
+             the trend would be computed over a silently truncated set. \
              Inspect the file's entries by hand, then re-run. (Drop --strict to skip them.)",
             history_path.display(),
-            stats.dropped(),
             stats.malformed,
-            stats.newer_schema,
         );
     }
 
@@ -618,5 +620,50 @@ mod tests {
             entry_with_hash("c", Some("aaa")),
         ];
         assert!(!crate::history::mixed_config_hashes(&es));
+    }
+
+    fn strict_opts(history_path: PathBuf) -> TrendOpts {
+        TrendOpts {
+            path: PathBuf::from("."),
+            history_path: Some(history_path),
+            limit: 20,
+            all: true,
+            format: TrendFormat::Json,
+            scale: TrendScale::Auto,
+            branch: None,
+            since: None,
+            until: None,
+            fail_on_regression: None,
+            diff: false,
+            group_by: None,
+            strict: true,
+        }
+    }
+
+    #[test]
+    fn strict_fails_on_a_malformed_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("history.jsonl");
+        let good = serde_json::to_string(&entry("2026-06-04T12:00:00Z", 50.0, None)).unwrap();
+        std::fs::write(&p, format!("{good}\nnot json\n")).unwrap();
+
+        let err = trend(strict_opts(p)).unwrap_err().to_string();
+        assert!(err.contains("malformed"), "got: {err}");
+    }
+
+    #[test]
+    fn strict_does_not_fail_on_a_newer_schema_line() {
+        // A newer-schema line is readable by a newer binary and unrepairable by
+        // this one — --strict must warn, not fail, or version skew wedges CI.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("history.jsonl");
+        let good = serde_json::to_string(&entry("2026-06-04T12:00:00Z", 50.0, None)).unwrap();
+        let newer = format!(
+            r#"{{"v":{},"timestamp":"2026-06-05T12:00:00Z","mutation_score":80.0,"killed":4,"survived":1,"timed_out":0,"skipped":0,"errored":0}}"#,
+            crate::history::CURRENT_SCHEMA_V + 1
+        );
+        std::fs::write(&p, format!("{good}\n{newer}\n")).unwrap();
+
+        assert!(trend(strict_opts(p)).is_ok());
     }
 }

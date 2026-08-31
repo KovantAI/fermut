@@ -474,10 +474,13 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = TrendFormatCli::Human)]
         format: TrendFormatCli,
 
-        /// Fail if the history log has any unreadable line (malformed or from a
-        /// newer schema) instead of silently skipping it. Use in CI to assert
-        /// the trend and regression gate see every recorded point, not a
-        /// truncated set.
+        /// Fail if the history log has any malformed (corrupt, unparseable)
+        /// line instead of silently skipping it, so a `fermut trend --strict`
+        /// CI step catches a truncated history file before the trend is
+        /// trusted. Newer-schema lines an older binary can't read are warned,
+        /// not failed — nothing this binary can do about them. Does not change
+        /// the `fermut run --fail-on-regression` gate, which loads history on
+        /// its own; run this as a separate step to guard the shared file.
         #[arg(long)]
         strict: bool,
     },

@@ -31,17 +31,23 @@ jobs:
           uv sync
           uv tool install fermut
 
-      - name: build coverage data
-        run: |
-          uv run coverage run -m pytest
-          uv run coverage json -o coverage.json
+      # Per-test coverage. fermut reads coverage.py's `.coverage` SQLite
+      # database directly, so there is no `coverage json` export step. `fermut
+      # coverage` runs the one incantation fermut needs — `pytest --cov
+      # --cov-context=test`, which records per-test contexts so fermut can pick
+      # the covering tests per mutant. (Plain `coverage run -m pytest` records
+      # NO contexts and cannot drive per-mutant selection.) Needs pytest-cov in
+      # the project env. Requires a fermut with `coverage` + direct `.coverage`
+      # reading.
+      - name: build per-test coverage
+        run: uv tool run fermut coverage
 
       - name: run fermut on changed lines
         run: |
           uv tool run fermut run src/ \
               --tests tests/ \
               --diff-only origin/${{ github.base_ref }} \
-              --coverage coverage.json \
+              --coverage .coverage \
               --hypothesis-seed 1234 \
               --markdown fermut-report.md \
               --json fermut-report.json

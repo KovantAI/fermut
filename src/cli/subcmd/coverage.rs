@@ -8,9 +8,17 @@
 //! 1. Discovers source + tests from `fermut.toml` / `pyproject.toml` (same
 //!    walk as `run`).
 //! 2. If no `.coverage` exists yet, runs the full suite under coverage.
-//! 3. If one exists, runs only the test files changed since the DB was
-//!    written, appending into it — so adding a test costs one test file's
-//!    runtime, not the whole suite.
+//! 3. If one exists, runs only the test files whose **content** changed since
+//!    the DB was written, appending into it — so adding a test costs one test
+//!    file's runtime, not the whole suite.
+//!
+//! Change detection is by content hash, recorded in a `.coverage`-adjacent
+//! `*.fermut-fingerprints.json` sidecar — deliberately NOT by mtime. mtime is
+//! useless in CI, where `actions/checkout` rewrites every timestamp on each
+//! run and an mtime check would flag the whole suite, collapsing the
+//! incremental path into a full rebuild. With a cached `.coverage` + sidecar,
+//! the content check re-runs only the genuinely edited test files — which is
+//! what stops coverage being regenerated from scratch on every run.
 //!
 //! fermut reads the `.coverage` SQLite directly (see
 //! [`crate::filter::coverage`]), so there is no `coverage json` export step.
@@ -23,13 +31,33 @@
 //! So before appending we DELETE the changed test files' contexts from the DB
 //! (`purge_contexts`), guaranteeing their line bits are rebuilt from scratch.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::config::loader::LoadedConfig;
+
+/// Content fingerprints of the test tree, stored beside the `.coverage` DB so
+/// the incremental refresh can tell which test files actually changed by
+/// **content**, not mtime.
+///
+/// mtime is worthless in CI: every `actions/checkout` rewrites it, so an
+/// mtime-based "changed since the DB was written" check flags the entire suite
+/// on every run and the incremental path collapses into a full rebuild — the
+/// exact reason coverage kept being regenerated from scratch. A content hash is
+/// stable across checkouts, so a cached `.coverage` + its sidecar makes
+/// `fermut coverage` re-run only the test files whose bytes differ.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Fingerprints {
+    /// Schema version. Bump to force a full rebuild on format changes.
+    v: u32,
+    /// base-dir-relative path (forward slashes) → hex sha256 of the file.
+    files: BTreeMap<String, String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct CoverageOpts {
@@ -97,10 +125,27 @@ pub fn coverage(opts: CoverageOpts) -> Result<()> {
         None => source.clone(),
     };
 
-    let full = opts.full || !db_path.exists();
+    let current = current_fingerprints(&tests, &base_dir);
+
+    // A full run rebuilds the DB and its fingerprint baseline from scratch:
+    // when forced, when no DB exists, or when a DB exists but carries no
+    // fermut sidecar (an old fermut, or a `.coverage` produced by a bare
+    // pytest-cov run). Without the sidecar we cannot tell what changed, so
+    // rebuilding is the only sound option — and it seeds the baseline that
+    // makes every subsequent run incremental.
+    let prior = load_fingerprints(&db_path);
+    let full = opts.full || !db_path.exists() || prior.is_none();
 
     if full {
-        println!("Running full test suite under coverage…");
+        if db_path.exists() && prior.is_none() && !opts.full {
+            println!(
+                "{} has no fermut fingerprint sidecar; rebuilding fully to establish an \
+                 incremental baseline.",
+                display_rel(&db_path, &base_dir)
+            );
+        } else {
+            println!("Running full test suite under coverage…");
+        }
         run_pytest(
             &base_dir,
             &cov_target,
@@ -109,56 +154,135 @@ pub fn coverage(opts: CoverageOpts) -> Result<()> {
             &opts.pytest_args,
             python.as_deref(),
         )?;
+        save_fingerprints(&db_path, &current)?;
         report_done(&loaded, &db_path, None);
         return Ok(());
     }
+    let prior = prior.unwrap_or_default();
 
-    // Incremental: which test files changed since the DB was last written?
-    let db_mtime = std::fs::metadata(&db_path)
-        .and_then(|m| m.modified())
-        .unwrap_or(SystemTime::UNIX_EPOCH);
-    let changed = changed_test_files(&tests, db_mtime);
+    // Incremental: compare content hashes, not mtimes. A file is `changed`
+    // when new or when its bytes differ; `deleted` when the baseline had it
+    // but the tree no longer does — its stale contexts must be purged so a
+    // removed test stops marking lines as covered.
+    let changed: Vec<PathBuf> = current
+        .files
+        .iter()
+        .filter(|(rel, hash)| prior.files.get(*rel) != Some(*hash))
+        .map(|(rel, _)| base_dir.join(rel))
+        .collect();
+    let deleted: Vec<String> = prior
+        .files
+        .keys()
+        .filter(|rel| !current.files.contains_key(*rel))
+        .cloned()
+        .collect();
 
-    if changed.is_empty() {
+    if changed.is_empty() && deleted.is_empty() {
         println!(
-            "{} is up to date (no test files changed since it was written). \
+            "{} is up to date (no test file content changed since it was written). \
              Nothing to do.",
             display_rel(&db_path, &base_dir)
         );
         return Ok(());
     }
 
-    println!(
-        "{} changed test file(s) since last coverage; appending:",
-        changed.len()
-    );
-    for f in &changed {
-        println!("  {}", display_rel(f, &base_dir));
+    if !changed.is_empty() {
+        println!("{} changed test file(s); appending:", changed.len());
+        for f in &changed {
+            println!("  {}", display_rel(f, &base_dir));
+        }
+    }
+    if !deleted.is_empty() {
+        println!(
+            "{} removed test file(s); purging their contexts:",
+            deleted.len()
+        );
+        for f in &deleted {
+            println!("  {f}");
+        }
     }
 
-    // Drop the changed files' stale contexts so --cov-append rebuilds them
-    // cleanly (a modified test covering fewer lines must not keep old bits).
-    let prefixes: Vec<String> = changed
+    // Drop the changed AND deleted files' stale contexts so --cov-append
+    // rebuilds the changed ones cleanly (a modified test covering fewer lines
+    // must not keep old bits) and a removed test leaves nothing behind.
+    let mut prefixes: Vec<String> = changed
         .iter()
         .filter_map(|f| rel_to(f, &base_dir))
         .filter_map(|p| p.to_str().map(|s| s.replace('\\', "/")))
         .collect();
+    prefixes.extend(deleted.iter().cloned());
     let purged = purge_contexts(&db_path, &prefixes)
         .with_context(|| format!("purging stale contexts from {}", db_path.display()))?;
     if purged > 0 {
-        println!("Purged {purged} stale context(s) for changed files.");
+        println!("Purged {purged} stale context(s).");
     }
 
-    run_pytest(
-        &base_dir,
-        &cov_target,
-        &changed,
-        true,
-        &opts.pytest_args,
-        python.as_deref(),
-    )?;
+    if !changed.is_empty() {
+        run_pytest(
+            &base_dir,
+            &cov_target,
+            &changed,
+            true,
+            &opts.pytest_args,
+            python.as_deref(),
+        )?;
+    }
+    // Persist the new baseline last, so an aborted run leaves the old sidecar
+    // matching the old DB rather than claiming files were measured that weren't.
+    save_fingerprints(&db_path, &current)?;
     report_done(&loaded, &db_path, Some(changed.len()));
     Ok(())
+}
+
+/// Sidecar path for the fingerprint baseline: the DB path with
+/// `.fermut-fingerprints.json` appended (so `.coverage` →
+/// `.coverage.fermut-fingerprints.json`). Kept adjacent so a cache that
+/// captures the DB captures the baseline too.
+fn fingerprints_path(db_path: &Path) -> PathBuf {
+    let mut s = db_path.as_os_str().to_owned();
+    s.push(".fermut-fingerprints.json");
+    PathBuf::from(s)
+}
+
+fn load_fingerprints(db_path: &Path) -> Option<Fingerprints> {
+    let raw = std::fs::read_to_string(fingerprints_path(db_path)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn save_fingerprints(db_path: &Path, fp: &Fingerprints) -> Result<()> {
+    let path = fingerprints_path(db_path);
+    let raw = serde_json::to_string_pretty(fp).context("serializing coverage fingerprints")?;
+    std::fs::write(&path, raw).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+/// Content fingerprint of every `.py` file under `tests`, keyed by
+/// base-dir-relative path with forward slashes (matching purge prefixes and
+/// recorded pytest node ids).
+fn current_fingerprints(tests: &Path, base_dir: &Path) -> Fingerprints {
+    let mut files = BTreeMap::new();
+    if tests.exists() {
+        for entry in walkdir::WalkDir::new(tests)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) != Some("py") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(p) else {
+                continue;
+            };
+            let Some(rel) = rel_to(p, base_dir) else {
+                continue;
+            };
+            let key = rel.to_string_lossy().replace('\\', "/");
+            let mut h = Sha256::new();
+            h.update(&bytes);
+            files.insert(key, hex::encode(h.finalize()));
+        }
+    }
+    Fingerprints { v: 1, files }
 }
 
 /// Invoke `pytest <targets> --cov=<target> --cov-context=test [--cov-append]`
@@ -208,32 +332,6 @@ fn run_pytest(
         );
     }
     Ok(())
-}
-
-/// Test files under `tests` modified strictly after `since`.
-fn changed_test_files(tests: &Path, since: SystemTime) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if !tests.exists() {
-        return out;
-    }
-    for entry in walkdir::WalkDir::new(tests)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let p = entry.path();
-        if p.extension().and_then(|e| e.to_str()) != Some("py") {
-            continue;
-        }
-        if let Ok(meta) = entry.metadata() {
-            if let Ok(modified) = meta.modified() {
-                if modified > since {
-                    out.push(p.to_path_buf());
-                }
-            }
-        }
-    }
-    out.sort();
-    out
 }
 
 /// Delete every context whose pytest node id belongs to one of `prefixes`
@@ -364,21 +462,89 @@ mod tests {
     }
 
     #[test]
-    fn changed_test_files_respects_mtime() {
+    fn fingerprints_track_content_not_mtime() {
         let tmp = tempfile::tempdir().unwrap();
-        let tests = tmp.path().join("tests");
+        let base = tmp.path();
+        let tests = base.join("tests");
         std::fs::create_dir_all(&tests).unwrap();
-        let old = tests.join("test_old.py");
-        std::fs::write(&old, "def test_a(): pass\n").unwrap();
+        std::fs::write(tests.join("test_a.py"), "def test_a(): pass\n").unwrap();
 
-        // Everything written before this instant is "old".
-        let cutoff = SystemTime::now();
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        let fp1 = current_fingerprints(&tests, base);
+        assert_eq!(fp1.files.len(), 1);
+        assert!(fp1.files.contains_key("tests/test_a.py"));
 
-        let new = tests.join("test_new.py");
-        std::fs::write(&new, "def test_b(): pass\n").unwrap();
+        // Rewrite identical bytes but bump mtime — content hash must not move,
+        // which is the whole point in CI where checkout rewrites every mtime.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(tests.join("test_a.py"), "def test_a(): pass\n").unwrap();
+        let fp2 = current_fingerprints(&tests, base);
+        assert_eq!(
+            fp1.files, fp2.files,
+            "identical content must yield an identical fingerprint despite a newer mtime"
+        );
 
-        let changed = changed_test_files(&tests, cutoff);
-        assert_eq!(changed, vec![new]);
+        // Real content change moves the hash.
+        std::fs::write(tests.join("test_a.py"), "def test_a(): assert True\n").unwrap();
+        let fp3 = current_fingerprints(&tests, base);
+        assert_ne!(fp1.files["tests/test_a.py"], fp3.files["tests/test_a.py"]);
+    }
+
+    #[test]
+    fn fingerprints_roundtrip_through_sidecar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let db = base.join(".coverage");
+        let tests = base.join("tests");
+        std::fs::create_dir_all(&tests).unwrap();
+        std::fs::write(tests.join("test_a.py"), "def test_a(): pass\n").unwrap();
+
+        assert!(load_fingerprints(&db).is_none(), "no sidecar yet");
+        let fp = current_fingerprints(&tests, base);
+        save_fingerprints(&db, &fp).unwrap();
+        // Sidecar sits next to the DB so a cache of the DB captures it too.
+        assert!(fingerprints_path(&db).exists());
+        let loaded = load_fingerprints(&db).expect("sidecar loads back");
+        assert_eq!(loaded.files, fp.files);
+    }
+
+    /// The content-vs-baseline diff the incremental path runs: new/modified
+    /// files are `changed`, vanished files are `deleted`, untouched files are
+    /// neither. Mirrors the logic in `coverage()` without spawning pytest.
+    #[test]
+    fn incremental_diff_classifies_changed_deleted_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let tests = base.join("tests");
+        std::fs::create_dir_all(&tests).unwrap();
+        std::fs::write(tests.join("keep.py"), "def test_k(): pass\n").unwrap();
+        std::fs::write(tests.join("edit.py"), "def test_e(): pass\n").unwrap();
+        std::fs::write(tests.join("gone.py"), "def test_g(): pass\n").unwrap();
+
+        let prior = current_fingerprints(&tests, base);
+
+        // Edit one, delete one, leave one, add one.
+        std::fs::write(tests.join("edit.py"), "def test_e(): assert 1\n").unwrap();
+        std::fs::remove_file(tests.join("gone.py")).unwrap();
+        std::fs::write(tests.join("new.py"), "def test_n(): pass\n").unwrap();
+        let current = current_fingerprints(&tests, base);
+
+        let changed: Vec<String> = current
+            .files
+            .iter()
+            .filter(|(rel, hash)| prior.files.get(*rel) != Some(*hash))
+            .map(|(rel, _)| rel.clone())
+            .collect();
+        let deleted: Vec<String> = prior
+            .files
+            .keys()
+            .filter(|rel| !current.files.contains_key(*rel))
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            changed,
+            vec!["tests/edit.py".to_string(), "tests/new.py".to_string()]
+        );
+        assert_eq!(deleted, vec!["tests/gone.py".to_string()]);
     }
 }

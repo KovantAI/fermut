@@ -210,7 +210,15 @@ fn build_report(current: &HistoryEntry, baseline: Option<&HistoryEntry>) -> Scor
         survivor_ids_compared,
     ) = match baseline {
         Some(base) => {
-            let delta = current.mutation_score - base.mutation_score;
+            // A scoreless run carries the vacuous 100.0 floor, not a real
+            // score — a delta against it (either side) is fabricated. Leave
+            // the delta undefined so regression is driven by survivor ids
+            // alone, never by a phantom score move.
+            let delta = if current.is_scoreless() || base.is_scoreless() {
+                None
+            } else {
+                Some(current.mutation_score - base.mutation_score)
+            };
             let (new_surv, new_kill, compared) = match history::survivor_diff(base, current) {
                 Some((s, k)) => (
                     s.into_iter().map(str::to_string).collect(),
@@ -224,12 +232,13 @@ fn build_report(current: &HistoryEntry, baseline: Option<&HistoryEntry>) -> Scor
             // rule in the coding-agents guide. When survivor ids weren't
             // compared (`compared == false`) the survivor term is always
             // empty, so this is score-delta-only — `survivor_ids_compared`
-            // tells the consumer.
-            let regressed = delta < -SCORE_NOISE || !new_surv.is_empty();
+            // tells the consumer. A missing (scoreless) delta never signals
+            // a regression on its own.
+            let regressed = delta.is_some_and(|d| d < -SCORE_NOISE) || !new_surv.is_empty();
             (
                 Some(base.mutation_score),
                 Some(base.timestamp.clone()),
-                Some(delta),
+                delta,
                 new_surv,
                 new_kill,
                 regressed,
@@ -294,7 +303,9 @@ mod tests {
             schema_version: crate::history::CURRENT_SCHEMA_V,
             timestamp: ts.into(),
             mutation_score: score,
-            killed: 0,
+            // Non-zero so the entry is a real scored run, not a scoreless
+            // vacuous-100 that score-delta/regression now ignore.
+            killed: 1,
             survived: survivors.len(),
             timed_out: 0,
             skipped: 0,
@@ -367,6 +378,28 @@ mod tests {
         // current=t3 (85), baseline two back = t1 (70).
         assert_eq!(r.baseline_score, Some(70.0));
         assert!((r.delta.unwrap() - 15.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn scoreless_side_yields_no_delta_and_no_regression() {
+        // A scoreless run carries the vacuous 100.0 floor. Whether it's the
+        // baseline or the current run, the delta is undefined and must not
+        // trip regression on a phantom score move.
+        let mut scoreless = entry("t1", 100.0, Some("main"), &[]);
+        scoreless.killed = 0; // now killed+survived+timed_out == 0
+        assert!(scoreless.is_scoreless());
+
+        let real = entry("t2", 60.0, Some("main"), &[]);
+
+        // scoreless baseline vs real current (100→60 would fake a -40 drop).
+        let r = build_report(&real, Some(&scoreless));
+        assert!(r.delta.is_none());
+        assert!(!r.regressed);
+
+        // real baseline vs scoreless current (60→100 would fake a +40 gain).
+        let r = build_report(&scoreless, Some(&real));
+        assert!(r.delta.is_none());
+        assert!(!r.regressed);
     }
 
     #[test]

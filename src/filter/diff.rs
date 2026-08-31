@@ -84,26 +84,25 @@ fn git_merge_base(base: &str, cwd: &Path) -> Result<String> {
         .output()
         .context("could not run `git` — is it installed and on PATH?")?;
     let stderr = String::from_utf8_lossy(&out.stderr);
+    let unrelated = || {
+        anyhow!(
+            "no merge-base between {base:?} and HEAD — unrelated histories. \
+             Point `--diff-only` at an ancestor of the current branch, or \
+             turn diff scoping off with `--no-diff-only`."
+        )
+    };
     // `git merge-base` on unrelated histories exits non-zero with *empty*
     // stderr — surface the actual cause instead of the generic git error.
     if !out.status.success() {
         return Err(if stderr.trim().is_empty() {
-            anyhow!(
-                "no merge-base between {base:?} and HEAD — unrelated histories. \
-                 Point `--diff-only` at an ancestor of the current branch, or \
-                 turn diff scoping off with `--no-diff-only`."
-            )
+            unrelated()
         } else {
             git_diff_error(&stderr, out.status)
         });
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if s.is_empty() {
-        return Err(anyhow!(
-            "no merge-base between {base:?} and HEAD — unrelated histories. \
-             Point `--diff-only` at an ancestor of the current branch, or \
-             turn diff scoping off with `--no-diff-only`."
-        ));
+        return Err(unrelated());
     }
     Ok(s)
 }
@@ -142,6 +141,7 @@ fn git_diff_error(stderr: &str, status: ExitStatus) -> anyhow::Error {
     } else if lower.contains("unknown revision")
         || lower.contains("ambiguous argument")
         || lower.contains("bad revision")
+        || lower.contains("not a valid object name")
     {
         "the diff base could not be resolved. Point `diff_only`/`--diff-only` \
          at a branch or commit that exists locally (e.g. `origin/main`), fetch \

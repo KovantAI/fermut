@@ -62,7 +62,8 @@ pub struct HistoryEntry {
     /// Stable hex digest of the run-shape config: runner, timeout, hseed,
     /// pytest_args, coverage on/off, operator allow/deny, experimental,
     /// parity, diff scope (`--since`/`--diff-only`), `--sample`, `--exclude`,
-    /// `--shard`, the ruff/ty filters, and equivalent-mutant detection.
+    /// `--shard`, the ruff/ty filters, equivalent-mutant detection, and the
+    /// test-suite / coverage-file selection (relative to `source_root`).
     /// Entries with the same hash were generated from the same
     /// shape *and the same mutant universe*, so their scores are comparable; a
     /// mismatch in the trend window means the comparison spans configurations
@@ -138,6 +139,26 @@ impl HistoryEntry {
     }
 }
 
+/// Feed a length-delimited byte field. Prefixing each variable-length,
+/// user-controlled value with its length stops adjacent fields from
+/// stream-colliding — otherwise a crafted git ref, glob, or pytest arg that
+/// happened to contain a later field marker (`|shard=`, …) could hash
+/// identically to a structurally different config.
+fn feed(h: &mut Sha256, bytes: &[u8]) {
+    h.update((bytes.len() as u64).to_le_bytes());
+    h.update(bytes);
+}
+
+/// Render `p` relative to `root` when it sits under it, else the path as-is.
+/// Keeps the hash stable across checkouts (absolute paths vary per machine)
+/// while still distinguishing a run pointed at a *different* suite/file.
+fn rel_to(root: &Path, p: &Path) -> String {
+    p.strip_prefix(root)
+        .unwrap_or(p)
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Stable hex digest of the run-shape config — see `HistoryEntry::config_hash`.
 /// Format-versioned (`v2|…`) so we can rev the shape without colliding with
 /// older entries; bump the prefix if the inputs ever change.
@@ -146,7 +167,8 @@ pub fn config_hash(cfg: &Config) -> String {
     // v2: folds in the mutant-universe / comparability inputs the score
     // actually depends on but v1 ignored — parity operators, diff scope
     // (`--since`/`--diff-only`), `--sample`, `--exclude`, `--shard`, the
-    // ruff/ty filters, and equivalent-mutant detection. These are exactly the
+    // ruff/ty filters, equivalent-mutant detection, and the test-suite /
+    // coverage-file selection. These are exactly the
     // filter-chain selectors in `filter::build_chain` plus the engine's equiv
     // pass; each changes which mutants are tested or counted. Two runs with
     // different values here are NOT comparable, so a diff-scoped or sampled run
@@ -156,7 +178,7 @@ pub fn config_hash(cfg: &Config) -> String {
     h.update(format!("{:?}", cfg.runner).as_bytes());
     h.update(b"|python=");
     match &cfg.python {
-        Some(p) => h.update(p.as_os_str().as_encoded_bytes()),
+        Some(p) => feed(&mut h, p.as_os_str().as_encoded_bytes()),
         None => h.update(b"none"),
     }
     h.update(b"|timeout=");
@@ -168,9 +190,9 @@ pub fn config_hash(cfg: &Config) -> String {
         h.update(b"none");
     }
     h.update(b"|args=");
+    h.update((cfg.pytest_args.len() as u64).to_le_bytes());
     for a in &cfg.pytest_args {
-        h.update(b"|");
-        h.update(a.as_bytes());
+        feed(&mut h, a.as_bytes());
     }
     h.update(b"|cov=");
     h.update(if cfg.coverage.is_some() {
@@ -213,10 +235,10 @@ pub fn config_hash(cfg: &Config) -> String {
     h.update(b"|scope=");
     if let Some(spec) = &cfg.since {
         h.update(b"since:");
-        h.update(spec.as_bytes());
+        feed(&mut h, spec.as_bytes());
     } else if let Some(base) = &cfg.diff_base {
         h.update(b"diff:");
-        h.update(base.as_bytes());
+        feed(&mut h, base.as_bytes());
     } else {
         h.update(b"full");
     }
@@ -241,9 +263,9 @@ pub fn config_hash(cfg: &Config) -> String {
     } else {
         let mut ex = cfg.exclude.clone();
         ex.sort();
+        h.update((ex.len() as u64).to_le_bytes());
         for g in ex {
-            h.update(b"|");
-            h.update(g.as_bytes());
+            feed(&mut h, g.as_bytes());
         }
     }
     // Sharding partitions the mutant set (`ShardFilter`, a hash modulo): a
@@ -283,6 +305,22 @@ pub fn config_hash(cfg: &Config) -> String {
     } else {
         &b"off"[..]
     });
+    // Test-suite / coverage-file selection is run shape: pointing `--tests` at
+    // a different suite (or `--coverage` at a different file) scores over a
+    // different mutant universe, so those runs are not comparable. Hashed
+    // relative to `source_root` so the digest stays stable across checkouts
+    // whose absolute paths differ; `source_root` itself is deliberately NOT
+    // hashed for the same reason (it's project/checkout identity, not shape).
+    h.update(b"|tests=");
+    feed(
+        &mut h,
+        rel_to(&cfg.source_root, &cfg.tests_path()).as_bytes(),
+    );
+    h.update(b"|covpath=");
+    match &cfg.coverage_path {
+        Some(p) => feed(&mut h, rel_to(&cfg.source_root, p).as_bytes()),
+        None => h.update(b"none"),
+    }
     hex::encode(h.finalize())
 }
 
@@ -877,6 +915,48 @@ mod tests {
         assert_ne!(base, ty, "ty-filtered run must differ");
         assert_ne!(ruff, ty, "ruff vs ty must differ");
         assert_ne!(base, equiv, "equiv-detect toggle must differ");
+
+        // Test-suite / coverage-file selection: pointing at a different suite
+        // or coverage file is a shape change, so the hash must differ.
+        let tests = config_hash(&Config {
+            tests: Some(PathBuf::from("other_tests")),
+            ..cfg()
+        });
+        let covpath = config_hash(&Config {
+            coverage_path: Some(PathBuf::from("cov.json")),
+            ..cfg()
+        });
+        assert_ne!(base, tests, "different --tests must differ");
+        assert_ne!(base, covpath, "a --coverage file must differ from none");
+    }
+
+    #[test]
+    fn config_hash_ignores_sample_seed_without_ratio() {
+        // `sample_seed` is only read inside the `Some(ratio)` arm; with no
+        // ratio the seed selects nothing, so it must not move the hash.
+        let no_seed = config_hash(&cfg());
+        let with_seed = config_hash(&Config {
+            sample_seed: Some(42),
+            ..cfg()
+        });
+        assert_eq!(no_seed, with_seed, "seed without a ratio must be inert");
+    }
+
+    #[test]
+    fn config_hash_tests_path_is_relative_to_source_root() {
+        // Absolute paths vary per checkout; the hash must depend only on the
+        // suite's location relative to source_root, not the checkout prefix.
+        let a = config_hash(&Config {
+            source_root: PathBuf::from("/checkout-a"),
+            tests: Some(PathBuf::from("/checkout-a/tests")),
+            ..cfg()
+        });
+        let b = config_hash(&Config {
+            source_root: PathBuf::from("/checkout-b"),
+            tests: Some(PathBuf::from("/checkout-b/tests")),
+            ..cfg()
+        });
+        assert_eq!(a, b, "same relative suite across checkouts must match");
     }
 
     #[test]

@@ -60,7 +60,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # Astral parser + AST + text-range crates. Pinned to a ruff release tag.
 # Bump the tag together to keep API consistency. Verify the tag exists at
 # https://github.com/astral-sh/ruff/tags before changing.
-ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.15.21" }
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.16.5" }
 ruff_python_ast    = { git = "https://github.com/astral-sh/ruff", tag = "0.15.21" }
 ruff_text_size     = { git = "https://github.com/astral-sh/ruff", tag = "0.15.21" }
 

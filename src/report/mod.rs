@@ -123,13 +123,34 @@ impl Counts {
         self.killed + self.survived + self.timed_out + self.skipped + self.errored + self.equivalent
     }
 
-    pub fn mutation_score(&self) -> f64 {
-        let detected = self.killed + self.timed_out;
-        let denom = detected + self.survived;
-        if denom == 0 {
-            return 100.0;
+    /// Denominator of the mutation score: mutants that produced a real verdict
+    /// (`killed`, `timed_out`, `survived`). Skipped, errored and equivalent
+    /// mutants are excluded. Zero means the score is *undefined*, not perfect.
+    pub fn scored(&self) -> usize {
+        self.killed + self.timed_out + self.survived
+    }
+
+    /// Mutation score in percent, or `None` when nothing was scored. A zero
+    /// denominator makes the ratio undefined — an all-errored or all-skipped
+    /// run has no score, which is not the same as 100%. Prefer this wherever
+    /// "nothing to score" must be told apart from a genuine perfect run (gates,
+    /// N/A reporting); use [`mutation_score`](Self::mutation_score) only where a
+    /// bare `f64` is required and the empty-denominator floor is acceptable.
+    pub fn mutation_score_opt(&self) -> Option<f64> {
+        let scored = self.scored();
+        if scored == 0 {
+            return None;
         }
-        100.0 * (detected as f64) / (denom as f64)
+        let detected = self.killed + self.timed_out;
+        Some(100.0 * (detected as f64) / (scored as f64))
+    }
+
+    /// Percent score with the historical empty-denominator floor of `100.0`.
+    /// Retained for the JSON summary and history schema, which carry a bare
+    /// `f64`. New gate/reporting logic should use
+    /// [`mutation_score_opt`](Self::mutation_score_opt) instead.
+    pub fn mutation_score(&self) -> f64 {
+        self.mutation_score_opt().unwrap_or(100.0)
     }
 }
 
@@ -200,6 +221,13 @@ impl Report {
             .any(|o| matches!(o, MutantOutcome::Survived { .. }))
     }
 
+    /// True when the run scored no mutant — the denominator is zero, so the
+    /// mutation score is undefined (reported N/A) rather than 100%. Callers gate
+    /// and display this case explicitly instead of trusting a floored percent.
+    pub fn is_scoreless(&self) -> bool {
+        self.counts().scored() == 0
+    }
+
     /// Decide whether the run should exit non-zero.
     ///
     /// With `fail_under` set, round the mutation score to the precision used
@@ -207,9 +235,20 @@ impl Report {
     /// threshold, so a printed `80.0%` never fails against a `--fail-under 80`
     /// due to f64 rounding while sub-decimal thresholds stay honoured exactly.
     /// Without it, any survivor fails the run.
+    ///
+    /// A zero denominator is *not* a passing 100%. When nothing was scored, a
+    /// threshold gate fails if any mutant errored — an all-errored run
+    /// otherwise collapses to a vacuous 100% and slips through — and passes only
+    /// when there was genuinely nothing to score and nothing errored (e.g. a
+    /// diff touching no mutable lines), which is a legitimate N/A rather than a
+    /// fake perfect score.
     pub fn should_fail(&self, fail_under: Option<f64>) -> bool {
+        let c = self.counts();
         match fail_under {
-            Some(threshold) => round1(self.counts().mutation_score()) < threshold,
+            Some(threshold) => match c.mutation_score_opt() {
+                Some(score) => round1(score) < threshold,
+                None => c.errored > 0,
+            },
             None => self.has_survivors(),
         }
     }
@@ -428,6 +467,50 @@ mod tests {
             MutantOutcome::survived(make_mutant()),
         ]);
         assert!(r.should_fail(Some(80.0)));
+    }
+
+    #[test]
+    fn mutation_score_opt_is_none_when_nothing_scored() {
+        // Only skipped/errored mutants — zero denominator.
+        let r = report(vec![
+            MutantOutcome::skipped(make_mutant(), "coverage"),
+            MutantOutcome::error(make_mutant(), "boom".into()),
+        ]);
+        assert!(r.counts().mutation_score_opt().is_none());
+        // The floored accessor still returns the historical 100.0.
+        assert!((r.counts().mutation_score() - 100.0).abs() < f64::EPSILON);
+        assert!(r.is_scoreless());
+    }
+
+    #[test]
+    fn should_fail_fails_vacuous_hundred_when_all_errored() {
+        // The reported bug: every mutant errored, denominator is zero, the
+        // floored score is a vacuous 100% that must NOT pass a threshold gate.
+        let r = report(vec![
+            MutantOutcome::error(make_mutant(), "boom".into()),
+            MutantOutcome::error(make_mutant(), "boom".into()),
+        ]);
+        assert!(r.should_fail(Some(50.0)));
+    }
+
+    #[test]
+    fn should_fail_passes_when_nothing_to_score_and_no_errors() {
+        // Nothing scored and nothing errored — a legitimate N/A (e.g. a diff
+        // touching no mutable lines), a pass rather than a fake perfect score.
+        let r = report(vec![
+            MutantOutcome::skipped(make_mutant(), "coverage"),
+            MutantOutcome::skipped(make_mutant(), "shard"),
+        ]);
+        assert!(!r.should_fail(Some(90.0)));
+        assert!(r.is_scoreless());
+    }
+
+    #[test]
+    fn should_fail_empty_report_passes_threshold_gate() {
+        // No mutants at all: N/A, not a failing gate.
+        let r = report(vec![]);
+        assert!(!r.should_fail(Some(90.0)));
+        assert!(r.is_scoreless());
     }
 
     #[test]

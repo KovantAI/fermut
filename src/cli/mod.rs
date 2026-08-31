@@ -1329,6 +1329,24 @@ impl Cli {
                             }
                         }
                     }
+                    // A zero-denominator run has no score. Say so, so a green
+                    // gate is never mistaken for a genuine 100% (an all-errored
+                    // run fails below; nothing-to-score with no errors passes as
+                    // a legitimate N/A).
+                    if report.is_scoreless() {
+                        let errored = report.counts().errored;
+                        if errored > 0 {
+                            eprintln!(
+                                "no mutants scored: {errored} errored, so the score is \
+                                 undefined (not 100%) and the gate fails"
+                            );
+                        } else {
+                            eprintln!(
+                                "no mutants scored: nothing to mutate in scope — \
+                                 mutation score N/A (not 100%)"
+                            );
+                        }
+                    }
                     if report.should_fail(cfg.fail_under) || gate_failed {
                         std::process::exit(1);
                     }

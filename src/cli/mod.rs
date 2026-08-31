@@ -687,6 +687,25 @@ enum Cmd {
         /// Also write a Markdown report.
         #[arg(long)]
         markdown: Option<PathBuf>,
+
+        /// Write a single history entry built from the merged report to this
+        /// path (overwriting). Git sha/branch are read from the merge checkout
+        /// and the fermut version is stamped automatically; the counts are the
+        /// merged full-universe totals. Lets a sharded run record its trend
+        /// point without harvesting a shard's history line as a template.
+        #[arg(long, value_name = "PATH")]
+        history: Option<PathBuf>,
+
+        /// `config_hash` to stamp into the `--history` entry. Merge can't derive
+        /// it (the run config lives in the shard jobs), so pass the value the
+        /// shards recorded, e.g. `$(jq -r .config_hash shard-1-entry.json)`.
+        #[arg(long, value_name = "HEX")]
+        config_hash: Option<String>,
+
+        /// Project root for git sha/branch discovery in the `--history` entry.
+        /// Defaults to the current directory (the merge checkout).
+        #[arg(long, value_name = "DIR", default_value = ".")]
+        project: PathBuf,
     },
 
     /// Post a Markdown report to a pull request as a sticky comment.
@@ -1670,12 +1689,18 @@ impl Cli {
                 junit,
                 html,
                 markdown,
+                history,
+                config_hash,
+                project,
             } => merge_reports(
                 &inputs,
                 json.as_ref(),
                 junit.as_ref(),
                 html.as_ref(),
                 markdown.as_ref(),
+                history.as_ref(),
+                config_hash,
+                &project,
             ),
             Cmd::List { path, filter: f } => {
                 let cfg = build_config(

@@ -178,6 +178,7 @@ mod tests {
             git_branch: None,
             survivor_ids: None,
             baseline: false,
+            fermut_version: None,
         }];
         let tmp = tempfile::NamedTempFile::new().unwrap();
         r.write_markdown_with_history(tmp.path(), &prior).unwrap();
@@ -210,6 +211,7 @@ mod tests {
             total: Some(2),
             duration_ms: None,
             config_hash: None,
+            fermut_version: None,
             git_sha: None,
             git_branch: None,
             survivor_ids: None,

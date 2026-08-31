@@ -159,6 +159,11 @@ impl Counts {
 /// from `outcomes`. `mutation_score` is rounded to one decimal to match the
 /// human summary line (`score: 86.4%`). Skipped and equivalent mutants are
 /// excluded from the score denominator (see [`Counts::mutation_score`]).
+///
+/// `mutation_score` carries the floored `100.0` when nothing was scored, so a
+/// consumer must read `scored` to tell a genuine perfect run from a vacuous
+/// N/A: `scored == 0` means the score is undefined, not 100% (see
+/// [`Counts::mutation_score_opt`]).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Summary {
     pub total: usize,
@@ -169,6 +174,12 @@ pub struct Summary {
     pub equivalent: usize,
     pub errored: usize,
     pub mutation_score: f64,
+    /// Denominator of `mutation_score` — mutants with a real verdict
+    /// (`killed + timed_out + survived`). `0` means `mutation_score` is a
+    /// vacuous floor, not a genuine 100%. Optional for back-compat with reports
+    /// written before this field existed.
+    #[serde(default)]
+    pub scored: usize,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -212,6 +223,7 @@ impl Report {
             equivalent: c.equivalent,
             errored: c.errored,
             mutation_score: round1(c.mutation_score()),
+            scored: c.scored(),
         }
     }
 
@@ -236,20 +248,23 @@ impl Report {
     /// due to f64 rounding while sub-decimal thresholds stay honoured exactly.
     /// Without it, any survivor fails the run.
     ///
-    /// A zero denominator is *not* a passing 100%. When nothing was scored, a
-    /// threshold gate fails if any mutant errored — an all-errored run
-    /// otherwise collapses to a vacuous 100% and slips through — and passes only
-    /// when there was genuinely nothing to score and nothing errored (e.g. a
-    /// diff touching no mutable lines), which is a legitimate N/A rather than a
-    /// fake perfect score.
+    /// A zero denominator is *not* a passing 100%. When nothing was scored the
+    /// run fails if any mutant errored — an all-errored run otherwise collapses
+    /// to a vacuous 100% and slips through — regardless of whether a threshold
+    /// was set. It passes only when there was genuinely nothing to score and
+    /// nothing errored (e.g. a diff touching no mutable lines), which is a
+    /// legitimate N/A rather than a fake perfect score. When there *is* a real
+    /// score, a threshold gate compares against it and the default gate fails on
+    /// any survivor.
     pub fn should_fail(&self, fail_under: Option<f64>) -> bool {
         let c = self.counts();
-        match fail_under {
-            Some(threshold) => match c.mutation_score_opt() {
-                Some(score) => round1(score) < threshold,
-                None => c.errored > 0,
+        match c.mutation_score_opt() {
+            Some(score) => match fail_under {
+                Some(threshold) => round1(score) < threshold,
+                None => self.has_survivors(),
             },
-            None => self.has_survivors(),
+            // Scoreless: fail iff something errored, in both gate modes.
+            None => c.errored > 0,
         }
     }
 
@@ -491,6 +506,37 @@ mod tests {
             MutantOutcome::error(make_mutant(), "boom".into()),
         ]);
         assert!(r.should_fail(Some(50.0)));
+    }
+
+    #[test]
+    fn should_fail_default_fails_vacuous_hundred_when_all_errored() {
+        // Same vacuous 100%, but no --fail-under: the default gate must also
+        // fail rather than exit 0 while claiming the gate failed.
+        let r = report(vec![
+            MutantOutcome::error(make_mutant(), "boom".into()),
+            MutantOutcome::error(make_mutant(), "boom".into()),
+        ]);
+        assert!(r.should_fail(None));
+    }
+
+    #[test]
+    fn should_fail_default_passes_when_nothing_to_score_and_no_errors() {
+        // No threshold, nothing scored, nothing errored — legitimate N/A pass.
+        let r = report(vec![MutantOutcome::skipped(make_mutant(), "coverage")]);
+        assert!(!r.should_fail(None));
+        assert!(r.is_scoreless());
+    }
+
+    #[test]
+    fn summary_scored_zero_flags_vacuous_score() {
+        // JSON consumers read `scored` to tell a real 100% from an N/A floor.
+        let r = report(vec![MutantOutcome::error(make_mutant(), "boom".into())]);
+        let s = r.summary();
+        assert_eq!(s.scored, 0);
+        assert!((s.mutation_score - 100.0).abs() < f64::EPSILON);
+
+        let real = report(vec![MutantOutcome::killed(make_mutant())]);
+        assert_eq!(real.summary().scored, 1);
     }
 
     #[test]

@@ -411,7 +411,9 @@ mod tests {
             schema_version: crate::history::CURRENT_SCHEMA_V,
             timestamp: ts.into(),
             mutation_score: score,
-            killed: 0,
+            // Non-zero so the entry is a real scored run, not a scoreless
+            // vacuous-100 that trend/regression now filter out.
+            killed: 1,
             survived: 0,
             timed_out: 0,
             skipped: 0,

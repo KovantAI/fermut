@@ -8,7 +8,9 @@
 //!   uncommitted edits. (Anchoring at the merge-base is what a three-dot
 //!   `<base>...HEAD` gives, but three-dot is commit-to-commit only and would
 //!   silently ignore working-tree changes — so we resolve the merge-base and
-//!   run a plain two-dot `git diff <merge-base>`.)
+//!   run a plain two-dot `git diff <merge-base>`.) Note: like `git diff`,
+//!   this does not see *untracked* files — a new file that was never
+//!   `git add`ed is out of scope until staged. `--since` has the same limit.
 //! - **since** (`--since <spec>`) — point-relative. `<spec>` is resolved as
 //!   either a git ref (commit SHA / tag / branch / `HEAD~5` / etc.) or a date
 //!   string (`2025-12-01`, `'1 week ago'`). Diff includes the working tree:
@@ -81,16 +83,26 @@ fn git_merge_base(base: &str, cwd: &Path) -> Result<String> {
         .current_dir(cwd)
         .output()
         .context("could not run `git` — is it installed and on PATH?")?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // `git merge-base` on unrelated histories exits non-zero with *empty*
+    // stderr — surface the actual cause instead of the generic git error.
     if !out.status.success() {
-        return Err(git_diff_error(
-            &String::from_utf8_lossy(&out.stderr),
-            out.status,
-        ));
+        return Err(if stderr.trim().is_empty() {
+            anyhow!(
+                "no merge-base between {base:?} and HEAD — unrelated histories. \
+                 Point `--diff-only` at an ancestor of the current branch, or \
+                 turn diff scoping off with `--no-diff-only`."
+            )
+        } else {
+            git_diff_error(&stderr, out.status)
+        });
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if s.is_empty() {
         return Err(anyhow!(
-            "git merge-base of {base:?} and HEAD is empty — unrelated histories?"
+            "no merge-base between {base:?} and HEAD — unrelated histories. \
+             Point `--diff-only` at an ancestor of the current branch, or \
+             turn diff scoping off with `--no-diff-only`."
         ));
     }
     Ok(s)
@@ -137,7 +149,7 @@ fn git_diff_error(stderr: &str, status: ExitStatus) -> anyhow::Error {
     } else {
         "fix the git error above, or turn diff scoping off with `--no-diff-only`."
     };
-    anyhow!("git diff failed ({status}): {first}\n\nhint: {hint}")
+    anyhow!("git failed ({status}): {first}\n\nhint: {hint}")
 }
 
 /// Resolve `spec` to a commit SHA. Tries `git rev-parse --verify` first
@@ -321,6 +333,52 @@ mod tests {
             set,
             [2u32].into_iter().collect(),
             "diff-only should scope in the uncommitted edit to line 2"
+        );
+    }
+
+    /// Regression: `--diff-only` must (a) still scope in *committed* branch
+    /// changes after switching from three-dot to merge-base+two-dot, and
+    /// (b) exclude commits made on `base` after divergence — the merge-base
+    /// anchor is what guarantees both.
+    #[test]
+    fn diff_only_scopes_committed_branch_changes_not_base_side() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        git(cwd, &["init", "-q", "-b", "main"]);
+        git(cwd, &["config", "user.email", "t@t"]);
+        git(cwd, &["config", "user.name", "t"]);
+        std::fs::write(cwd.join("f.py"), "a\nb\nc\n").unwrap();
+        git(cwd, &["add", "."]);
+        git(cwd, &["commit", "-qm", "base"]);
+
+        // Diverge: committed edit to line 2 on the branch.
+        git(cwd, &["checkout", "-qb", "feat"]);
+        std::fs::write(cwd.join("f.py"), "a\nB\nc\n").unwrap();
+        git(cwd, &["add", "."]);
+        git(cwd, &["commit", "-qm", "feat edit"]);
+
+        // Advance base past the merge-base with an unrelated file.
+        git(cwd, &["checkout", "-q", "main"]);
+        std::fs::write(cwd.join("g.py"), "x\n").unwrap();
+        git(cwd, &["add", "."]);
+        git(cwd, &["commit", "-qm", "main-side"]);
+        git(cwd, &["checkout", "-q", "feat"]);
+
+        let filter = DiffFilter::from_git("main", cwd).unwrap();
+
+        let f = cwd.join("f.py");
+        let f = f.canonicalize().unwrap_or(f);
+        assert_eq!(
+            filter.changed.get(&f).cloned().unwrap_or_default(),
+            [2u32].into_iter().collect(),
+            "committed branch edit to line 2 must be scoped in"
+        );
+
+        let g = cwd.join("g.py");
+        let g = g.canonicalize().unwrap_or(g);
+        assert!(
+            !filter.changed.contains_key(&g),
+            "base-side commit after divergence must be excluded"
         );
     }
 

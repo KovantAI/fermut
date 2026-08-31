@@ -53,6 +53,12 @@ use sha2::{Digest, Sha256};
 
 use crate::config::loader::LoadedConfig;
 
+/// Current fingerprint-sidecar schema version. `load_fingerprints` rejects any
+/// sidecar not stamped with exactly this value, so bumping it here genuinely
+/// forces a full rebuild after a format change (an older/newer sidecar is
+/// discarded rather than deserialized into incompatible semantics).
+const CURRENT_FP_V: u32 = 1;
+
 /// Content fingerprints of the test AND source trees, stored beside the
 /// `.coverage` DB so the incremental refresh can tell what actually changed by
 /// **content** — not mtime (useless in CI, where every checkout rewrites it) —
@@ -60,15 +66,17 @@ use crate::config::loader::LoadedConfig;
 /// invalidated.
 ///
 /// Two kinds of change invalidate a test's recorded coverage:
-///   1. the **test** itself changed — re-run that test file;
-///   2. a **source** file it covers changed — the recorded line→test mapping is
-///      now stale (added/shifted lines), so re-run every test whose contexts
-///      touched that source file. Tracking source hashes is what makes the
-///      incremental DB safe for a diff-scoped `fermut run` (`--since`), whose
-///      mutants sit on exactly those changed source lines.
+///
+/// 1. the **test** itself changed — re-run that test file;
+/// 2. a **source** file it covers changed — the recorded line→test mapping is
+///    now stale (added/shifted lines), so re-run every test whose contexts
+///    touched that source file. Tracking source hashes is what makes the
+///    incremental DB safe for a diff-scoped `fermut run` (`--since`), whose
+///    mutants sit on exactly those changed source lines.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Fingerprints {
-    /// Schema version. Bump to force a full rebuild on format changes.
+    /// Schema version. Always written as [`CURRENT_FP_V`]; a sidecar carrying
+    /// any other value is discarded on load, triggering a full rebuild.
     v: u32,
     /// base-dir-relative test-file path (forward slashes) → hex sha256.
     #[serde(default)]
@@ -162,7 +170,7 @@ pub fn coverage(opts: CoverageOpts) -> Result<()> {
         } else {
             println!("Running full test suite under coverage…");
         }
-        run_pytest(
+        let ran_ok = run_pytest(
             &base_dir,
             &cov_target,
             std::slice::from_ref(&tests),
@@ -170,7 +178,18 @@ pub fn coverage(opts: CoverageOpts) -> Result<()> {
             &opts.pytest_args,
             python.as_deref(),
         )?;
-        save_fingerprints(&db_path, &current)?;
+        // Only record the baseline if the suite actually passed. A failed full
+        // run wrote partial coverage; saving the sidecar would mark it complete
+        // and make the next `fermut coverage` skip as "up to date". Leaving no
+        // sidecar keeps the run on the full-rebuild path until it goes green.
+        if ran_ok {
+            save_fingerprints(&db_path, &current)?;
+        } else {
+            eprintln!(
+                "warning: not writing the coverage fingerprint baseline because pytest \
+                 failed — the next `fermut coverage` will rebuild from scratch."
+            );
+        }
         report_done(&loaded, &db_path, Done::Full);
         return Ok(());
     }
@@ -192,13 +211,19 @@ pub fn coverage(opts: CoverageOpts) -> Result<()> {
     // Tests whose recorded contexts cover a changed source file — re-run so
     // their line mapping is rebuilt against the new source. This is the
     // source-awareness that makes the incremental DB safe for `--since`.
-    let tests_for_sources = if changed_sources.is_empty() {
+    //
+    // Filtered to paths that still exist: the DB may list a test deleted in this
+    // same change, and handing a missing path to pytest aborts collection (its
+    // stale contexts are purged below via `deleted_tests`). Filtering here keeps
+    // the re-measure count accurate for the message too.
+    let tests_for_sources: Vec<PathBuf> = if changed_sources.is_empty() {
         Vec::new()
     } else {
         tests_covering_sources(&db_path, &changed_sources)
             .with_context(|| format!("querying {} for source coverage", db_path.display()))?
             .into_iter()
             .map(|rel| base_dir.join(rel))
+            .filter(|f| f.exists())
             .collect()
     };
 
@@ -223,7 +248,11 @@ pub fn coverage(opts: CoverageOpts) -> Result<()> {
         }
     }
 
-    if rerun.is_empty() && deleted_tests.is_empty() {
+    // Genuinely nothing changed → done. Gate on the raw diffs, not on `rerun`:
+    // a changed source with no re-runnable coverer leaves `rerun` empty but is
+    // NOT "up to date" — we still advance the baseline below so we don't
+    // re-detect it every run.
+    if changed_tests.is_empty() && changed_sources.is_empty() && deleted_tests.is_empty() {
         println!(
             "{} is up to date (no test or source content changed since it was written). \
              Nothing to do.",
@@ -233,11 +262,25 @@ pub fn coverage(opts: CoverageOpts) -> Result<()> {
     }
 
     if !changed_sources.is_empty() {
-        println!(
-            "{} changed source file(s); re-measuring the {} test file(s) that cover them.",
-            changed_sources.len(),
-            tests_for_sources.len()
-        );
+        if tests_for_sources.is_empty() {
+            // Source changed but nothing in the DB covers it that we can re-run
+            // (covered only by an untracked test — a root conftest, a test
+            // outside the tests dir — or its coverers were deleted). We can't
+            // refresh that coverage incrementally; the baseline still advances
+            // so the change isn't re-detected forever.
+            eprintln!(
+                "warning: {} source file(s) changed but no re-runnable test covers them in \
+                 {} — their coverage may be stale. Run `fermut coverage --full` to rebuild.",
+                changed_sources.len(),
+                display_rel(&db_path, &base_dir)
+            );
+        } else {
+            println!(
+                "{} changed source file(s); re-measuring the {} test file(s) that cover them.",
+                changed_sources.len(),
+                tests_for_sources.len()
+            );
+        }
     }
     if !rerun.is_empty() {
         println!("appending coverage for {} test file(s):", rerun.len());
@@ -312,7 +355,13 @@ fn fingerprints_path(db_path: &Path) -> PathBuf {
 
 fn load_fingerprints(db_path: &Path) -> Option<Fingerprints> {
     let raw = std::fs::read_to_string(fingerprints_path(db_path)).ok()?;
-    serde_json::from_str(&raw).ok()
+    let fp: Fingerprints = serde_json::from_str(&raw).ok()?;
+    // A different schema version means the stored maps may not mean what this
+    // binary expects — discard it (→ full rebuild) rather than act on it.
+    if fp.v != CURRENT_FP_V {
+        return None;
+    }
+    Some(fp)
 }
 
 fn save_fingerprints(db_path: &Path, fp: &Fingerprints) -> Result<()> {
@@ -333,7 +382,7 @@ fn current_fingerprints(tests: &Path, source: &Path, base_dir: &Path) -> Fingerp
     // fire a spurious source-coverage query.
     sources.retain(|k, _| !tests_fp.contains_key(k));
     Fingerprints {
-        v: 1,
+        v: CURRENT_FP_V,
         tests: tests_fp,
         sources,
     }
@@ -425,12 +474,21 @@ fn tests_covering_sources(db_path: &Path, source_rels: &[String]) -> Result<Vec<
     let conn = Connection::open(db_path).context("opening coverage database")?;
     let mut test_files = std::collections::BTreeSet::<String>::new();
     for src in source_rels {
-        let suffix = format!("%/{src}");
+        // Escape LIKE metacharacters so a filename's `_` (ubiquitous in Python)
+        // or `%` matches literally, not as a wildcard — otherwise `my_module.py`
+        // would also match `myXmodule.py`. The exact `path = ?1` arm needs no
+        // escaping. `\` is the ESCAPE char below.
+        let escaped = src
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let suffix = format!("%/{escaped}");
         let mut stmt = conn.prepare(
             "SELECT DISTINCT c.context \
              FROM line_bits lb \
              JOIN context c ON c.id = lb.context_id \
-             WHERE lb.file_id IN (SELECT id FROM file WHERE path = ?1 OR path LIKE ?2)",
+             WHERE lb.file_id IN \
+                 (SELECT id FROM file WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\')",
         )?;
         let rows = stmt.query_map((src, &suffix), |r| r.get::<_, String>(0))?;
         for ctx in rows.filter_map(|r| r.ok()) {
@@ -552,6 +610,9 @@ fn report_done(loaded: &LoadedConfig, db_path: &Path, done: Done) {
     match done {
         Done::Full => println!("\nWrote {}.", display_rel(db_path, &loaded.base_dir)),
         Done::Incremental { reran, removed } => match (reran, removed) {
+            // Source changed but no coverer was re-runnable (see the warning
+            // above); the baseline advanced but the DB is otherwise unchanged.
+            (0, 0) => println!("\nCoverage baseline updated (nothing to re-run)."),
             (0, r) => println!("\nRefreshed coverage — dropped {r} removed test file(s)."),
             (n, 0) => println!("\nRefreshed coverage — re-ran {n} test file(s)."),
             (n, r) => {
@@ -735,6 +796,31 @@ mod tests {
     }
 
     #[test]
+    fn load_rejects_sidecar_with_mismatched_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join(".coverage");
+        // A sidecar from a future schema version must be discarded (→ full
+        // rebuild), not deserialized into today's semantics.
+        std::fs::write(
+            fingerprints_path(&db),
+            format!(
+                r#"{{"v":{},"tests":{{}},"sources":{{}}}}"#,
+                CURRENT_FP_V + 1
+            ),
+        )
+        .unwrap();
+        assert!(load_fingerprints(&db).is_none());
+
+        // The current version loads fine.
+        std::fs::write(
+            fingerprints_path(&db),
+            format!(r#"{{"v":{CURRENT_FP_V},"tests":{{}},"sources":{{}}}}"#),
+        )
+        .unwrap();
+        assert!(load_fingerprints(&db).is_some());
+    }
+
+    #[test]
     fn fingerprints_roundtrip_through_sidecar() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join(".coverage");
@@ -813,6 +899,45 @@ mod tests {
         // A source nothing covers → no tests.
         let none = tests_covering_sources(&db, &["src/unknown.py".to_string()]).unwrap();
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn tests_covering_sources_treats_underscore_literally() {
+        // `_` is a LIKE wildcard; a source `my_module.py` must not match a
+        // sibling `myXmodule.py` and drag in its unrelated test.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join(".coverage");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE context (id integer primary key, context text, unique(context));
+             CREATE TABLE file (id integer primary key, path text, unique(path));
+             CREATE TABLE line_bits (file_id integer, context_id integer, numbits blob);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO context (id, context) VALUES
+                (1, 'tests/test_mine.py::t|run'),
+                (2, 'tests/test_other.py::t|run')",
+            (),
+        )
+        .unwrap();
+        // Two absolute source paths differing only at the `_` position.
+        conn.execute(
+            "INSERT INTO file (id, path) VALUES
+                (10, '/abs/proj/src/my_module.py'),
+                (11, '/abs/proj/src/myXmodule.py')",
+            (),
+        )
+        .unwrap();
+        conn.execute("INSERT INTO line_bits VALUES (10,1,x'02'),(11,2,x'02')", ())
+            .unwrap();
+
+        let got = tests_covering_sources(&db, &["src/my_module.py".to_string()]).unwrap();
+        assert_eq!(
+            got,
+            vec![PathBuf::from("tests/test_mine.py")],
+            "underscore must match literally, not myXmodule.py's test"
+        );
     }
 
     #[test]

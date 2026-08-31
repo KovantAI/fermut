@@ -150,6 +150,38 @@ pub struct Summary {
     pub mutation_score: f64,
 }
 
+/// Per-operator verdict breakdown for one run. Only real verdicts are counted;
+/// skipped/errored/equivalent mutants say nothing about an operator's value.
+/// Used to surface "noise" operators whose survivors swamp their kills —
+/// candidates for `skip_ops`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperatorStat {
+    pub operator: &'static str,
+    pub killed: usize,
+    pub survived: usize,
+    pub timed_out: usize,
+}
+
+impl OperatorStat {
+    /// Mutants that produced a real verdict for this operator.
+    pub fn scored(&self) -> usize {
+        self.killed + self.survived + self.timed_out
+    }
+
+    /// Detected mutants (killed or timed out — both count as caught).
+    pub fn detected(&self) -> usize {
+        self.killed + self.timed_out
+    }
+
+    /// True when survivors meet or exceed detections and there is at least one
+    /// survivor — the operator produced at least as much noise as signal this
+    /// run. Mirrors the `survived >= killed` rule projects hand-tune into
+    /// `skip_ops` (e.g. `constant-replace`, `keyword-arg-drop`).
+    pub fn is_noisy(&self) -> bool {
+        self.survived > 0 && self.survived >= self.detected()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Report {
     pub outcomes: Vec<MutantOutcome>,
@@ -246,6 +278,38 @@ impl Report {
         v
     }
 
+    /// Per-operator verdict breakdown, noisiest (most survivors) first. Only
+    /// operators that produced at least one real verdict appear. Lets a caller
+    /// (or the human summary) surface `is_noisy` operators as `skip_ops`
+    /// candidates without re-scanning `outcomes`.
+    pub fn operator_stats(&self) -> Vec<OperatorStat> {
+        let mut map: std::collections::BTreeMap<&'static str, OperatorStat> =
+            std::collections::BTreeMap::new();
+        for o in &self.outcomes {
+            let name = o.mutant().operator.name();
+            let e = map.entry(name).or_insert(OperatorStat {
+                operator: name,
+                killed: 0,
+                survived: 0,
+                timed_out: 0,
+            });
+            match o {
+                MutantOutcome::Killed { .. } => e.killed += 1,
+                MutantOutcome::Survived { .. } => e.survived += 1,
+                MutantOutcome::TimedOut { .. } => e.timed_out += 1,
+                // Skipped/Error/Equivalent carry no operator-value signal.
+                _ => {}
+            }
+        }
+        let mut v: Vec<OperatorStat> = map.into_values().filter(|s| s.scored() > 0).collect();
+        v.sort_by(|a, b| {
+            b.survived
+                .cmp(&a.survived)
+                .then_with(|| a.operator.cmp(b.operator))
+        });
+        v
+    }
+
     pub fn print(&self, fmt: ReportFormat) {
         match fmt {
             ReportFormat::Json => {
@@ -304,6 +368,22 @@ impl Report {
             c.errored,
             c.mutation_score()
         );
+        // Flag operators that produced at least as many survivors as kills:
+        // they cost test time for little signal, and are the usual `skip_ops`
+        // candidates. Only shown when there is something to act on.
+        let noisy: Vec<&str> = self
+            .operator_stats()
+            .iter()
+            .filter(|s| s.is_noisy())
+            .map(|s| s.operator)
+            .collect();
+        if !noisy.is_empty() {
+            println!(
+                "noisy operators (survivors ≥ kills): {} — add to `skip_ops` if their \
+                 survivors aren't observably wrong",
+                noisy.join(", ")
+            );
+        }
     }
 }
 
@@ -313,6 +393,53 @@ mod tests {
     use crate::mutator::Operator;
     use ruff_text_size::TextRange;
     use std::path::PathBuf;
+
+    #[test]
+    fn operator_stats_ranks_and_flags_noisy_operators() {
+        fn m(op: Operator) -> Mutant {
+            Mutant {
+                id: "x".into(),
+                file: PathBuf::from("t.py"),
+                operator: op,
+                range: TextRange::new(0u32.into(), 1u32.into()),
+                original: "+".into(),
+                replacement: "-".into(),
+                line: 1,
+                stmt_line: 1,
+            }
+        }
+        let r = Report::new(vec![
+            MutantOutcome::killed(m(Operator::ArithOpSwap)), // 2 killed, 0 surv → signal
+            MutantOutcome::killed(m(Operator::ArithOpSwap)),
+            MutantOutcome::survived(m(Operator::ConstantReplace)), // 0 killed, 2 surv → noise
+            MutantOutcome::survived(m(Operator::ConstantReplace)),
+            MutantOutcome::killed(m(Operator::CompareOpSwap)), // 1 killed, 1 surv → noise (>=)
+            MutantOutcome::survived(m(Operator::CompareOpSwap)),
+            MutantOutcome::skipped(m(Operator::BoundaryShift), "ty"), // no verdict → excluded
+        ]);
+        let stats = r.operator_stats();
+        let names: Vec<&str> = stats.iter().map(|s| s.operator).collect();
+        // Sorted by survivors desc; boundary-shift excluded (only skipped).
+        assert_eq!(
+            names,
+            vec!["constant-replace", "compare-op-swap", "arith-op-swap"]
+        );
+        let noisy: Vec<&str> = stats
+            .iter()
+            .filter(|s| s.is_noisy())
+            .map(|s| s.operator)
+            .collect();
+        assert_eq!(noisy, vec!["constant-replace", "compare-op-swap"]);
+        let arith = stats
+            .iter()
+            .find(|s| s.operator == "arith-op-swap")
+            .unwrap();
+        assert!(
+            !arith.is_noisy(),
+            "an all-killed operator is signal, not noise"
+        );
+        assert_eq!(arith.killed, 2);
+    }
 
     fn make_mutant() -> Mutant {
         Mutant {

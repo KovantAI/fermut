@@ -44,6 +44,20 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         .with_context(|| format!("collecting mutations under {}", cfg.source_root.display()))?;
     info!(count = mutants.len(), "mutations generated");
 
+    // `--sample` scales only the TESTING phase: every mutant above was still
+    // generated, and the `ty` pre-filter (below) still type-checks the whole
+    // universe. That work is a fixed floor under every run, so wall-clock does
+    // NOT shrink by the sample ratio — sizing a shard by `1/ratio` overshoots.
+    if let Some(ratio) = cfg.sample_ratio {
+        info!(
+            ratio,
+            generated = mutants.len(),
+            "sampling the testing phase only — generation and the ty pre-filter still \
+             cover all {} mutants, a fixed cost the ratio does not reduce",
+            mutants.len()
+        );
+    }
+
     let filters = filter::build_chain(cfg)?;
     let runner = runner::build(cfg);
 

@@ -210,19 +210,39 @@ fn collect_checks(start: &Path) -> Vec<Check> {
         ),
     });
 
+    // ---- virtualenv discovery ----
+    // Resolve the project's venv (the same walk `run`/`coverage` use) so every
+    // tool probe below can look inside it, not just on PATH. This is what lets
+    // `fermut doctor` see uv-managed tools without the caller activating the
+    // venv or prepending `.venv/bin` to PATH.
+    let scope = loaded
+        .as_ref()
+        .map(|c| c.base_dir.clone())
+        .unwrap_or_else(|| start.to_path_buf());
+    let venv_python = crate::runner::resolve_python(&scope, None);
+    let venv_bin: Option<PathBuf> = venv_python
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    out.push(match &venv_bin {
+        Some(bin) => Check::ok("venv", format!("probing tools in {}", bin.display())),
+        None => Check::skip("venv", "none found — probing tools on PATH only"),
+    });
+    let vbin = venv_bin.as_deref();
+
     // ---- python ----
-    out.push(check_python());
+    out.push(check_python(vbin));
 
     // ---- test runner ----
     let runner = loaded
         .as_ref()
         .and_then(|c| c.file.runner)
         .unwrap_or(crate::config::RunnerKind::Pytest);
-    out.push(check_runner(runner));
+    out.push(check_runner(runner, vbin));
 
     // ---- coverage + pytest-cov (required; per-test coverage filter) ----
-    out.push(check_coverage_binary());
-    out.push(check_pytest_cov());
+    out.push(check_coverage_binary(vbin));
+    out.push(check_pytest_cov(vbin));
 
     // ---- coverage.json (only meaningful when wired in config) ----
     let coverage_wired = loaded.as_ref().and_then(|c| c.file.coverage.clone());
@@ -246,6 +266,7 @@ fn collect_checks(start: &Path) -> Vec<Check> {
             "type-aware mutant pre-filter",
             "uv tool install ty",
             /* required */ true,
+            vbin,
         ));
     } else {
         // Surface it as skipped instead of dropping the row — otherwise the
@@ -262,6 +283,7 @@ fn collect_checks(start: &Path) -> Vec<Check> {
             "lint pre-filter",
             "uv tool install ruff",
             /* required */ true,
+            vbin,
         ));
     }
 
@@ -272,6 +294,7 @@ fn collect_checks(start: &Path) -> Vec<Check> {
         "needed for `fermut pr-comment`",
         "install GitHub CLI: https://cli.github.com",
         /* required */ false,
+        vbin,
     ));
 
     // ---- common gotchas ----
@@ -280,11 +303,11 @@ fn collect_checks(start: &Path) -> Vec<Check> {
     out
 }
 
-fn check_python() -> Check {
+fn check_python(venv_bin: Option<&Path>) -> Check {
     let candidates = ["python3", "python"];
     let probed: Vec<(&str, Option<String>)> = candidates
         .into_iter()
-        .map(|bin| (bin, tool_version(&[bin, "--version"])))
+        .map(|bin| (bin, tool_version(&[bin, "--version"], venv_bin)))
         .collect();
     pick_python(&probed)
 }
@@ -346,7 +369,7 @@ fn parse_python_version(s: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-fn check_runner(runner: crate::config::RunnerKind) -> Check {
+fn check_runner(runner: crate::config::RunnerKind, venv_bin: Option<&Path>) -> Check {
     match runner {
         crate::config::RunnerKind::Pytest => check_tool(
             "pytest",
@@ -354,6 +377,7 @@ fn check_runner(runner: crate::config::RunnerKind) -> Check {
             "configured runner",
             "pipx install pytest  (or `uv add --dev pytest`)",
             /* required */ true,
+            venv_bin,
         ),
         crate::config::RunnerKind::Rstest => check_tool(
             "rstest",
@@ -361,6 +385,7 @@ fn check_runner(runner: crate::config::RunnerKind) -> Check {
             "configured runner",
             "pipx install rstest  (or `uv add --dev rstest`)",
             /* required */ true,
+            venv_bin,
         ),
         crate::config::RunnerKind::Unittest => {
             // Stdlib; presence implies Python is present.
@@ -369,26 +394,27 @@ fn check_runner(runner: crate::config::RunnerKind) -> Check {
     }
 }
 
-fn check_coverage_binary() -> Check {
+fn check_coverage_binary(venv_bin: Option<&Path>) -> Check {
     check_tool(
         "coverage",
         &["coverage", "--version"],
         "needed to generate coverage.json with per-test contexts",
         "uv add --dev coverage  (or pip install coverage)",
         /* required */ true,
+        venv_bin,
     )
 }
 
-fn check_pytest_cov() -> Check {
+fn check_pytest_cov(venv_bin: Option<&Path>) -> Check {
     // pytest-cov isn't a binary; probe the Python interpreter that fermut
-    // would actually launch tests against (same interpreter resolves
-    // `python3` on PATH).
+    // would actually launch tests against — the venv's `python` when one is
+    // discovered (venv_bin prepends it to PATH), else `python3` on PATH.
     let probe = [
         "python3",
         "-c",
         "import pytest_cov; print(pytest_cov.__version__)",
     ];
-    match tool_version(&probe) {
+    match tool_version(&probe, venv_bin) {
         Some(v) => Check::ok(
             "pytest-cov",
             format!("pytest-cov {v} — per-test coverage contexts"),
@@ -443,17 +469,34 @@ fn check_tool(
     purpose: &str,
     install_hint: &str,
     required: bool,
+    venv_bin: Option<&Path>,
 ) -> Check {
-    match tool_version(cmd) {
+    match tool_version(cmd, venv_bin) {
         Some(v) => Check::ok(name, format!("{v} — {purpose}")),
         None if required => Check::fail(name, format!("not on PATH ({purpose})"), install_hint),
         None => Check::warn(name, format!("not on PATH ({purpose})"), install_hint),
     }
 }
 
-fn tool_version(cmd: &[&str]) -> Option<String> {
+/// Probe a tool's `--version` (or similar). When `venv_bin` is set — the
+/// project's virtualenv `bin/` — it is prepended to the child's PATH, so a bare
+/// `pytest`/`coverage`/`python` resolves to the venv's copy first and falls
+/// back to PATH only when the venv lacks it. This is why `fermut doctor` no
+/// longer needs the caller to activate the venv (or prepend `.venv/bin` to PATH
+/// by hand) to see uv-managed tools.
+fn tool_version(cmd: &[&str], venv_bin: Option<&Path>) -> Option<String> {
     let (head, tail) = cmd.split_first()?;
-    let out = Command::new(head).args(tail).output().ok()?;
+    let mut command = Command::new(head);
+    command.args(tail);
+    if let Some(bin) = venv_bin {
+        let existing = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![bin.to_path_buf()];
+        paths.extend(std::env::split_paths(&existing));
+        if let Ok(joined) = std::env::join_paths(paths) {
+            command.env("PATH", joined);
+        }
+    }
+    let out = command.output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -578,6 +621,25 @@ fn project_uses_hypothesis(base: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn tool_version_finds_a_tool_only_in_the_venv_bin() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        // A fake tool that exists ONLY in the venv bin, not on PATH.
+        let tool = bin.join("fermut-faketool");
+        std::fs::write(&tool, "#!/bin/sh\necho 'faketool 9.9.9'\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Without the venv bin, the bare name is not on PATH → not found.
+        assert!(tool_version(&["fermut-faketool"], None).is_none());
+        // With the venv bin prepended, it resolves.
+        let v = tool_version(&["fermut-faketool"], Some(&bin));
+        assert_eq!(v.as_deref(), Some("faketool 9.9.9"));
+    }
 
     #[test]
     fn parse_python_version_handles_common_formats() {

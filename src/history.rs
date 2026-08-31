@@ -61,8 +61,9 @@ pub struct HistoryEntry {
     pub duration_ms: Option<u64>,
     /// Stable hex digest of the run-shape config: runner, timeout, hseed,
     /// pytest_args, coverage on/off, operator allow/deny, experimental,
-    /// parity, diff scope (`--since`/`--diff-only`), `--sample`, and
-    /// `--exclude`. Entries with the same hash were generated from the same
+    /// parity, diff scope (`--since`/`--diff-only`), `--sample`, `--exclude`,
+    /// `--shard`, the ruff/ty filters, and equivalent-mutant detection.
+    /// Entries with the same hash were generated from the same
     /// shape *and the same mutant universe*, so their scores are comparable; a
     /// mismatch in the trend window means the comparison spans configurations
     /// or scopes, not just code. Optional for back-compat with entries written
@@ -138,13 +139,16 @@ impl HistoryEntry {
 }
 
 /// Stable hex digest of the run-shape config — see `HistoryEntry::config_hash`.
-/// Format-versioned (`v1|…`) so we can rev the shape without colliding with
+/// Format-versioned (`v2|…`) so we can rev the shape without colliding with
 /// older entries; bump the prefix if the inputs ever change.
 pub fn config_hash(cfg: &Config) -> String {
     let mut h = Sha256::new();
     // v2: folds in the mutant-universe / comparability inputs the score
     // actually depends on but v1 ignored — parity operators, diff scope
-    // (`--since`/`--diff-only`), `--sample`, and `--exclude`. Two runs with
+    // (`--since`/`--diff-only`), `--sample`, `--exclude`, `--shard`, the
+    // ruff/ty filters, and equivalent-mutant detection. These are exactly the
+    // filter-chain selectors in `filter::build_chain` plus the engine's equiv
+    // pass; each changes which mutants are tested or counted. Two runs with
     // different values here are NOT comparable, so a diff-scoped or sampled run
     // must no longer hash identically to a full run (which is what forced the
     // PR gate onto `--no-history` and the trend merge onto a manual `ci_scope`).
@@ -242,6 +246,43 @@ pub fn config_hash(cfg: &Config) -> String {
             h.update(g.as_bytes());
         }
     }
+    // Sharding partitions the mutant set (`ShardFilter`, a hash modulo): a
+    // `--shard i/n` run scores over 1/n of the universe, not comparable to a
+    // full run. Index + total both matter — different shards test different
+    // mutants.
+    h.update(b"|shard=");
+    match cfg.shard {
+        Some((index, total)) => {
+            h.update(index.to_le_bytes());
+            h.update(b"/");
+            h.update(total.to_le_bytes());
+        }
+        None => h.update(b"none"),
+    }
+    // The ruff/ty filters drop mutants those tools reject before they are ever
+    // run, shrinking the denominator. A `--ruff`/`--ty` run is not comparable
+    // to one without.
+    h.update(b"|ruff=");
+    h.update(if cfg.ruff_filter {
+        &b"on"[..]
+    } else {
+        &b"off"[..]
+    });
+    h.update(b"|ty=");
+    h.update(if cfg.ty_filter {
+        &b"on"[..]
+    } else {
+        &b"off"[..]
+    });
+    // Equivalent-mutant detection flips otherwise-`Survived` mutants to
+    // `Equivalent`, removing them from the killable denominator and moving the
+    // score. On by default; `--no-equiv-detect` changes the universe.
+    h.update(b"|equiv=");
+    h.update(if cfg.equiv_detect {
+        &b"on"[..]
+    } else {
+        &b"off"[..]
+    });
     hex::encode(h.finalize())
 }
 
@@ -801,6 +842,41 @@ mod tests {
             ..cfg()
         });
         assert_ne!(base, parity, "parity run must differ from non-parity");
+
+        // Sharding partitions the mutant set; index and total both matter.
+        let sh1 = config_hash(&Config {
+            shard: Some((1, 4)),
+            ..cfg()
+        });
+        let sh2 = config_hash(&Config {
+            shard: Some((2, 4)),
+            ..cfg()
+        });
+        let sh_total = config_hash(&Config {
+            shard: Some((1, 2)),
+            ..cfg()
+        });
+        assert_ne!(base, sh1, "sharded run must differ from full");
+        assert_ne!(sh1, sh2, "different shard indices must differ");
+        assert_ne!(sh1, sh_total, "different shard totals must differ");
+
+        // ruff/ty filters and equiv detection each change the denominator.
+        let ruff = config_hash(&Config {
+            ruff_filter: true,
+            ..cfg()
+        });
+        let ty = config_hash(&Config {
+            ty_filter: true,
+            ..cfg()
+        });
+        let equiv = config_hash(&Config {
+            equiv_detect: true,
+            ..cfg()
+        });
+        assert_ne!(base, ruff, "ruff-filtered run must differ");
+        assert_ne!(base, ty, "ty-filtered run must differ");
+        assert_ne!(ruff, ty, "ruff vs ty must differ");
+        assert_ne!(base, equiv, "equiv-detect toggle must differ");
     }
 
     #[test]

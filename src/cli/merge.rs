@@ -95,7 +95,7 @@ pub(super) fn merge_reports(
 
     if let Some(p) = json {
         merged.write_json(p)?;
-    } else if junit.is_none() && html.is_none() && markdown.is_none() {
+    } else if junit.is_none() && html.is_none() && markdown.is_none() && history.is_none() {
         // Nothing requested → print JSON to stdout so the command is useful by default.
         merged.print(ReportFormat::Json);
     }

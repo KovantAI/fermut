@@ -59,12 +59,16 @@ pub struct HistoryEntry {
     /// back-compat with entries written before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
-    /// Stable hex digest of the run-shape config (runner, timeout, hseed,
-    /// pytest_args, coverage on/off, operator allow/deny, experimental).
-    /// Entries with the same hash were generated from the same shape so
-    /// their scores are comparable; a mismatch in the trend window means
-    /// the comparison is across configurations, not just across code.
-    /// Optional for back-compat with entries written before this field.
+    /// Stable hex digest of the run-shape config: runner, timeout, hseed,
+    /// pytest_args, coverage on/off, operator allow/deny, experimental,
+    /// parity, diff scope (`--since`/`--diff-only`), `--sample`, `--exclude`,
+    /// `--shard`, the ruff/ty filters, equivalent-mutant detection, and the
+    /// test-suite / coverage-file selection (relative to `source_root`).
+    /// Entries with the same hash were generated from the same
+    /// shape *and the same mutant universe*, so their scores are comparable; a
+    /// mismatch in the trend window means the comparison spans configurations
+    /// or scopes, not just code. Optional for back-compat with entries written
+    /// before this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_hash: Option<String>,
     /// fermut version that produced this entry (`CARGO_PKG_VERSION`). fermut is
@@ -142,18 +146,57 @@ impl HistoryEntry {
             baseline: false,
         }
     }
+
+    /// True when this entry scored no mutant (`killed + timed_out + survived
+    /// == 0`), so its `mutation_score` is the vacuous `100.0` floor rather than
+    /// a real measurement. Trend and regression must skip these — comparing
+    /// against a fake perfect score fabricates spurious drops and streaks.
+    /// Mirrors [`crate::report::Report::is_scoreless`] for the persisted shape.
+    pub fn is_scoreless(&self) -> bool {
+        self.killed + self.timed_out + self.survived == 0
+    }
+}
+
+/// Feed a length-delimited byte field. Prefixing each variable-length,
+/// user-controlled value with its length stops adjacent fields from
+/// stream-colliding — otherwise a crafted git ref, glob, or pytest arg that
+/// happened to contain a later field marker (`|shard=`, …) could hash
+/// identically to a structurally different config.
+fn feed(h: &mut Sha256, bytes: &[u8]) {
+    h.update((bytes.len() as u64).to_le_bytes());
+    h.update(bytes);
+}
+
+/// Render `p` relative to `root` when it sits under it, else the path as-is.
+/// Keeps the hash stable across checkouts (absolute paths vary per machine)
+/// while still distinguishing a run pointed at a *different* suite/file.
+fn rel_to(root: &Path, p: &Path) -> String {
+    p.strip_prefix(root)
+        .unwrap_or(p)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Stable hex digest of the run-shape config — see `HistoryEntry::config_hash`.
-/// Format-versioned (`v1|…`) so we can rev the shape without colliding with
+/// Format-versioned (`v2|…`) so we can rev the shape without colliding with
 /// older entries; bump the prefix if the inputs ever change.
 pub fn config_hash(cfg: &Config) -> String {
     let mut h = Sha256::new();
-    h.update(b"v1|runner=");
+    // v2: folds in the mutant-universe / comparability inputs the score
+    // actually depends on but v1 ignored — parity operators, diff scope
+    // (`--since`/`--diff-only`), `--sample`, `--exclude`, `--shard`, the
+    // ruff/ty filters, equivalent-mutant detection, and the test-suite /
+    // coverage-file selection. These are exactly the
+    // filter-chain selectors in `filter::build_chain` plus the engine's equiv
+    // pass; each changes which mutants are tested or counted. Two runs with
+    // different values here are NOT comparable, so a diff-scoped or sampled run
+    // must no longer hash identically to a full run (which is what forced the
+    // PR gate onto `--no-history` and the trend merge onto a manual `ci_scope`).
+    h.update(b"v2|runner=");
     h.update(format!("{:?}", cfg.runner).as_bytes());
     h.update(b"|python=");
     match &cfg.python {
-        Some(p) => h.update(p.as_os_str().as_encoded_bytes()),
+        Some(p) => feed(&mut h, p.as_os_str().as_encoded_bytes()),
         None => h.update(b"none"),
     }
     h.update(b"|timeout=");
@@ -165,9 +208,9 @@ pub fn config_hash(cfg: &Config) -> String {
         h.update(b"none");
     }
     h.update(b"|args=");
+    h.update((cfg.pytest_args.len() as u64).to_le_bytes());
     for a in &cfg.pytest_args {
-        h.update(b"|");
-        h.update(a.as_bytes());
+        feed(&mut h, a.as_bytes());
     }
     h.update(b"|cov=");
     h.update(if cfg.coverage.is_some() {
@@ -198,6 +241,103 @@ pub fn config_hash(cfg: &Config) -> String {
     for o in sorted {
         h.update(b"|");
         h.update(o.as_bytes());
+    }
+    // Parity operators expand the mutant set, so a parity run's score is not
+    // comparable to a non-parity one.
+    h.update(b"|parity=");
+    h.update(if cfg.parity { &b"on"[..] } else { &b"off"[..] });
+    // Diff scope. A run restricted to changed lines scores over a different
+    // universe than a full run; `--since` and `--diff-only` are mutually
+    // exclusive at the parser. The spec/base string is included so a full run
+    // and a `--since origin/main` run get distinct hashes.
+    h.update(b"|scope=");
+    if let Some(spec) = &cfg.since {
+        h.update(b"since:");
+        feed(&mut h, spec.as_bytes());
+    } else if let Some(base) = &cfg.diff_base {
+        h.update(b"diff:");
+        feed(&mut h, base.as_bytes());
+    } else {
+        h.update(b"full");
+    }
+    // Sampling tests only a fraction of mutants, so a sampled score is a noisy
+    // estimate, not comparable to a full run. Ratio + seed both matter: a
+    // different seed selects a different subset.
+    h.update(b"|sample=");
+    match cfg.sample_ratio {
+        Some(r) => {
+            h.update(b"ratio:");
+            h.update(r.to_bits().to_le_bytes());
+            h.update(b":seed:");
+            h.update(cfg.sample_seed.unwrap_or(0).to_le_bytes());
+        }
+        None => h.update(b"none"),
+    }
+    // Excluded paths change which files produce mutants at all. Sorted so the
+    // hash is order-independent.
+    h.update(b"|exclude=");
+    if cfg.exclude.is_empty() {
+        h.update(b"none");
+    } else {
+        let mut ex = cfg.exclude.clone();
+        ex.sort();
+        h.update((ex.len() as u64).to_le_bytes());
+        for g in ex {
+            feed(&mut h, g.as_bytes());
+        }
+    }
+    // Sharding partitions the mutant set (`ShardFilter`, a hash modulo): a
+    // `--shard i/n` run scores over 1/n of the universe, not comparable to a
+    // full run. Index + total both matter — different shards test different
+    // mutants.
+    h.update(b"|shard=");
+    match cfg.shard {
+        Some((index, total)) => {
+            h.update(index.to_le_bytes());
+            h.update(b"/");
+            h.update(total.to_le_bytes());
+        }
+        None => h.update(b"none"),
+    }
+    // The ruff/ty filters drop mutants those tools reject before they are ever
+    // run, shrinking the denominator. A `--ruff`/`--ty` run is not comparable
+    // to one without.
+    h.update(b"|ruff=");
+    h.update(if cfg.ruff_filter {
+        &b"on"[..]
+    } else {
+        &b"off"[..]
+    });
+    h.update(b"|ty=");
+    h.update(if cfg.ty_filter {
+        &b"on"[..]
+    } else {
+        &b"off"[..]
+    });
+    // Equivalent-mutant detection flips otherwise-`Survived` mutants to
+    // `Equivalent`, removing them from the killable denominator and moving the
+    // score. On by default; `--no-equiv-detect` changes the universe.
+    h.update(b"|equiv=");
+    h.update(if cfg.equiv_detect {
+        &b"on"[..]
+    } else {
+        &b"off"[..]
+    });
+    // Test-suite / coverage-file selection is run shape: pointing `--tests` at
+    // a different suite (or `--coverage` at a different file) scores over a
+    // different mutant universe, so those runs are not comparable. Hashed
+    // relative to `source_root` so the digest stays stable across checkouts
+    // whose absolute paths differ; `source_root` itself is deliberately NOT
+    // hashed for the same reason (it's project/checkout identity, not shape).
+    h.update(b"|tests=");
+    feed(
+        &mut h,
+        rel_to(&cfg.source_root, &cfg.tests_path()).as_bytes(),
+    );
+    h.update(b"|covpath=");
+    match &cfg.coverage_path {
+        Some(p) => feed(&mut h, rel_to(&cfg.source_root, p).as_bytes()),
+        None => h.update(b"none"),
     }
     hex::encode(h.finalize())
 }
@@ -317,10 +457,17 @@ pub fn survivor_diff<'a>(
 /// Shared by `fermut trend` (CLI table) and `fermut dashboard` (summary
 /// card) so the two surfaces never drift on what counts as a streak.
 pub fn trailing_streak(entries: &[HistoryEntry]) -> Option<(StreakDir, usize)> {
-    if entries.len() < 3 {
+    // Scoreless runs carry a vacuous 100.0 — including them invents deltas
+    // (a real 85% next to a fake 100% looks like a 15pt move). Drop them so
+    // the streak reflects only runs that actually measured a score.
+    let scores: Vec<f64> = entries
+        .iter()
+        .filter(|e| !e.is_scoreless())
+        .map(|e| e.mutation_score)
+        .collect();
+    if scores.len() < 3 {
         return None;
     }
-    let scores: Vec<f64> = entries.iter().map(|e| e.mutation_score).collect();
     let mut dir: Option<StreakDir> = None;
     let mut count = 0usize;
     for w in scores.windows(2).rev() {
@@ -455,14 +602,19 @@ fn parse_id_file(id: &str) -> Option<&str> {
 /// happens to contain — append can silently fail (read-only FS, disk
 /// full) and leave the file's tail one entry behind reality.
 pub fn regression_against(prior: &[HistoryEntry], current: &HistoryEntry) -> Option<f64> {
+    // A scoreless run has a vacuous 100.0, not a real score — neither side of
+    // the comparison may be one, or we fabricate a drop (real prev vs fake-100
+    // current) or hide one (fake-100 prev vs real current).
+    if current.is_scoreless() {
+        return None;
+    }
     let current_branch = current.git_branch.as_deref();
-    let prev = prior
-        .iter()
-        .rev()
-        .find(|e| match (e.git_branch.as_deref(), current_branch) {
+    let prev = prior.iter().rev().filter(|e| !e.is_scoreless()).find(|e| {
+        match (e.git_branch.as_deref(), current_branch) {
             (Some(a), Some(b)) => a == b,
             _ => true,
-        })?;
+        }
+    })?;
     let drop = prev.mutation_score - current.mutation_score;
     if drop > 0.0 {
         Some(drop)
@@ -542,34 +694,69 @@ pub fn append(path: &Path, entry: &HistoryEntry) -> Result<()> {
     res
 }
 
-/// Load every well-formed entry from `path`, in file order (oldest first).
-/// Malformed lines are silently skipped — older fermut versions may have
-/// written entries we no longer understand, and a single bad line should
-/// not poison `fermut trend`.
-pub fn load(path: &Path) -> Result<Vec<HistoryEntry>> {
+/// Counts of history lines dropped at load time, so a caller (e.g. `fermut
+/// trend --strict`) can tell "the trend is computed over every recorded point"
+/// from "some points were silently discarded". A non-empty line that fails to
+/// parse is `malformed`; a well-formed entry stamped with a schema newer than
+/// this binary understands is `newer_schema`. Empty lines are not counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LoadStats {
+    pub loaded: usize,
+    pub malformed: usize,
+    pub newer_schema: usize,
+}
+
+impl LoadStats {
+    /// Non-empty lines that did not become a loaded entry.
+    pub fn dropped(&self) -> usize {
+        self.malformed + self.newer_schema
+    }
+}
+
+/// Load every well-formed entry from `path`, in file order (oldest first),
+/// alongside a count of what was dropped. Malformed and newer-schema lines are
+/// skipped — older/newer fermut versions may have written entries we don't
+/// understand, and a single bad line should not poison `fermut trend` — but the
+/// stats let a strict caller refuse to report over a silently truncated set.
+pub fn load_with_stats(path: &Path) -> Result<(Vec<HistoryEntry>, LoadStats)> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), LoadStats::default()))
+        }
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
     let mut out = Vec::new();
+    let mut stats = LoadStats::default();
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
         }
-        if let Ok(entry) = serde_json::from_str::<HistoryEntry>(line) {
-            if entry.schema_version > CURRENT_SCHEMA_V {
-                warn!(
-                    v = entry.schema_version,
-                    current = CURRENT_SCHEMA_V,
-                    "skipping history entry with newer schema version"
-                );
-                continue;
+        match serde_json::from_str::<HistoryEntry>(line) {
+            Ok(entry) => {
+                if entry.schema_version > CURRENT_SCHEMA_V {
+                    warn!(
+                        v = entry.schema_version,
+                        current = CURRENT_SCHEMA_V,
+                        "skipping history entry with newer schema version"
+                    );
+                    stats.newer_schema += 1;
+                    continue;
+                }
+                out.push(entry);
             }
-            out.push(entry);
+            Err(_) => stats.malformed += 1,
         }
     }
-    Ok(out)
+    stats.loaded = out.len();
+    Ok((out, stats))
+}
+
+/// Load every well-formed entry from `path`, in file order (oldest first).
+/// Malformed lines are silently skipped — see [`load_with_stats`] for the
+/// dropped-line counts a strict caller needs.
+pub fn load(path: &Path) -> Result<Vec<HistoryEntry>> {
+    load_with_stats(path).map(|(entries, _)| entries)
 }
 
 fn iso8601_now() -> String {
@@ -651,6 +838,191 @@ pub(crate) fn current_git_branch(dir: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// Minimal `Config` for exercising `config_hash`. Only the fields the hash
+    /// reads are meaningful; the rest are inert defaults.
+    fn cfg() -> Config {
+        use crate::config::{CacheScope, IsolationMode, RunnerKind};
+        Config {
+            source_root: PathBuf::from("."),
+            tests: None,
+            jobs: None,
+            timeout_secs: 30,
+            ty_filter: false,
+            ruff_filter: false,
+            experimental: false,
+            parity: false,
+            ops_allow: None,
+            ops_deny: Default::default(),
+            diff_base: None,
+            since: None,
+            coverage_path: None,
+            coverage: None,
+            hypothesis_seed: None,
+            pytest_args: Vec::new(),
+            cache: false,
+            cache_path: PathBuf::from(".fermut/cache.json"),
+            history: false,
+            history_path: PathBuf::from(".fermut/history.jsonl"),
+            sample_ratio: None,
+            sample_seed: None,
+            shard: None,
+            runner: RunnerKind::Pytest,
+            python: None,
+            isolation: IsolationMode::Auto,
+            equiv_detect: false,
+            cache_scope: CacheScope::File,
+            fail_under: None,
+            exclude: Vec::new(),
+            verify_baseline: false,
+            baseline_timeout_secs: 300,
+        }
+    }
+
+    #[test]
+    fn config_hash_is_stable_for_identical_config() {
+        assert_eq!(config_hash(&cfg()), config_hash(&cfg()));
+    }
+
+    #[test]
+    fn config_hash_distinguishes_scope_sample_exclude_parity() {
+        let base = config_hash(&cfg());
+
+        // Diff scope: full vs --since vs --diff-only, and two different --since
+        // specs, must all differ — a diff-scoped run is no longer mistaken for
+        // a full run in the trend store.
+        let since = config_hash(&Config {
+            since: Some("origin/main".into()),
+            ..cfg()
+        });
+        let since2 = config_hash(&Config {
+            since: Some("v1.2.0".into()),
+            ..cfg()
+        });
+        let diff = config_hash(&Config {
+            diff_base: Some("origin/main".into()),
+            ..cfg()
+        });
+        assert_ne!(base, since, "full vs --since must differ");
+        assert_ne!(since, since2, "different --since specs must differ");
+        assert_ne!(base, diff, "full vs --diff-only must differ");
+        assert_ne!(since, diff, "--since vs --diff-only must differ");
+
+        // Sampling: presence and seed both change comparability.
+        let s1 = config_hash(&Config {
+            sample_ratio: Some(0.5),
+            sample_seed: Some(0),
+            ..cfg()
+        });
+        let s2 = config_hash(&Config {
+            sample_ratio: Some(0.5),
+            sample_seed: Some(1),
+            ..cfg()
+        });
+        assert_ne!(base, s1, "sampled run must differ from full");
+        assert_ne!(s1, s2, "different sample seeds must differ");
+
+        // Exclude: presence and content, order-independent.
+        let e1 = config_hash(&Config {
+            exclude: vec!["a/**".into()],
+            ..cfg()
+        });
+        let e_ab = config_hash(&Config {
+            exclude: vec!["a/**".into(), "b/**".into()],
+            ..cfg()
+        });
+        let e_ba = config_hash(&Config {
+            exclude: vec!["b/**".into(), "a/**".into()],
+            ..cfg()
+        });
+        assert_ne!(base, e1, "an exclude must differ from none");
+        assert_ne!(e1, e_ab, "different exclude sets must differ");
+        assert_eq!(e_ab, e_ba, "exclude order must not matter");
+
+        // Parity operators expand the mutant set.
+        let parity = config_hash(&Config {
+            parity: true,
+            ..cfg()
+        });
+        assert_ne!(base, parity, "parity run must differ from non-parity");
+
+        // Sharding partitions the mutant set; index and total both matter.
+        let sh1 = config_hash(&Config {
+            shard: Some((1, 4)),
+            ..cfg()
+        });
+        let sh2 = config_hash(&Config {
+            shard: Some((2, 4)),
+            ..cfg()
+        });
+        let sh_total = config_hash(&Config {
+            shard: Some((1, 2)),
+            ..cfg()
+        });
+        assert_ne!(base, sh1, "sharded run must differ from full");
+        assert_ne!(sh1, sh2, "different shard indices must differ");
+        assert_ne!(sh1, sh_total, "different shard totals must differ");
+
+        // ruff/ty filters and equiv detection each change the denominator.
+        let ruff = config_hash(&Config {
+            ruff_filter: true,
+            ..cfg()
+        });
+        let ty = config_hash(&Config {
+            ty_filter: true,
+            ..cfg()
+        });
+        let equiv = config_hash(&Config {
+            equiv_detect: true,
+            ..cfg()
+        });
+        assert_ne!(base, ruff, "ruff-filtered run must differ");
+        assert_ne!(base, ty, "ty-filtered run must differ");
+        assert_ne!(ruff, ty, "ruff vs ty must differ");
+        assert_ne!(base, equiv, "equiv-detect toggle must differ");
+
+        // Test-suite / coverage-file selection: pointing at a different suite
+        // or coverage file is a shape change, so the hash must differ.
+        let tests = config_hash(&Config {
+            tests: Some(PathBuf::from("other_tests")),
+            ..cfg()
+        });
+        let covpath = config_hash(&Config {
+            coverage_path: Some(PathBuf::from("cov.json")),
+            ..cfg()
+        });
+        assert_ne!(base, tests, "different --tests must differ");
+        assert_ne!(base, covpath, "a --coverage file must differ from none");
+    }
+
+    #[test]
+    fn config_hash_ignores_sample_seed_without_ratio() {
+        // `sample_seed` is only read inside the `Some(ratio)` arm; with no
+        // ratio the seed selects nothing, so it must not move the hash.
+        let no_seed = config_hash(&cfg());
+        let with_seed = config_hash(&Config {
+            sample_seed: Some(42),
+            ..cfg()
+        });
+        assert_eq!(no_seed, with_seed, "seed without a ratio must be inert");
+    }
+
+    #[test]
+    fn config_hash_tests_path_is_relative_to_source_root() {
+        // Absolute paths vary per checkout; the hash must depend only on the
+        // suite's location relative to source_root, not the checkout prefix.
+        let a = config_hash(&Config {
+            source_root: PathBuf::from("/checkout-a"),
+            tests: Some(PathBuf::from("/checkout-a/tests")),
+            ..cfg()
+        });
+        let b = config_hash(&Config {
+            source_root: PathBuf::from("/checkout-b"),
+            tests: Some(PathBuf::from("/checkout-b/tests")),
+            ..cfg()
+        });
+        assert_eq!(a, b, "same relative suite across checkouts must match");
+    }
 
     #[test]
     fn from_report_stamps_current_fermut_version() {
@@ -773,6 +1145,51 @@ mod tests {
         let loaded = load(&p).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].killed, 1);
+    }
+
+    #[test]
+    fn load_with_stats_counts_malformed_and_newer_schema() {
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("history.jsonl");
+        let valid = HistoryEntry {
+            schema_version: CURRENT_SCHEMA_V,
+            timestamp: "2026-06-04T12:00:00Z".into(),
+            mutation_score: 50.0,
+            killed: 1,
+            survived: 1,
+            timed_out: 0,
+            skipped: 0,
+            errored: 0,
+            equivalent: 0,
+            total: Some(2),
+            duration_ms: None,
+            config_hash: None,
+            git_sha: None,
+            git_branch: None,
+            survivor_ids: None,
+            baseline: false,
+            fermut_version: None,
+        };
+        let good = serde_json::to_string(&valid).unwrap();
+        // A well-formed entry stamped one schema version ahead of this binary.
+        let newer = format!(
+            r#"{{"v":{},"timestamp":"t","mutation_score":80.0,"killed":4,"survived":1,"timed_out":0,"skipped":0,"errored":0}}"#,
+            CURRENT_SCHEMA_V + 1
+        );
+        // valid, malformed, newer-schema, blank line (ignored, not counted).
+        std::fs::write(&p, format!("{good}\nnot json\n{newer}\n\n")).unwrap();
+
+        let (entries, stats) = load_with_stats(&p).unwrap();
+        assert_eq!(entries.len(), 1, "only the one in-range entry loads");
+        assert_eq!(stats.loaded, 1);
+        assert_eq!(stats.malformed, 1);
+        assert_eq!(stats.newer_schema, 1);
+        assert_eq!(stats.dropped(), 2);
+
+        // Missing file → all zeros, no error.
+        let (empty, s0) = load_with_stats(&tmp.path().join("nope.jsonl")).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(s0.dropped(), 0);
     }
 
     #[test]
@@ -977,7 +1394,9 @@ mod tests {
             schema_version: CURRENT_SCHEMA_V,
             timestamp: "2026-06-04T12:00:00Z".into(),
             mutation_score: score,
-            killed: 0,
+            // Non-zero so the entry is a real scored run, not a scoreless
+            // vacuous-100 that trend/regression now filter out.
+            killed: 1,
             survived: 0,
             timed_out: 0,
             skipped: 0,
@@ -1089,6 +1508,48 @@ mod tests {
     fn regression_against_returns_none_when_prior_empty() {
         let current = mk(80.0, Some("main"));
         assert_eq!(regression_against(&[], &current), None);
+    }
+
+    /// A scored `mk` entry forced back to zero buckets — its `mutation_score`
+    /// is the vacuous 100.0 floor, so `is_scoreless()` is true.
+    fn mk_scoreless(branch: Option<&str>) -> HistoryEntry {
+        let mut e = mk(100.0, branch);
+        e.killed = 0;
+        assert!(e.is_scoreless());
+        e
+    }
+
+    #[test]
+    fn regression_against_ignores_scoreless_current() {
+        // Current run scored nothing (all errored/skipped) → vacuous 100.0.
+        // Comparing a real 90% prior against it would fabricate a -10pt drop.
+        let prior = vec![mk(90.0, Some("main"))];
+        let current = mk_scoreless(Some("main"));
+        assert_eq!(regression_against(&prior, &current), None);
+    }
+
+    #[test]
+    fn regression_against_skips_scoreless_prior() {
+        // The most recent prior scored nothing (vacuous 100.0). It must be
+        // skipped so the gate compares against the last real score (90→85).
+        let prior = vec![
+            mk(90.0, Some("main")),     // last real prior
+            mk_scoreless(Some("main")), // vacuous 100.0, must be skipped
+        ];
+        let current = mk(85.0, Some("main"));
+        assert_eq!(regression_against(&prior, &current), Some(5.0));
+    }
+
+    #[test]
+    fn trailing_streak_ignores_scoreless_entries() {
+        // A vacuous-100 run sitting between real scores must not invent a move.
+        let es = vec![
+            mk(50.0, None),
+            mk(60.0, None),
+            mk_scoreless(None), // vacuous 100.0 — dropped, not a +40 spike
+            mk(70.0, None),
+        ];
+        assert_eq!(trailing_streak(&es), Some((StreakDir::Up, 2)));
     }
 
     #[test]

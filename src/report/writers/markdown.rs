@@ -34,13 +34,13 @@ impl Report {
         md.push_str(STICKY_MARKER);
         md.push('\n');
         md.push_str(&format!(
-            "## fermut report\n\n**Score:** {:.1}% ({} / {} detected)\n\n",
-            c.mutation_score(),
+            "## fermut report\n\n**Score:** {} ({} / {} detected)\n\n",
+            c.score_label(),
             c.killed + c.timed_out,
-            c.killed + c.timed_out + c.survived
+            c.scored()
         ));
         if !prior_history.is_empty() {
-            md.push_str(&render_trend_block(c.mutation_score(), prior_history));
+            md.push_str(&render_trend_block(c.mutation_score_opt(), prior_history));
         }
         md.push_str("| Status     | Count |\n|------------|------:|\n");
         md.push_str(&format!("| killed     | {} |\n", c.killed));
@@ -86,28 +86,50 @@ impl Report {
 /// Build the trend section that goes between the score line and the count
 /// table. We cap the sparkline window at 20 points so a long history
 /// doesn't blow out the comment width.
-fn render_trend_block(current_score: f64, prior_history: &[HistoryEntry]) -> String {
+/// `current_score` is `None` when the run scored nothing (its `mutation_score`
+/// is the vacuous 100.0 floor, not a measurement). Scoreless prior entries and
+/// a scoreless current run are excluded from the sparkline and delta so the
+/// trend reflects real scores only — a phantom 100 would fake a spike and an
+/// improvement (mirrors the `trend`/`dashboard` filtering).
+fn render_trend_block(current_score: Option<f64>, prior_history: &[HistoryEntry]) -> String {
     const WINDOW: usize = 20;
     let start = prior_history.len().saturating_sub(WINDOW - 1);
     let window = &prior_history[start..];
-    let scores: Vec<f64> = window
+    let mut scores: Vec<f64> = window
         .iter()
+        .filter(|e| !e.is_scoreless())
         .map(|e| e.mutation_score)
-        .chain(std::iter::once(current_score))
         .collect();
+    if let Some(cur) = current_score {
+        scores.push(cur);
+    }
+    // Nothing real to plot (all-scoreless history and a scoreless run).
+    if scores.is_empty() {
+        return String::new();
+    }
     let spark = history::sparkline(scores.iter().copied());
-    let first = scores.first().copied().unwrap_or(current_score);
+    let first = scores.first().copied().unwrap();
 
-    let prev = prior_history.last().map(|e| e.mutation_score);
-    let delta = prev.map(|p| current_score - p);
+    // Delta only when the current run scored and there is a prior scored run.
+    let prev = window
+        .iter()
+        .rev()
+        .find(|e| !e.is_scoreless())
+        .map(|e| e.mutation_score);
+    let delta = current_score.zip(prev).map(|(c, p)| c - p);
     let delta_s = match delta {
         Some(d) if d.abs() < 0.05 => "no change".to_string(),
         Some(d) if d >= 0.0 => format!("▲ +{d:.1} pts vs previous"),
         Some(d) => format!("▼ {d:.1} pts vs previous"),
+        None if current_score.is_none() => "not scored this run".to_string(),
         None => "first recorded run".to_string(),
     };
 
-    format!("**Trend:** `{spark}`  {first:.1}% → {current_score:.1}%  ({delta_s})\n\n")
+    let last_s = match current_score {
+        Some(c) => format!("{c:.1}%"),
+        None => "N/A".to_string(),
+    };
+    format!("**Trend:** `{spark}`  {first:.1}% → {last_s}  ({delta_s})\n\n")
 }
 
 #[cfg(test)]
@@ -127,6 +149,45 @@ mod tests {
         assert!(written.contains("fermut report"));
         assert!(written.contains("50.0%"));
         assert!(written.contains("survivor"));
+    }
+
+    #[test]
+    fn write_markdown_scoreless_run_reports_na_not_hundred() {
+        use crate::history::HistoryEntry;
+        // Every mutant errored → nothing scored. The report must headline N/A,
+        // and the trend block must neither show 100% nor a phantom improvement
+        // against a real prior score.
+        let r = Report::new(vec![
+            MutantOutcome::error(make_mutant(), "boom".into()),
+            MutantOutcome::error(make_mutant(), "boom".into()),
+        ]);
+        let prior = vec![HistoryEntry {
+            schema_version: crate::history::CURRENT_SCHEMA_V,
+            timestamp: "2026-05-01T00:00:00Z".into(),
+            mutation_score: 80.0,
+            killed: 4,
+            survived: 1,
+            timed_out: 0,
+            skipped: 0,
+            errored: 0,
+            equivalent: 0,
+            total: Some(5),
+            duration_ms: None,
+            config_hash: None,
+            git_sha: None,
+            git_branch: None,
+            survivor_ids: None,
+            baseline: false,
+            fermut_version: None,
+        }];
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        r.write_markdown_with_history(tmp.path(), &prior).unwrap();
+        let written = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(written.contains("**Score:** N/A"));
+        assert!(!written.contains("100.0%"));
+        // No fabricated delta from the vacuous floor.
+        assert!(!written.contains("▲ +"));
+        assert!(written.contains("not scored this run"));
     }
 
     #[test]

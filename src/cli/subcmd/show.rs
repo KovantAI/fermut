@@ -44,7 +44,7 @@ fn print_list(report: &Report, all: bool) -> Result<()> {
     }
     let c = report.counts();
     println!(
-        "\n{} shown of {} total — killed: {}, survived: {}, timeout: {}, skipped: {}, equivalent: {}, errored: {}  | score: {:.1}%",
+        "\n{} shown of {} total — killed: {}, survived: {}, timeout: {}, skipped: {}, equivalent: {}, errored: {}  | score: {}",
         shown,
         c.total(),
         c.killed,
@@ -53,7 +53,7 @@ fn print_list(report: &Report, all: bool) -> Result<()> {
         c.skipped,
         c.equivalent,
         c.errored,
-        c.mutation_score()
+        c.score_label()
     );
     Ok(())
 }

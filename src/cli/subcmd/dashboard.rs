@@ -161,14 +161,15 @@ fn render_summary(window: &[HistoryEntry]) -> String {
     let Some(last) = window.last() else {
         return "<div class='card empty'>No runs recorded yet.</div>".into();
     };
-    let prev = if window.len() >= 2 {
-        Some(&window[window.len() - 2])
-    } else {
-        None
-    };
-    let delta_html = match prev {
-        Some(p) => {
-            let d = last.mutation_score - p.mutation_score;
+    // Delta the latest run posted against the previous scored run. Suppressed
+    // entirely when the latest run is itself scoreless — its headline is N/A,
+    // so a delta carried over from older runs would misread as the N/A run's
+    // move. Scoreless priors are skipped so the comparison is real-vs-real.
+    let mut scored_rev = window.iter().rev().filter(|e| !e.is_scoreless());
+    let latest_scored = (!last.is_scoreless()).then(|| scored_rev.next()).flatten();
+    let delta_html = match (latest_scored, scored_rev.next()) {
+        (Some(cur), Some(p)) => {
+            let d = cur.mutation_score - p.mutation_score;
             let cls = if d > 0.05 {
                 "up"
             } else if d < -0.05 {
@@ -179,7 +180,14 @@ fn render_summary(window: &[HistoryEntry]) -> String {
             let sign = if d >= 0.0 { "+" } else { "" };
             format!("<span class='delta {cls}'>{sign}{d:.1} pts</span>")
         }
-        None => String::new(),
+        _ => String::new(),
+    };
+    // The headline reflects the latest run itself — N/A when it scored nothing,
+    // never the floored 100.0.
+    let score_html = if last.is_scoreless() {
+        "<div class='big-score na'>N/A</div>".to_string()
+    } else {
+        format!("<div class='big-score'>{:.1}%</div>", last.mutation_score)
     };
     let streak_html = match history::trailing_streak(window) {
         Some((StreakDir::Up, n)) => format!(
@@ -209,7 +217,7 @@ fn render_summary(window: &[HistoryEntry]) -> String {
     format!(
         "<section class='card summary'>\
          <h2>Latest run</h2>\
-         <div class='big-score'>{:.1}%</div>\
+         {score_html}\
          {delta_html}\
          {streak_html}\
          <div class='counts'>\
@@ -221,7 +229,6 @@ fn render_summary(window: &[HistoryEntry]) -> String {
          </div>\
          <div class='aux-line'>{} {duration} {git}</div>\
          </section>",
-        last.mutation_score,
         last.killed,
         last.survived,
         last.timed_out,
@@ -232,6 +239,11 @@ fn render_summary(window: &[HistoryEntry]) -> String {
 }
 
 fn render_sparkline(window: &[HistoryEntry]) -> String {
+    // Header counts every run in the window so it matches the history table;
+    // the plot itself uses scored runs only — a scoreless run's vacuous 100.0
+    // would draw a phantom spike to the top of the chart.
+    let total_runs = window.len();
+    let window: Vec<&HistoryEntry> = window.iter().filter(|e| !e.is_scoreless()).collect();
     if window.is_empty() {
         return String::new();
     }
@@ -274,7 +286,7 @@ fn render_sparkline(window: &[HistoryEntry]) -> String {
     }
     format!(
         "<section class='card chart'>\
-         <h2>Trend ({} runs)</h2>\
+         <h2>Trend ({total_runs} runs)</h2>\
          <svg viewBox='0 0 {W} {H}' role='img' aria-label='mutation score over time'>\
            <line x1='{PAD}' y1='{PAD}' x2='{PAD}' y2='{}' class='axis'/>\
            <line x1='{PAD}' y1='{}' x2='{}' y2='{}' class='axis'/>\
@@ -282,7 +294,6 @@ fn render_sparkline(window: &[HistoryEntry]) -> String {
          </svg>\
          <div class='axis-label'>0% – 100% (fixed scale)</div>\
          </section>",
-        n,
         H - PAD,
         H - PAD,
         W - PAD,
@@ -297,11 +308,24 @@ fn render_trend_table(window: &[HistoryEntry]) -> String {
     let mut rows = String::new();
     let mut prev_score: Option<f64> = None;
     for e in window {
-        let delta_cell = match prev_score.map(|p| e.mutation_score - p) {
+        // Scoreless runs have no real score: N/A cell, no delta, and the
+        // vacuous 100.0 never seeds the next row's delta.
+        let scoreless = e.is_scoreless();
+        let delta = if scoreless {
+            None
+        } else {
+            prev_score.map(|p| e.mutation_score - p)
+        };
+        let delta_cell = match delta {
             Some(d) if d.abs() < 0.05 => "<td class='flat'>0.0</td>".into(),
             Some(d) if d >= 0.0 => format!("<td class='up'>+{d:.1}</td>"),
             Some(d) => format!("<td class='down'>{d:.1}</td>"),
             None => "<td class='flat'>—</td>".into(),
+        };
+        let score_cell = if scoreless {
+            "<td class='score'>N/A</td>".to_string()
+        } else {
+            format!("<td class='score'>{:.1}%</td>", e.mutation_score)
         };
         let git = match (&e.git_branch, &e.git_sha) {
             (Some(b), Some(s)) => format!("{}@{}", html_escape(b), html_escape(s)),
@@ -318,18 +342,20 @@ fn render_trend_table(window: &[HistoryEntry]) -> String {
         rows.push_str(&format!(
             "<tr{tr_class}>\
              <td class='ts'>{}{ts_badge}</td>\
-             <td class='score'>{:.1}%</td>\
+             {score_cell}\
              {delta_cell}\
              <td>{}</td><td>{}</td><td>{}</td>\
              <td class='git'>{git}</td>\
              </tr>",
             html_escape(&e.timestamp),
-            e.mutation_score,
             e.killed,
             e.survived,
             e.timed_out,
         ));
-        prev_score = Some(e.mutation_score);
+        // Only real scores seed the next delta — a vacuous 100.0 must not.
+        if !scoreless {
+            prev_score = Some(e.mutation_score);
+        }
     }
     format!(
         "<section class='card table-wrap'>\
@@ -594,6 +620,24 @@ mod tests {
         assert!(html.contains("History"));
         assert!(html.contains("Survivors (2)"));
         assert!(html.contains("85.0%"));
+    }
+
+    #[test]
+    fn dashboard_scoreless_latest_shows_na_and_no_delta() {
+        // Latest run scored nothing (killed+survived+timed_out == 0) → vacuous
+        // 100.0. Headline must read N/A, no delta may carry over from the older
+        // real run, and the trend header still counts both runs.
+        let real = entry("2026-01-01T00:00:00Z", 80.0, Some(&["a"]));
+        let scoreless = entry("2026-01-02T00:00:00Z", 100.0, Some(&[]));
+        assert!(scoreless.is_scoreless());
+        let html = render_dashboard(&[real, scoreless], 10, None, Path::new("/tmp/h.jsonl"));
+        // Headline N/A, not a floored 100.0%.
+        assert!(html.contains("big-score na"));
+        assert!(html.contains(">N/A<"));
+        // No summary delta pill carried over from the older run.
+        assert!(!html.contains("class='delta"));
+        // Header counts BOTH runs even though only the scored one is plotted.
+        assert!(html.contains("Trend (2 runs)"));
     }
 
     #[test]

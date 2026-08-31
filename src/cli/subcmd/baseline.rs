@@ -68,6 +68,9 @@ enum Grade {
     Ok,
     Weak,
     Smoke,
+    /// Nothing scored — the run's mutation score is the vacuous 100.0 floor,
+    /// not a measurement, so no band applies (all-errored / all-skipped).
+    Na,
 }
 
 impl Grade {
@@ -86,6 +89,7 @@ impl Grade {
             Grade::Ok => "real gaps in covered code",
             Grade::Weak => "many covered lines untested for behavior",
             Grade::Smoke => "mostly smoke tests — they run code but assert little",
+            Grade::Na => "nothing scored — no test-quality signal",
         }
     }
 }
@@ -96,8 +100,15 @@ pub(crate) struct BaselineReport {
     /// `null` when it couldn't be read (the mutation half still stands).
     #[serde(skip_serializing_if = "Option::is_none")]
     line_coverage: Option<f64>,
-    /// Mutation score on covered code, percent.
+    /// Mutation score on covered code, percent. Carries the vacuous `100.0`
+    /// floor when `scored == 0` — read `scored` to tell a genuine perfect run
+    /// from a scoreless N/A (mirrors [`crate::report::Summary`]).
     mutation_score: f64,
+    /// Mutants with a real verdict (`killed + timed_out + survived`) — the
+    /// score denominator. `0` means `mutation_score` is a vacuous floor, not a
+    /// measurement (grade `na`), so JSON/MCP consumers must not read the score
+    /// as a genuine 100%.
+    scored: usize,
     /// `100 - mutation_score`: of the code tests *do* execute, the share of
     /// behavior changes no test would notice — the false-confidence gap.
     /// This is on the covered-code denominator (same as `mutation_score`),
@@ -242,7 +253,14 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
 
     let summary = report.summary();
     let worst_files = top_survivor_files(&report, opts.top);
-    let grade = Grade::of(summary.mutation_score);
+    // A scoreless run (nothing killed/survived/timed out) carries the vacuous
+    // 100.0 floor, not a measurement — grade it N/A rather than a perfect
+    // "Strong", which would read as an A for a run that scored nothing.
+    let grade = if report.is_scoreless() {
+        Grade::Na
+    } else {
+        Grade::of(summary.mutation_score)
+    };
     // The blind spot in covered code — never negative, same denominator as
     // the mutation score. (Line coverage is a separate axis below.)
     let quality_gap = round1(100.0 - summary.mutation_score);
@@ -251,6 +269,7 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
     Ok(BaselineReport {
         line_coverage,
         mutation_score: summary.mutation_score,
+        scored: summary.scored,
         quality_gap,
         untested_risk,
         grade,
@@ -323,14 +342,18 @@ fn print_human(r: &BaselineReport) {
     } else {
         "  (on covered code)".to_string()
     };
-    println!("  mutation score    {:.0}%{est}", r.mutation_score);
-    println!("  ───────────────────────────────");
-    println!(
-        "  test-quality gap  {:.0} pts   ← covered code whose behavior no test checks",
-        r.quality_gap
-    );
-    if let Some(risk) = r.untested_risk {
-        println!("  untested risk     {risk:.0}%     ← lines no test executes at all");
+    if matches!(r.grade, Grade::Na) {
+        println!("  mutation score    N/A  (nothing scored — no mutants got a verdict)");
+    } else {
+        println!("  mutation score    {:.0}%{est}", r.mutation_score);
+        println!("  ───────────────────────────────");
+        println!(
+            "  test-quality gap  {:.0} pts   ← covered code whose behavior no test checks",
+            r.quality_gap
+        );
+        if let Some(risk) = r.untested_risk {
+            println!("  untested risk     {risk:.0}%     ← lines no test executes at all");
+        }
     }
     println!("\n  grade: {:?} — {}", r.grade, r.grade.blurb());
 

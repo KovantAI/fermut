@@ -152,6 +152,18 @@ impl Counts {
     pub fn mutation_score(&self) -> f64 {
         self.mutation_score_opt().unwrap_or(100.0)
     }
+
+    /// Human display of the score: a one-decimal percent, or `N/A` when
+    /// nothing was scored (a zero denominator is undefined, not 100%). Use
+    /// this for any surface a person reads (`show`, HTML/Markdown reports); the
+    /// bare floored [`mutation_score`](Self::mutation_score) stays only for the
+    /// JSON/history schema.
+    pub fn score_label(&self) -> String {
+        match self.mutation_score_opt() {
+            Some(s) => format!("{s:.1}%"),
+            None => "N/A".to_string(),
+        }
+    }
 }
 
 /// Top-level run summary, emitted as the `summary` object in JSON output so
@@ -495,6 +507,17 @@ mod tests {
         // The floored accessor still returns the historical 100.0.
         assert!((r.counts().mutation_score() - 100.0).abs() < f64::EPSILON);
         assert!(r.is_scoreless());
+    }
+
+    #[test]
+    fn score_label_is_na_when_scoreless_else_percent() {
+        let scoreless = report(vec![MutantOutcome::error(make_mutant(), "boom".into())]);
+        assert_eq!(scoreless.counts().score_label(), "N/A");
+        let real = report(vec![
+            MutantOutcome::killed(make_mutant()),
+            MutantOutcome::survived(make_mutant()),
+        ]);
+        assert_eq!(real.counts().score_label(), "50.0%");
     }
 
     #[test]

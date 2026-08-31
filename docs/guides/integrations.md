@@ -95,6 +95,16 @@ jobs:
 Shards are deterministic per `mutant.id` — no coordination, no
 overlap.
 
+`fermut merge` requires every shard's report and refuses to guess: a
+missing shard (a mutant left with only its `shard` placeholder) or two
+inputs that disagree on the same mutant both error out instead of
+scoring a partial or ambiguous universe. Pass all N shard reports;
+re-running an identical report is a harmless idempotent merge. For the
+same reason, merging a *single* shard report on its own errors — its
+out-of-slice placeholders have no real verdict to resolve them. To
+convert one shard's report to another format, render it from the
+producing `run` instead.
+
 ## PR gate + nightly (recommended pair) { #pr-gate-nightly }
 
 The PR gate catches regressions on changed lines fast. Nightly catches

@@ -304,6 +304,18 @@ enum Cmd {
         #[arg(long, value_name = "SCORE")]
         fail_under: Option<f64>,
 
+        /// Never exit non-zero because of the mutation result — write every
+        /// report and exit 0 even with survivors. For runs that only produce a
+        /// report (a trend shard, a dashboard feed) where the mutants exist to
+        /// be recorded, not to gate. Replaces the `--fail-under 0` idiom.
+        /// Mutually exclusive with the gate flags. Note this also suppresses
+        /// the exit for a scoreless/all-errored run (the vacuous-100% guard):
+        /// the broken run is reported as N/A but still exits 0, so pair a
+        /// report-only shard with a separate gated step if you need to catch a
+        /// suite that errors under mutation.
+        #[arg(long, conflicts_with_all = ["fail_under", "fail_on_regression"])]
+        no_fail: bool,
+
         /// Skip the pre-flight check that the unmutated suite passes. fermut
         /// runs your full test suite once before mutating; a red or erroring
         /// suite makes every covered mutant look killed and inflates the
@@ -465,6 +477,16 @@ enum Cmd {
         /// stdout output format.
         #[arg(long, value_enum, default_value_t = TrendFormatCli::Human)]
         format: TrendFormatCli,
+
+        /// Fail if the history log has any malformed (corrupt, unparseable)
+        /// line instead of silently skipping it, so a `fermut trend --strict`
+        /// CI step catches a truncated history file before the trend is
+        /// trusted. Newer-schema lines an older binary can't read are warned,
+        /// not failed — nothing this binary can do about them. Does not change
+        /// the `fermut run --fail-on-regression` gate, which loads history on
+        /// its own; run this as a separate step to guard the shared file.
+        #[arg(long)]
+        strict: bool,
     },
 
     /// Emit the agent reward signal for the latest run: score, delta vs a
@@ -1219,6 +1241,7 @@ impl Cli {
                 trend_branch,
                 fail_on_regression,
                 fail_under,
+                no_fail,
                 no_verify_baseline,
                 baseline_timeout,
                 filter: f,
@@ -1332,13 +1355,20 @@ impl Cli {
                     // A zero-denominator run has no score. Say so, so a green
                     // gate is never mistaken for a genuine 100% (an all-errored
                     // run fails below; nothing-to-score with no errors passes as
-                    // a legitimate N/A).
+                    // a legitimate N/A). Under `--no-fail` the exit is suppressed
+                    // regardless, so the errored case reports N/A too — claiming
+                    // "the gate fails" would contradict the exit-0 that follows.
                     if report.is_scoreless() {
                         let errored = report.counts().errored;
-                        if errored > 0 {
+                        if errored > 0 && !no_fail {
                             eprintln!(
                                 "no mutants scored: {errored} errored, so the score is \
                                  undefined (not 100%) and the gate fails"
+                            );
+                        } else if errored > 0 {
+                            eprintln!(
+                                "no mutants scored: {errored} errored, so the score is \
+                                 undefined (not 100%) — reported N/A, exit suppressed by --no-fail"
                             );
                         } else {
                             eprintln!(
@@ -1347,7 +1377,12 @@ impl Cli {
                             );
                         }
                     }
-                    if report.should_fail(cfg.fail_under) || gate_failed {
+                    // `--no-fail`: the run exists to produce a report, not to
+                    // gate. Conflicts with the gate flags at the parser, so
+                    // `gate_failed` is always false here; the guard is explicit
+                    // so the intent survives a future flag that sets it.
+                    if gate_exits_nonzero(no_fail, report.should_fail(cfg.fail_under), gate_failed)
+                    {
                         std::process::exit(1);
                     }
                     Ok(())
@@ -1482,6 +1517,7 @@ impl Cli {
                 diff,
                 by,
                 format,
+                strict,
             } => trend(TrendOpts {
                 path,
                 history_path,
@@ -1495,6 +1531,7 @@ impl Cli {
                 diff,
                 group_by: by.map(Into::into),
                 format: format.into(),
+                strict,
             }),
             Cmd::Score {
                 path,
@@ -1697,6 +1734,16 @@ fn load_prior_excluding(path: &std::path::Path, current: &HistoryEntry) -> Vec<H
     prior
 }
 
+/// Whether `fermut run` should exit non-zero after producing its report.
+/// `--no-fail` suppresses the exit unconditionally — the run existed to
+/// produce a report, not to gate — otherwise the run fails if the mutation
+/// result is below the bar (`result_fails`) or a regression gate tripped
+/// (`gate_failed`). Extracted so the gate decision is unit-testable without a
+/// live pytest run.
+fn gate_exits_nonzero(no_fail: bool, result_fails: bool, gate_failed: bool) -> bool {
+    !no_fail && (result_fails || gate_failed)
+}
+
 /// Resolve the run-history log path the same way `build_config` does, but
 /// without requiring the full runtime `Config`. Used by `fermut clean` so
 /// it preserves the user's configured history file (which may live under
@@ -1728,4 +1775,50 @@ fn same_run(a: &HistoryEntry, b: &HistoryEntry) -> bool {
     a.timestamp == b.timestamp
         && a.git_sha == b.git_sha
         && a.mutation_score.to_bits() == b.mutation_score.to_bits()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_fail_suppresses_every_gate_exit() {
+        // Whatever the result/regression state, --no-fail exits 0.
+        for result_fails in [false, true] {
+            for gate_failed in [false, true] {
+                assert!(
+                    !gate_exits_nonzero(true, result_fails, gate_failed),
+                    "no_fail must suppress exit (result_fails={result_fails}, gate_failed={gate_failed})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn without_no_fail_a_failing_result_or_gate_exits_nonzero() {
+        assert!(!gate_exits_nonzero(false, false, false), "clean run passes");
+        assert!(
+            gate_exits_nonzero(false, true, false),
+            "survivors/threshold fail"
+        );
+        assert!(
+            gate_exits_nonzero(false, false, true),
+            "regression gate fails"
+        );
+        assert!(gate_exits_nonzero(false, true, true), "both fail");
+    }
+
+    #[test]
+    fn no_fail_and_gate_flags_are_mutually_exclusive_in_the_parser() {
+        use clap::Parser;
+        // clap rejects --no-fail alongside a gate flag, so gate_failed can never
+        // be set under --no-fail — the runtime guard is belt-and-suspenders.
+        assert!(Cli::try_parse_from(["fermut", "run", "--no-fail", "--fail-under", "50"]).is_err());
+        assert!(
+            Cli::try_parse_from(["fermut", "run", "--no-fail", "--fail-on-regression", "5"])
+                .is_err()
+        );
+        // --no-fail alone parses fine.
+        assert!(Cli::try_parse_from(["fermut", "run", "--no-fail"]).is_ok());
+    }
 }

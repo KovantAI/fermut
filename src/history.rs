@@ -133,6 +133,15 @@ impl HistoryEntry {
             baseline: false,
         }
     }
+
+    /// True when this entry scored no mutant (`killed + timed_out + survived
+    /// == 0`), so its `mutation_score` is the vacuous `100.0` floor rather than
+    /// a real measurement. Trend and regression must skip these — comparing
+    /// against a fake perfect score fabricates spurious drops and streaks.
+    /// Mirrors [`crate::report::Report::is_scoreless`] for the persisted shape.
+    pub fn is_scoreless(&self) -> bool {
+        self.killed + self.timed_out + self.survived == 0
+    }
 }
 
 /// Stable hex digest of the run-shape config — see `HistoryEntry::config_hash`.
@@ -308,10 +317,17 @@ pub fn survivor_diff<'a>(
 /// Shared by `fermut trend` (CLI table) and `fermut dashboard` (summary
 /// card) so the two surfaces never drift on what counts as a streak.
 pub fn trailing_streak(entries: &[HistoryEntry]) -> Option<(StreakDir, usize)> {
-    if entries.len() < 3 {
+    // Scoreless runs carry a vacuous 100.0 — including them invents deltas
+    // (a real 85% next to a fake 100% looks like a 15pt move). Drop them so
+    // the streak reflects only runs that actually measured a score.
+    let scores: Vec<f64> = entries
+        .iter()
+        .filter(|e| !e.is_scoreless())
+        .map(|e| e.mutation_score)
+        .collect();
+    if scores.len() < 3 {
         return None;
     }
-    let scores: Vec<f64> = entries.iter().map(|e| e.mutation_score).collect();
     let mut dir: Option<StreakDir> = None;
     let mut count = 0usize;
     for w in scores.windows(2).rev() {
@@ -446,14 +462,19 @@ fn parse_id_file(id: &str) -> Option<&str> {
 /// happens to contain — append can silently fail (read-only FS, disk
 /// full) and leave the file's tail one entry behind reality.
 pub fn regression_against(prior: &[HistoryEntry], current: &HistoryEntry) -> Option<f64> {
+    // A scoreless run has a vacuous 100.0, not a real score — neither side of
+    // the comparison may be one, or we fabricate a drop (real prev vs fake-100
+    // current) or hide one (fake-100 prev vs real current).
+    if current.is_scoreless() {
+        return None;
+    }
     let current_branch = current.git_branch.as_deref();
-    let prev = prior
-        .iter()
-        .rev()
-        .find(|e| match (e.git_branch.as_deref(), current_branch) {
+    let prev = prior.iter().rev().filter(|e| !e.is_scoreless()).find(|e| {
+        match (e.git_branch.as_deref(), current_branch) {
             (Some(a), Some(b)) => a == b,
             _ => true,
-        })?;
+        }
+    })?;
     let drop = prev.mutation_score - current.mutation_score;
     if drop > 0.0 {
         Some(drop)
@@ -1023,7 +1044,9 @@ mod tests {
             schema_version: CURRENT_SCHEMA_V,
             timestamp: "2026-06-04T12:00:00Z".into(),
             mutation_score: score,
-            killed: 0,
+            // Non-zero so the entry is a real scored run, not a scoreless
+            // vacuous-100 that trend/regression now filter out.
+            killed: 1,
             survived: 0,
             timed_out: 0,
             skipped: 0,
@@ -1134,6 +1157,48 @@ mod tests {
     fn regression_against_returns_none_when_prior_empty() {
         let current = mk(80.0, Some("main"));
         assert_eq!(regression_against(&[], &current), None);
+    }
+
+    /// A scored `mk` entry forced back to zero buckets — its `mutation_score`
+    /// is the vacuous 100.0 floor, so `is_scoreless()` is true.
+    fn mk_scoreless(branch: Option<&str>) -> HistoryEntry {
+        let mut e = mk(100.0, branch);
+        e.killed = 0;
+        assert!(e.is_scoreless());
+        e
+    }
+
+    #[test]
+    fn regression_against_ignores_scoreless_current() {
+        // Current run scored nothing (all errored/skipped) → vacuous 100.0.
+        // Comparing a real 90% prior against it would fabricate a -10pt drop.
+        let prior = vec![mk(90.0, Some("main"))];
+        let current = mk_scoreless(Some("main"));
+        assert_eq!(regression_against(&prior, &current), None);
+    }
+
+    #[test]
+    fn regression_against_skips_scoreless_prior() {
+        // The most recent prior scored nothing (vacuous 100.0). It must be
+        // skipped so the gate compares against the last real score (90→85).
+        let prior = vec![
+            mk(90.0, Some("main")),     // last real prior
+            mk_scoreless(Some("main")), // vacuous 100.0, must be skipped
+        ];
+        let current = mk(85.0, Some("main"));
+        assert_eq!(regression_against(&prior, &current), Some(5.0));
+    }
+
+    #[test]
+    fn trailing_streak_ignores_scoreless_entries() {
+        // A vacuous-100 run sitting between real scores must not invent a move.
+        let es = vec![
+            mk(50.0, None),
+            mk(60.0, None),
+            mk_scoreless(None), // vacuous 100.0 — dropped, not a +40 spike
+            mk(70.0, None),
+        ];
+        assert_eq!(trailing_streak(&es), Some((StreakDir::Up, 2)));
     }
 
     #[test]

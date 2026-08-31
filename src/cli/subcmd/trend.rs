@@ -173,15 +173,19 @@ fn resolve_scale(entries: &[HistoryEntry], scale: TrendScale) -> (f64, f64, Stri
     if scale == TrendScale::Fixed || entries.is_empty() {
         return (0.0, 100.0, String::new());
     }
+    // Scoreless runs carry the vacuous 100.0 floor — folding them into the
+    // range warps the auto-scale (a real 40-60 window stretched to 40-100).
     let lo = entries
         .iter()
+        .filter(|e| !e.is_scoreless())
         .map(|e| e.mutation_score)
         .fold(f64::INFINITY, f64::min);
     let hi = entries
         .iter()
+        .filter(|e| !e.is_scoreless())
         .map(|e| e.mutation_score)
         .fold(f64::NEG_INFINITY, f64::max);
-    if hi - lo < 1.0 {
+    if !lo.is_finite() || !hi.is_finite() || hi - lo < 1.0 {
         return (0.0, 100.0, String::new());
     }
     let label = format!("  (scale {lo:.1}-{hi:.1})");
@@ -246,11 +250,16 @@ fn print_human(
     }
     println!();
 
-    let scores = entries.iter().map(|e| e.mutation_score);
+    // Summary sparkline and first→last span read from scored runs only — a
+    // scoreless vacuous-100 would draw a phantom spike and fake the overall
+    // delta. The per-run table below still lists every run (N/A for the
+    // scoreless ones) so nothing is hidden.
+    let scored: Vec<&HistoryEntry> = entries.iter().filter(|e| !e.is_scoreless()).collect();
+    let scores = scored.iter().map(|e| e.mutation_score);
     let (lo, hi, scale_label) = resolve_scale(entries, scale);
     let sparkline = history::sparkline_scaled(scores, lo, hi);
-    let first = entries.first().map(|e| e.mutation_score).unwrap_or(0.0);
-    let last = entries.last().map(|e| e.mutation_score).unwrap_or(0.0);
+    let first = scored.first().map(|e| e.mutation_score).unwrap_or(0.0);
+    let last = scored.last().map(|e| e.mutation_score).unwrap_or(0.0);
     let overall_delta = last - first;
     println!(
         "score: {sparkline}   {:.1}% → {:.1}%  ({}{:.1} pts){}",
@@ -275,7 +284,14 @@ fn print_human(
     );
     let mut prev_score: Option<f64> = None;
     for e in entries {
-        let delta = prev_score.map(|p| e.mutation_score - p);
+        // Scoreless runs have no real score: show N/A, no delta, and don't let
+        // the vacuous 100.0 become the baseline for the next row's delta.
+        let scoreless = e.is_scoreless();
+        let delta = if scoreless {
+            None
+        } else {
+            prev_score.map(|p| e.mutation_score - p)
+        };
         let delta_s = match delta {
             Some(d) if d.abs() < 0.05 => "  0.0".to_string(),
             Some(d) if d >= 0.0 => format!("+{d:.1}"),
@@ -299,17 +315,25 @@ fn print_human(
         } else {
             git
         };
+        let score_s = if scoreless {
+            format!("{:>7}", "N/A")
+        } else {
+            format!("{:>6.1}%", e.mutation_score)
+        };
         println!(
-            "  {:<20} {:>6.1}% {:>5} {:>5} {:>5} {:>10} {}",
+            "  {:<20} {} {:>5} {:>5} {:>5} {:>10} {}",
             truncate(&e.timestamp, 19),
-            e.mutation_score,
+            score_s,
             e.killed,
             e.survived,
             e.timed_out,
             delta_s,
             git,
         );
-        prev_score = Some(e.mutation_score);
+        // Only real scores seed the next delta — a vacuous 100.0 must not.
+        if !scoreless {
+            prev_score = Some(e.mutation_score);
+        }
     }
 
     print_survivor_diff(entries, diff);
@@ -432,7 +456,9 @@ mod tests {
             schema_version: crate::history::CURRENT_SCHEMA_V,
             timestamp: ts.into(),
             mutation_score: score,
-            killed: 0,
+            // Non-zero so the entry is a real scored run, not a scoreless
+            // vacuous-100 that trend/regression now filter out.
+            killed: 1,
             survived: 0,
             timed_out: 0,
             skipped: 0,

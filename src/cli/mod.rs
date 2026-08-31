@@ -308,7 +308,11 @@ enum Cmd {
         /// report and exit 0 even with survivors. For runs that only produce a
         /// report (a trend shard, a dashboard feed) where the mutants exist to
         /// be recorded, not to gate. Replaces the `--fail-under 0` idiom.
-        /// Mutually exclusive with the gate flags.
+        /// Mutually exclusive with the gate flags. Note this also suppresses
+        /// the exit for a scoreless/all-errored run (the vacuous-100% guard):
+        /// the broken run is reported as N/A but still exits 0, so pair a
+        /// report-only shard with a separate gated step if you need to catch a
+        /// suite that errors under mutation.
         #[arg(long, conflicts_with_all = ["fail_under", "fail_on_regression"])]
         no_fail: bool,
 
@@ -1346,6 +1350,31 @@ impl Cli {
                                     gate_failed = true;
                                 }
                             }
+                        }
+                    }
+                    // A zero-denominator run has no score. Say so, so a green
+                    // gate is never mistaken for a genuine 100% (an all-errored
+                    // run fails below; nothing-to-score with no errors passes as
+                    // a legitimate N/A). Under `--no-fail` the exit is suppressed
+                    // regardless, so the errored case reports N/A too — claiming
+                    // "the gate fails" would contradict the exit-0 that follows.
+                    if report.is_scoreless() {
+                        let errored = report.counts().errored;
+                        if errored > 0 && !no_fail {
+                            eprintln!(
+                                "no mutants scored: {errored} errored, so the score is \
+                                 undefined (not 100%) and the gate fails"
+                            );
+                        } else if errored > 0 {
+                            eprintln!(
+                                "no mutants scored: {errored} errored, so the score is \
+                                 undefined (not 100%) — reported N/A, exit suppressed by --no-fail"
+                            );
+                        } else {
+                            eprintln!(
+                                "no mutants scored: nothing to mutate in scope — \
+                                 mutation score N/A (not 100%)"
+                            );
                         }
                     }
                     // `--no-fail`: the run exists to produce a report, not to

@@ -17,7 +17,9 @@ the file by hand and re-run pytest, the test fails.
 ```sh
 fermut clean                                              # evict cache
 # pin Hypothesis seed in fermut.toml
-pytest --cov=src --cov-context=test                       # regenerate coverage
-coverage json -o coverage.json --show-contexts
-fermut run src/ --tests tests/
+fermut coverage                                           # rebuild .coverage
+fermut run src/ --tests tests/ --coverage .coverage
 ```
+
+(Or regenerate the JSON export manually: `pytest --cov=src
+--cov-context=test && coverage json -o coverage.json --show-contexts`.)

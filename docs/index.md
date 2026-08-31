@@ -82,10 +82,15 @@ profile based on project size:
 ```sh
 cd path/to/your/project
 fermut init
-# generate coverage first — fermut uses it to skip irrelevant tests per mutant
-pytest --cov=src --cov-context=test && coverage json -o coverage.json --show-contexts
-fermut run src/ --tests tests/ --coverage coverage.json
+# build coverage first — fermut uses it to skip irrelevant tests per mutant
+fermut coverage
+fermut run src/ --tests tests/ --coverage .coverage
 ```
+
+`fermut coverage` writes a `.coverage` SQLite database and refreshes it
+incrementally as your tests change — no `coverage json` export step.
+(Or, manually: `pytest --cov=src --cov-context=test && coverage json -o
+coverage.json --show-contexts`, then `--coverage coverage.json`.)
 
 Expected output — a line per survivor/timeout, then a one-line summary:
 

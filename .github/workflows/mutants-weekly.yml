@@ -8,7 +8,10 @@ name: Mutants (weekly)
 # of green PR checks says otherwise.
 #
 # ~2200 mutants at a measured median of 15s is ~9.4 CPU-hours — past GitHub's
-# 6h job limit as one job, comfortably inside it as 8.
+# 6h job limit as one job, comfortably inside it as 8. That is ~11 job-hours of
+# billed runner time per run, so the scheduled trigger checks first whether
+# anything that could move the score has changed since the last run, and most
+# weeks does nothing.
 
 on:
   schedule:
@@ -26,12 +29,89 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Most weeks nothing here can move the score: a docs edit, a dependabot PR
+  # that never landed, a workflow tweak. Spending ~11 job-hours to re-derive
+  # last week's number is the easiest waste in this repo to avoid, so compare
+  # against the commit the last successful run saw and stop if the paths that
+  # matter are byte-identical.
+  #
+  # A manual dispatch always runs — asking for it is the point.
+  changed:
+    name: anything to test?
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # To read the previous run's head SHA.
+      actions: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # The comparison reaches back to an arbitrary earlier commit.
+          fetch-depth: 0
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCED: ${{ github.event_name == 'workflow_dispatch' }}
+          BRANCH: ${{ github.ref_name }}
+          COMMIT_URL: ${{ github.server_url }}/${{ github.repository }}/commit
+        run: |
+          decide() { # decide RUN REASON
+            echo "run=$1" >> "$GITHUB_OUTPUT"
+            echo "$2"
+            echo "### cargo-mutants — whole crate" >> "$GITHUB_STEP_SUMMARY"
+            echo >> "$GITHUB_STEP_SUMMARY"
+            echo "$2" >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          if [ "$FORCED" = "true" ]; then
+            decide true "Manual dispatch — running the full crate."
+            exit 0
+          fi
+
+          last=$(gh run list --workflow mutants-weekly.yml --branch "$BRANCH" \
+            --status success --limit 1 --json headSha --jq '.[0].headSha // empty')
+          if [ -z "$last" ]; then
+            decide true "No previous successful run to compare against — running."
+            exit 0
+          fi
+          # Force-pushes and history rewrites can strand the recorded SHA. An
+          # unresolvable baseline means "don't know", which resolves to running,
+          # never to a silent skip.
+          if ! git cat-file -e "$last^{commit}" 2>/dev/null; then
+            decide true "Last run's commit \`$last\` is no longer reachable — running."
+            exit 0
+          fi
+
+          # Everything that can change the score or the verdict. Not a
+          # code-only list: the config decides which mutants exist, the floor
+          # decides whether the number passes, and the scripts decide how it is
+          # computed.
+          paths=(
+            src
+            Cargo.toml
+            Cargo.lock
+            .cargo/mutants.toml
+            .github/mutants-floor.txt
+            .github/scripts
+            .github/workflows/mutants-weekly.yml
+          )
+          if git diff --quiet "$last" HEAD -- "${paths[@]}"; then
+            decide false "No change to src, dependencies, mutants config, or the floor since [\`${last:0:7}\`]($COMMIT_URL/$last) — skipping. Dispatch this workflow manually to force a run."
+          else
+            changed=$(git diff --name-only "$last" HEAD -- "${paths[@]}" | wc -l | tr -d ' ')
+            decide true "$changed relevant file(s) changed since \`${last:0:7}\` — running the full crate."
+          fi
+
   # Shards run with --baseline=skip, which means none of them checks that the
   # unmutated tree passes. Without this job a broken `main` would report every
   # mutant as caught — a 100% score that means the suite is dead. Check once,
   # here, and let the shards skip it eight times.
   baseline:
     name: baseline (unmutated tree)
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -44,7 +124,8 @@ jobs:
 
   shard:
     name: shard ${{ matrix.shard }}/8
-    needs: baseline
+    needs: [changed, baseline]
+    if: needs.changed.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -83,8 +164,8 @@ jobs:
 
   score:
     name: score
-    needs: shard
-    if: always()
+    needs: [changed, shard]
+    if: always() && needs.changed.outputs.run == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read

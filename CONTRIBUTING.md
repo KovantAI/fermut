@@ -185,6 +185,12 @@ enforce it:
 | `Mutants` | every PR | only the lines the PR changed | the diff has **≥10 scored mutants** and scores below the floor |
 | `Mutants (weekly)` | Sunday 03:00 UTC, or on demand | the whole crate, in 8 shards | the crate scores below the floor — and it files an issue |
 
+The weekly run skips itself when nothing that could move the score has changed
+since the last run — `src/`, `Cargo.toml`, `Cargo.lock`, `.cargo/mutants.toml`,
+the floor, and the scoring scripts. Most weeks that is the case, and a full run
+is ~11 job-hours of billed runner time to re-derive last week's number. Dispatch
+it manually (Actions → Mutants (weekly) → Run workflow) to force one.
+
 **The weekly run is the real signal.** A PR-sized diff is a small denominator:
 three mutants can only score 0, 33, 67 or 100%, which measures the shape of the
 diff more than the quality of the tests. That is why the PR check ignores its

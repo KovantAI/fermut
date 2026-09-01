@@ -170,9 +170,22 @@ Results land in `mutants.out/`: `caught.txt`, `missed.txt`, `timeout.txt`,
 already excluded on those grounds.
 
 The `Mutants` CI workflow runs `--in-diff` on every PR and posts the outcome to
-the job summary. It is **advisory** — not a required check, and it does not run
-on `main`. Adding an assertion because a mutant survived is a judgement call for
-the reviewer, not a merge gate.
+the job summary, including a mutation score for the diff — `caught / (caught +
+missed)`, with timeouts and unviable mutants left out because neither answers
+the question the score is asking.
+
+It is **advisory** — not a required check, and it does not run on `main`.
+Adding an assertion because a mutant survived is a judgement call for the
+reviewer, not a merge gate.
+
+**There is no minimum score, deliberately.** `--in-diff` scopes the run to the
+lines a PR changed, so the denominator is whatever that diff happens to
+contain: a three-mutant diff can only score 0, 33, 67 or 100%, and a threshold
+over that measures diff shape more than test quality. It would also fail PRs
+whose one survivor belongs in category 2 or 3 above, whose only remedy is an
+assertion written to satisfy CI. Read the number, and if it looks wrong, look
+at `missed.txt` rather than at the percentage. A crate-wide baseline is the
+thing that would make a floor meaningful, and we do not have one yet.
 
 ## Style
 

@@ -56,10 +56,16 @@ jobs:
       # paths, and a git configured with `diff.mnemonicPrefix` or `diff.noprefix`
       # emits something else, whereupon `--in-diff` matches nothing and the run
       # reports a clean "No mutants to filter" rather than failing.
+      #
+      # Context values reach the shell through the environment, never through
+      # `${{ }}` interpolation into the script body: an expanded expression is
+      # spliced in before the shell parses the line, so anything an attacker can
+      # put in the context becomes code.
       - name: Diff against the PR base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          git diff --src-prefix=a/ --dst-prefix=b/ \
-            "${{ github.event.pull_request.base.sha }}" > /tmp/pr.diff
+          git diff --src-prefix=a/ --dst-prefix=b/ "$BASE_SHA" > /tmp/pr.diff
           wc -l < /tmp/pr.diff | xargs echo "diff lines:"
 
       # Cheap (no build) — makes a zero-mutant run visibly zero-mutant instead
@@ -84,15 +90,21 @@ jobs:
 
       - name: Summarise
         if: always()
+        env:
+          MUTANT_COUNT: ${{ steps.count.outputs.count }}
         run: |
           out=mutants.out
-          if [ "${{ steps.count.outputs.count }}" = "0" ]; then
+          if [ "$MUTANT_COUNT" = "0" ]; then
             echo "### cargo-mutants (PR diff)" >> "$GITHUB_STEP_SUMMARY"
             echo >> "$GITHUB_STEP_SUMMARY"
             echo "No mutable lines in this diff — nothing to test." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           [ -d "$out" ] || { echo "No mutants.out — the run did not get that far." >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          # An outcome file is absent when nothing landed in that bucket.
+          count_of() { [ -f "$out/$1.txt" ] && wc -l < "$out/$1.txt" | tr -d ' ' || echo 0; }
+          caught=$(count_of caught)
+          missed=$(count_of missed)
           {
             echo "### cargo-mutants (PR diff)"
             echo
@@ -100,9 +112,21 @@ jobs:
             echo "|---|---|"
             for f in caught missed timeout unviable; do
               if [ -f "$out/$f.txt" ]; then
-                echo "| $f | $(wc -l < "$out/$f.txt" | tr -d ' ') |"
+                echo "| $f | $(count_of "$f") |"
               fi
             done
+            echo
+            # Reported, not enforced. Over a PR-sized diff the denominator is
+            # small enough that the number swings wildly — a three-mutant diff
+            # scores 0, 33, 67 or 100 — so it is a reading, not a threshold.
+            # Timeouts and unviable mutants are excluded: neither says anything
+            # about whether an assertion is missing.
+            scored=$((caught + missed))
+            if [ "$scored" -gt 0 ]; then
+              echo "**Mutation score: $((caught * 100 / scored))%** ($caught caught / $scored scored)"
+            else
+              echo "**Mutation score: n/a** — no mutant reached a caught/missed verdict."
+            fi
             if [ -s "$out/missed.txt" ]; then
               echo
               echo "<details><summary>Surviving mutants</summary>"

@@ -33,3 +33,16 @@ exclude_globs = [
     # Outbound HTTP to the LLM provider. Not exercised offline.
     "src/llm/client.rs",
 ]
+
+# Individual mutants nothing can kill — an equivalent mutant, or a line whose
+# only observable effect is a log message we don't assert on. The regex matches
+# the full mutant name: file, impl/trait, function, and the replacement.
+#
+# This is the pressure valve for the score gates. Excluding here removes the
+# mutant from the denominator everywhere — the weekly whole-crate score and the
+# per-PR check both stop counting it — which is the point: a floor is only
+# honest if the mutants under it are ones a test could actually kill.
+#
+# Every entry needs a comment saying why it can't be killed. "This PR would go
+# green faster" is not a reason; the `mutants-advisory` PR label is for that.
+exclude_re = []

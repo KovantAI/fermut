@@ -1,0 +1,13 @@
+# Minimum mutation score, as a whole-number percentage of caught / (caught + missed).
+#
+# Enforced in two places, both against this one number:
+#   - Mutants (weekly)  — the whole crate on `main`. This is the real signal.
+#   - Mutants (PR diff) — only when the diff has enough mutants to mean anything.
+#
+# Raise it when the weekly run has cleared the new value twice in a row. Never
+# lower it to make a red build green — a drop is the signal, not the problem.
+#
+# 0 means UNSEEDED: both gates are inert. Run the weekly workflow
+# (Actions → Mutants (weekly) → Run workflow), then commit the measured score
+# minus a few points of headroom.
+0

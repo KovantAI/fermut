@@ -6,9 +6,12 @@ name: Mutants
 # mutants inside the PR's own diff (`--in-diff`). A PR that touches nothing
 # mutable finishes in the time it takes to build the baseline.
 #
-# Advisory, not a gate: it does not run on `main` and is not a required check.
-# Surviving mutants are a prompt to add an assertion, and sometimes the honest
-# answer is "that line does not need one".
+# The check fails only when the diff has enough mutants for a percentage to
+# mean something AND that percentage falls under the floor in
+# `.github/mutants-floor.txt`. Everything else — a survivor or two on a small
+# diff, a mutant nothing can kill — is reported and left alone. The weekly
+# whole-crate run (mutants-weekly.yml) is the signal that actually matters;
+# this one only stops a PR from walking the number down.
 
 on:
   pull_request:
@@ -79,65 +82,116 @@ jobs:
           echo "mutants in diff: $n"
 
       # `--in-diff` restricts mutants to the lines this PR added or changed.
-      # continue-on-error keeps the job advisory: surviving mutants are reported
-      # in the summary below rather than failing the check. cargo-mutants uses
-      # distinct non-zero exit codes per outcome; we deliberately don't branch
-      # on them, so a tool upgrade can't silently turn this into a gate.
+      #
+      # continue-on-error because cargo-mutants exits non-zero as soon as one
+      # mutant survives, and "one survivor" is not the bar. Whether this job
+      # passes is decided by the floor comparison at the end, over numbers we
+      # compute ourselves — so a tool upgrade that changes an exit code cannot
+      # change what the check means.
       - name: Run cargo mutants
         if: steps.count.outputs.count != '0'
         continue-on-error: true
         run: cargo mutants --in-diff /tmp/pr.diff
 
+      - name: Score the diff
+        id: score
+        if: always()
+        run: |
+          # The run above is skipped for a zero-mutant diff, and can fail before
+          # writing results. An empty directory scores as "no verdict", which is
+          # exactly what it is — the steps below branch on that rather than on
+          # whether a file happens to exist.
+          mkdir -p mutants.out
+          .github/scripts/mutants-score.sh mutants.out | tee -a "$GITHUB_OUTPUT"
+
       - name: Summarise
         if: always()
         env:
           MUTANT_COUNT: ${{ steps.count.outputs.count }}
+          CAUGHT: ${{ steps.score.outputs.caught }}
+          MISSED: ${{ steps.score.outputs.missed }}
+          SCORED: ${{ steps.score.outputs.scored }}
+          SCORE: ${{ steps.score.outputs.score }}
+          FLOOR: ${{ steps.score.outputs.floor }}
         run: |
           out=mutants.out
-          if [ "$MUTANT_COUNT" = "0" ]; then
-            echo "### cargo-mutants (PR diff)" >> "$GITHUB_STEP_SUMMARY"
-            echo >> "$GITHUB_STEP_SUMMARY"
-            echo "No mutable lines in this diff — nothing to test." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          [ -d "$out" ] || { echo "No mutants.out — the run did not get that far." >> "$GITHUB_STEP_SUMMARY"; exit 0; }
-          # An outcome file is absent when nothing landed in that bucket.
-          count_of() { [ -f "$out/$1.txt" ] && wc -l < "$out/$1.txt" | tr -d ' ' || echo 0; }
-          caught=$(count_of caught)
-          missed=$(count_of missed)
           {
             echo "### cargo-mutants (PR diff)"
             echo
-            echo "| outcome | count |"
-            echo "|---|---|"
-            for f in caught missed timeout unviable; do
-              if [ -f "$out/$f.txt" ]; then
-                echo "| $f | $(count_of "$f") |"
-              fi
-            done
-            echo
-            # Reported, not enforced. Over a PR-sized diff the denominator is
-            # small enough that the number swings wildly — a three-mutant diff
-            # scores 0, 33, 67 or 100 — so it is a reading, not a threshold.
-            # Timeouts and unviable mutants are excluded: neither says anything
-            # about whether an assertion is missing.
-            scored=$((caught + missed))
-            if [ "$scored" -gt 0 ]; then
-              echo "**Mutation score: $((caught * 100 / scored))%** ($caught caught / $scored scored)"
+            if [ "$MUTANT_COUNT" = "0" ]; then
+              echo "No mutable lines in this diff — nothing to test."
+            elif [ "$SCORED" -eq 0 ]; then
+              echo "No mutant reached a caught/missed verdict. See the artifact."
             else
-              echo "**Mutation score: n/a** — no mutant reached a caught/missed verdict."
-            fi
-            if [ -s "$out/missed.txt" ]; then
-              echo
-              echo "<details><summary>Surviving mutants</summary>"
-              echo
-              echo '```'
-              cat "$out/missed.txt"
-              echo '```'
-              echo
-              echo "</details>"
+              echo "| | |"
+              echo "|---|---|"
+              echo "| score | **${SCORE}%** |"
+              [ "$FLOOR" -gt 0 ] && echo "| floor | ${FLOOR}% |"
+              echo "| caught | ${CAUGHT} |"
+              echo "| missed | ${MISSED} |"
+              for f in timeout unviable; do
+                if [ -s "$out/$f.txt" ]; then
+                  echo "| $f (not scored) | $(wc -l < "$out/$f.txt" | tr -d ' ') |"
+                fi
+              done
+              if [ -s "$out/missed.txt" ]; then
+                echo
+                echo "<details><summary>Surviving mutants</summary>"
+                echo
+                echo '```'
+                cat "$out/missed.txt"
+                echo '```'
+                echo
+                echo "</details>"
+              fi
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # The gate, and the three ways past it.
+      #
+      # MIN_SCORED — under this many scored mutants the percentage is
+      # arithmetic noise (a three-mutant diff can only score 0, 33, 67 or 100),
+      # so the check reports and passes. Small diffs are covered by the weekly
+      # run instead, which sees them again as part of the whole crate.
+      #
+      # A mutant that genuinely cannot be killed belongs in `exclude_re` or
+      # `exclude_globs` in `.cargo/mutants.toml`, with a comment saying why.
+      # That is the right fix: it excuses the mutant for the weekly baseline
+      # too, so the crate score stops counting something no test could ever
+      # reach.
+      #
+      # The `mutants-advisory` label is the last resort, for the PR where that
+      # judgement needs a human and shouldn't hold up the merge. It downgrades
+      # this step to a warning. GitHub reads labels at trigger time, so re-run
+      # the job after adding one.
+      - name: Gate on the floor
+        if: always()
+        env:
+          MIN_SCORED: 10
+          SCORED: ${{ steps.score.outputs.scored }}
+          SCORE: ${{ steps.score.outputs.score }}
+          FLOOR: ${{ steps.score.outputs.floor }}
+          ADVISORY: ${{ contains(github.event.pull_request.labels.*.name, 'mutants-advisory') }}
+        run: |
+          if [ "$FLOOR" -eq 0 ]; then
+            echo "::notice::no floor seeded in .github/mutants-floor.txt — reporting only"
+            exit 0
+          fi
+          if [ "$SCORED" -lt "$MIN_SCORED" ]; then
+            echo "::notice::${SCORED} scored mutants is under the ${MIN_SCORED} needed for the percentage to mean anything — reporting only"
+            exit 0
+          fi
+          if [ "$SCORE" -ge "$FLOOR" ]; then
+            echo "score ${SCORE}% >= floor ${FLOOR}%"
+            exit 0
+          fi
+          msg="mutation score ${SCORE}% over ${SCORED} scored mutants is below the floor of ${FLOOR}% — see mutants.out/missed.txt in the artifact"
+          if [ "$ADVISORY" = "true" ]; then
+            echo "::warning::${msg} (mutants-advisory label set, not failing)"
+            exit 0
+          fi
+          echo "::error::${msg}"
+          exit 1
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()

@@ -169,23 +169,58 @@ Results land in `mutants.out/`: `caught.txt`, `missed.txt`, `timeout.txt`,
 `src/main.rs`, `src/cli/mod.rs`, `src/watch.rs`, and `src/llm/client.rs` are
 already excluded on those grounds.
 
-The `Mutants` CI workflow runs `--in-diff` on every PR and posts the outcome to
-the job summary, including a mutation score for the diff — `caught / (caught +
-missed)`, with timeouts and unviable mutants left out because neither answers
-the question the score is asking.
+### The score and the floor
 
-It is **advisory** — not a required check, and it does not run on `main`.
-Adding an assertion because a mutant survived is a judgement call for the
-reviewer, not a merge gate.
+The **mutation score** is `caught / (caught + missed)`, as a percentage.
+Timeouts and unviable mutants are outside the denominator: an unviable mutant
+never compiled and a timeout never reached a verdict, so neither answers "is
+this line asserted on?". Leaving them out is also the forgiving direction —
+they can't drag the score down.
 
-**There is no minimum score, deliberately.** `--in-diff` scopes the run to the
-lines a PR changed, so the denominator is whatever that diff happens to
-contain: a three-mutant diff can only score 0, 33, 67 or 100%, and a threshold
-over that measures diff shape more than test quality. It would also fail PRs
-whose one survivor belongs in category 2 or 3 above, whose only remedy is an
-assertion written to satisfy CI. Read the number, and if it looks wrong, look
-at `missed.txt` rather than at the percentage. A crate-wide baseline is the
-thing that would make a floor meaningful, and we do not have one yet.
+The **floor** is a single number in `.github/mutants-floor.txt`. Two workflows
+enforce it:
+
+| Workflow | Runs | Scope | Fails when |
+|---|---|---|---|
+| `Mutants` | every PR | only the lines the PR changed | the diff has **≥10 scored mutants** and scores below the floor |
+| `Mutants (weekly)` | Sunday 03:00 UTC, or on demand | the whole crate, in 8 shards | the crate scores below the floor — and it files an issue |
+
+**The weekly run is the real signal.** A PR-sized diff is a small denominator:
+three mutants can only score 0, 33, 67 or 100%, which measures the shape of the
+diff more than the quality of the tests. That is why the PR check ignores its
+own number below ten scored mutants and leans on the weekly run to catch those
+lines later, as part of the crate. What the PR gate is for is narrower: stopping
+a large, thinly-tested change from walking the crate score down before anyone
+sees it.
+
+### When the PR check goes red
+
+In descending order of how much you should want each one:
+
+1. **Add the assertion.** Almost always the right answer, and the reason the
+   tool is here.
+2. **Exclude the mutant** — `exclude_re` (one mutant) or `exclude_globs` (a
+   whole file) in `.cargo/mutants.toml`, with a comment saying why it can't be
+   killed. This is the honest fix for an equivalent mutant: it drops out of the
+   weekly denominator too, so the crate score stops counting something no test
+   could reach.
+3. **Label the PR `mutants-advisory`.** Downgrades the check to a warning for
+   that PR. For the case where the judgement needs a human and shouldn't hold up
+   the merge. GitHub reads labels when the run is triggered, so re-run the job
+   after adding it.
+
+What is *not* on the list is an assertion written to make the number go up. If
+the only way to kill a mutant is a test that asserts on nothing anyone cares
+about, that's option 2.
+
+### Moving the floor
+
+Seed it from a weekly run: take the measured score, subtract a few points of
+headroom, commit that. `0` means unseeded and both gates are inert.
+
+Raise it when the weekly run has cleared the higher value twice running. Lower
+it only as a deliberate, reviewed decision in its own PR — never as the fix for
+a red build. A drop is the thing the floor exists to show you.
 
 ## Style
 

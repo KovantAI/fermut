@@ -331,6 +331,17 @@ enum Cmd {
         #[arg(long, value_name = "SECS")]
         baseline_timeout: Option<u64>,
 
+        /// Wall-clock ceiling (seconds) on the per-mutant testing phase. When
+        /// set, mutants are evaluated highest-value first (covered mutants
+        /// before uncovered) and, once the deadline passes, every mutant not
+        /// yet started is recorded as `skipped` (filter `time-budget`) instead
+        /// of run; mutants already in flight finish. Gives a PR gate a
+        /// predictable ceiling — a time cap beats a mutant cap for CI trust.
+        /// Bounds only the testing phase: baseline verification, generation,
+        /// and the ty pre-filter are separate fixed costs it does not cover.
+        #[arg(long, value_name = "SECS")]
+        max_time: Option<u64>,
+
         #[command(flatten)]
         filter: FilterArgs,
     },
@@ -1263,6 +1274,7 @@ impl Cli {
                 no_fail,
                 no_verify_baseline,
                 baseline_timeout,
+                max_time,
                 filter: f,
             } => {
                 let cfg = build_config(
@@ -1289,6 +1301,7 @@ impl Cli {
                     fail_under,
                     no_verify_baseline,
                     baseline_timeout,
+                    max_time,
                     f,
                 )?;
                 let want_annotations =
@@ -1726,6 +1739,7 @@ impl Cli {
                     None,
                     None,
                     true,
+                    None,
                     None,
                     f,
                 )?;

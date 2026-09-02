@@ -29,7 +29,7 @@ exposes the same JSON shapes the CLI subcommands emit.
 | Tool                     | Mirrors                              | Arguments                                                        |
 |--------------------------|--------------------------------------|------------------------------------------------------------------|
 | `fermut_doctor`          | [`doctor`](doctor.md)                | `path?`                                                          |
-| `fermut_run`             | [`run`](run.md)                      | `path?`, `tests?`, `coverage?`, `since?`, `diff_only?`, `jobs?`, `timeout?`, `python?`, `report_path?` |
+| `fermut_run`             | [`run`](run.md)                      | `path?`, `tests?`, `coverage?`, `since?`, `diff_only?`, `jobs?`, `timeout?`, `max_time?`, `python?`, `report_path?` |
 | `fermut_next`            | [`next`](next.md)                    | `report` (required), `limit?`, `max_tokens?`                     |
 | `fermut_explain`         | [`explain`](explain.md)              | `report` (required), `target` (required), `context?`, `tests?`, `coverage?` |
 | `fermut_score`           | [`score`](score.md)                  | `path?`, `baseline?`, `branch?`                                  |

@@ -166,6 +166,7 @@ fn tool_definitions() -> Value {
                     "diff_only": {"type": "string", "description": "Restrict mutants to lines changed vs this base ref."},
                     "jobs": {"type": "integer", "description": "Parallel worker count. Defaults to logical CPU count."},
                     "timeout": {"type": "integer", "description": "Per-mutant pytest timeout in seconds."},
+                    "max_time": {"type": "integer", "description": "Wall-clock ceiling (seconds) on the testing phase. Highest-value mutants (covered first) run before the deadline; the rest are recorded skipped/`time-budget` and excluded from the score. Bounds testing only, not baseline/generation/ty. Use for a predictable inner-loop latency cap on large suites."},
                     "python": {"type": "string", "description": "Python interpreter path or virtualenv dir to run pytest with (`<python> -m pytest`); avoids relying on PATH. Auto-discovers a venv when omitted."},
                     "report_path": {"type": "string", "description": "Where to write the JSON report. Defaults to <project>/.fermut/last.json."}
                 }
@@ -470,6 +471,7 @@ fn tool_run(args: &Value) -> Result<Value> {
     let diff_only = str_arg(args, "diff_only").map(str::to_string);
     let jobs = args.get("jobs").and_then(Value::as_u64).map(|n| n as usize);
     let timeout = args.get("timeout").and_then(Value::as_u64);
+    let max_time = args.get("max_time").and_then(Value::as_u64);
     let python = str_arg(args, "python").map(PathBuf::from);
 
     let filter = super::super::FilterArgs {
@@ -510,6 +512,7 @@ fn tool_run(args: &Value) -> Result<Value> {
         None,
         false,
         None,
+        max_time,
         filter,
     )?;
 
@@ -571,6 +574,22 @@ mod tests {
         ] {
             assert!(names.contains(&expected), "missing tool {expected}");
         }
+    }
+
+    #[test]
+    fn fermut_run_advertises_max_time() {
+        // The budget flag must be reachable over MCP, not just the CLI.
+        let run = tool_definitions()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "fermut_run")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            run["inputSchema"]["properties"]["max_time"]["type"], "integer",
+            "fermut_run must expose an integer max_time"
+        );
     }
 
     #[test]

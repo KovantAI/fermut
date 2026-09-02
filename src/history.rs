@@ -876,6 +876,7 @@ mod tests {
             exclude: Vec::new(),
             verify_baseline: false,
             baseline_timeout_secs: 300,
+            max_time_secs: None,
         }
     }
 

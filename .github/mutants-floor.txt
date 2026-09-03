@@ -7,7 +7,10 @@
 # Raise it when the weekly run has cleared the new value twice in a row. Never
 # lower it to make a red build green — a drop is the signal, not the problem.
 #
-# 0 means UNSEEDED: both gates are inert. Run the weekly workflow
-# (Actions → Mutants (weekly) → Run workflow), then commit the measured score
-# minus a few points of headroom.
-0
+# Seeded deliberately low. Measured locally at 63% (822 caught / 1285 scored)
+# over 1407 of 2192 mutants — 64% of the crate, in two partial runs. The
+# untested remainder is almost all `src/cli/subcmd/*`, which scored worse than
+# the rest, so the true figure is likely a few points under 63%. 50% is the
+# floor that number clears with room to spare; the first full weekly run
+# replaces the estimate with a measurement.
+50

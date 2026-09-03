@@ -19,7 +19,7 @@ use ruff_text_size::{Ranged, TextRange, TextSize};
 use super::ignore::{collect_from_tokens, IgnoreMap};
 use super::operators::{
     Operator, ARITH_SWAPS, AUG_ASSIGN_SWAPS, BOOL_SWAPS, BOUNDARY_SWAPS, COMPARE_SWAPS,
-    CONSTANT_SWAPS,
+    CONSTANT_SWAPS, CONTAINER_TYPE_SWAPS,
 };
 use super::Mutant;
 
@@ -236,12 +236,150 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// Range covering a leading `async` keyword plus the whitespace up to the
+    /// following keyword (`for` / `with`), so replacing it with `""` turns an
+    /// `async for` / `async with` into its sync form. `None` when the statement
+    /// doesn't actually start with `async` (defensive — `is_async` should have
+    /// gated the call). The statement range starts at the `async` token.
+    fn async_kw_range(&self, stmt_range: TextRange) -> Option<TextRange> {
+        let s: usize = stmt_range.start().into();
+        if !self.source[s..].starts_with("async") {
+            return None;
+        }
+        let bytes = self.source.as_bytes();
+        let mut e = s + "async".len();
+        while e < bytes.len() && bytes[e].is_ascii_whitespace() {
+            e += 1;
+        }
+        Some(TextRange::new((s as u32).into(), (e as u32).into()))
+    }
+
+    fn handle_match(&mut self, m: &ast::StmtMatch) {
+        // Negate each `case ... if <guard>` guard. A guard decides whether the
+        // arm fires; wrapping it in `not (...)` flips which case handles the
+        // subject — observable whenever a test depends on the branch taken.
+        for case in &m.cases {
+            if let Some(guard) = &case.guard {
+                let r = guard.range();
+                let repl = format!("not ({})", &self.source[r]);
+                self.push(Operator::MatchGuardNegate, r, &repl);
+            }
+        }
+    }
+
+    fn handle_raise(&mut self, r: &ast::StmtRaise) {
+        // `raise X from <cause>` → `raise X`: drop the explicit exception
+        // chaining. Catches tests that assert on the exception type but never
+        // on `__cause__`. Covers `from None` too (suppressed chaining).
+        if let (Some(exc), Some(cause)) = (&r.exc, &r.cause) {
+            let range = TextRange::new(exc.range().end(), cause.range().end());
+            self.push(Operator::RaiseFromDrop, range, "");
+        }
+    }
+
     fn handle_for(&mut self, f: &ast::StmtFor) {
         let r = f.iter.range();
         self.push(Operator::ZeroIterationForLoop, r, "[]");
         let orig = &self.source[r];
         let one = format!("[next(iter({}))]", orig);
         self.push(Operator::OneIterationForLoop, r, &one);
+    }
+
+    /// Emit type-annotation mutations over every annotation attached to a
+    /// function (each parameter + the return). Annotation exprs are only
+    /// visited here, never via the generic expr pass, so `int`/`list` inside an
+    /// annotation is mutated while a runtime `int(x)` / `list(x)` call is not.
+    fn handle_param_annotations(&mut self, params: &ast::Parameters, returns: Option<&Expr>) {
+        for p in params
+            .posonlyargs
+            .iter()
+            .chain(params.args.iter())
+            .chain(params.kwonlyargs.iter())
+        {
+            if let Some(a) = &p.parameter.annotation {
+                self.annotate(a);
+            }
+        }
+        if let Some(p) = &params.vararg {
+            if let Some(a) = &p.annotation {
+                self.annotate(a);
+            }
+        }
+        if let Some(p) = &params.kwarg {
+            if let Some(a) = &p.annotation {
+                self.annotate(a);
+            }
+        }
+        if let Some(r) = returns {
+            self.annotate(r);
+        }
+    }
+
+    /// Recurse a type-annotation expression, emitting the three experimental
+    /// type-annotation operators at every level:
+    /// - `NumericTypeSwap`: `int` ↔ `float` (bare name).
+    /// - `ContainerTypeSwap`: builtin container name swap (`list` → `tuple`, …),
+    ///   whether bare (`x: list`) or subscripted (`x: list[int]`).
+    /// - `OptionalTypeDrop`: `Optional[T]` → `T` and `T | None` → `T`.
+    ///
+    /// Recurses into subscript slices and `|` unions so nested annotations
+    /// (`dict[str, Optional[int]]`) are covered at each layer.
+    fn annotate(&mut self, ann: &Expr) {
+        match ann {
+            Expr::Name(_) => {
+                let r = ann.range();
+                let lex = &self.source[r];
+                match lex {
+                    "int" => self.push(Operator::NumericTypeSwap, r, "float"),
+                    "float" => self.push(Operator::NumericTypeSwap, r, "int"),
+                    _ => {}
+                }
+                for (orig, repl) in CONTAINER_TYPE_SWAPS {
+                    if *orig == lex {
+                        self.push(Operator::ContainerTypeSwap, r, repl);
+                    }
+                }
+            }
+            Expr::Subscript(s) => {
+                if let Expr::Name(_) = s.value.as_ref() {
+                    let nr = s.value.range();
+                    let name = &self.source[nr];
+                    if name == "Optional" {
+                        // `Optional[T]` → `T`: replace the whole subscript with
+                        // the inner type's source text.
+                        let inner = &self.source[s.slice.range()];
+                        self.push(Operator::OptionalTypeDrop, s.range(), inner);
+                    }
+                    for (orig, repl) in CONTAINER_TYPE_SWAPS {
+                        if *orig == name {
+                            self.push(Operator::ContainerTypeSwap, nr, repl);
+                        }
+                    }
+                }
+                // The slice carries the parameter types (`T`, or a tuple of
+                // them) — recurse so nested annotations mutate too.
+                self.annotate(&s.slice);
+            }
+            // `dict[str, int]`'s slice is a tuple of the type args.
+            Expr::Tuple(t) => {
+                for elt in &t.elts {
+                    self.annotate(elt);
+                }
+            }
+            // PEP 604 unions: `T | None` → `T` (drop the optional arm).
+            Expr::BinOp(b) if matches!(b.op, ast::Operator::BitOr) => {
+                if matches!(b.right.as_ref(), Expr::NoneLiteral(_)) {
+                    let keep = &self.source[b.left.range()];
+                    self.push(Operator::OptionalTypeDrop, b.range(), keep);
+                } else if matches!(b.left.as_ref(), Expr::NoneLiteral(_)) {
+                    let keep = &self.source[b.right.range()];
+                    self.push(Operator::OptionalTypeDrop, b.range(), keep);
+                }
+                self.annotate(&b.left);
+                self.annotate(&b.right);
+            }
+            _ => {}
+        }
     }
 
     fn handle_param_defaults(&mut self, params: &ast::Parameters) {
@@ -277,12 +415,34 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
             Stmt::FunctionDef(f) => {
                 self.handle_decorators(&f.decorator_list);
                 self.handle_param_defaults(&f.parameters);
+                self.handle_param_annotations(&f.parameters, f.returns.as_deref());
             }
             Stmt::ClassDef(c) => {
                 self.handle_decorators(&c.decorator_list);
             }
             Stmt::Try(t) => self.handle_try(t),
-            Stmt::For(f) => self.handle_for(f),
+            Stmt::For(f) => {
+                // `async for` → `for`: sync iteration over an async iterator
+                // raises at runtime — a reliable kill wherever the loop runs.
+                if f.is_async {
+                    if let Some(r) = self.async_kw_range(f.range()) {
+                        self.push(Operator::AsyncForToSync, r, "");
+                    }
+                }
+                self.handle_for(f);
+            }
+            Stmt::With(w) if w.is_async => {
+                // `async with` → `with`: a sync context-manager protocol on an
+                // async CM raises at runtime.
+                if let Some(r) = self.async_kw_range(w.range()) {
+                    self.push(Operator::AsyncWithToSync, r, "");
+                }
+            }
+            Stmt::Match(m) => self.handle_match(m),
+            Stmt::Raise(r) => self.handle_raise(r),
+            // Variable annotation (`x: int = 0`): mutate the annotation only;
+            // the value (if any) is handled by the generic expr pass.
+            Stmt::AnnAssign(a) => self.annotate(&a.annotation),
             Stmt::Assign(a) if !matches!(a.value.as_ref(), Expr::NoneLiteral(_)) => {
                 self.push(Operator::AssignValueToNone, a.value.range(), "None");
             }
@@ -437,6 +597,15 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
                         self.push(Operator::ConstantReplace, r, repl);
                     }
                 }
+            }
+            Expr::Await(a) => {
+                // `await X` → `X`: drop the await. The expression now evaluates
+                // to the coroutine/awaitable itself instead of its result —
+                // observable wherever the awaited value is used (comparison,
+                // attribute access, return). Range covers `await ` up to the
+                // operand start.
+                let r = TextRange::new(a.range().start(), a.value.range().start());
+                self.push(Operator::AwaitDrop, r, "");
             }
             Expr::Lambda(l) if !matches!(l.body.as_ref(), Expr::NoneLiteral(_)) => {
                 self.push(Operator::LambdaBodyToNone, l.body.range(), "None");
@@ -933,6 +1102,225 @@ mod operator_emission_tests {
         assert!(contains("d = {'a': 1, 'b': 2}\n", Operator::DictItemDrop));
         let ops = ops_for("d = {'a': 1}\n");
         assert!(!ops.contains(&Operator::DictItemDrop));
+    }
+
+    #[test]
+    fn await_drop_fires() {
+        let src = "async def f():\n    x = await g()\n    return x\n";
+        assert!(contains(src, Operator::AwaitDrop));
+    }
+
+    #[test]
+    fn await_drop_removes_only_the_await_keyword() {
+        // The mutant must splice out `await ` and leave the operand, producing
+        // valid Python: `x = g()`.
+        let src = "async def f():\n    x = await g()\n    return x\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+        let m = mutants
+            .iter()
+            .find(|m| m.operator == Operator::AwaitDrop)
+            .expect("await-drop mutant");
+        assert!(
+            m.original.starts_with("await"),
+            "original should span the await keyword: {:?}",
+            m.original
+        );
+        assert_eq!(m.replacement, "");
+    }
+
+    #[test]
+    fn async_for_to_sync_fires() {
+        let src = "async def f(it):\n    async for x in it:\n        pass\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+        let m = mutants
+            .iter()
+            .find(|m| m.operator == Operator::AsyncForToSync)
+            .expect("async-for-to-sync mutant");
+        assert!(m.original.starts_with("async"));
+        assert_eq!(m.replacement, "");
+    }
+
+    #[test]
+    fn sync_for_does_not_emit_async_strip() {
+        let ops = ops_for("for x in items:\n    pass\n");
+        assert!(!ops.contains(&Operator::AsyncForToSync));
+    }
+
+    #[test]
+    fn async_with_to_sync_fires() {
+        let src = "async def f(cm):\n    async with cm as c:\n        pass\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+        let m = mutants
+            .iter()
+            .find(|m| m.operator == Operator::AsyncWithToSync)
+            .expect("async-with-to-sync mutant");
+        assert!(m.original.starts_with("async"));
+        assert_eq!(m.replacement, "");
+    }
+
+    #[test]
+    fn sync_with_does_not_emit_async_strip() {
+        let ops = ops_for("with open('f') as fh:\n    pass\n");
+        assert!(!ops.contains(&Operator::AsyncWithToSync));
+    }
+
+    #[test]
+    fn match_guard_negate_fires_only_on_guarded_cases() {
+        let src = "def f(x):\n    match x:\n        case n if n > 0:\n            return 1\n        case _:\n            return 0\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+        let guard: Vec<_> = mutants
+            .iter()
+            .filter(|m| m.operator == Operator::MatchGuardNegate)
+            .collect();
+        // Exactly one case has a guard (`if n > 0`); the wildcard has none.
+        assert_eq!(guard.len(), 1);
+        assert_eq!(guard[0].original, "n > 0");
+        assert_eq!(guard[0].replacement, "not (n > 0)");
+    }
+
+    #[test]
+    fn raise_from_drop_fires_and_is_experimental() {
+        let src = "def f():\n    try:\n        pass\n    except ValueError as e:\n        raise RuntimeError('x') from e\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+        let m = mutants
+            .iter()
+            .find(|m| m.operator == Operator::RaiseFromDrop)
+            .expect("raise-from-drop mutant");
+        // Range covers ` from e`, replacement empty → `raise RuntimeError('x')`.
+        assert!(m.original.contains("from e"), "original: {:?}", m.original);
+        assert_eq!(m.replacement, "");
+        assert!(Operator::RaiseFromDrop.is_experimental());
+    }
+
+    #[test]
+    fn raise_from_none_is_also_dropped() {
+        let src = "def f():\n    raise RuntimeError('x') from None\n";
+        assert!(contains(src, Operator::RaiseFromDrop));
+    }
+
+    #[test]
+    fn plain_raise_does_not_emit_from_drop() {
+        let ops = ops_for("def f():\n    raise RuntimeError('x')\n");
+        assert!(!ops.contains(&Operator::RaiseFromDrop));
+    }
+
+    #[test]
+    fn numeric_type_swap_fires_on_param_and_return_annotations() {
+        let src = "def f(a: int, b: float) -> int:\n    return a\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+        let swaps: Vec<_> = mutants
+            .iter()
+            .filter(|m| m.operator == Operator::NumericTypeSwap)
+            .collect();
+        // a: int→float, b: float→int, return int→float.
+        assert_eq!(swaps.len(), 3);
+        assert!(swaps
+            .iter()
+            .any(|m| m.original == "int" && m.replacement == "float"));
+        assert!(swaps
+            .iter()
+            .any(|m| m.original == "float" && m.replacement == "int"));
+    }
+
+    #[test]
+    fn numeric_type_swap_ignores_runtime_int_call() {
+        // A runtime `int(x)` must NOT be mutated — only annotations.
+        let ops = ops_for("def f(x):\n    return int(x)\n");
+        assert!(!ops.contains(&Operator::NumericTypeSwap));
+    }
+
+    #[test]
+    fn optional_type_drop_fires_on_subscript_and_union() {
+        let src = "def f(a: Optional[int], b: str | None) -> None:\n    return None\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+        let drops: Vec<_> = mutants
+            .iter()
+            .filter(|m| m.operator == Operator::OptionalTypeDrop)
+            .collect();
+        assert_eq!(drops.len(), 2, "Optional[int]→int and (str | None)→str");
+        assert!(drops.iter().any(|m| m.replacement == "int"));
+        assert!(drops.iter().any(|m| m.replacement == "str"));
+    }
+
+    #[test]
+    fn optional_drop_recurses_into_inner_numeric() {
+        // `Optional[int]` must ALSO yield the inner int→float swap, at the
+        // int's own range — two independent mutants.
+        let src = "def f(a: Optional[int]):\n    return a\n";
+        let ops = ops_for(src);
+        assert!(ops.contains(&Operator::OptionalTypeDrop));
+        assert!(ops.contains(&Operator::NumericTypeSwap));
+    }
+
+    #[test]
+    fn container_type_swap_fires_bare_and_subscripted() {
+        let src = "def f(a: list, b: set[int]) -> tuple:\n    return b\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+        let swaps: Vec<_> = mutants
+            .iter()
+            .filter(|m| m.operator == Operator::ContainerTypeSwap)
+            .collect();
+        // a: list→tuple, b: set→frozenset (subscript value), return tuple→list.
+        assert_eq!(swaps.len(), 3);
+        assert!(swaps
+            .iter()
+            .any(|m| m.original == "list" && m.replacement == "tuple"));
+        assert!(swaps
+            .iter()
+            .any(|m| m.original == "set" && m.replacement == "frozenset"));
+        assert!(swaps
+            .iter()
+            .any(|m| m.original == "tuple" && m.replacement == "list"));
+    }
+
+    #[test]
+    fn container_type_swap_ignores_runtime_list_call() {
+        let ops = ops_for("def f(x):\n    return list(x)\n");
+        assert!(!ops.contains(&Operator::ContainerTypeSwap));
+    }
+
+    #[test]
+    fn ann_assign_annotation_is_mutated() {
+        // Module-level `x: int = 0` — annotation mutated, not just the value.
+        let ops = ops_for("x: int = 0\n");
+        assert!(ops.contains(&Operator::NumericTypeSwap));
+    }
+
+    #[test]
+    fn type_annotation_ops_are_experimental() {
+        for op in [
+            Operator::NumericTypeSwap,
+            Operator::OptionalTypeDrop,
+            Operator::ContainerTypeSwap,
+        ] {
+            assert!(op.is_experimental(), "{op:?} must be experimental");
+        }
+    }
+
+    #[test]
+    fn nested_container_annotation_mutates_each_layer() {
+        // `list[Optional[int]]`: container swap on `list`, optional drop on
+        // Optional[int], numeric swap on the inner int — one mutant per layer.
+        let src = "def f(a: list[Optional[int]]):\n    return a\n";
+        let ops = ops_for(src);
+        assert!(ops.contains(&Operator::ContainerTypeSwap));
+        assert!(ops.contains(&Operator::OptionalTypeDrop));
+        assert!(ops.contains(&Operator::NumericTypeSwap));
+    }
+
+    #[test]
+    fn dict_annotation_slice_tuple_recurses_without_container_swap() {
+        // `dict` is a two-arg generic, deliberately absent from the container
+        // swap table — but its slice tuple `str, Optional[int]` must still
+        // recurse so the inner Optional/int mutate.
+        let src = "def f(a: dict[str, Optional[int]]):\n    return a\n";
+        let ops = ops_for(src);
+        assert!(
+            !ops.contains(&Operator::ContainerTypeSwap),
+            "dict not swapped"
+        );
+        assert!(ops.contains(&Operator::OptionalTypeDrop));
+        assert!(ops.contains(&Operator::NumericTypeSwap));
     }
 
     #[test]

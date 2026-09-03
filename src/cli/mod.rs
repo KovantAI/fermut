@@ -336,9 +336,24 @@ enum Cmd {
     },
 
     /// Enumerate mutations without running tests.
+    ///
+    /// By default the same pre-test filters as `run` apply (ty type-check,
+    /// coverage, diff scope), so the list reflects what `run` would actually
+    /// test. Pass `--no-ty-filter` to see the raw generated catalogue before
+    /// the ty pre-filter drops type-invalid candidates.
     List {
         #[arg(default_value = ".")]
         path: PathBuf,
+
+        /// Skip the ty pre-filter — list every generated mutant, including ones
+        /// ty would reject as type-invalid. Matches `run --no-ty-filter`.
+        #[arg(long)]
+        no_ty_filter: bool,
+
+        /// Enable the ruff lint pre-filter. Requires `ruff` on PATH. Matches
+        /// `run --ruff-filter`.
+        #[arg(long)]
+        ruff_filter: bool,
 
         #[command(flatten)]
         filter: FilterArgs,
@@ -1702,14 +1717,19 @@ impl Cli {
                 config_hash,
                 &project,
             ),
-            Cmd::List { path, filter: f } => {
+            Cmd::List {
+                path,
+                no_ty_filter,
+                ruff_filter,
+                filter: f,
+            } => {
                 let cfg = build_config(
                     path,
                     None,
                     None,
                     None,
-                    false,
-                    false,
+                    no_ty_filter,
+                    ruff_filter,
                     None,
                     Vec::new(),
                     true,

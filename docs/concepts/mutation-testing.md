@@ -181,7 +181,7 @@ Quick-reference table. Full alphabetical lookup in
 
 | Term         | What it means                                                                                              |
 |--------------|------------------------------------------------------------------------------------------------------------|
-| [Operator](glossary.md#operator-op)     | A *kind* of mutation (e.g. `arith-op-swap`, `boundary-shift`). fermut ships 26 stable + 4 experimental.    |
+| [Operator](glossary.md#operator-op)     | A *kind* of mutation (e.g. `arith-op-swap`, `boundary-shift`). fermut ships 30 stable + 8 experimental.    |
 | [Mutant](glossary.md#mutant)       | One specific application of an operator to one specific source location.                                   |
 | [Survived](glossary.md#survived)     | The mutant changed observable behavior, but the test suite passed anyway. **What you want fewer of.**     |
 | [Killed](glossary.md#killed)       | The mutant changed behavior, and the test suite caught it. **What you want more of.**                     |

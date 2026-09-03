@@ -1,19 +1,13 @@
 #!/usr/bin/env bash
 # Sum cargo-mutants outcomes across one or more `mutants.out` directories and
-# emit the mutation score as KEY=VALUE lines, ready to append to $GITHUB_OUTPUT.
+# emit caught/missed/scored/score/floor as KEY=VALUE, ready for $GITHUB_OUTPUT.
 #
 #   .github/scripts/mutants-score.sh mutants.out
 #   .github/scripts/mutants-score.sh shards/mutants-out-*
 #
-# Emits: caught, missed, scored, score, floor.
-#
-# `scored` is caught + missed. Timeouts and unviable mutants are deliberately
-# outside it: an unviable mutant did not compile and a timeout did not reach a
-# verdict, so neither answers "is this line asserted on?". Excluding them is
-# also the forgiving direction — they can never drag the score down.
-#
-# `score` is -1 when nothing reached a verdict. Callers must check `scored`
-# before comparing against `floor`.
+# `scored` is caught + missed. Timeouts and unviable mutants are outside it —
+# neither reached a verdict on "is this line asserted on?" — which is also the
+# forgiving direction. `score` is -1 when nothing did; check `scored` first.
 set -euo pipefail
 
 [ "$#" -gt 0 ] || { echo "usage: $0 MUTANTS_OUT_DIR..." >&2; exit 2; }
@@ -39,9 +33,8 @@ else
   score=-1
 fi
 
-# Comments and blank lines are allowed in the floor file; the first remaining
-# line is the number. A missing or unparseable file means "no floor" (0), which
-# no score can fall below — the gate fails open, never closed.
+# First non-comment, non-blank line is the number. Missing or unparseable
+# means "no floor" (0), which no score falls below — fails open, not closed.
 floor=0
 if [ -f "$floor_file" ]; then
   parsed=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$floor_file" | head -1 | tr -cd '0-9')

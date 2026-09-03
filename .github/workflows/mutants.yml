@@ -1,17 +1,7 @@
 name: Mutants
 
-# Mutation-test fermut's own Rust source with cargo-mutants.
-#
-# The full crate is ~2200 mutants and takes hours, so this workflow only tests
-# mutants inside the PR's own diff (`--in-diff`). A PR that touches nothing
-# mutable finishes in the time it takes to build the baseline.
-#
-# The check fails only when the diff has enough mutants for a percentage to
-# mean something AND that percentage falls under the floor in
-# `.github/mutants-floor.txt`. Everything else — a survivor or two on a small
-# diff, a mutant nothing can kill — is reported and left alone. The weekly
-# whole-crate run (mutants-weekly.yml) is the signal that actually matters;
-# this one only stops a PR from walking the number down.
+# Mutation-test the PR's own diff. The whole crate is ~2200 mutants and hours;
+# mutants-weekly.yml covers that. See CONTRIBUTING.md for what the gate means.
 
 on:
   pull_request:
@@ -27,8 +17,7 @@ jobs:
   in-diff:
     name: cargo mutants (PR diff)
     runs-on: ubuntu-latest
-    # A cold build of the ruff/ty git dependencies alone takes ~15 min, and each
-    # mutant rebuilds the crate on top of it.
+    # ~15 min for a cold ruff/ty build, then a rebuild per mutant.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -36,34 +25,23 @@ jobs:
           # `--in-diff` needs the base commit, which a depth-1 checkout lacks.
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      # Restores ~/.cargo — the registry and the git checkouts of the pinned
-      # ruff/ty deps, which saves the clone. It does NOT save the compile:
-      # cargo-mutants builds each mutant in a scratch copy of the tree and
-      # leaves the top-level target/ behind unless `copy_target` is set, so the
-      # ~15 min above is paid on every run. Turning that around needs
-      # `copy_target = true` plus a warm-up build, traded against copying a
-      # multi-GB target dir per mutant — measure before reaching for it.
+      # Saves the dep clone, not the compile: mutants build in a scratch copy
+      # of the tree, so the cold build above is paid every run. `copy_target`
+      # would change that at the cost of copying target/ per mutant.
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: mutants
       - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
-          # Pinned: the config schema below rejects unknown keys, so a release
-          # that renames one would fail the Count step on every PR.
+          # Pinned: mutants.toml rejects unknown keys, so a renamed config key
+          # in a new release would fail every PR.
           tool: cargo-mutants@27.1.0
 
-      # The default PR checkout is the merge commit, so base.sha is an ancestor
-      # of HEAD and this diff is exactly what the PR changes.
+      # The prefixes are load-bearing: cargo-mutants matches `a/`…`b/`, and a
+      # git with diff.mnemonicPrefix or diff.noprefix makes --in-diff match
+      # nothing and report "No mutants to filter" instead of failing.
       #
-      # The explicit prefixes are not cosmetic: cargo-mutants matches `a/`…`b/`
-      # paths, and a git configured with `diff.mnemonicPrefix` or `diff.noprefix`
-      # emits something else, whereupon `--in-diff` matches nothing and the run
-      # reports a clean "No mutants to filter" rather than failing.
-      #
-      # Context values reach the shell through the environment, never through
-      # `${{ }}` interpolation into the script body: an expanded expression is
-      # spliced in before the shell parses the line, so anything an attacker can
-      # put in the context becomes code.
+      # Context reaches the shell via env, never `${{ }}` in a script body.
       - name: Diff against the PR base
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -71,8 +49,7 @@ jobs:
           git diff --src-prefix=a/ --dst-prefix=b/ "$BASE_SHA" > /tmp/pr.diff
           wc -l < /tmp/pr.diff | xargs echo "diff lines:"
 
-      # Cheap (no build) — makes a zero-mutant run visibly zero-mutant instead
-      # of indistinguishable from a silently misparsed diff.
+      # No build. Distinguishes a genuinely empty diff from a misparsed one.
       - name: Count mutants in the diff
         id: count
         run: |
@@ -81,13 +58,8 @@ jobs:
           echo "count=$n" >> "$GITHUB_OUTPUT"
           echo "mutants in diff: $n"
 
-      # `--in-diff` restricts mutants to the lines this PR added or changed.
-      #
-      # continue-on-error because cargo-mutants exits non-zero as soon as one
-      # mutant survives, and "one survivor" is not the bar. Whether this job
-      # passes is decided by the floor comparison at the end, over numbers we
-      # compute ourselves — so a tool upgrade that changes an exit code cannot
-      # change what the check means.
+      # continue-on-error: cargo-mutants exits non-zero on the first survivor,
+      # which is not the bar. The floor comparison below decides this job.
       - name: Run cargo mutants
         if: steps.count.outputs.count != '0'
         continue-on-error: true
@@ -97,10 +69,8 @@ jobs:
         id: score
         if: always()
         run: |
-          # The run above is skipped for a zero-mutant diff, and can fail before
-          # writing results. An empty directory scores as "no verdict", which is
-          # exactly what it is — the steps below branch on that rather than on
-          # whether a file happens to exist.
+          # Absent when the run was skipped or died early; an empty dir scores
+          # as "no verdict", which is what it is.
           mkdir -p mutants.out
           .github/scripts/mutants-score.sh mutants.out | tee -a "$GITHUB_OUTPUT"
 
@@ -147,23 +117,11 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # The gate, and the three ways past it.
-      #
-      # MIN_SCORED — under this many scored mutants the percentage is
-      # arithmetic noise (a three-mutant diff can only score 0, 33, 67 or 100),
-      # so the check reports and passes. Small diffs are covered by the weekly
-      # run instead, which sees them again as part of the whole crate.
-      #
-      # A mutant that genuinely cannot be killed belongs in `exclude_re` or
-      # `exclude_globs` in `.cargo/mutants.toml`, with a comment saying why.
-      # That is the right fix: it excuses the mutant for the weekly baseline
-      # too, so the crate score stops counting something no test could ever
-      # reach.
-      #
-      # The `mutants-advisory` label is the last resort, for the PR where that
-      # judgement needs a human and shouldn't hold up the merge. It downgrades
-      # this step to a warning. GitHub reads labels at trigger time, so re-run
-      # the job after adding one.
+      # Under MIN_SCORED the percentage is arithmetic noise (three mutants can
+      # only score 0, 33, 67 or 100), so report and pass; the weekly run sees
+      # those lines again. Unkillable mutants belong in exclude_re. The
+      # mutants-advisory label (read at trigger time) downgrades this to a
+      # warning. CONTRIBUTING.md has the reasoning.
       - name: Gate on the floor
         if: always()
         env:

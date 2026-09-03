@@ -1,17 +1,11 @@
 name: Mutants (weekly)
 
-# The whole crate, sharded, on a schedule. This is the number that matters.
+# The whole crate, sharded, on a schedule. The trend line here is the real
+# signal; the per-PR score swings with the shape of the diff.
 #
-# The per-PR workflow (mutants.yml) only sees the lines a PR touched, so its
-# score swings with the shape of the diff. This one is the trend line: if the
-# crate score drifts down over weeks, the suite is losing ground, and no amount
-# of green PR checks says otherwise.
-#
-# ~2200 mutants at a measured median of 15s is ~9.4 CPU-hours — past GitHub's
-# 6h job limit as one job, comfortably inside it as 8. That is ~11 job-hours of
-# billed runner time per run, so the scheduled trigger checks first whether
-# anything that could move the score has changed since the last run, and most
-# weeks does nothing.
+# ~2200 mutants at a measured 15s median is ~9.4 CPU-hours: past GitHub's 6h
+# job limit as one job, inside it as 8. ~11 billed job-hours per run, hence the
+# change check below.
 
 on:
   schedule:
@@ -29,13 +23,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Most weeks nothing here can move the score: a docs edit, a dependabot PR
-  # that never landed, a workflow tweak. Spending ~11 job-hours to re-derive
-  # last week's number is the easiest waste in this repo to avoid, so compare
-  # against the commit the last successful run saw and stop if the paths that
-  # matter are byte-identical.
-  #
-  # A manual dispatch always runs — asking for it is the point.
+  # Skip the ~11 job-hours when nothing that could move the score has changed
+  # since the last successful run. A manual dispatch always runs.
   changed:
     name: anything to test?
     runs-on: ubuntu-latest
@@ -76,18 +65,15 @@ jobs:
             decide true "No previous successful run to compare against — running."
             exit 0
           fi
-          # Force-pushes and history rewrites can strand the recorded SHA. An
-          # unresolvable baseline means "don't know", which resolves to running,
-          # never to a silent skip.
+          # A force-push can strand the recorded SHA. "Don't know" resolves to
+          # running, never to a silent skip.
           if ! git cat-file -e "$last^{commit}" 2>/dev/null; then
             decide true "Last run's commit \`$last\` is no longer reachable — running."
             exit 0
           fi
 
-          # Everything that can change the score or the verdict. Not a
-          # code-only list: the config decides which mutants exist, the floor
-          # decides whether the number passes, and the scripts decide how it is
-          # computed.
+          # Not code-only: the config decides which mutants exist, the floor
+          # decides whether the number passes, the scripts compute it.
           paths=(
             src
             Cargo.toml
@@ -104,10 +90,9 @@ jobs:
             decide true "$changed relevant file(s) changed since \`${last:0:7}\` — running the full crate."
           fi
 
-  # Shards run with --baseline=skip, which means none of them checks that the
-  # unmutated tree passes. Without this job a broken `main` would report every
-  # mutant as caught — a 100% score that means the suite is dead. Check once,
-  # here, and let the shards skip it eight times.
+  # Shards use --baseline=skip, so none of them checks the unmutated tree.
+  # Without this, a broken `main` reports every mutant caught — 100% from a
+  # dead suite. Checked once here instead of eight times.
   baseline:
     name: baseline (unmutated tree)
     needs: changed
@@ -131,9 +116,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The list and the /8 denominator below must change together — shards
-        # disagreeing on `n` divide the work differently and the union is
-        # neither complete nor disjoint.
+        # Must change together with the /8 below: shards disagreeing on `n`
+        # split the work differently, and the union has holes and overlaps.
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -145,17 +129,15 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0
 
-      # continue-on-error because cargo-mutants exits non-zero when a mutant
-      # survives, and a shard with survivors still has results worth uploading.
-      # The score job decides what the numbers mean; a shard never does.
+      # continue-on-error: a survivor exits non-zero, but those results still
+      # need uploading. Only the score job decides what the numbers mean.
       - name: cargo mutants
         continue-on-error: true
         env:
           SHARD: ${{ matrix.shard }}
         run: cargo mutants --shard "$SHARD/8" --baseline=skip
 
-      # Every shard must produce one of these. The score job counts them and
-      # refuses to score a partial set.
+      # The score job counts these and refuses to score a partial set.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mutants-out-${{ matrix.shard }}
@@ -169,28 +151,25 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # To file the regression issue. A failed scheduled run is easy not to
-      # notice; an issue is not.
+      # To file the regression issue — a failed scheduled run is easy to miss.
       issues: write
     env:
       SHARDS: 8
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      # continue-on-error so that a missing or partial set of artifacts is
-      # reported by the explicit check below, with a message that says what is
-      # wrong, rather than as a bare download failure.
+      # continue-on-error so the check below reports what is missing, rather
+      # than failing here as a bare download error.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         continue-on-error: true
         with:
           pattern: mutants-out-*
           path: shards
-          # NOT merge-multiple: the shards all name their files caught.txt and
-          # would overwrite each other into a single shard's worth of results.
+          # NOT merge-multiple: every shard writes caught.txt and they would
+          # overwrite each other.
           merge-multiple: false
 
-      # A crashed shard drops its whole slice of the crate, and the surviving
-      # shards still produce a confident-looking percentage over what is left.
-      # Refuse to score rather than publish a number computed from a hole.
+      # A crashed shard drops its slice, and the rest still yield a
+      # confident-looking percentage. Refuse to score over a hole.
       - name: Check every shard reported
         run: |
           mkdir -p shards

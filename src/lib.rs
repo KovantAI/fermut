@@ -26,6 +26,7 @@ pub mod engine;
 pub mod equiv;
 pub mod filter;
 pub mod history;
+pub mod kill_order;
 pub mod llm;
 pub mod mutator;
 pub mod report;

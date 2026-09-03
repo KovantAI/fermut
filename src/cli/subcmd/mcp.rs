@@ -510,6 +510,7 @@ fn tool_run(args: &Value) -> Result<Value> {
         None,
         false,
         None,
+        false, // no_smart_order
         filter,
     )?;
 

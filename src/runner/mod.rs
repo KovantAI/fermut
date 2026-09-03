@@ -38,6 +38,14 @@ pub trait Runner: Send + Sync {
     /// toward 100% while proving nothing. The engine calls this before any
     /// mutation and aborts on [`BaselineStatus::Failed`].
     fn baseline(&self) -> Result<BaselineStatus>;
+
+    /// Drain the kills learned this run (which test killed which
+    /// `(file, operator)`), for the engine to fold into the smart-ordering
+    /// sidecar. Default empty — only the pytest runner learns them, and only
+    /// when smart ordering is on.
+    fn take_kill_records(&self) -> Vec<crate::kill_order::KillRecord> {
+        Vec::new()
+    }
 }
 
 /// Result of the pre-flight baseline run (the unmutated suite).
@@ -175,6 +183,16 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
     let timeout = Duration::from_secs(cfg.timeout_secs);
     let baseline_timeout = Duration::from_secs(cfg.baseline_timeout_secs);
     let isolation = cfg.isolation;
+    // Smart ordering: load the kill-order history once (immutable, shared for
+    // no-lock ordering) and a fresh sink the runner appends kills to. When off,
+    // the history is empty (ordering no-ops) and no kills are recorded.
+    let kill_order = std::sync::Arc::new(if cfg.smart_order {
+        crate::kill_order::KillOrder::load(&cfg.kill_order_path)
+    } else {
+        crate::kill_order::KillOrder::default()
+    });
+    let kill_sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let key_base = cfg.source_root.clone();
     // `rstest` is a pytest-CLI-compatible drop-in, so it reuses the pytest
     // runner wholesale — only the framework executable name differs.
     let pytest_compatible = |exe: &'static str| -> Box<dyn Runner> {
@@ -188,6 +206,10 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
             cfg.coverage.clone(),
             cfg.python.clone(),
             exe,
+            cfg.smart_order,
+            kill_order.clone(),
+            kill_sink.clone(),
+            key_base.clone(),
         ))
     };
     match cfg.runner {

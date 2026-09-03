@@ -64,6 +64,42 @@ fn run_finds_known_survivor() {
 }
 
 #[test]
+#[ignore = "requires pytest + ty on PATH; enable once env is set up"]
+fn smart_order_builds_sidecar_and_keeps_verdict() {
+    // Two runs: the first learns which tests kill mutants and writes
+    // `.fermut/kill-order.json`; the second reads it to order tests. The
+    // mutation result must be identical across both — ordering only changes
+    // *which test runs first*, never the kill/survive verdict.
+    let src = sample_path().join("src");
+    let tests = sample_path().join("tests");
+    // Kill-order sidecar lands at the project root's `.fermut/`.
+    let sidecar = sample_path().join(".fermut").join("kill-order.json");
+    let _ = std::fs::remove_file(&sidecar);
+
+    let run = || {
+        Command::cargo_bin("fermut")
+            .unwrap()
+            .arg("run")
+            .arg(&src)
+            .arg("--tests")
+            .arg(&tests)
+            .arg("--no-ty-filter")
+            .arg("--no-cache") // isolate ordering from cache reuse
+            .assert()
+            .failure() // survivors → exit 1
+            .stdout(contains("SURVIVED"));
+    };
+
+    run(); // builds the sidecar from learned kills
+    assert!(
+        sidecar.exists(),
+        "first run must write the kill-order sidecar at {}",
+        sidecar.display()
+    );
+    run(); // reads the sidecar to order; same verdict
+}
+
+#[test]
 #[ignore = "requires rstest (pytest-compatible drop-in) + ty on PATH; enable once env is set up"]
 fn run_finds_known_survivor_with_rstest() {
     // `rstest` shares the pytest runner, so the same weak `in_range` boundary

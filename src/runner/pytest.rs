@@ -9,9 +9,10 @@
 //! compatible drop-in). Both accept the same flags and node-id positionals, so
 //! one implementation drives either; only the program name differs.
 
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::process::{ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -40,6 +41,16 @@ pub struct PytestRunner {
     python: Option<PathBuf>,
     /// Framework executable / module name: `pytest` or the `rstest` drop-in.
     exe: &'static str,
+    /// Smart test ordering on. When set, coverage-selected ids are reordered by
+    /// `kill_order` and killers learned into `kill_sink`.
+    smart_order: bool,
+    /// Immutable kill-order history, read to order selected tests (no lock).
+    kill_order: Arc<crate::kill_order::KillOrder>,
+    /// Kills learned this run, folded into the sidecar by the engine afterward.
+    kill_sink: Arc<Mutex<Vec<crate::kill_order::KillRecord>>>,
+    /// Base for the `(file, operator)` history key — mutant files are made
+    /// relative to this so the sidecar survives moves/checkouts.
+    key_base: PathBuf,
 }
 
 impl PytestRunner {
@@ -54,6 +65,10 @@ impl PytestRunner {
         coverage: Option<Arc<CoverageContexts>>,
         python: Option<PathBuf>,
         exe: &'static str,
+        smart_order: bool,
+        kill_order: Arc<crate::kill_order::KillOrder>,
+        kill_sink: Arc<Mutex<Vec<crate::kill_order::KillRecord>>>,
+        key_base: PathBuf,
     ) -> Self {
         Self {
             tests,
@@ -65,6 +80,44 @@ impl PytestRunner {
             coverage,
             python,
             exe,
+            smart_order,
+            kill_order,
+            kill_sink,
+            key_base,
+        }
+    }
+
+    /// `(project-relative file, operator name)` history key for a mutant.
+    fn kill_key(&self, mutant: &Mutant) -> (String, &'static str) {
+        let file = mutant
+            .file
+            .strip_prefix(&self.key_base)
+            .unwrap_or(&mutant.file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        (file, mutant.operator.name())
+    }
+
+    /// Read the killed mutant's captured pytest output, parse the killing test's
+    /// node id from the `-rf` summary, and append it to the shared sink for the
+    /// engine to fold into the kill-order sidecar. Best-effort: any misfire
+    /// (no output, unparsable, poisoned lock) just forfeits this datapoint.
+    fn record_killer(&self, stdout: Option<ChildStdout>, file: &str, op: &'static str) {
+        let Some(mut out) = stdout else {
+            return;
+        };
+        let mut buf = String::new();
+        if out.read_to_string(&mut buf).is_err() {
+            return;
+        }
+        if let Some(nodeid) = crate::kill_order::parse_first_failed(&buf) {
+            if let Ok(mut sink) = self.kill_sink.lock() {
+                sink.push(crate::kill_order::KillRecord {
+                    file: file.to_string(),
+                    operator: op.to_string(),
+                    nodeid,
+                });
+            }
         }
     }
 
@@ -85,12 +138,24 @@ impl PytestRunner {
 }
 
 impl Runner for PytestRunner {
+    fn take_kill_records(&self) -> Vec<crate::kill_order::KillRecord> {
+        self.kill_sink
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default()
+    }
+
     fn run(&self, mutant: &Mutant) -> Result<MutantOutcome> {
         with_worker_mirror(&self.tests, self.isolation, |mirror| {
             let _guard = apply_patch(mirror, mutant)?;
 
             let mut cmd = self.framework_command();
             cmd.arg("-x").arg("--tb=no").arg("-q");
+            // `-rf` prints a `FAILED <nodeid>` summary line so a kill tells us
+            // *which* test did it — the signal smart ordering learns from.
+            if self.smart_order {
+                cmd.arg("-rf");
+            }
             if let Some(seed) = self.hypothesis_seed {
                 cmd.arg(format!("--hypothesis-seed={seed}"));
             }
@@ -102,14 +167,26 @@ impl Runner for PytestRunner {
             // node ids and skip the default "whole tests dir" sweep. The filter
             // chain has already dropped mutants with no recorded context, so
             // we only get here when at least one test id exists.
+            //
+            // Smart ordering reorders those ids so a historically-frequent
+            // killer for this `(file, operator)` runs first — pytest's `-x` then
+            // short-circuits on it. It only permutes the set, never changes it,
+            // so the kill/survive verdict is identical.
+            let (key_file, key_op) = self.kill_key(mutant);
             match self
                 .coverage
                 .as_ref()
                 .and_then(|ctx| ctx.tests_for_mutant(mutant))
             {
                 Some(ids) if !ids.is_empty() => {
-                    for id in ids {
-                        cmd.arg(id);
+                    if self.smart_order {
+                        for id in self.kill_order.order(ids, &key_file, key_op) {
+                            cmd.arg(id);
+                        }
+                    } else {
+                        for id in ids {
+                            cmd.arg(id);
+                        }
                     }
                 }
                 _ => {
@@ -129,14 +206,20 @@ impl Runner for PytestRunner {
             // compiled module that still validates against the patched source
             // would mask the mutation and falsely report it survived.
             cmd.env("PYTHONDONTWRITEBYTECODE", "1");
-            // Discard per-mutant pytest output. Only the exit status matters
-            // (0 → survived, non-zero → killed); without this each killed
-            // mutant streams its `FAILED … / 1 failed` lines to the terminal,
-            // which reads as the run being broken when it's mutants dying as
-            // intended. The baseline run (separate) still captures + surfaces
-            // output so a red unmutated suite is diagnosable.
-            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            // Per-mutant pytest output is noise on the terminal (each killed
+            // mutant would stream `FAILED … / 1 failed`, reading as breakage
+            // when it's mutants dying as intended). Discard it — except under
+            // smart ordering, where we capture stdout to learn the killer's
+            // node id from the `-rf` summary. Output is tiny (`-q --tb=no`), so
+            // a pipe never deadlocks. stderr is always discarded.
+            let stdout_cfg = if self.smart_order {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            };
+            cmd.stdout(stdout_cfg).stderr(Stdio::null());
             let mut child = cmd.spawn().context("spawning test runner")?;
+            let stdout = child.stdout.take();
 
             match child
                 .wait_timeout(self.timeout)
@@ -146,6 +229,11 @@ impl Runner for PytestRunner {
                     if status.success() {
                         Ok(MutantOutcome::survived(mutant.clone()))
                     } else {
+                        // Killed. Under smart ordering, learn which test did it
+                        // and record it for next time's ordering.
+                        if self.smart_order {
+                            self.record_killer(stdout, &key_file, key_op);
+                        }
                         Ok(MutantOutcome::killed(mutant.clone()))
                     }
                 }

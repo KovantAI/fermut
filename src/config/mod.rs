@@ -47,6 +47,13 @@ pub struct Config {
     pub pytest_args: Vec<String>,
     pub cache: bool,
     pub cache_path: PathBuf,
+    /// Smart test ordering: when on, coverage-selected tests are reordered so a
+    /// historically-killing test (per `(file, operator)`) runs first, letting
+    /// pytest's `-x` short-circuit sooner. Advisory — never changes a verdict.
+    /// Default on; disable with `--no-smart-order` / `smart_order = false`.
+    pub smart_order: bool,
+    /// Path to the advisory kill-order sidecar (`.fermut/kill-order.json`).
+    pub kill_order_path: PathBuf,
     /// When true, each `fermut run` appends a summary line to `history_path`.
     /// Disable with `--no-history` or `history = false` in the config file.
     pub history: bool,

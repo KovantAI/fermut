@@ -862,6 +862,8 @@ mod tests {
             pytest_args: Vec::new(),
             cache: false,
             cache_path: PathBuf::from(".fermut/cache.json"),
+            smart_order: false,
+            kill_order_path: PathBuf::from(".fermut/kill-order.json"),
             history: false,
             history_path: PathBuf::from(".fermut/history.jsonl"),
             sample_ratio: None,

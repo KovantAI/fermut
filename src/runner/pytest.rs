@@ -40,6 +40,10 @@ pub struct PytestRunner {
     python: Option<PathBuf>,
     /// Framework executable / module name: `pytest` or the `rstest` drop-in.
     exe: &'static str,
+    /// Smart test ordering: when on, coverage-selected tests are reordered so
+    /// the most targeted one (fewest lines covered) runs first, so `-x`
+    /// short-circuits sooner. Only permutes the set — never changes a verdict.
+    smart_order: bool,
 }
 
 impl PytestRunner {
@@ -54,6 +58,7 @@ impl PytestRunner {
         coverage: Option<Arc<CoverageContexts>>,
         python: Option<PathBuf>,
         exe: &'static str,
+        smart_order: bool,
     ) -> Self {
         Self {
             tests,
@@ -65,6 +70,7 @@ impl PytestRunner {
             coverage,
             python,
             exe,
+            smart_order,
         }
     }
 
@@ -102,17 +108,29 @@ impl Runner for PytestRunner {
             // node ids and skip the default "whole tests dir" sweep. The filter
             // chain has already dropped mutants with no recorded context, so
             // we only get here when at least one test id exists.
-            match self
-                .coverage
-                .as_ref()
-                .and_then(|ctx| ctx.tests_for_mutant(mutant))
-            {
-                Some(ids) if !ids.is_empty() => {
-                    for id in ids {
-                        cmd.arg(id);
+            //
+            // Smart ordering (cold-start): reorder those ids so the most
+            // *targeted* test — fewest lines covered — runs first, letting `-x`
+            // short-circuit sooner. Only permutes the set, so the verdict is
+            // unchanged.
+            match self.coverage.as_ref() {
+                Some(ctx) => match ctx.tests_for_mutant(mutant) {
+                    Some(ids) if !ids.is_empty() => {
+                        if self.smart_order {
+                            for id in ctx.order_by_breadth(ids) {
+                                cmd.arg(id);
+                            }
+                        } else {
+                            for id in ids {
+                                cmd.arg(id);
+                            }
+                        }
                     }
-                }
-                _ => {
+                    _ => {
+                        cmd.arg(&mirror.tests);
+                    }
+                },
+                None => {
                     cmd.arg(&mirror.tests);
                 }
             }

@@ -49,11 +49,29 @@ fermut run [PATH] [flags...]
 | `--fail-under <SCORE>`      | none (any survivor fails)        | Pass when mutation score is at least `SCORE` (0.0–100.0). Equal to threshold passes. |
 | `--no-verify-baseline`      | baseline check on                | Skip the pre-flight run of the unmutated suite. By default fermut runs your full suite once and aborts if it isn't green (a red suite would inflate the score toward 100%). Skip only when you've already confirmed green (e.g. CI ran it). |
 | `--baseline-timeout <SECS>` | `300`                            | Wall-clock cap for the baseline run. Separate from `--timeout` (which bounds a single mutant) because the baseline runs the whole suite. A suite that exceeds it is killed and the run aborts. Raise for large suites. |
+| `--no-smart-order`          | ordering on                      | Disable smart test ordering. See [Smart test ordering](#smart-test-ordering). |
 | `--fail-on-regression <PTS>`| off                              | Exit non-zero when score dropped more than `PTS` vs the most recent prior entry on the same git branch. Requires history. Ignored in `--watch`. |
 | `--trend-branch <NAME>`     | none                             | Restrict the `--trend` markdown block's "previous run" lookup to entries recorded on this branch. Requires `--trend`. |
 
 Exit code is non-zero when any mutant survives — wire that into CI to
 gate on mutation score.
+
+## Smart test ordering { #smart-test-ordering }
+
+When coverage selects **more than one** test for a mutant, fermut runs
+them under pytest's `-x` (stop at the first failure), so the mutant dies
+as soon as any selected test fails. Smart ordering runs the **most
+targeted** test first — the one covering the fewest lines — because a
+focused unit test is the likelier killer, so `-x` short-circuits sooner.
+It needs no run history: the signal comes from the coverage data already
+loaded, so it helps on the first run and on freshly-changed `--since`
+lines.
+
+**On by default** (only active when `--coverage` is in use). **Ordering
+never changes a verdict** — it only permutes the selected tests, so `-x`
+still runs until a failure or exhaustion and the kill/survive/timeout
+result is identical. Disable with `--no-smart-order` (or `smart_order =
+false` in config); the tests then run in plain coverage order.
 
 ## CLI overrides vs config
 

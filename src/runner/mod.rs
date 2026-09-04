@@ -188,6 +188,7 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
             cfg.coverage.clone(),
             cfg.python.clone(),
             exe,
+            cfg.smart_order,
         ))
     };
     match cfg.runner {

@@ -47,6 +47,13 @@ pub struct Config {
     pub pytest_args: Vec<String>,
     pub cache: bool,
     pub cache_path: PathBuf,
+    /// Smart test ordering: when on (and coverage is available), the
+    /// coverage-selected tests for a mutant are reordered so the most targeted
+    /// test (fewest lines covered) runs first, letting pytest's `-x`
+    /// short-circuit sooner. Advisory — only permutes the selected set, so it
+    /// never changes a verdict, only speed. Default on; disable with
+    /// `--no-smart-order` / `smart_order = false`.
+    pub smart_order: bool,
     /// When true, each `fermut run` appends a summary line to `history_path`.
     /// Disable with `--no-history` or `history = false` in the config file.
     pub history: bool,

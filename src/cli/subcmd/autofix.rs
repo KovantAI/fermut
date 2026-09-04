@@ -177,6 +177,7 @@ fn build_run_config(opts: &AutofixOpts) -> Result<crate::config::Config> {
         None,
         false,
         None,
+        false, // no_smart_order
         filter,
     )
 }

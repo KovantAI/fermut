@@ -331,6 +331,14 @@ enum Cmd {
         #[arg(long, value_name = "SECS")]
         baseline_timeout: Option<u64>,
 
+        /// Disable smart test ordering. By default, when coverage selects
+        /// multiple tests for a mutant, fermut runs the most targeted one
+        /// (covering the fewest lines) first so pytest's `-x` short-circuits
+        /// sooner. Ordering never changes a verdict — only which test runs
+        /// first. Also settable via `smart_order = false` in config.
+        #[arg(long)]
+        no_smart_order: bool,
+
         #[command(flatten)]
         filter: FilterArgs,
     },
@@ -1263,6 +1271,7 @@ impl Cli {
                 no_fail,
                 no_verify_baseline,
                 baseline_timeout,
+                no_smart_order,
                 filter: f,
             } => {
                 let cfg = build_config(
@@ -1289,6 +1298,7 @@ impl Cli {
                     fail_under,
                     no_verify_baseline,
                     baseline_timeout,
+                    no_smart_order,
                     f,
                 )?;
                 let want_annotations =
@@ -1727,6 +1737,7 @@ impl Cli {
                     None,
                     true,
                     None,
+                    false, // no_smart_order (list doesn't run tests)
                     f,
                 )?;
                 let mutants = crate::mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)?;

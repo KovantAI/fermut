@@ -703,6 +703,42 @@ pub(crate) fn operator_hint(op: Operator) -> &'static str {
             "loop iteration count mutated. Tests likely don't assert on the number of \
              iterations or their cumulative effect."
         }
+        Operator::AwaitDrop => {
+            "`await` dropped — the expression now yields the coroutine/awaitable \
+             instead of its result. Tests likely don't assert on the awaited value. \
+             Add an assertion on what the awaited call returns."
+        }
+        Operator::AsyncForToSync | Operator::AsyncWithToSync => {
+            "`async` dropped from an `async for` / `async with`. Tests likely never \
+             drive this async path under a running loop. Add a test that awaits the \
+             coroutine so the async iteration / context manager actually executes."
+        }
+        Operator::MatchGuardNegate => {
+            "`match`/`case` guard negated (`if g` → `if not (g)`). Tests likely don't \
+             cover both sides of the guard. Add a case where the guard's truth value \
+             decides which arm handles the subject."
+        }
+        Operator::RaiseFromDrop => {
+            "explicit exception chaining dropped (`raise X from e` → `raise X`). Tests \
+             likely assert the exception type but not `__cause__`. Assert on \
+             `exc.__cause__` (or use `pytest.raises(...)` and inspect `.value.__cause__`)."
+        }
+        Operator::NumericTypeSwap => {
+            "numeric type annotation swapped (`int` ↔ `float`). Only observable when \
+             the type is enforced at runtime (pydantic / dataclass validation, \
+             `beartype`). Add a test that feeds a value the swapped type would coerce \
+             or reject differently."
+        }
+        Operator::OptionalTypeDrop => {
+            "optionality dropped from an annotation (`Optional[T]` / `T | None` → `T`). \
+             If the type is runtime-validated, passing `None` should now be rejected. \
+             Add a test that passes `None` and asserts it is accepted (or rejected)."
+        }
+        Operator::ContainerTypeSwap => {
+            "container type annotation swapped (`list` → `tuple`, `set` → `frozenset`). \
+             Observable under runtime validation/coercion. Add a test that depends on \
+             the concrete container type the annotation declares."
+        }
     }
 }
 
@@ -816,8 +852,15 @@ pub(crate) fn operator_slug(op: Operator) -> &'static str {
         Operator::DictItemDrop => "dict_item",
         Operator::ArgToNone => "arg_value",
         Operator::NoneToValue => "none_value",
-        Operator::ExceptionClassSwap | Operator::BareExcept => "exception",
+        Operator::ExceptionClassSwap | Operator::BareExcept | Operator::RaiseFromDrop => {
+            "exception"
+        }
         Operator::ZeroIterationForLoop | Operator::OneIterationForLoop => "loop_count",
+        Operator::AwaitDrop | Operator::AsyncForToSync | Operator::AsyncWithToSync => "async",
+        Operator::MatchGuardNegate => "match",
+        Operator::NumericTypeSwap | Operator::OptionalTypeDrop | Operator::ContainerTypeSwap => {
+            "type_annotation"
+        }
         Operator::ExprToNone => "return_value",
         Operator::PositionalDrop => "arg_value",
         Operator::StringCaseSwap => "literal",

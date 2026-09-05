@@ -38,6 +38,10 @@ pub enum Operator {
     DictItemDrop,
     ArgToNone,
     NoneToValue,
+    AwaitDrop,
+    AsyncForToSync,
+    AsyncWithToSync,
+    MatchGuardNegate,
 
     // Experimental — opt-in via `--experimental`.
     // Higher noise: more equivalent mutants, more likely to break runtime
@@ -46,6 +50,14 @@ pub enum Operator {
     BareExcept,
     ZeroIterationForLoop,
     OneIterationForLoop,
+    RaiseFromDrop,
+    // Type-annotation operators. Annotations are rarely enforced at runtime
+    // (Python evaluates but does not check them), so most survive — unless the
+    // project runtime-validates types (pydantic, dataclasses, beartype), where
+    // they light up real gaps. Experimental for that reason.
+    NumericTypeSwap,
+    OptionalTypeDrop,
+    ContainerTypeSwap,
 
     // Parity — opt-in via `--parity`. Exist to broaden overlap with other
     // mutation tools (mutmut) for cross-tool comparison, NOT for normal
@@ -85,10 +97,18 @@ impl Operator {
             Self::DictItemDrop => "dict-item-drop",
             Self::ArgToNone => "arg-to-none",
             Self::NoneToValue => "none-to-value",
+            Self::AwaitDrop => "await-drop",
+            Self::AsyncForToSync => "async-for-to-sync",
+            Self::AsyncWithToSync => "async-with-to-sync",
+            Self::MatchGuardNegate => "match-guard-negate",
             Self::ExceptionClassSwap => "exp:exception-class-swap",
             Self::BareExcept => "exp:bare-except",
             Self::ZeroIterationForLoop => "exp:zero-iteration-for-loop",
             Self::OneIterationForLoop => "exp:one-iteration-for-loop",
+            Self::RaiseFromDrop => "exp:raise-from-drop",
+            Self::NumericTypeSwap => "exp:numeric-type-swap",
+            Self::OptionalTypeDrop => "exp:optional-type-drop",
+            Self::ContainerTypeSwap => "exp:container-type-swap",
             Self::ExprToNone => "parity:expr-to-none",
             Self::PositionalDrop => "parity:positional-drop",
             Self::StringCaseSwap => "parity:string-case-swap",
@@ -102,6 +122,10 @@ impl Operator {
                 | Self::BareExcept
                 | Self::ZeroIterationForLoop
                 | Self::OneIterationForLoop
+                | Self::RaiseFromDrop
+                | Self::NumericTypeSwap
+                | Self::OptionalTypeDrop
+                | Self::ContainerTypeSwap
         )
     }
 
@@ -142,10 +166,18 @@ impl Operator {
             Operator::DictItemDrop,
             Operator::ArgToNone,
             Operator::NoneToValue,
+            Operator::AwaitDrop,
+            Operator::AsyncForToSync,
+            Operator::AsyncWithToSync,
+            Operator::MatchGuardNegate,
             Operator::ExceptionClassSwap,
             Operator::BareExcept,
             Operator::ZeroIterationForLoop,
             Operator::OneIterationForLoop,
+            Operator::RaiseFromDrop,
+            Operator::NumericTypeSwap,
+            Operator::OptionalTypeDrop,
+            Operator::ContainerTypeSwap,
             Operator::ExprToNone,
             Operator::PositionalDrop,
             Operator::StringCaseSwap,
@@ -218,6 +250,17 @@ pub const AUG_ASSIGN_SWAPS: &[(&str, &str)] = &[
 pub const CONSTANT_SWAPS: &[(&str, &str)] =
     &[("True", "False"), ("False", "True"), ("\"\"", "\"fermut\"")];
 
+/// Builtin container-type swaps for annotations (`list[int]` → `tuple[int]`).
+/// Restricted to always-in-scope, subscriptable builtins (3.9+) so a swapped
+/// annotation never introduces an undefined name — no import assumptions. Used
+/// only in annotation position by `ContainerTypeSwap`.
+pub const CONTAINER_TYPE_SWAPS: &[(&str, &str)] = &[
+    ("list", "tuple"),
+    ("tuple", "list"),
+    ("set", "frozenset"),
+    ("frozenset", "set"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,14 +277,14 @@ mod tests {
     #[test]
     fn all_covers_every_variant() {
         // Cheap proxy: kick `name()` on every variant via `all()` and assert
-        // none panic and the count matches the expected total (26 stable + 4
+        // none panic and the count matches the expected total (30 stable + 8
         // experimental + 3 parity). Update when adding/removing operators.
-        assert_eq!(Operator::all().len(), 33);
+        assert_eq!(Operator::all().len(), 41);
         let experimental_count = Operator::all()
             .iter()
             .filter(|o| o.is_experimental())
             .count();
-        assert_eq!(experimental_count, 4);
+        assert_eq!(experimental_count, 8);
         let parity_count = Operator::all().iter().filter(|o| o.is_parity()).count();
         assert_eq!(parity_count, 3);
     }
@@ -463,6 +506,7 @@ mod tests {
             .chain(BOOL_SWAPS)
             .chain(AUG_ASSIGN_SWAPS)
             .chain(CONSTANT_SWAPS)
+            .chain(CONTAINER_TYPE_SWAPS)
         {
             assert_ne!(orig, repl, "identity swap entry {orig:?} -> {repl:?}");
         }

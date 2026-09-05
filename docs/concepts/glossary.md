@@ -132,7 +132,7 @@ See [mutation score on the concept page](mutation-testing.md#the-mutation-score)
 
 A *kind* of mutation. Examples: `arith-op-swap` (replace `+` with
 `-`), `boundary-shift` (`<` → `<=`), `return-to-none`. fermut ships
-26 stable operators and 4 experimental. Select with `--ops`, skip
+30 stable operators and 8 experimental. Select with `--ops`, skip
 with `--skip-ops`, enable experimental with `--experimental`. See
 [operator catalogue](../reference/operators/index.md).
 

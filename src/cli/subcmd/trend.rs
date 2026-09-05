@@ -662,6 +662,50 @@ mod tests {
     }
 
     #[test]
+    fn print_human_renders_partial_baseline_and_scoreless_rows() {
+        // Smoke: drive the full human table over the mix of run kinds the
+        // `--max-time` work added branches for — a baseline anchor, a full run,
+        // a `--max-time` partial subset run, and a scoreless vacuous-100 run.
+        // Guards that the `[partial]`/`[baseline]` tag and N/A score-cell paths
+        // (see `trend_step`/`is_comparable`) render end-to-end without panicking
+        // on the mix. Output-shape assertions live in the history.rs unit tests.
+        let anchor = {
+            let mut e = entry("2026-01-01T00:00:00Z", 54.0, Some("main"));
+            e.baseline = true;
+            e
+        };
+        let full = entry("2026-01-02T00:00:00Z", 80.0, Some("main"));
+        let partial = {
+            let mut e = entry("2026-01-03T00:00:00Z", 40.0, Some("main"));
+            e.partial = true; // --max-time-truncated subset score
+            e
+        };
+        // Scoreless: zero denominator (killed+survived+timed_out == 0) → N/A.
+        let scoreless = {
+            let mut e = entry("2026-01-04T00:00:00Z", 100.0, Some("main"));
+            e.killed = 0;
+            assert!(e.is_scoreless() && !e.is_comparable());
+            e
+        };
+        // A tagged run with no git info exercises the "tags only, empty git"
+        // column branch (a partial run before any commit metadata was recorded).
+        let partial_no_git = {
+            let mut e = entry("2026-01-05T00:00:00Z", 42.0, None);
+            e.partial = true;
+            e
+        };
+        let entries = vec![anchor, full, partial, scoreless, partial_no_git];
+        // diff on so `print_survivor_diff` is exercised too; group_by None.
+        print_human(
+            &entries,
+            Path::new("/tmp/history.jsonl"),
+            TrendScale::Auto,
+            true,
+            None,
+        );
+    }
+
+    #[test]
     fn missing_hashes_dont_trigger_warning() {
         let es = vec![
             entry_with_hash("a", Some("aaa")),

@@ -49,11 +49,44 @@ fermut run [PATH] [flags...]
 | `--fail-under <SCORE>`      | none (any survivor fails)        | Pass when mutation score is at least `SCORE` (0.0–100.0). Equal to threshold passes. |
 | `--no-verify-baseline`      | baseline check on                | Skip the pre-flight run of the unmutated suite. By default fermut runs your full suite once and aborts if it isn't green (a red suite would inflate the score toward 100%). Skip only when you've already confirmed green (e.g. CI ran it). |
 | `--baseline-timeout <SECS>` | `300`                            | Wall-clock cap for the baseline run. Separate from `--timeout` (which bounds a single mutant) because the baseline runs the whole suite. A suite that exceeds it is killed and the run aborts. Raise for large suites. |
+| `--max-time <SECS>`         | off (whole catalogue)            | Wall-clock ceiling on the testing phase. Evaluates highest-value mutants first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` (excluded from the score) instead of run — in-flight mutants finish. A predictable time ceiling for PR gates. See [Time-boxed runs](#time-boxed-runs-max-time). |
 | `--fail-on-regression <PTS>`| off                              | Exit non-zero when score dropped more than `PTS` vs the most recent prior entry on the same git branch. Requires history. Ignored in `--watch`. |
 | `--trend-branch <NAME>`     | none                             | Restrict the `--trend` markdown block's "previous run" lookup to entries recorded on this branch. Requires `--trend`. |
 
 Exit code is non-zero when any mutant survives — wire that into CI to
 gate on mutation score.
+
+## Time-boxed runs (`--max-time`) { #time-boxed-runs-max-time }
+
+`--max-time <SECS>` caps the **testing phase** at a wall-clock ceiling —
+a time budget instead of a mutant budget. For a PR gate a time ceiling
+is more predictable than `--sample`: it bounds how long the job runs
+regardless of how the mutant count grows.
+
+How it works:
+
+- Mutants are ordered **highest-value first** — mutants a coverage-selected
+  test can actually reach sort ahead of uncovered ones (which the coverage
+  filter would skip anyway). Parallel workers mean this biases *start* order
+  rather than strictly serializing, but since uncovered mutants are cheap
+  coverage-skips the expensive budget still lands on covered mutants — so the
+  mutants left untested at the deadline are the least informative.
+- Once the deadline passes, every mutant **not yet started** is recorded as
+  `skipped` with filter `time-budget`. Mutants already **in flight finish** —
+  the ceiling is soft by one slowest-mutant.
+- Budget-skipped mutants are **excluded from the score denominator** (like a
+  coverage or shard skip), so the reported score is over the mutants that
+  actually ran. The count surfaces in the summary line
+  (`skipped: N (time-budget N)`) and as a `WARN` log, so a truncated run never
+  looks like a clean full sweep. A run where the budget expired before *any*
+  mutant ran scores **N/A**, not a vacuous 100%.
+
+The budget covers the testing phase only. Baseline verification, mutant
+generation, and the `ty` pre-filter are separate fixed costs it does not
+bound — the same floor `--sample` has. Pair with `--no-verify-baseline` in
+CI (where the suite already ran) to keep the whole job under budget.
+
+Set it in config as `max_time` under `[tool.fermut]`.
 
 ## CLI overrides vs config
 

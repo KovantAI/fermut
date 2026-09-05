@@ -99,6 +99,18 @@ pub struct HistoryEntry {
     /// every `run`-written entry and on pre-field history.
     #[serde(default, skip_serializing_if = "is_false")]
     pub baseline: bool,
+    /// True when a `--max-time` budget expired before every mutant was tested,
+    /// so this run scored over a *timing-nondeterministic subset* of the
+    /// mutant universe. Two such runs at identical test quality can report
+    /// different scores purely on which mutants beat the deadline, so trend and
+    /// regression must skip these — comparing against (or as) a partial run
+    /// fabricates spurious drops. Set from the report's `time-budget` skips;
+    /// a `--max-time` run whose budget never expired ran the whole catalogue
+    /// and is *not* partial. Absent (defaults false) on unbudgeted runs and on
+    /// pre-field history. See [`is_scoreless`](Self::is_scoreless) for the
+    /// sibling exclusion.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub partial: bool,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -126,6 +138,15 @@ impl HistoryEntry {
                 _ => None,
             })
             .collect();
+        // A run is "partial" when the --max-time budget cut it short — any
+        // mutant recorded skipped/`time-budget`. Such a run scored over a
+        // nondeterministic subset, so it must be excluded from regression/trend
+        // (see the `partial` field). A budgeted run that finished everything has
+        // no time-budget skips and is a full, comparable run.
+        let partial = report.outcomes.iter().any(|o| {
+            matches!(o, MutantOutcome::Skipped { filter, .. }
+                if filter == crate::engine::TIME_BUDGET_FILTER)
+        });
         Self {
             schema_version: CURRENT_SCHEMA_V,
             timestamp: iso8601_now(),
@@ -144,6 +165,7 @@ impl HistoryEntry {
             git_branch: current_git_branch(project_root),
             survivor_ids: Some(survivor_ids),
             baseline: false,
+            partial,
         }
     }
 
@@ -154,6 +176,29 @@ impl HistoryEntry {
     /// Mirrors [`crate::report::Report::is_scoreless`] for the persisted shape.
     pub fn is_scoreless(&self) -> bool {
         self.killed + self.timed_out + self.survived == 0
+    }
+
+    /// True when this entry may take part in a regression comparison — it
+    /// scored a real mutant set and wasn't a `--max-time` partial run. A
+    /// scoreless entry carries the vacuous `100.0` floor and a partial entry
+    /// scored a nondeterministic subset; comparing against (or as) either
+    /// fabricates spurious drops, so both are excluded from the gate.
+    pub fn is_comparable(&self) -> bool {
+        !self.is_scoreless() && !self.partial
+    }
+}
+
+/// One step of a trend/dashboard delta column: given the running baseline
+/// `prev` (the last comparable score), return `(delta_to_show, next_prev)` for
+/// entry `e`. A non-comparable run — a scoreless vacuous-100 or a `--max-time`
+/// partial subset score — shows no delta and does **not** advance the baseline,
+/// so the next comparable row still deltas against the last real full run.
+/// Shared by `trend` (stdout table) and `dashboard` (HTML table) so both agree.
+pub(crate) fn trend_step(prev: Option<f64>, e: &HistoryEntry) -> (Option<f64>, Option<f64>) {
+    if e.is_comparable() {
+        (prev.map(|p| e.mutation_score - p), Some(e.mutation_score))
+    } else {
+        (None, prev)
     }
 }
 
@@ -457,12 +502,14 @@ pub fn survivor_diff<'a>(
 /// Shared by `fermut trend` (CLI table) and `fermut dashboard` (summary
 /// card) so the two surfaces never drift on what counts as a streak.
 pub fn trailing_streak(entries: &[HistoryEntry]) -> Option<(StreakDir, usize)> {
-    // Scoreless runs carry a vacuous 100.0 — including them invents deltas
-    // (a real 85% next to a fake 100% looks like a 15pt move). Drop them so
-    // the streak reflects only runs that actually measured a score.
+    // Only comparable runs seed a streak. Scoreless runs carry a vacuous 100.0
+    // (a real 85% next to a fake 100% looks like a 15pt move); a `--max-time`
+    // partial run carries a nondeterministic subset score that would invent or
+    // break a streak the same way. Drop both so the streak reflects only runs
+    // that measured a real, full score. Matches `trend_step`/`regression_against`.
     let scores: Vec<f64> = entries
         .iter()
-        .filter(|e| !e.is_scoreless())
+        .filter(|e| e.is_comparable())
         .map(|e| e.mutation_score)
         .collect();
     if scores.len() < 3 {
@@ -602,14 +649,16 @@ fn parse_id_file(id: &str) -> Option<&str> {
 /// happens to contain — append can silently fail (read-only FS, disk
 /// full) and leave the file's tail one entry behind reality.
 pub fn regression_against(prior: &[HistoryEntry], current: &HistoryEntry) -> Option<f64> {
-    // A scoreless run has a vacuous 100.0, not a real score — neither side of
-    // the comparison may be one, or we fabricate a drop (real prev vs fake-100
-    // current) or hide one (fake-100 prev vs real current).
-    if current.is_scoreless() {
+    // A scoreless run has a vacuous 100.0, not a real score, and a `--max-time`
+    // partial run scored a nondeterministic subset — neither side of the
+    // comparison may be one, or we fabricate a drop (real prev vs fake/partial
+    // current) or hide one (fake/partial prev vs real current). `is_comparable`
+    // rejects both.
+    if !current.is_comparable() {
         return None;
     }
     let current_branch = current.git_branch.as_deref();
-    let prev = prior.iter().rev().filter(|e| !e.is_scoreless()).find(|e| {
+    let prev = prior.iter().rev().filter(|e| e.is_comparable()).find(|e| {
         match (e.git_branch.as_deref(), current_branch) {
             (Some(a), Some(b)) => a == b,
             _ => true,
@@ -876,6 +925,7 @@ mod tests {
             exclude: Vec::new(),
             verify_baseline: false,
             baseline_timeout_secs: 300,
+            max_time_secs: None,
         }
     }
 
@@ -1043,6 +1093,47 @@ mod tests {
         assert_eq!(e.fermut_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
     }
 
+    fn mutant(id: &str) -> crate::mutator::Mutant {
+        use crate::mutator::{Mutant, Operator};
+        use ruff_text_size::TextRange;
+        Mutant {
+            id: id.into(),
+            file: PathBuf::from("a.py"),
+            operator: Operator::ArithOpSwap,
+            range: TextRange::new(0u32.into(), 1u32.into()),
+            original: "+".into(),
+            replacement: "-".into(),
+            line: 1,
+            stmt_line: 1,
+        }
+    }
+
+    #[test]
+    fn from_report_marks_time_budget_run_partial() {
+        // A run with any time-budget skip scored a truncated subset → partial,
+        // so the regression gate/trend excludes it.
+        let report = Report::new(vec![
+            MutantOutcome::killed(mutant("k")),
+            MutantOutcome::skipped(mutant("s"), crate::engine::TIME_BUDGET_FILTER),
+        ]);
+        let e = HistoryEntry::from_report(&report, Path::new("."), None, None);
+        assert!(e.partial, "time-budget skip must flag the entry partial");
+        assert!(!e.is_comparable());
+    }
+
+    #[test]
+    fn from_report_full_run_is_not_partial() {
+        // No time-budget skip (a plain coverage skip is not a budget cutoff) →
+        // a full, comparable run.
+        let report = Report::new(vec![
+            MutantOutcome::killed(mutant("k")),
+            MutantOutcome::skipped(mutant("s"), "coverage"),
+        ]);
+        let e = HistoryEntry::from_report(&report, Path::new("."), None, None);
+        assert!(!e.partial, "a non-budget skip must not flag partial");
+        assert!(e.is_comparable());
+    }
+
     #[test]
     fn append_then_load_roundtrips_entries() {
         let tmp = tempdir().unwrap();
@@ -1065,6 +1156,7 @@ mod tests {
             git_branch: Some("main".into()),
             survivor_ids: None,
             baseline: false,
+            partial: false,
         };
         append(&p, &entry).unwrap();
         append(&p, &entry).unwrap();
@@ -1097,6 +1189,7 @@ mod tests {
             git_branch: None,
             survivor_ids: None,
             baseline: false,
+            partial: false,
         };
         // A false flag is skipped on serialize — no schema bloat on run rows.
         let normal_json = serde_json::to_string(&anchor).unwrap();
@@ -1139,6 +1232,7 @@ mod tests {
             git_branch: None,
             survivor_ids: None,
             baseline: false,
+            partial: false,
         };
         let line = serde_json::to_string(&valid).unwrap();
         std::fs::write(&p, format!("not json\n{line}\n{{partial:")).unwrap();
@@ -1168,6 +1262,7 @@ mod tests {
             git_branch: None,
             survivor_ids: None,
             baseline: false,
+            partial: false,
             fermut_version: None,
         };
         let good = serde_json::to_string(&valid).unwrap();
@@ -1221,6 +1316,7 @@ mod tests {
                         git_branch: None,
                         survivor_ids: None,
                         baseline: false,
+                        partial: false,
                     };
                     append(&p, &entry).unwrap();
                 }
@@ -1259,6 +1355,7 @@ mod tests {
             git_branch: None,
             survivor_ids: None,
             baseline: false,
+            partial: false,
         };
         let valid_line = serde_json::to_string(&valid).unwrap();
         std::fs::write(&p, format!("{line}\n{valid_line}\n")).unwrap();
@@ -1410,6 +1507,7 @@ mod tests {
             git_branch: branch.map(str::to_string),
             survivor_ids: None,
             baseline: false,
+            partial: false,
         }
     }
 
@@ -1550,6 +1648,102 @@ mod tests {
             mk(70.0, None),
         ];
         assert_eq!(trailing_streak(&es), Some((StreakDir::Up, 2)));
+    }
+
+    #[test]
+    fn trailing_streak_ignores_partial_entries() {
+        // A `--max-time` partial run's subset score must not invent or break a
+        // streak. 50→60→70 is a clean 2-run up streak; a partial 20 wedged in
+        // would otherwise read as a down-then-up whipsaw.
+        let es = vec![
+            mk(50.0, None),
+            mk(60.0, None),
+            mk_partial(20.0, None), // subset score — dropped, not a −40 move
+            mk(70.0, None),
+        ];
+        assert_eq!(trailing_streak(&es), Some((StreakDir::Up, 2)));
+    }
+
+    /// A real scored entry flagged `partial` — as a `--max-time` run truncated
+    /// by the budget would be. Scored (not scoreless), but not comparable.
+    fn mk_partial(score: f64, branch: Option<&str>) -> HistoryEntry {
+        let mut e = mk(score, branch);
+        e.partial = true;
+        assert!(
+            !e.is_scoreless(),
+            "partial entry still scored a real subset"
+        );
+        assert!(
+            !e.is_comparable(),
+            "partial entry must be excluded from the gate"
+        );
+        e
+    }
+
+    #[test]
+    fn regression_against_ignores_partial_current() {
+        // Current run was --max-time-truncated → scored a nondeterministic
+        // subset. Comparing a real 90% prior against it would fabricate a drop.
+        let prior = vec![mk(90.0, Some("main"))];
+        let current = mk_partial(70.0, Some("main"));
+        assert_eq!(regression_against(&prior, &current), None);
+    }
+
+    #[test]
+    fn regression_against_skips_partial_prior() {
+        // The most recent prior was a partial (budget-truncated) run. It must
+        // be skipped so the gate compares against the last full run (90→85),
+        // never poisoning the baseline with a subset score.
+        let prior = vec![
+            mk(90.0, Some("main")),         // last full prior
+            mk_partial(50.0, Some("main")), // budget-truncated, must be skipped
+        ];
+        let current = mk(85.0, Some("main"));
+        assert_eq!(regression_against(&prior, &current), Some(5.0));
+    }
+
+    #[test]
+    fn trend_step_deltas_and_seeds_only_comparable_runs() {
+        // full(80) → partial(40) → full(78): the partial neither shows a delta
+        // nor advances the baseline, so the third row deltas 78−80 = −2.
+        let a = mk(80.0, None);
+        let b = mk_partial(40.0, None);
+        let c = mk(78.0, None);
+
+        let (d_a, prev) = trend_step(None, &a);
+        assert_eq!(d_a, None, "first comparable row has no prior");
+        assert_eq!(prev, Some(80.0));
+
+        let (d_b, prev) = trend_step(prev, &b);
+        assert_eq!(d_b, None, "partial row shows no delta");
+        assert_eq!(
+            prev,
+            Some(80.0),
+            "partial row does NOT advance the baseline"
+        );
+
+        let (d_c, prev) = trend_step(prev, &c);
+        assert_eq!(
+            d_c,
+            Some(-2.0),
+            "deltas against the last full run, not the subset"
+        );
+        assert_eq!(prev, Some(78.0));
+    }
+
+    #[test]
+    fn trend_step_skips_scoreless_like_partial() {
+        // A scoreless (vacuous-100) row behaves the same: no delta, no seed.
+        let a = mk(90.0, None);
+        let s = mk_scoreless(None);
+        let (_, prev) = trend_step(None, &a);
+        let (d_s, prev_after) = trend_step(prev, &s);
+        assert_eq!(d_s, None);
+        assert_eq!(
+            prev_after,
+            Some(90.0),
+            "scoreless must not reseed the baseline"
+        );
     }
 
     #[test]

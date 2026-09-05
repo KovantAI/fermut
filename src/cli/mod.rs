@@ -331,6 +331,17 @@ enum Cmd {
         #[arg(long, value_name = "SECS")]
         baseline_timeout: Option<u64>,
 
+        /// Wall-clock ceiling (seconds) on the per-mutant testing phase. When
+        /// set, mutants are evaluated highest-value first (covered mutants
+        /// before uncovered) and, once the deadline passes, every mutant not
+        /// yet started is recorded as `skipped` (filter `time-budget`) instead
+        /// of run; mutants already in flight finish. Gives a PR gate a
+        /// predictable ceiling — a time cap beats a mutant cap for CI trust.
+        /// Bounds only the testing phase: baseline verification, generation,
+        /// and the ty pre-filter are separate fixed costs it does not cover.
+        #[arg(long, value_name = "SECS")]
+        max_time: Option<u64>,
+
         #[command(flatten)]
         filter: FilterArgs,
     },
@@ -1263,6 +1274,7 @@ impl Cli {
                 no_fail,
                 no_verify_baseline,
                 baseline_timeout,
+                max_time,
                 filter: f,
             } => {
                 let cfg = build_config(
@@ -1289,6 +1301,7 @@ impl Cli {
                     fail_under,
                     no_verify_baseline,
                     baseline_timeout,
+                    max_time,
                     f,
                 )?;
                 let want_annotations =
@@ -1351,6 +1364,19 @@ impl Cli {
                             );
                             gate_failed = true;
                         } else if let Some(current) = current_entry.as_ref() {
+                            if current.partial {
+                                // A `--max-time` run truncated by the budget
+                                // scored a nondeterministic subset, so it can't
+                                // anchor a regression comparison — `regression_
+                                // against` excludes it. Say so, or a green gate
+                                // reads as "no regression" when it's really "not
+                                // evaluated".
+                                eprintln!(
+                                    "--fail-on-regression skipped: this run hit the --max-time \
+                                     budget and scored a partial subset (not comparable). Run \
+                                     without --max-time to gate on regression."
+                                );
+                            }
                             // Reload post-run so concurrent writers (e.g.
                             // parallel `--shard` workers) become visible,
                             // then compare against the in-memory current
@@ -1378,23 +1404,7 @@ impl Cli {
                     // regardless, so the errored case reports N/A too — claiming
                     // "the gate fails" would contradict the exit-0 that follows.
                     if report.is_scoreless() {
-                        let errored = report.counts().errored;
-                        if errored > 0 && !no_fail {
-                            eprintln!(
-                                "no mutants scored: {errored} errored, so the score is \
-                                 undefined (not 100%) and the gate fails"
-                            );
-                        } else if errored > 0 {
-                            eprintln!(
-                                "no mutants scored: {errored} errored, so the score is \
-                                 undefined (not 100%) — reported N/A, exit suppressed by --no-fail"
-                            );
-                        } else {
-                            eprintln!(
-                                "no mutants scored: nothing to mutate in scope — \
-                                 mutation score N/A (not 100%)"
-                            );
-                        }
+                        eprintln!("{}", scoreless_note(&report, no_fail));
                     }
                     // `--no-fail`: the run exists to produce a report, not to
                     // gate. Conflicts with the gate flags at the parser, so
@@ -1727,6 +1737,7 @@ impl Cli {
                     None,
                     true,
                     None,
+                    None,
                     f,
                 )?;
                 let mutants = crate::mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)?;
@@ -1767,6 +1778,41 @@ fn load_prior_excluding(path: &std::path::Path, current: &HistoryEntry) -> Vec<H
 /// live pytest run.
 fn gate_exits_nonzero(no_fail: bool, result_fails: bool, gate_failed: bool) -> bool {
     !no_fail && (result_fails || gate_failed)
+}
+
+/// Human note for a scoreless (zero-denominator) run — its score is undefined
+/// (N/A), never a vacuous 100%. Distinguishes the causes so the message is
+/// actionable: all-errored (which fails the gate unless `--no-fail`), a
+/// `--max-time` budget that expired before any mutant ran, or a genuinely
+/// empty scope. Pure so the branch selection is unit-tested.
+fn scoreless_note(report: &Report, no_fail: bool) -> String {
+    let errored = report.counts().errored;
+    if errored > 0 && !no_fail {
+        format!(
+            "no mutants scored: {errored} errored, so the score is \
+             undefined (not 100%) and the gate fails"
+        )
+    } else if errored > 0 {
+        format!(
+            "no mutants scored: {errored} errored, so the score is \
+             undefined (not 100%) — reported N/A, exit suppressed by --no-fail"
+        )
+    } else if let Some((_, n)) = report
+        .skipped_by_filter()
+        .into_iter()
+        .find(|(f, _)| f == crate::engine::TIME_BUDGET_FILTER)
+    {
+        // The budget expired before any mutant was scored — distinct from an
+        // empty scope; say so rather than claiming "nothing to mutate".
+        format!(
+            "no mutants scored: --max-time budget expired before any mutant \
+             ran ({n} skipped/`time-budget`) — mutation score N/A (not 100%)"
+        )
+    } else {
+        "no mutants scored: nothing to mutate in scope — \
+         mutation score N/A (not 100%)"
+            .to_string()
+    }
 }
 
 /// Resolve the run-history log path the same way `build_config` does, but
@@ -1845,5 +1891,55 @@ mod tests {
         );
         // --no-fail alone parses fine.
         assert!(Cli::try_parse_from(["fermut", "run", "--no-fail"]).is_ok());
+    }
+
+    fn scoreless_mutant(id: &str) -> crate::mutator::Mutant {
+        use crate::mutator::{Mutant, Operator};
+        use ruff_text_size::TextRange;
+        Mutant {
+            id: id.into(),
+            file: PathBuf::from("a.py"),
+            operator: Operator::ArithOpSwap,
+            range: TextRange::new(0u32.into(), 1u32.into()),
+            original: "+".into(),
+            replacement: "-".into(),
+            line: 1,
+            stmt_line: 1,
+        }
+    }
+
+    #[test]
+    fn scoreless_note_flags_time_budget_exhaustion() {
+        use crate::report::MutantOutcome;
+        // Budget expired before any mutant ran: every mutant is a time-budget
+        // skip, no errors. The note must name the budget, not "nothing to
+        // mutate".
+        let report = Report::new(vec![
+            MutantOutcome::skipped(scoreless_mutant("a"), crate::engine::TIME_BUDGET_FILTER),
+            MutantOutcome::skipped(scoreless_mutant("b"), crate::engine::TIME_BUDGET_FILTER),
+        ]);
+        let note = scoreless_note(&report, false);
+        assert!(note.contains("--max-time budget expired"), "got: {note}");
+        assert!(note.contains("2 skipped"), "reports the count: {note}");
+        assert!(!note.contains("nothing to mutate"));
+    }
+
+    #[test]
+    fn scoreless_note_empty_scope_vs_errored() {
+        use crate::report::MutantOutcome;
+        // No mutants at all → empty scope wording.
+        let empty = Report::new(vec![]);
+        assert!(scoreless_note(&empty, false).contains("nothing to mutate in scope"));
+
+        // All errored, gate live → the gate-fails wording.
+        let errored = Report::new(vec![MutantOutcome::error(
+            scoreless_mutant("e"),
+            "boom".into(),
+        )]);
+        assert!(scoreless_note(&errored, false).contains("and the gate fails"));
+        // Same run under --no-fail → exit-suppressed wording, never "gate fails".
+        let note = scoreless_note(&errored, true);
+        assert!(note.contains("exit suppressed by --no-fail"));
+        assert!(!note.contains("and the gate fails"));
     }
 }

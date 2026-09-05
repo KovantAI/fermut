@@ -16,12 +16,6 @@ bandwidth. Tracked alongside live work at
   most-likely-to-kill first.
 - **Smart test ordering.** Within selected tests, run the
   historical-killer first. Cuts wall-clock on survivor tails.
-- **Time-boxed runs (`--max-time`).** Wall-clock ceiling for big
-  suites that can't run the full catalogue. Evaluates the
-  highest-value mutants first (coverage + smart ordering) and
-  reports the best survivors found within the budget. Predictable
-  PR-gate latency — a time ceiling beats a mutant ceiling for CI
-  trust.
 - **Cross-run mutant cache.** Shareable cache across machines /
   CI runners. Cache server + content-addressed entries. Today's
   cache is local-only.
@@ -79,6 +73,18 @@ bandwidth. Tracked alongside live work at
 - **Rust self-mutation.** Mutate fermut's own Rust source as part
   of CI. Eats own dogfood, catches regressions in operator
   emission logic.
+
+## Time-boxed runs (`--max-time`) — shipped
+
+`fermut run --max-time <SECS>` caps the testing phase at a wall-clock
+ceiling. Mutants are evaluated highest-value first (covered ahead of
+uncovered); mutants left untested at the deadline are recorded as
+`skipped`/`time-budget` and excluded from the score, so a truncated run
+reports over what actually ran rather than masquerading as a full sweep.
+A predictable time ceiling for PR gates — a time cap beats a mutant cap
+for CI trust. See **[run reference](reference/cli/run.md#time-boxed-runs-max-time)**.
+Follow-ups still open: coverage-call-graph ordering and historical-killer
+ordering (below) sharpen the "highest-value first" signal.
 
 ## Public PyPI — shipped
 

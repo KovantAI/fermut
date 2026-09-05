@@ -210,11 +210,12 @@ fn build_report(current: &HistoryEntry, baseline: Option<&HistoryEntry>) -> Scor
         survivor_ids_compared,
     ) = match baseline {
         Some(base) => {
-            // A scoreless run carries the vacuous 100.0 floor, not a real
-            // score — a delta against it (either side) is fabricated. Leave
-            // the delta undefined so regression is driven by survivor ids
-            // alone, never by a phantom score move.
-            let delta = if current.is_scoreless() || base.is_scoreless() {
+            // A scoreless run carries the vacuous 100.0 floor and a `--max-time`
+            // partial run scored a nondeterministic subset — a delta against
+            // either (on either side) is fabricated. Leave the delta undefined
+            // so regression is driven by survivor ids alone, never by a phantom
+            // score move. `is_comparable` rejects both.
+            let delta = if !current.is_comparable() || !base.is_comparable() {
                 None
             } else {
                 Some(current.mutation_score - base.mutation_score)
@@ -319,6 +320,7 @@ mod tests {
             git_branch: branch.map(str::to_string),
             survivor_ids: Some(survivors.iter().map(|s| s.to_string()).collect()),
             baseline: false,
+            partial: false,
         }
     }
 
@@ -401,6 +403,25 @@ mod tests {
         let r = build_report(&scoreless, Some(&real));
         assert!(r.delta.is_none());
         assert!(!r.regressed);
+    }
+
+    #[test]
+    fn partial_side_yields_no_delta() {
+        // A `--max-time` partial run scored a nondeterministic subset. Whether
+        // it's the baseline or the current run, the score delta is fabricated
+        // and must be suppressed (survivor ids still drive real regressions).
+        let mut partial = entry("t1", 70.0, Some("main"), &["a"]);
+        partial.partial = true;
+        assert!(!partial.is_scoreless() && !partial.is_comparable());
+        let real = entry("t2", 90.0, Some("main"), &["a"]);
+
+        // partial baseline vs real current (70→90 would fake a +20 gain).
+        let r = build_report(&real, Some(&partial));
+        assert!(r.delta.is_none());
+
+        // real baseline vs partial current (90→70 would fake a -20 drop).
+        let r = build_report(&partial, Some(&real));
+        assert!(r.delta.is_none());
     }
 
     #[test]

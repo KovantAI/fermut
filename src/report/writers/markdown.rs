@@ -95,9 +95,11 @@ fn render_trend_block(current_score: Option<f64>, prior_history: &[HistoryEntry]
     const WINDOW: usize = 20;
     let start = prior_history.len().saturating_sub(WINDOW - 1);
     let window = &prior_history[start..];
+    // Comparable priors only — a scoreless vacuous-100 or a `--max-time`
+    // partial subset score would draw a phantom spike/dip in the sparkline.
     let mut scores: Vec<f64> = window
         .iter()
-        .filter(|e| !e.is_scoreless())
+        .filter(|e| e.is_comparable())
         .map(|e| e.mutation_score)
         .collect();
     if let Some(cur) = current_score {
@@ -110,11 +112,14 @@ fn render_trend_block(current_score: Option<f64>, prior_history: &[HistoryEntry]
     let spark = history::sparkline(scores.iter().copied());
     let first = scores.first().copied().unwrap();
 
-    // Delta only when the current run scored and there is a prior scored run.
+    // Delta only when the current run scored and there is a prior comparable
+    // run. Skips scoreless (vacuous 100.0) *and* `--max-time` partial priors —
+    // a subset score as the "previous" point renders a phantom ▲/▼ in the PR
+    // markdown. Matches the `regression_against` gate.
     let prev = window
         .iter()
         .rev()
-        .find(|e| !e.is_scoreless())
+        .find(|e| e.is_comparable())
         .map(|e| e.mutation_score);
     let delta = current_score.zip(prev).map(|(c, p)| c - p);
     let delta_s = match delta {
@@ -178,6 +183,7 @@ mod tests {
             git_branch: None,
             survivor_ids: None,
             baseline: false,
+            partial: false,
             fermut_version: None,
         }];
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -216,6 +222,7 @@ mod tests {
             git_branch: None,
             survivor_ids: None,
             baseline: false,
+            partial: false,
         }];
         let tmp = tempfile::NamedTempFile::new().unwrap();
         r.write_markdown_with_history(tmp.path(), &prior).unwrap();
@@ -226,6 +233,53 @@ mod tests {
         let trend_at = written.find("**Trend:**").unwrap();
         let table_at = written.find("| Status").unwrap();
         assert!(trend_at < table_at);
+    }
+
+    #[test]
+    fn write_markdown_trend_skips_partial_prior_for_delta() {
+        use crate::history::HistoryEntry;
+        // The only prior is a `--max-time` partial run (subset score). It must
+        // NOT be the "vs previous" comparison point — no phantom ▲/▼ against a
+        // nondeterministic subset. With no comparable prior the block reads
+        // "first recorded run".
+        let r = Report::new(vec![
+            MutantOutcome::killed(make_mutant()),
+            MutantOutcome::survived(make_mutant()),
+        ]);
+        let partial = HistoryEntry {
+            schema_version: crate::history::CURRENT_SCHEMA_V,
+            timestamp: "2026-05-01T00:00:00Z".into(),
+            mutation_score: 10.0, // low subset score — would fake a huge ▲ if used
+            killed: 1,
+            survived: 9,
+            timed_out: 0,
+            skipped: 0,
+            errored: 0,
+            equivalent: 0,
+            total: Some(10),
+            duration_ms: None,
+            config_hash: None,
+            fermut_version: None,
+            git_sha: None,
+            git_branch: None,
+            survivor_ids: None,
+            baseline: false,
+            partial: true,
+        };
+        // Scored (killed>0) so it is NOT scoreless — the skip must be driven by
+        // `partial` alone, not the zero-denominator guard.
+        assert!(!partial.is_scoreless() && !partial.is_comparable());
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        r.write_markdown_with_history(tmp.path(), std::slice::from_ref(&partial))
+            .unwrap();
+        let written = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(written.contains("**Trend:**"));
+        assert!(
+            !written.contains("▲ +"),
+            "partial prior must not produce a phantom improvement delta"
+        );
+        assert!(written.contains("first recorded run"));
     }
 
     #[test]

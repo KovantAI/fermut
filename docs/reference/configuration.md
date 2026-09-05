@@ -66,6 +66,7 @@ TOML primitives: `string`, `bool`, `int`, `float`, `array<string>`.
 | `baseline_timeout` | `int`           | `300`                                           | Wall-clock cap (seconds) for the baseline run. Separate from `timeout` (which bounds a single mutant's coverage-selected subset) because the baseline runs the whole suite. A suite exceeding it is killed and the run aborts. CLI `--baseline-timeout` overrides. |
 | `smart_order`      | `bool`          | `true`                                          | Run the historically-killing test first (per `(file, operator)`, learned into `.fermut/kill-order.json`) so pytest's `-x` short-circuits sooner. Advisory — never changes a verdict, only speed. CLI `--no-smart-order` overrides. See [Smart test ordering](cli/run.md#smart-test-ordering). |
 | `kill_order_path`  | `path`          | `.fermut/kill-order.json`                       | Location of the advisory smart-ordering sidecar. Relative paths resolve against the config file's directory. Advisory — losing or relocating it only costs a slow run. |
+| `max_time`         | `int`           | unset (whole catalogue)                         | Wall-clock ceiling (seconds) on the testing phase. Mutants are evaluated highest-value first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` and excluded from the score. Bounds the testing phase only — not baseline, generation, or the `ty` pre-filter. CLI `--max-time` overrides. See [Time-boxed runs](cli/run.md#time-boxed-runs-max-time). |
 
 ## Examples
 

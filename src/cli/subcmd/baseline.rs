@@ -228,6 +228,7 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
         false, // no_verify_baseline
         None,  // baseline_timeout
         false, // no_smart_order
+        None,  // max_time
         filter,
     )?;
 

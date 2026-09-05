@@ -209,7 +209,7 @@ and inline markers. Mapping for the operators with a direct analogue:
 | `break` ↔ `continue`            | `break-continue-swap` |
 | decorator drop                  | `remove-decorator`   |
 
-The full fermut catalogue (26 stable, more experimental) lives in
+The full fermut catalogue (30 stable, more experimental) lives in
 **[Operators → Stable](../reference/operators/stable.md)**. Use
 `--ops` / `--skip-ops` with names, e.g.
 `fermut run --skip-ops string-to-empty,number-to-zero`.

@@ -98,7 +98,7 @@ impl PytestRunner {
         (file, mutant.operator.name())
     }
 
-    /// Parse the killing test's node id from captured pytest output (the `-rf`
+    /// Parse the killing test's node id from captured pytest output (the `-rfE`
     /// summary) and append it to the shared sink for the engine to fold into the
     /// kill-order sidecar. Best-effort: any misfire (no failure line, unparsable,
     /// poisoned lock) just forfeits this datapoint.
@@ -133,10 +133,61 @@ impl PytestRunner {
 /// Whether to capture the per-mutant pytest stdout to learn the killing test.
 /// Only worth it when smart ordering is on AND more than one test was selected:
 /// with a single (or zero) selected test there's nothing to reorder next run, so
-/// the pipe + read + `-rf` are pure overhead. Kept pure so the wiring is tested.
+/// the pipe + read + `-rfE` are pure overhead. Kept pure so the wiring is tested.
 fn should_capture(smart_order: bool, selected_len: usize) -> bool {
     smart_order && selected_len > 1
 }
+
+/// Per-mutant test selection: either coverage-selected node ids or the
+/// whole-tests-dir sweep. Returned by [`select_args`] so the caller keeps the
+/// sweep path as an `OsStr` (no lossy conversion) while the id wiring stays pure
+/// and testable.
+enum Selection {
+    /// Positional args to append after the base flags: the (reordered) node
+    /// ids, plus `-rfE` when `capture` is set so the summary names the killer.
+    Ids { args: Vec<String>, capture: bool },
+    /// No coverage selection → run the whole tests dir. Never captures.
+    Sweep,
+}
+
+/// Decide the per-mutant selection. Pure — no mirror, no spawn — so the arg
+/// wiring (smart reordering, the `-rfE` capture flag, and the sweep fallback)
+/// is unit-tested without launching pytest. `ids` is the coverage selection;
+/// `None` or empty falls back to [`Selection::Sweep`].
+fn select_args(
+    ids: Option<&[String]>,
+    smart_order: bool,
+    kill_order: &crate::kill_order::KillOrder,
+    key_file: &str,
+    key_op: &str,
+) -> Selection {
+    match ids {
+        Some(ids) if !ids.is_empty() => {
+            let ordered = if smart_order {
+                kill_order.order(ids, key_file, key_op)
+            } else {
+                ids.to_vec()
+            };
+            let capture = should_capture(smart_order, ordered.len());
+            let mut args = ordered;
+            if capture {
+                // `-rfE` prints a `FAILED`/`ERROR <nodeid>` summary line so a
+                // kill tells us *which* test did it — a mutant can die by a
+                // failed assertion or a raised error, so accept either.
+                args.push("-rfE".to_string());
+            }
+            Selection::Ids { args, capture }
+        }
+        _ => Selection::Sweep,
+    }
+}
+
+/// Grace period to wait for the stdout drain once the child has exited. In the
+/// normal case the drain finishes instantly (the child closing its write end
+/// EOFs the read). It only matters when a lingering grandchild inherited the
+/// pipe's write end: rather than block a worker forever we abandon the drain
+/// after this and forfeit the (advisory) datapoint.
+const DRAIN_GRACE: Duration = Duration::from_secs(5);
 
 /// Wait for `child` with `timeout` while concurrently draining its stdout on a
 /// dedicated thread. Draining concurrently is load-bearing: if the child fills
@@ -145,30 +196,52 @@ fn should_capture(smart_order: bool, selected_len: usize) -> bool {
 /// changing the verdict. On timeout, `on_timeout` terminates the child. Returns
 /// the exit status (`None` = timed out) and the captured stdout (`None` when
 /// stdout wasn't piped, or on the timeout path).
+///
+/// The drain result is delivered over a channel, not a bare `JoinHandle::join`,
+/// so the wait for it is *bounded* by [`DRAIN_GRACE`]: if the child exits but a
+/// grandchild still holds the pipe's write end the read never EOFs, and joining
+/// would wedge this worker forever. Bytes are decoded lossily rather than via
+/// `read_to_string` so a single non-UTF-8 byte can't discard the whole capture.
 fn wait_draining_stdout(
-    mut child: Child,
+    child: Child,
     timeout: Duration,
     on_timeout: impl FnOnce(&mut Child),
 ) -> Result<(Option<ExitStatus>, Option<String>)> {
+    wait_draining_stdout_with_grace(child, timeout, DRAIN_GRACE, on_timeout)
+}
+
+/// [`wait_draining_stdout`] with the drain grace injected, so a test can prove
+/// the bound holds without waiting the full [`DRAIN_GRACE`].
+fn wait_draining_stdout_with_grace(
+    mut child: Child,
+    timeout: Duration,
+    grace: Duration,
+    on_timeout: impl FnOnce(&mut Child),
+) -> Result<(Option<ExitStatus>, Option<String>)> {
     let reader = child.stdout.take().map(|mut out| {
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut buf = String::new();
-            let _ = out.read_to_string(&mut buf);
-            buf
-        })
+            let mut buf = Vec::new();
+            let _ = out.read_to_end(&mut buf);
+            let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+        });
+        rx
     });
-    let join = |r: Option<std::thread::JoinHandle<String>>| r.and_then(|h| h.join().ok());
+    // `None` when stdout wasn't piped or the drain overran the grace window.
+    let collect = |rx: Option<std::sync::mpsc::Receiver<String>>| {
+        rx.and_then(|rx| rx.recv_timeout(grace).ok())
+    };
 
     match child
         .wait_timeout(timeout)
         .context("waiting on test runner")?
     {
-        Some(status) => Ok((Some(status), join(reader))),
+        Some(status) => Ok((Some(status), collect(reader))),
         None => {
             on_timeout(&mut child);
             let _ = child.wait();
-            // Reap the drain thread now that the pipe has closed.
-            join(reader);
+            // Reap the drain now that the pipe has closed (bounded like above).
+            let _ = collect(reader);
             Ok((None, None))
         }
     }
@@ -203,40 +276,25 @@ impl Runner for PytestRunner {
             // Smart ordering reorders those ids so a historically-frequent
             // killer for this `(file, operator)` runs first — pytest's `-x` then
             // short-circuits on it. It only permutes the set, never changes it,
-            // so the kill/survive verdict is identical.
+            // so the kill/survive verdict is identical. See [`select_args`].
             let (key_file, key_op) = self.kill_key(mutant);
-            // Whether to capture stdout and learn the killer this run. Only pays
-            // off when smart ordering is on AND more than one coverage-selected
-            // test could run — with a single test there's nothing to reorder and
-            // no reason to pipe/read output. Set inside the selection below.
-            let mut capture = false;
-            match self
+            let ids = self
                 .coverage
                 .as_ref()
-                .and_then(|ctx| ctx.tests_for_mutant(mutant))
-            {
-                Some(ids) if !ids.is_empty() => {
-                    let ordered = if self.smart_order {
-                        self.kill_order.order(ids, &key_file, key_op)
-                    } else {
-                        ids.to_vec()
-                    };
-                    capture = should_capture(self.smart_order, ordered.len());
-                    for id in &ordered {
-                        cmd.arg(id);
+                .and_then(|ctx| ctx.tests_for_mutant(mutant));
+            let capture =
+                match select_args(ids, self.smart_order, &self.kill_order, &key_file, key_op) {
+                    Selection::Ids { args, capture } => {
+                        for a in &args {
+                            cmd.arg(a);
+                        }
+                        capture
                     }
-                }
-                _ => {
-                    // No coverage selection → whole-tests-dir sweep. Ordering
-                    // can't help and the output would be large, so never capture.
-                    cmd.arg(&mirror.tests);
-                }
-            }
-            // `-rf` prints a `FAILED <nodeid>` summary line so a kill tells us
-            // *which* test did it — only needed when we're capturing to learn.
-            if capture {
-                cmd.arg("-rf");
-            }
+                    Selection::Sweep => {
+                        cmd.arg(&mirror.tests);
+                        false
+                    }
+                };
             cmd.current_dir(&mirror.root);
             with_new_process_group(&mut cmd);
             // Editable installs (`pip install -e .`) write an absolute path
@@ -253,7 +311,7 @@ impl Runner for PytestRunner {
             // Per-mutant pytest output is noise on the terminal (each killed
             // mutant would stream `FAILED … / 1 failed`, reading as breakage
             // when it's mutants dying as intended). Discard it — except when
-            // capturing to learn the killer's node id from the `-rf` summary.
+            // capturing to learn the killer's node id from the `-rfE` summary.
             // stderr is always discarded.
             let stdout_cfg = if capture {
                 Stdio::piped()
@@ -325,6 +383,89 @@ mod tests {
         assert!(should_capture(true, 100));
     }
 
+    // --- select_args: locks the arg wiring (ordering, `-rfE`, sweep fallback).
+
+    use crate::kill_order::KillOrder;
+
+    fn sids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn assert_ids(sel: Selection, want_args: &[&str], want_capture: bool) -> Vec<String> {
+        match sel {
+            Selection::Ids { args, capture } => {
+                assert_eq!(args, sids(want_args), "positional args");
+                assert_eq!(capture, want_capture, "capture flag");
+                args
+            }
+            Selection::Sweep => panic!("expected Ids, got Sweep"),
+        }
+    }
+
+    #[test]
+    fn select_args_multi_test_captures_and_appends_rfe() {
+        // Smart order on + >1 test → capture, and `-rfE` must be the last arg
+        // so the summary surfaces the killer. This is the wiring the ignored
+        // e2e can't cheaply guard.
+        let ko = KillOrder::default();
+        let sel = select_args(Some(&sids(&["t::a", "t::b"])), true, &ko, "src/f.py", "op");
+        assert_ids(sel, &["t::a", "t::b", "-rfE"], true);
+    }
+
+    #[test]
+    fn select_args_single_test_neither_captures_nor_adds_rfe() {
+        // One selected test → nothing to reorder next run, so no capture and no
+        // `-rfE` (piping + summary would be pure overhead).
+        let ko = KillOrder::default();
+        let sel = select_args(Some(&sids(&["t::only"])), true, &ko, "src/f.py", "op");
+        assert_ids(sel, &["t::only"], false);
+    }
+
+    #[test]
+    fn select_args_smart_order_off_keeps_input_order_no_rfe() {
+        // Ordering off → ids pass through untouched, never capture even with
+        // many tests.
+        let ko = KillOrder::default();
+        let sel = select_args(
+            Some(&sids(&["t::a", "t::b", "t::c"])),
+            false,
+            &ko,
+            "src/f.py",
+            "op",
+        );
+        assert_ids(sel, &["t::a", "t::b", "t::c"], false);
+    }
+
+    #[test]
+    fn select_args_reorders_by_history_then_appends_rfe() {
+        // A learned killer must be lifted ahead of the coverage order, and
+        // `-rfE` still trails the reordered ids.
+        let mut ko = KillOrder::default();
+        ko.record("src/f.py", "op", "t::c");
+        ko.record("src/f.py", "op", "t::c");
+        let sel = select_args(
+            Some(&sids(&["t::a", "t::b", "t::c"])),
+            true,
+            &ko,
+            "src/f.py",
+            "op",
+        );
+        assert_ids(sel, &["t::c", "t::a", "t::b", "-rfE"], true);
+    }
+
+    #[test]
+    fn select_args_no_or_empty_coverage_is_sweep() {
+        let ko = KillOrder::default();
+        assert!(matches!(
+            select_args(None, true, &ko, "src/f.py", "op"),
+            Selection::Sweep
+        ));
+        assert!(matches!(
+            select_args(Some(&[]), true, &ko, "src/f.py", "op"),
+            Selection::Sweep
+        ));
+    }
+
     // --- wait_draining_stdout: guards the #2 deadlock fix.
 
     fn never_called(_: &mut Child) {
@@ -353,6 +494,67 @@ mod tests {
             out.len() >= 200_000,
             "expected the full flood to be drained, got {} bytes",
             out.len()
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn wait_draining_does_not_hang_when_grandchild_holds_stdout() {
+        // Regression for the bounded-drain fix: the direct child exits, but a
+        // backgrounded grandchild inherited the stdout write end, so the read
+        // never EOFs. An unbounded `join` would wedge the worker forever; the
+        // channel + grace must return promptly instead. `on_timeout` must NOT
+        // fire — the child exited normally, it did not time out.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("sleep 30 & echo done") // shell exits; the `sleep` keeps stdout open
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let child = cmd.spawn().expect("spawn sh");
+
+        let grace = Duration::from_millis(300);
+        let start = std::time::Instant::now();
+        let (status, output) =
+            wait_draining_stdout_with_grace(child, Duration::from_secs(30), grace, never_called)
+                .unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            status.expect("child exited, not timed out").success(),
+            "the direct child exited 0"
+        );
+        assert!(
+            output.is_none(),
+            "drain can't EOF while the grandchild holds the pipe → no capture"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "must return within the grace, not block on the never-EOFing pipe (took {elapsed:?})"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn wait_draining_keeps_capture_despite_non_utf8_bytes() {
+        // A stray non-UTF-8 byte must not discard the whole capture (the old
+        // `read_to_string` behavior): we lossy-decode, so the surrounding
+        // `FAILED <nodeid>` line still survives to be parsed. Prints a raw
+        // 0xFF byte, then a normal summary line.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("printf '\\377\\n'; printf 'FAILED tests/t.py::x - E\\n'")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let child = cmd.spawn().expect("spawn sh");
+
+        let (status, output) =
+            wait_draining_stdout(child, Duration::from_secs(30), never_called).unwrap();
+        assert!(status.expect("exited").success());
+        let out = output.expect("stdout was piped");
+        assert_eq!(
+            crate::kill_order::parse_first_failed(&out).as_deref(),
+            Some("tests/t.py::x"),
+            "lossy decode must preserve the FAILED line, got {out:?}"
         );
     }
 

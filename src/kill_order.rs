@@ -97,16 +97,21 @@ impl KillOrder {
     }
 }
 
-/// The node id of the first `FAILED <nodeid>` line in pytest `-rf` output — the
-/// test that killed the mutant (under `-x` the first failure is the only one).
-/// `None` when there is no failure line (a survivor, or output we can't read).
-/// pytest prints `FAILED <nodeid> - <reason>`; we take the first token after
-/// `FAILED `, so the trailing reason is ignored. The nodeid itself may contain
+/// The node id of the first `FAILED`/`ERROR <nodeid>` line in pytest `-rfE`
+/// output — the test that killed the mutant (under `-x` the first is the only
+/// one). A mutant can kill by a failed assertion (`FAILED`) or a raised error
+/// (`ERROR`, e.g. a mutated import or fixture), so we accept either prefix.
+/// `None` when there is no such line (a survivor, or output we can't read).
+/// pytest prints `<PREFIX> <nodeid> - <reason>`; we take the first token after
+/// the prefix, so the trailing reason is ignored. The nodeid itself may contain
 /// spaces (parametrized ids like `test_f[a b]`), so we split on the ` - ` reason
 /// separator rather than whitespace; a line with no separator is all nodeid.
 pub fn parse_first_failed(stdout: &str) -> Option<String> {
     stdout.lines().find_map(|line| {
-        let rest = line.trim().strip_prefix("FAILED ")?;
+        let trimmed = line.trim();
+        let rest = trimmed
+            .strip_prefix("FAILED ")
+            .or_else(|| trimmed.strip_prefix("ERROR "))?;
         let nodeid = rest.split_once(" - ").map_or(rest, |(id, _)| id).trim();
         (!nodeid.is_empty()).then(|| nodeid.to_string())
     })
@@ -127,6 +132,28 @@ mod tests {
             parse_first_failed(out).as_deref(),
             Some("tests/test_x.py::test_add")
         );
+    }
+
+    #[test]
+    fn parse_takes_error_line_when_mutant_raises() {
+        // A mutant that breaks import/fixture kills via `ERROR`, not `FAILED`.
+        // `-rfE` surfaces it and we must learn that killer too.
+        let out = "E\n\
+                   =short test summary=\n\
+                   ERROR tests/test_x.py::test_add - ImportError: boom\n";
+        assert_eq!(
+            parse_first_failed(out).as_deref(),
+            Some("tests/test_x.py::test_add")
+        );
+    }
+
+    #[test]
+    fn parse_takes_first_of_mixed_failed_and_error() {
+        // Whichever kill line comes first wins (under `-x` there's only one).
+        let out = "FAILED tests/a.py::t1 - E\nERROR tests/b.py::t2 - E\n";
+        assert_eq!(parse_first_failed(out).as_deref(), Some("tests/a.py::t1"));
+        let out = "ERROR tests/b.py::t2 - E\nFAILED tests/a.py::t1 - E\n";
+        assert_eq!(parse_first_failed(out).as_deref(), Some("tests/b.py::t2"));
     }
 
     #[test]

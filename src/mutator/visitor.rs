@@ -38,6 +38,7 @@ pub fn collect(path: &Path, source: &str) -> Result<Vec<Mutant>> {
         out: Vec::new(),
         docstrings,
         ignores,
+        annotation_ranges: Vec::new(),
         stmt_line: 0,
     };
     for stmt in &module.body {
@@ -69,6 +70,12 @@ struct Collector<'a> {
     out: Vec<Mutant>,
     docstrings: HashSet<TextRange>,
     ignores: IgnoreMap,
+    /// Ranges of union-annotation tokens whose generic mutation is invalid: each
+    /// `|` operator (arith swap → `&`) and each `None` arm (none-to-value), both
+    /// of which would raise at def-time. `push` suppresses any operator landing
+    /// inside one. Scoped to those exact tokens so `Literal[N]` / `Annotated[..]`
+    /// values elsewhere in the annotation still mutate. See `push`.
+    annotation_ranges: Vec<TextRange>,
     /// First line of the statement currently being visited. Mutants record it
     /// so coverage lookups can fall back to the line coverage.py actually
     /// attributes execution to — see `Mutant::stmt_line`.
@@ -85,6 +92,24 @@ impl<'a> Collector<'a> {
     fn push(&mut self, op: Operator, range: TextRange, replacement: &str) {
         let line = self.line_of(range);
         if self.ignores.is_ignored(line, op) {
+            return;
+        }
+        // `annotation_ranges` holds the `|` and `None`-arm tokens of union
+        // annotations, whose generic mutation raises at def-time (`str & None` /
+        // `str | ""`). Suppress any operator landing inside one; the dedicated
+        // type-annotation operators are exempt (they emit the valid union drop).
+        // Ranges are token-precise, so `Literal[N]` / `Annotated[..]` values —
+        // even inside the same union — still mutate.
+        let is_annotation_op = matches!(
+            op,
+            Operator::NumericTypeSwap | Operator::OptionalTypeDrop | Operator::ContainerTypeSwap
+        );
+        if !is_annotation_op
+            && self
+                .annotation_ranges
+                .iter()
+                .any(|a| a.contains_range(range))
+        {
             return;
         }
         let original = &self.source[range];
@@ -286,9 +311,7 @@ impl<'a> Collector<'a> {
     }
 
     /// Emit type-annotation mutations over every annotation attached to a
-    /// function (each parameter + the return). Annotation exprs are only
-    /// visited here, never via the generic expr pass, so `int`/`list` inside an
-    /// annotation is mutated while a runtime `int(x)` / `list(x)` call is not.
+    /// function (each parameter + the return).
     fn handle_param_annotations(&mut self, params: &ast::Parameters, returns: Option<&Expr>) {
         for p in params
             .posonlyargs
@@ -341,15 +364,23 @@ impl<'a> Collector<'a> {
                 }
             }
             Expr::Subscript(s) => {
+                // `Optional[T]` → `T`, bare (`Optional`) or qualified
+                // (`typing.Optional`, `t.Optional`) — replace the whole
+                // subscript with the inner type's source text.
+                let is_optional = match s.value.as_ref() {
+                    Expr::Name(_) => &self.source[s.value.range()] == "Optional",
+                    Expr::Attribute(a) => a.attr.as_str() == "Optional",
+                    _ => false,
+                };
+                if is_optional {
+                    let inner = &self.source[s.slice.range()];
+                    self.push(Operator::OptionalTypeDrop, s.range(), inner);
+                }
+                // Container swaps only for bare builtin names — a `typing.`
+                // qualifier is not a subscriptable builtin container.
                 if let Expr::Name(_) = s.value.as_ref() {
                     let nr = s.value.range();
                     let name = &self.source[nr];
-                    if name == "Optional" {
-                        // `Optional[T]` → `T`: replace the whole subscript with
-                        // the inner type's source text.
-                        let inner = &self.source[s.slice.range()];
-                        self.push(Operator::OptionalTypeDrop, s.range(), inner);
-                    }
                     for (orig, repl) in CONTAINER_TYPE_SWAPS {
                         if *orig == name {
                             self.push(Operator::ContainerTypeSwap, nr, repl);
@@ -368,10 +399,25 @@ impl<'a> Collector<'a> {
             }
             // PEP 604 unions: `T | None` → `T` (drop the optional arm).
             Expr::BinOp(b) if matches!(b.op, ast::Operator::BitOr) => {
+                // Suppress exactly the two def-time-invalid generic mutations a
+                // union annotation attracts, and nothing else: the arith swap on
+                // *this* `|`, and none-to-value on a `None` arm (`str | None` →
+                // `str & None` / `str | ""`, both raise at def-time). Scoped to
+                // just those tokens — a `Literal[N]` / `Annotated[...]` arm keeps
+                // mutating. Per-node op lookup handles nested unions correctly.
+                let ls: usize = b.left.range().end().into();
+                let rs: usize = b.right.range().start().into();
+                if let Some(idx) = self.source[ls..rs].find('|') {
+                    let a = ls + idx;
+                    self.annotation_ranges
+                        .push(TextRange::new((a as u32).into(), ((a + 1) as u32).into()));
+                }
                 if matches!(b.right.as_ref(), Expr::NoneLiteral(_)) {
+                    self.annotation_ranges.push(b.right.range());
                     let keep = &self.source[b.left.range()];
                     self.push(Operator::OptionalTypeDrop, b.range(), keep);
                 } else if matches!(b.left.as_ref(), Expr::NoneLiteral(_)) {
+                    self.annotation_ranges.push(b.left.range());
                     let keep = &self.source[b.right.range()];
                     self.push(Operator::OptionalTypeDrop, b.range(), keep);
                 }
@@ -422,14 +468,20 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
             }
             Stmt::Try(t) => self.handle_try(t),
             Stmt::For(f) => {
-                // `async for` → `for`: sync iteration over an async iterator
-                // raises at runtime — a reliable kill wherever the loop runs.
                 if f.is_async {
+                    // `async for` → `for`: sync iteration over an async iterator
+                    // raises at runtime — a reliable kill wherever it runs. Skip
+                    // the loop-count mutants here: `[]` / `[next(iter(...))]` are
+                    // not async-iterable, so on an `async for` they raise the
+                    // same TypeError instead of producing an empty/one-shot loop
+                    // — redundant with async-for-to-sync and invalid by
+                    // construction.
                     if let Some(r) = self.async_kw_range(f.range()) {
                         self.push(Operator::AsyncForToSync, r, "");
                     }
+                } else {
+                    self.handle_for(f);
                 }
-                self.handle_for(f);
             }
             Stmt::With(w) if w.is_async => {
                 // `async with` → `with`: a sync context-manager protocol on an
@@ -1281,9 +1333,14 @@ mod operator_emission_tests {
 
     #[test]
     fn ann_assign_annotation_is_mutated() {
-        // Module-level `x: int = 0` — annotation mutated, not just the value.
+        // Module-level `x: int = 0` — annotation mutated, AND the value is still
+        // reached by the generic pass (no regression from the annotation guard).
         let ops = ops_for("x: int = 0\n");
         assert!(ops.contains(&Operator::NumericTypeSwap));
+        assert!(
+            ops.contains(&Operator::NumberShift),
+            "value 0 still mutates"
+        );
     }
 
     #[test]
@@ -1321,6 +1378,110 @@ mod operator_emission_tests {
         );
         assert!(ops.contains(&Operator::OptionalTypeDrop));
         assert!(ops.contains(&Operator::NumericTypeSwap));
+    }
+
+    #[test]
+    fn annotation_union_does_not_emit_generic_mutants() {
+        // The generic expr pass recurses into annotations, but `str | None`
+        // must NOT collect an arith swap on `|` or a none-to-value on `None`
+        // (both raise at def-time). Only the annotation operators apply.
+        let src = "def f(a: str | None):\n    return a\n";
+        let ops = ops_for(src);
+        assert!(ops.contains(&Operator::OptionalTypeDrop));
+        assert!(
+            !ops.contains(&Operator::ArithOpSwap),
+            "no `|`→`&` in annotation"
+        );
+        assert!(
+            !ops.contains(&Operator::NoneToValue),
+            "no none-to-value in annotation"
+        );
+    }
+
+    #[test]
+    fn runtime_binop_outside_annotation_still_mutates() {
+        // The annotation guard must be scoped: a real `a | b` in the body still
+        // gets the arith swap.
+        let ops = ops_for("def f(a, b):\n    return a | b\n");
+        assert!(ops.contains(&Operator::ArithOpSwap));
+    }
+
+    #[test]
+    fn annotation_non_union_literals_still_mutate() {
+        // The union guard is scoped to `|` nodes only — a `Literal[N]` value and
+        // `Annotated[...]` metadata elsewhere in an annotation still get the
+        // generic mutations they got before the guard existed.
+        assert!(
+            ops_for("from typing import Literal\ndef f(x: Literal[0]):\n    return x\n")
+                .contains(&Operator::NumberShift)
+        );
+        assert!(
+            ops_for("def f(a: Annotated[int, some(0)]):\n    return a\n")
+                .contains(&Operator::NumberShift),
+            "Annotated metadata literal still mutates"
+        );
+    }
+
+    #[test]
+    fn async_for_omits_loop_count_mutants() {
+        // `async for` emits only the async-strip; the loop-count mutants (`[]` /
+        // `[next(iter(...))]`) are not async-iterable and are suppressed.
+        let src = "async def f(it):\n    async for x in it:\n        pass\n";
+        let ops = ops_for(src);
+        assert!(ops.contains(&Operator::AsyncForToSync));
+        assert!(!ops.contains(&Operator::ZeroIterationForLoop));
+        assert!(!ops.contains(&Operator::OneIterationForLoop));
+    }
+
+    #[test]
+    fn async_for_body_and_iter_still_mutate() {
+        // Skipping loop-count on async-for must not stop the generic walk: the
+        // iter expression and loop body still produce their mutants.
+        let src = "async def f(it):\n    async for x in foo(it):\n        return x\n";
+        let ops = ops_for(src);
+        assert!(ops.contains(&Operator::AsyncForToSync));
+        assert!(
+            ops.contains(&Operator::ArgToNone),
+            "iter arg `it` still mutates"
+        );
+        assert!(
+            ops.contains(&Operator::ReturnValueToNone),
+            "loop body still mutates"
+        );
+    }
+
+    #[test]
+    fn literal_arm_of_union_still_mutates() {
+        // The union guard is token-precise: in `Literal[0] | None` only the `|`
+        // and `None` are suppressed — the `0` inside the `Literal` arm still
+        // gets its NumberShift (parity with pre-annotation-guard behaviour).
+        let src = "from typing import Literal\ndef f(x: Literal[0] | None):\n    return x\n";
+        let ops = ops_for(src);
+        assert!(
+            ops.contains(&Operator::NumberShift),
+            "Literal value still mutates"
+        );
+        assert!(ops.contains(&Operator::OptionalTypeDrop));
+        assert!(
+            !ops.contains(&Operator::ArithOpSwap),
+            "union `|` still suppressed"
+        );
+        assert!(
+            !ops.contains(&Operator::NoneToValue),
+            "union `None` still suppressed"
+        );
+    }
+
+    #[test]
+    fn optional_type_drop_fires_on_qualified_typing_optional() {
+        // `typing.Optional[int]` (attribute form) must drop like the bare name.
+        let src = "import typing\ndef f(a: typing.Optional[int]):\n    return a\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+        let drop = mutants
+            .iter()
+            .find(|m| m.operator == Operator::OptionalTypeDrop)
+            .expect("qualified Optional should drop");
+        assert_eq!(drop.replacement, "int");
     }
 
     #[test]

@@ -359,8 +359,11 @@ impl Report {
                 format!("{} ({})", c.skipped, parts.join(", "))
             }
         };
+        // `score_label`, not the floored `mutation_score`: an all-skipped run
+        // (e.g. a `--max-time` budget that expired before any mutant ran) has a
+        // zero denominator and reads `N/A`, never a vacuous `100.0%`.
         println!(
-            "\n{} mutants — killed: {}, survived: {}, timeout: {}, skipped: {}, equivalent: {}, errored: {}  | score: {:.1}%",
+            "\n{} mutants — killed: {}, survived: {}, timeout: {}, skipped: {}, equivalent: {}, errored: {}  | score: {}",
             c.total(),
             c.killed,
             c.survived,
@@ -368,7 +371,7 @@ impl Report {
             skipped,
             c.equivalent,
             c.errored,
-            c.mutation_score()
+            c.score_label()
         );
     }
 }
@@ -507,6 +510,19 @@ mod tests {
         // The floored accessor still returns the historical 100.0.
         assert!((r.counts().mutation_score() - 100.0).abs() < f64::EPSILON);
         assert!(r.is_scoreless());
+    }
+
+    #[test]
+    fn all_time_budget_skipped_run_labels_na_not_vacuous_hundred() {
+        // A --max-time budget that expired before any mutant ran: every mutant
+        // is a time-budget skip, zero denominator. The human summary uses
+        // `score_label`, so it must read N/A, never a vacuous 100.0%.
+        let r = report(vec![
+            MutantOutcome::skipped(make_mutant(), "time-budget"),
+            MutantOutcome::skipped(make_mutant(), "time-budget"),
+        ]);
+        assert!(r.is_scoreless());
+        assert_eq!(r.counts().score_label(), "N/A");
     }
 
     #[test]

@@ -37,16 +37,24 @@ pub const TIME_BUDGET_FILTER: &str = "time-budget";
 /// v1 value signal: a mutant is "covered" when the coverage context maps it to
 /// at least one test. Covered mutants sort ahead of uncovered ones so the
 /// budget is spent on mutants that can actually be reached — an uncovered
-/// mutant would be coverage-skipped regardless. `sort_by_key` is stable, so
-/// generation order is preserved within each tier and the ordering is fully
+/// mutant would be coverage-skipped regardless. `sort_by_cached_key` is stable,
+/// so generation order is preserved within each tier and the ordering is fully
 /// deterministic. With no coverage context every mutant tiers equal and the
 /// order is unchanged.
+///
+/// Note: the worker pool (`par_iter`) splits the slice across threads, so this
+/// biases *start* order rather than strictly serializing covered-before-
+/// uncovered. In practice uncovered mutants are cheap coverage-skips that drain
+/// fast, so the expensive budget still lands on covered mutants; the ordering
+/// makes that the common case, not a hard guarantee.
 fn order_by_value(mutants: &mut [Mutant], cfg: &Config) {
     let Some(cov) = cfg.coverage.as_ref() else {
         return;
     };
-    // key 0 = covered (run first), 1 = uncovered.
-    mutants.sort_by_key(|m| u8::from(cov.tests_for_mutant(m).is_none_or(<[_]>::is_empty)));
+    // key 0 = covered (run first), 1 = uncovered. `sort_by_cached_key` computes
+    // the coverage lookup once per mutant (O(n)) rather than the O(n log n)
+    // lookups a bare `sort_by_key` comparator would run.
+    mutants.sort_by_cached_key(|m| u8::from(cov.tests_for_mutant(m).is_none_or(<[_]>::is_empty)));
 }
 
 /// Top-level orchestration: parse → mutate → filter chain → pytest → report.

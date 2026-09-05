@@ -67,7 +67,9 @@ How it works:
 
 - Mutants are ordered **highest-value first** — mutants a coverage-selected
   test can actually reach sort ahead of uncovered ones (which the coverage
-  filter would skip anyway). So the budget is spent where it counts, and the
+  filter would skip anyway). Parallel workers mean this biases *start* order
+  rather than strictly serializing, but since uncovered mutants are cheap
+  coverage-skips the expensive budget still lands on covered mutants — so the
   mutants left untested at the deadline are the least informative.
 - Once the deadline passes, every mutant **not yet started** is recorded as
   `skipped` with filter `time-budget`. Mutants already **in flight finish** —

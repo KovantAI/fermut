@@ -173,16 +173,17 @@ fn resolve_scale(entries: &[HistoryEntry], scale: TrendScale) -> (f64, f64, Stri
     if scale == TrendScale::Fixed || entries.is_empty() {
         return (0.0, 100.0, String::new());
     }
-    // Scoreless runs carry the vacuous 100.0 floor — folding them into the
-    // range warps the auto-scale (a real 40-60 window stretched to 40-100).
+    // Only comparable runs set the range. A scoreless vacuous-100 or a
+    // `--max-time` partial subset score would warp the auto-scale (a real
+    // 40-60 window stretched to 40-100, or a subset 40 dropping the floor).
     let lo = entries
         .iter()
-        .filter(|e| !e.is_scoreless())
+        .filter(|e| e.is_comparable())
         .map(|e| e.mutation_score)
         .fold(f64::INFINITY, f64::min);
     let hi = entries
         .iter()
-        .filter(|e| !e.is_scoreless())
+        .filter(|e| e.is_comparable())
         .map(|e| e.mutation_score)
         .fold(f64::NEG_INFINITY, f64::max);
     if !lo.is_finite() || !hi.is_finite() || hi - lo < 1.0 {
@@ -250,11 +251,12 @@ fn print_human(
     }
     println!();
 
-    // Summary sparkline and first→last span read from scored runs only — a
+    // Summary sparkline and first→last span read from comparable runs only — a
     // scoreless vacuous-100 would draw a phantom spike and fake the overall
-    // delta. The per-run table below still lists every run (N/A for the
-    // scoreless ones) so nothing is hidden.
-    let scored: Vec<&HistoryEntry> = entries.iter().filter(|e| !e.is_scoreless()).collect();
+    // delta, and a `--max-time` partial subset score would do the same. The
+    // per-run table below still lists every run (N/A for scoreless, a badged
+    // real % for partial) so nothing is hidden.
+    let scored: Vec<&HistoryEntry> = entries.iter().filter(|e| e.is_comparable()).collect();
     let scores = scored.iter().map(|e| e.mutation_score);
     let (lo, hi, scale_label) = resolve_scale(entries, scale);
     let sparkline = history::sparkline_scaled(scores, lo, hi);
@@ -284,14 +286,13 @@ fn print_human(
     );
     let mut prev_score: Option<f64> = None;
     for e in entries {
-        // Scoreless runs have no real score: show N/A, no delta, and don't let
-        // the vacuous 100.0 become the baseline for the next row's delta.
+        // Scoreless runs have no real score: show N/A. A `--max-time` partial
+        // run has a real subset score to show, but it isn't comparable — so
+        // neither a partial nor a scoreless run gets a delta or seeds the next
+        // row's delta (see `history::trend_step`). `scoreless` still gates the
+        // score cell (partial shows its %).
         let scoreless = e.is_scoreless();
-        let delta = if scoreless {
-            None
-        } else {
-            prev_score.map(|p| e.mutation_score - p)
-        };
+        let (delta, next_prev) = history::trend_step(prev_score, e);
         let delta_s = match delta {
             Some(d) if d.abs() < 0.05 => "  0.0".to_string(),
             Some(d) if d >= 0.0 => format!("+{d:.1}"),
@@ -305,15 +306,22 @@ fn print_human(
             (None, None) => "".into(),
         };
         // Mark the day-one anchor written by `fermut baseline` so it reads as
-        // run zero rather than an ordinary run in the table.
-        let git = if e.baseline {
-            if git.is_empty() {
-                "[baseline]".to_string()
-            } else {
-                format!("{git} [baseline]")
-            }
-        } else {
+        // run zero rather than an ordinary run in the table. Mark a `--max-time`
+        // partial run too, so a "—" delta on a real score reads as "truncated
+        // subset, not comparable" rather than a glitch.
+        let mut tags = String::new();
+        if e.baseline {
+            tags.push_str(" [baseline]");
+        }
+        if e.partial {
+            tags.push_str(" [partial]");
+        }
+        let git = if tags.is_empty() {
             git
+        } else if git.is_empty() {
+            tags.trim_start().to_string()
+        } else {
+            format!("{git}{tags}")
         };
         let score_s = if scoreless {
             format!("{:>7}", "N/A")
@@ -330,10 +338,7 @@ fn print_human(
             delta_s,
             git,
         );
-        // Only real scores seed the next delta — a vacuous 100.0 must not.
-        if !scoreless {
-            prev_score = Some(e.mutation_score);
-        }
+        prev_score = next_prev;
     }
 
     print_survivor_diff(entries, diff);
@@ -472,6 +477,7 @@ mod tests {
             git_branch: branch.map(str::to_string),
             survivor_ids: None,
             baseline: false,
+            partial: false,
         }
     }
 
@@ -604,6 +610,22 @@ mod tests {
         ];
         let (lo, hi, label) = resolve_scale(&es, TrendScale::Auto);
         assert!((lo - 85.0).abs() < f64::EPSILON);
+        assert!((hi - 95.0).abs() < f64::EPSILON);
+        assert!(label.contains("85.0-95.0"));
+    }
+
+    #[test]
+    fn resolve_scale_ignores_partial_subset_score() {
+        // A `--max-time` partial run scored a subset 40.0. It must not drop the
+        // auto-scale floor — the range stays 85-95 over the comparable runs.
+        let mut partial = entry("p", 40.0, None);
+        partial.partial = true;
+        let es = vec![entry("a", 85.0, None), partial, entry("c", 95.0, None)];
+        let (lo, hi, label) = resolve_scale(&es, TrendScale::Auto);
+        assert!(
+            (lo - 85.0).abs() < f64::EPSILON,
+            "partial 40 must not lower the floor"
+        );
         assert!((hi - 95.0).abs() < f64::EPSILON);
         assert!(label.contains("85.0-95.0"));
     }

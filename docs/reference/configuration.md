@@ -65,6 +65,7 @@ TOML primitives: `string`, `bool`, `int`, `float`, `array<string>`.
 | `verify_baseline`  | `bool`          | `true`                                          | Run the unmutated test suite once before mutating and abort if it isn't green. A failing/erroring suite makes every covered mutant exit non-zero (counted "killed"), inflating the score toward 100%. Set `false` (or `--no-verify-baseline`) to skip — only when you've already confirmed the suite passes (e.g. CI ran it). Costs one full-suite run up front. |
 | `baseline_timeout` | `int`           | `300`                                           | Wall-clock cap (seconds) for the baseline run. Separate from `timeout` (which bounds a single mutant's coverage-selected subset) because the baseline runs the whole suite. A suite exceeding it is killed and the run aborts. CLI `--baseline-timeout` overrides. |
 | `smart_order`      | `bool`          | `true`                                          | Run the historically-killing test first (per `(file, operator)`, learned into `.fermut/kill-order.json`) so pytest's `-x` short-circuits sooner. Advisory — never changes a verdict, only speed. CLI `--no-smart-order` overrides. See [Smart test ordering](cli/run.md#smart-test-ordering). |
+| `kill_order_path`  | `path`          | `.fermut/kill-order.json`                       | Location of the advisory smart-ordering sidecar. Relative paths resolve against the config file's directory. Advisory — losing or relocating it only costs a slow run. |
 
 ## Examples
 

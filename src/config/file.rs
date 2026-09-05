@@ -34,6 +34,10 @@ pub struct FileConfig {
     /// Smart test ordering (historical-killer first). Default true; CLI
     /// `--no-smart-order` overrides.
     pub smart_order: Option<bool>,
+    /// Path to the advisory kill-order sidecar. Default
+    /// `<artifact_root>/.fermut/kill-order.json`; relative paths resolve
+    /// against the config file's directory.
+    pub kill_order_path: Option<PathBuf>,
     pub history: Option<bool>,
     pub history_path: Option<PathBuf>,
     pub sample: Option<f64>,

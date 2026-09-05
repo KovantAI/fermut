@@ -11,7 +11,7 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{ChildStdout, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -98,19 +98,12 @@ impl PytestRunner {
         (file, mutant.operator.name())
     }
 
-    /// Read the killed mutant's captured pytest output, parse the killing test's
-    /// node id from the `-rf` summary, and append it to the shared sink for the
-    /// engine to fold into the kill-order sidecar. Best-effort: any misfire
-    /// (no output, unparsable, poisoned lock) just forfeits this datapoint.
-    fn record_killer(&self, stdout: Option<ChildStdout>, file: &str, op: &'static str) {
-        let Some(mut out) = stdout else {
-            return;
-        };
-        let mut buf = String::new();
-        if out.read_to_string(&mut buf).is_err() {
-            return;
-        }
-        if let Some(nodeid) = crate::kill_order::parse_first_failed(&buf) {
+    /// Parse the killing test's node id from captured pytest output (the `-rf`
+    /// summary) and append it to the shared sink for the engine to fold into the
+    /// kill-order sidecar. Best-effort: any misfire (no failure line, unparsable,
+    /// poisoned lock) just forfeits this datapoint.
+    fn record_killer(&self, output: &str, file: &str, op: &'static str) {
+        if let Some(nodeid) = crate::kill_order::parse_first_failed(output) {
             if let Ok(mut sink) = self.kill_sink.lock() {
                 sink.push(crate::kill_order::KillRecord {
                     file: file.to_string(),
@@ -137,6 +130,50 @@ impl PytestRunner {
     }
 }
 
+/// Whether to capture the per-mutant pytest stdout to learn the killing test.
+/// Only worth it when smart ordering is on AND more than one test was selected:
+/// with a single (or zero) selected test there's nothing to reorder next run, so
+/// the pipe + read + `-rf` are pure overhead. Kept pure so the wiring is tested.
+fn should_capture(smart_order: bool, selected_len: usize) -> bool {
+    smart_order && selected_len > 1
+}
+
+/// Wait for `child` with `timeout` while concurrently draining its stdout on a
+/// dedicated thread. Draining concurrently is load-bearing: if the child fills
+/// its stdout pipe (~64 KiB) it blocks on `write`, which would wedge
+/// `wait_timeout` forever and turn a kill into a false timeout — silently
+/// changing the verdict. On timeout, `on_timeout` terminates the child. Returns
+/// the exit status (`None` = timed out) and the captured stdout (`None` when
+/// stdout wasn't piped, or on the timeout path).
+fn wait_draining_stdout(
+    mut child: Child,
+    timeout: Duration,
+    on_timeout: impl FnOnce(&mut Child),
+) -> Result<(Option<ExitStatus>, Option<String>)> {
+    let reader = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = out.read_to_string(&mut buf);
+            buf
+        })
+    });
+    let join = |r: Option<std::thread::JoinHandle<String>>| r.and_then(|h| h.join().ok());
+
+    match child
+        .wait_timeout(timeout)
+        .context("waiting on test runner")?
+    {
+        Some(status) => Ok((Some(status), join(reader))),
+        None => {
+            on_timeout(&mut child);
+            let _ = child.wait();
+            // Reap the drain thread now that the pipe has closed.
+            join(reader);
+            Ok((None, None))
+        }
+    }
+}
+
 impl Runner for PytestRunner {
     fn take_kill_records(&self) -> Vec<crate::kill_order::KillRecord> {
         self.kill_sink
@@ -151,11 +188,6 @@ impl Runner for PytestRunner {
 
             let mut cmd = self.framework_command();
             cmd.arg("-x").arg("--tb=no").arg("-q");
-            // `-rf` prints a `FAILED <nodeid>` summary line so a kill tells us
-            // *which* test did it — the signal smart ordering learns from.
-            if self.smart_order {
-                cmd.arg("-rf");
-            }
             if let Some(seed) = self.hypothesis_seed {
                 cmd.arg(format!("--hypothesis-seed={seed}"));
             }
@@ -173,25 +205,37 @@ impl Runner for PytestRunner {
             // short-circuits on it. It only permutes the set, never changes it,
             // so the kill/survive verdict is identical.
             let (key_file, key_op) = self.kill_key(mutant);
+            // Whether to capture stdout and learn the killer this run. Only pays
+            // off when smart ordering is on AND more than one coverage-selected
+            // test could run — with a single test there's nothing to reorder and
+            // no reason to pipe/read output. Set inside the selection below.
+            let mut capture = false;
             match self
                 .coverage
                 .as_ref()
                 .and_then(|ctx| ctx.tests_for_mutant(mutant))
             {
                 Some(ids) if !ids.is_empty() => {
-                    if self.smart_order {
-                        for id in self.kill_order.order(ids, &key_file, key_op) {
-                            cmd.arg(id);
-                        }
+                    let ordered = if self.smart_order {
+                        self.kill_order.order(ids, &key_file, key_op)
                     } else {
-                        for id in ids {
-                            cmd.arg(id);
-                        }
+                        ids.to_vec()
+                    };
+                    capture = should_capture(self.smart_order, ordered.len());
+                    for id in &ordered {
+                        cmd.arg(id);
                     }
                 }
                 _ => {
+                    // No coverage selection → whole-tests-dir sweep. Ordering
+                    // can't help and the output would be large, so never capture.
                     cmd.arg(&mirror.tests);
                 }
+            }
+            // `-rf` prints a `FAILED <nodeid>` summary line so a kill tells us
+            // *which* test did it — only needed when we're capturing to learn.
+            if capture {
+                cmd.arg("-rf");
             }
             cmd.current_dir(&mirror.root);
             with_new_process_group(&mut cmd);
@@ -208,40 +252,31 @@ impl Runner for PytestRunner {
             cmd.env("PYTHONDONTWRITEBYTECODE", "1");
             // Per-mutant pytest output is noise on the terminal (each killed
             // mutant would stream `FAILED … / 1 failed`, reading as breakage
-            // when it's mutants dying as intended). Discard it — except under
-            // smart ordering, where we capture stdout to learn the killer's
-            // node id from the `-rf` summary. Output is tiny (`-q --tb=no`), so
-            // a pipe never deadlocks. stderr is always discarded.
-            let stdout_cfg = if self.smart_order {
+            // when it's mutants dying as intended). Discard it — except when
+            // capturing to learn the killer's node id from the `-rf` summary.
+            // stderr is always discarded.
+            let stdout_cfg = if capture {
                 Stdio::piped()
             } else {
                 Stdio::null()
             };
             cmd.stdout(stdout_cfg).stderr(Stdio::null());
-            let mut child = cmd.spawn().context("spawning test runner")?;
-            let stdout = child.stdout.take();
+            let child = cmd.spawn().context("spawning test runner")?;
 
-            match child
-                .wait_timeout(self.timeout)
-                .context("waiting on test runner")?
-            {
-                Some(status) => {
+            match wait_draining_stdout(child, self.timeout, kill_group)? {
+                (Some(status), output) => {
                     if status.success() {
                         Ok(MutantOutcome::survived(mutant.clone()))
                     } else {
-                        // Killed. Under smart ordering, learn which test did it
-                        // and record it for next time's ordering.
-                        if self.smart_order {
-                            self.record_killer(stdout, &key_file, key_op);
+                        // Killed. When capturing, learn which test did it and
+                        // record it for next time's ordering.
+                        if let Some(out) = output {
+                            self.record_killer(&out, &key_file, key_op);
                         }
                         Ok(MutantOutcome::killed(mutant.clone()))
                     }
                 }
-                None => {
-                    kill_group(&mut child);
-                    let _ = child.wait();
-                    Ok(MutantOutcome::timed_out(mutant.clone()))
-                }
+                (None, _) => Ok(MutantOutcome::timed_out(mutant.clone())),
             }
         })
     }
@@ -267,5 +302,96 @@ impl Runner for PytestRunner {
         with_new_process_group(&mut cmd);
         cmd.env("PYTHONPATH", mirror_pythonpath(&mirror)?);
         run_baseline_with_timeout(cmd, self.baseline_timeout)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- should_capture: locks the #4 wiring (no capture unless it can pay off).
+
+    #[test]
+    fn should_capture_only_when_ordering_on_and_multiple_tests() {
+        // Off → never capture, regardless of how many tests were selected.
+        assert!(!should_capture(false, 0));
+        assert!(!should_capture(false, 1));
+        assert!(!should_capture(false, 5));
+        // On but ≤1 selected → nothing to reorder next run, so no capture.
+        assert!(!should_capture(true, 0));
+        assert!(!should_capture(true, 1));
+        // On and >1 selected → capture to learn the killer.
+        assert!(should_capture(true, 2));
+        assert!(should_capture(true, 100));
+    }
+
+    // --- wait_draining_stdout: guards the #2 deadlock fix.
+
+    fn never_called(_: &mut Child) {
+        panic!("on_timeout must not fire when the child exits before the timeout");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn wait_draining_does_not_deadlock_on_large_output() {
+        // The child writes ~264 KiB to stdout — far past the ~64 KiB pipe
+        // buffer. Without concurrent draining the child would block on `write`,
+        // wedging the wait forever (the exact bug that turned a kill into a
+        // false timeout). With draining it must complete and capture all bytes.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("i=0; while [ $i -lt 8000 ]; do printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n'; i=$((i+1)); done")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let child = cmd.spawn().expect("spawn sh flooder");
+
+        let (status, output) =
+            wait_draining_stdout(child, Duration::from_secs(30), never_called).unwrap();
+        assert!(status.expect("child exited, not timed out").success());
+        let out = output.expect("stdout was piped");
+        assert!(
+            out.len() >= 200_000,
+            "expected the full flood to be drained, got {} bytes",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn wait_draining_returns_none_output_when_stdout_not_piped() {
+        // stdout null → no reader thread, output is None, status still returned.
+        let mut cmd = Command::new(if cfg!(windows) { "cmd" } else { "true" });
+        if cfg!(windows) {
+            cmd.arg("/C").arg("exit 0");
+        }
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        let child = cmd.spawn().expect("spawn trivial process");
+
+        let (status, output) =
+            wait_draining_stdout(child, Duration::from_secs(30), never_called).unwrap();
+        assert!(status.expect("exited").success());
+        assert!(output.is_none(), "no pipe → no captured output");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn wait_draining_times_out_and_invokes_on_timeout() {
+        // A child that outlives the timeout must return `(None, None)` and have
+        // `on_timeout` invoked exactly once to terminate it.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("sleep 30")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let child = cmd.spawn().expect("spawn sleeper");
+
+        let mut killed = false;
+        let (status, output) = wait_draining_stdout(child, Duration::from_millis(200), |c| {
+            killed = true;
+            let _ = c.kill();
+        })
+        .unwrap();
+        assert!(status.is_none(), "should have timed out");
+        assert!(output.is_none(), "timeout path captures no output");
+        assert!(killed, "on_timeout must fire to kill the hung child");
     }
 }

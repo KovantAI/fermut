@@ -13,10 +13,16 @@
 //! ordering is count-descending, ties keeping the caller's (coverage) order.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+/// Default kill-order sidecar location, beside the cache/history under
+/// `<artifact_root>/.fermut/`. Overridable via `kill_order_path` in config.
+pub fn default_kill_order_path(artifact_root: &Path) -> PathBuf {
+    artifact_root.join(".fermut").join("kill-order.json")
+}
 
 /// `{ file : { operator : { test_nodeid : kill_count } } }`. Serialized
 /// transparently, so the JSON is the bare nested map.
@@ -95,13 +101,14 @@ impl KillOrder {
 /// test that killed the mutant (under `-x` the first failure is the only one).
 /// `None` when there is no failure line (a survivor, or output we can't read).
 /// pytest prints `FAILED <nodeid> - <reason>`; we take the first token after
-/// `FAILED `, so the trailing reason is ignored.
+/// `FAILED `, so the trailing reason is ignored. The nodeid itself may contain
+/// spaces (parametrized ids like `test_f[a b]`), so we split on the ` - ` reason
+/// separator rather than whitespace; a line with no separator is all nodeid.
 pub fn parse_first_failed(stdout: &str) -> Option<String> {
     stdout.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("FAILED ")
-            .and_then(|rest| rest.split_whitespace().next())
-            .map(str::to_string)
+        let rest = line.trim().strip_prefix("FAILED ")?;
+        let nodeid = rest.split_once(" - ").map_or(rest, |(id, _)| id).trim();
+        (!nodeid.is_empty()).then(|| nodeid.to_string())
     })
 }
 
@@ -142,6 +149,23 @@ mod tests {
         assert_eq!(parse_first_failed("FAILED \n"), None);
     }
 
+    #[test]
+    fn parse_keeps_parametrized_nodeid_with_spaces() {
+        // Parametrized ids can contain spaces; the ` - ` reason separator, not
+        // whitespace, bounds the nodeid. A truncated key would never match the
+        // coverage-selected id, silently defeating ordering for param tests.
+        let out = "FAILED tests/t.py::test_add[a b] - AssertionError\n";
+        assert_eq!(
+            parse_first_failed(out).as_deref(),
+            Some("tests/t.py::test_add[a b]")
+        );
+        // No reason on the line → whole rest is the nodeid.
+        assert_eq!(
+            parse_first_failed("FAILED tests/t.py::test_x[a b]\n").as_deref(),
+            Some("tests/t.py::test_x[a b]")
+        );
+    }
+
     // --- order ---
 
     fn ids(v: &[&str]) -> Vec<String> {
@@ -164,6 +188,24 @@ mod tests {
         ko.record("src/f.py", "arith-op-swap", "t::a");
         let out = ko.order(&ids(&["t::a", "t::b", "t::c"]), "src/f.py", "arith-op-swap");
         assert_eq!(out, ids(&["t::c", "t::a", "t::b"]));
+    }
+
+    #[test]
+    fn parsed_param_killer_matches_and_lifts_the_selected_id() {
+        // End-to-end guard for the space-in-nodeid fix: the id parsed from
+        // pytest's `-rf` line must be byte-identical to the coverage-selected
+        // id, so recording it actually lifts that id next run. A whitespace-
+        // truncating parse would record `test_x.py::t[a` and never match.
+        let selected = ids(&["tests/t.py::t[a b]", "tests/t.py::t[c d]"]);
+        let killer = parse_first_failed("FAILED tests/t.py::t[c d] - AssertionError\n").unwrap();
+        assert!(
+            selected.contains(&killer),
+            "parsed killer {killer:?} must match a selected id"
+        );
+        let mut ko = KillOrder::default();
+        ko.record("src/f.py", "op", &killer);
+        let out = ko.order(&selected, "src/f.py", "op");
+        assert_eq!(out, ids(&["tests/t.py::t[c d]", "tests/t.py::t[a b]"]));
     }
 
     #[test]

@@ -169,7 +169,11 @@ pub(crate) fn build_config(
     } else {
         file.smart_order.unwrap_or(true)
     };
-    let kill_order_path = artifact_root.join(".fermut").join("kill-order.json");
+    let kill_order_path = file
+        .kill_order_path
+        .clone()
+        .map(|p| loaded.resolve_path(p))
+        .unwrap_or_else(|| crate::kill_order::default_kill_order_path(&artifact_root));
 
     let sample_ratio = cli_sample.or(file.sample);
     let sample_seed = cli_sample_seed.or(file.sample_seed);
@@ -561,6 +565,28 @@ mod tests {
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
         assert!(cfg.smart_order, "smart ordering is on by default");
         assert!(cfg.kill_order_path.ends_with(".fermut/kill-order.json"));
+    }
+
+    #[test]
+    fn kill_order_path_from_config_resolves_against_config_dir() {
+        // A relative `kill_order_path` in config resolves against the config
+        // dir, not left hardcoded to `.fermut/kill-order.json`. Guards the
+        // sidecar-path knob against regressing back to a fixed location.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("fermut.toml"),
+            "kill_order_path = \"artifacts/ko.json\"\n",
+        )
+        .unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        // `resolve_path` canonicalizes (on macOS `/var` → `/private/var`), so
+        // compare the tail + absoluteness rather than the exact temp prefix.
+        assert!(cfg.kill_order_path.is_absolute());
+        assert!(
+            cfg.kill_order_path.ends_with("artifacts/ko.json"),
+            "kill_order_path {:?} should resolve under the config dir",
+            cfg.kill_order_path
+        );
     }
 
     #[test]

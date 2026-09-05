@@ -97,6 +97,10 @@ fn smart_order_builds_sidecar_and_keeps_verdict() {
         sidecar.display()
     );
     run(); // reads the sidecar to order; same verdict
+
+    // Don't leave the learned sidecar behind in the shared sample tree — it
+    // would show as untracked and could bleed into other e2e runs.
+    let _ = std::fs::remove_file(&sidecar);
 }
 
 #[test]

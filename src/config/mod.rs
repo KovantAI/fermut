@@ -47,10 +47,14 @@ pub struct Config {
     pub pytest_args: Vec<String>,
     pub cache: bool,
     pub cache_path: PathBuf,
-    /// Smart test ordering: when on, coverage-selected tests are reordered so a
-    /// historically-killing test (per `(file, operator)`) runs first, letting
-    /// pytest's `-x` short-circuit sooner. Advisory — never changes a verdict.
-    /// Default on; disable with `--no-smart-order` / `smart_order = false`.
+    /// Smart test ordering: when on (and coverage is available), the
+    /// coverage-selected tests for a mutant are reordered so the most targeted
+    /// test runs first, letting pytest's `-x` short-circuit sooner. Two layers:
+    /// a cold-start breadth prior (fewest of the mutated file's lines covered),
+    /// then any historically-killing test (per `(file, operator)`) lifted ahead
+    /// of it. Advisory — only permutes the selected set, so it never changes a
+    /// verdict, only speed. Default on; disable with `--no-smart-order` /
+    /// `smart_order = false`.
     pub smart_order: bool,
     /// Path to the advisory kill-order sidecar (`.fermut/kill-order.json`).
     pub kill_order_path: PathBuf,

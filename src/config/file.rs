@@ -31,8 +31,9 @@ pub struct FileConfig {
     pub pytest_args: Option<Vec<String>>,
     pub cache: Option<bool>,
     pub cache_path: Option<PathBuf>,
-    /// Smart test ordering (historical-killer first). Default true; CLI
-    /// `--no-smart-order` overrides.
+    /// Smart test ordering: cold-start coverage-breadth prior, then
+    /// historical-killer lifted first. Default true; CLI `--no-smart-order`
+    /// overrides.
     pub smart_order: Option<bool>,
     /// Path to the advisory kill-order sidecar. Default
     /// `<artifact_root>/.fermut/kill-order.json`; relative paths resolve

@@ -29,12 +29,16 @@ jobs:
       - name: install project + fermut
         run: |
           uv sync
+          uv pip install pytest-cov # `fermut coverage` shells `pytest --cov` into this venv
           uv tool install fermut
 
-      - name: build coverage data
-        run: |
-          uv run coverage run -m pytest
-          uv run coverage json -o coverage.json
+      # fermut reads coverage.py's `.coverage` SQLite directly (no `coverage
+      # json` export). `fermut coverage` runs `pytest --cov --cov-context=test`
+      # so per-test contexts are recorded for per-mutant selection. Needs
+      # pytest-cov in the project env. Requires a fermut with `coverage` +
+      # direct `.coverage` reading.
+      - name: build per-test coverage
+        run: uv tool run fermut coverage
 
       - name: full mutation sweep
         id: mutate
@@ -42,7 +46,7 @@ jobs:
         run: |
           uv tool run fermut run src/ \
               --tests tests/ \
-              --coverage coverage.json \
+              --coverage .coverage \
               --hypothesis-seed 1234 \
               --experimental \
               --jobs 8 \

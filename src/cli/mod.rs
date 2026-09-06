@@ -332,9 +332,11 @@ enum Cmd {
         baseline_timeout: Option<u64>,
 
         /// Disable smart test ordering. By default, when coverage selects
-        /// multiple tests for a mutant, fermut runs the one that historically
-        /// killed this file+operator first so pytest's `-x` short-circuits
-        /// sooner (kill history in `.fermut/kill-order.json`). Ordering never
+        /// multiple tests for a mutant, fermut runs the most targeted one first
+        /// so pytest's `-x` short-circuits sooner: the cold-start breadth prior
+        /// (covering the fewest of the mutated file's lines) sets the order, and
+        /// any test that historically killed this file+operator is lifted ahead
+        /// of it (kill history in `.fermut/kill-order.json`). Ordering never
         /// changes the kill/survive verdict — only which test runs first — so
         /// disabling it only affects speed. With `--timeout` set the result is
         /// order-sensitive (reaching the killer sooner can turn a `timed_out`
@@ -1784,7 +1786,7 @@ impl Cli {
                     None,
                     false, // no_smart_order (list doesn't run tests)
                     false, // smart_order
-                    None,  // max_time
+                    None,  // max_time (list doesn't run tests)
                     f,
                 )?;
                 let mutants = crate::mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)?;

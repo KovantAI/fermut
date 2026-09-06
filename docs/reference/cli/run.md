@@ -62,10 +62,22 @@ gate on mutation score.
 
 When coverage selects **more than one** test for a mutant, fermut runs
 them under pytest's `-x` (stop at the first failure), so the mutant dies
-as soon as any selected test fails. Smart ordering runs the test that has
-**historically killed this `(file, operator)` first**, so `-x`
-short-circuits sooner — cutting per-mutant wall-clock on hot lines covered
-by many tests.
+as soon as any selected test fails. Smart ordering runs the **most likely
+killer first**, so `-x` short-circuits sooner — cutting per-mutant
+wall-clock on hot lines covered by many tests. It picks that order in two
+layers:
+
+1. **Cold-start breadth prior.** With no run history, the **most targeted**
+   test leads — the one covering the fewest lines *of the mutated file* —
+   because a test focused on that file is the likelier killer. Scoping to
+   the mutated file (rather than the test's repo-wide footprint) keeps a
+   broad integration test that heavily exercises the mutated function ranked
+   ahead of a test that merely grazes one of its lines. This needs no
+   history: the signal comes from the coverage data already loaded, so it
+   helps on the first run and on freshly-changed `--since` lines.
+2. **Learned history.** A test that has **historically killed this
+   `(file, operator)`** is lifted ahead of the breadth order. History
+   dominates once a killer is known; breadth fills the no-history gap.
 
 It's **on by default** (except when a per-mutant timeout is set — see the
 caveat below) and self-training: each run records which test killed which
@@ -104,6 +116,12 @@ ordering would now kill it.)
 
 Disable explicitly with `--no-smart-order` (or `smart_order = false` in
 config); it then uses the plain coverage order.
+
+Ordering relies on pytest honoring the node-id order fermut passes on the
+command line. A test-shuffling plugin (`pytest-randomly`,
+`pytest-random-order`) re-sorts collected tests and silently defeats it —
+disable the plugin for fermut runs (e.g. `pytest_args = ["-p",
+"no:randomly"]`) if you want the `-x` short-circuit.
 
 ## Time-boxed runs (`--max-time`) { #time-boxed-runs-max-time }
 

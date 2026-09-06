@@ -41,8 +41,10 @@ pub struct PytestRunner {
     python: Option<PathBuf>,
     /// Framework executable / module name: `pytest` or the `rstest` drop-in.
     exe: &'static str,
-    /// Smart test ordering on. When set, coverage-selected ids are reordered by
-    /// `kill_order` and killers learned into `kill_sink`.
+    /// Smart test ordering on. When set, coverage-selected ids are reordered —
+    /// the cold-start breadth prior (fewest of the mutated file's lines) first,
+    /// then any learned `(file, operator)` killer lifted ahead of that — and
+    /// killers observed this run are learned into `kill_sink`.
     smart_order: bool,
     /// Immutable kill-order history, read to order selected tests (no lock).
     kill_order: Arc<crate::kill_order::KillOrder>,
@@ -113,6 +115,25 @@ impl PytestRunner {
                     nodeid,
                 });
             }
+        }
+    }
+
+    /// Cold-start breadth ordering of the coverage-selected node ids: with smart
+    /// ordering the test most focused on the mutated file (fewest of its lines
+    /// covered) leads so `-x` short-circuits sooner; otherwise the caller's
+    /// coverage order is kept. Only permutes `ids` — never adds or drops — so the
+    /// verdict is unchanged. Learned `(file, operator)` history is layered on top
+    /// of this order by [`select_args`], so breadth fills the no-history gap.
+    fn ordered_ids<'a>(
+        &self,
+        ctx: &CoverageContexts,
+        mutant: &Mutant,
+        ids: &'a [String],
+    ) -> Vec<&'a String> {
+        if self.smart_order {
+            ctx.order_by_breadth_in(&mutant.file, ids)
+        } else {
+            ids.iter().collect()
         }
     }
 
@@ -304,30 +325,41 @@ impl Runner for PytestRunner {
             // chain has already dropped mutants with no recorded context, so
             // we only get here when at least one test id exists.
             //
-            // Smart ordering reorders those ids so a historically-frequent
-            // killer for this `(file, operator)` runs first — pytest's `-x` then
-            // short-circuits on it. It only permutes the set, never changes it,
-            // so the kill/survive verdict is identical. (With a `--timeout` the
-            // result is order-sensitive: reaching the killer sooner can convert
-            // a would-be `timed_out` into a `killed`.) See [`select_args`].
+            // Smart ordering reorders those ids without changing the set, so the
+            // kill/survive verdict is identical. (With a `--timeout` the result is
+            // order-sensitive: reaching the killer sooner can convert a would-be
+            // `timed_out` into a `killed`.) Two layers: the cold-start breadth
+            // prior (`ordered_ids`) puts the most *targeted* test — fewest of the
+            // mutated file's lines — first, then [`select_args`] lifts any learned
+            // `(file, operator)` killer ahead of that. Breadth fills the no-history
+            // gap; history dominates once a killer is known.
             let (key_file, key_op) = self.kill_key(mutant);
-            let ids = self
-                .coverage
-                .as_ref()
-                .and_then(|ctx| ctx.tests_for_mutant(mutant));
-            let capture =
-                match select_args(ids, self.smart_order, &self.kill_order, &key_file, key_op) {
-                    Selection::Ids { args, capture } => {
-                        for a in &args {
-                            cmd.arg(a);
-                        }
-                        capture
+            let ordered: Option<Vec<String>> = self.coverage.as_ref().and_then(|ctx| {
+                ctx.tests_for_mutant(mutant).map(|ids| {
+                    self.ordered_ids(ctx, mutant, ids)
+                        .into_iter()
+                        .cloned()
+                        .collect()
+                })
+            });
+            let capture = match select_args(
+                ordered.as_deref(),
+                self.smart_order,
+                &self.kill_order,
+                &key_file,
+                key_op,
+            ) {
+                Selection::Ids { args, capture } => {
+                    for a in &args {
+                        cmd.arg(a);
                     }
-                    Selection::Sweep => {
-                        cmd.arg(&mirror.tests);
-                        false
-                    }
-                };
+                    capture
+                }
+                Selection::Sweep => {
+                    cmd.arg(&mirror.tests);
+                    false
+                }
+            };
             cmd.current_dir(&mirror.root);
             with_new_process_group(&mut cmd);
             // Editable installs (`pip install -e .`) write an absolute path
@@ -690,5 +722,124 @@ mod tests {
             status.is_none(),
             "killer-last must time out before reaching the killer"
         );
+    }
+
+    // --- ordered_ids: locks the cold-start breadth prior (main #63).
+
+    use std::io::Write;
+    use std::path::Path;
+
+    // wide covers 3 lines, mid 1, narrow 1 — same fixture as the coverage tests.
+    fn breadth_ctx(dir: &Path) -> Arc<CoverageContexts> {
+        std::fs::write(dir.join("foo.py"), "a = 1\nb = 2\nc = 3\n").unwrap();
+        let doc = r#"{
+            "files": {
+                "foo.py": {
+                    "contexts": {
+                        "1": ["tests/t.py::wide|run"],
+                        "2": ["tests/t.py::wide|run", "tests/t.py::narrow|run"],
+                        "3": ["tests/t.py::wide|run", "tests/t.py::mid|run"]
+                    }
+                }
+            }
+        }"#;
+        let path = dir.join("coverage.json");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(doc.as_bytes())
+            .unwrap();
+        CoverageContexts::from_json(&path, dir, dir).unwrap()
+    }
+
+    fn runner(smart_order: bool, coverage: Arc<CoverageContexts>) -> PytestRunner {
+        PytestRunner::new(
+            PathBuf::from("tests"),
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+            None,
+            Vec::new(),
+            IsolationMode::Auto,
+            Some(coverage),
+            None,
+            "pytest",
+            smart_order,
+            Arc::new(crate::kill_order::KillOrder::default()),
+            Arc::new(Mutex::new(Vec::new())),
+            PathBuf::from("."),
+        )
+    }
+
+    fn selected() -> Vec<String> {
+        ["tests/t.py::wide", "tests/t.py::narrow", "tests/t.py::mid"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    // A mutant in `foo.py` — the file the breadth fixture indexes — so scoped
+    // ordering resolves to that file's per-test breadth.
+    fn mutant_in(dir: &Path) -> Mutant {
+        Mutant {
+            id: "id".into(),
+            file: dir.join("foo.py"),
+            operator: crate::mutator::Operator::ArithOpSwap,
+            range: ruff_text_size::TextRange::new(0u32.into(), 1u32.into()),
+            original: "+".into(),
+            replacement: "-".into(),
+            line: 1,
+            stmt_line: 1,
+        }
+    }
+
+    #[test]
+    fn ordered_ids_smart_puts_narrowest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = breadth_ctx(tmp.path());
+        let r = runner(true, ctx.clone());
+        let ids = selected();
+        let m = mutant_in(tmp.path());
+        let out: Vec<String> = r.ordered_ids(&ctx, &m, &ids).into_iter().cloned().collect();
+        // wide (breadth 3) sinks; the two breadth-1 tests keep input order (stable).
+        assert_eq!(
+            out,
+            vec![
+                "tests/t.py::narrow".to_string(),
+                "tests/t.py::mid".to_string(),
+                "tests/t.py::wide".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn ordered_ids_no_smart_keeps_coverage_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = breadth_ctx(tmp.path());
+        let r = runner(false, ctx.clone());
+        let ids = selected();
+        let m = mutant_in(tmp.path());
+        let out: Vec<String> = r.ordered_ids(&ctx, &m, &ids).into_iter().cloned().collect();
+        // Smart ordering off → caller's coverage order is preserved verbatim.
+        assert_eq!(out, ids);
+    }
+
+    #[test]
+    fn ordered_ids_is_a_permutation_either_way() {
+        // Verdict-invariance: both branches return exactly the selected set,
+        // only the order differs — so pytest's `-x` runs the same tests.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = breadth_ctx(tmp.path());
+        let ids = selected();
+        let m = mutant_in(tmp.path());
+        for smart in [true, false] {
+            let r = runner(smart, ctx.clone());
+            let mut out: Vec<String> = r.ordered_ids(&ctx, &m, &ids).into_iter().cloned().collect();
+            let mut want = ids.clone();
+            out.sort();
+            want.sort();
+            assert_eq!(
+                out, want,
+                "smart={smart} must be a permutation of the input"
+            );
+        }
     }
 }

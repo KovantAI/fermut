@@ -5,17 +5,66 @@ dates — pre-1.0 ordering depends on demand and contributor
 bandwidth. Tracked alongside live work at
 <https://github.com/KovantAI/fermut/issues>.
 
+## Next up (biggest open bets)
+
+The engine is fast (in-process ty, coverage-owned loop, smart ordering).
+The two highest-leverage tracks left:
+
+- **Distribution — meet users where they already are.** Now that runs
+  are quick, adoption is gated by setup friction, not speed. The
+  cluster: a **`pytest-fermut` plugin** (run mutation testing without
+  leaving the pytest UX), an **official `KovantAI/fermut@v1` GitHub
+  Action** (cache-restore + PR-comment in one step), a **pinned Docker
+  image** (ty + ruff + coverage preinstalled), a **VS Code plugin**
+  (inline survivor decorations), plus a packaged **pre-commit hook** and
+  a **Homebrew formula**. Each removes a reason a team bounces off.
+  Detail under [Integrations and distribution](#integrations-and-distribution).
+- **Higher-order mutants — a real differentiator.** Combine two
+  operators on the same source to catch tests that pass under any single
+  mutation but fail under interactions. No mainstream Python mutation
+  tool ships this; it's a genuine capability edge, not just a speed or
+  polish win. Experimental / off by default (high noise, high signal).
+  Detail under [Engine and runtime](#engine-and-runtime).
+
+Everything below is the full backlog; these two are where the marginal
+return is highest today.
+
 ## Engine and runtime
 
-- **ty daemon mode.** Reuse one long-lived `ty` process across the
-  filter chain instead of spawning per mutant. Targets the largest
-  remaining per-mutant overhead.
-- **Per-mutant test selection via coverage (deeper).** Today's
-  `--coverage` filter narrows tests via per-test contexts. Next:
-  use coverage call-graph data to also order tests by
-  most-likely-to-kill first.
-- **Smart test ordering.** Within selected tests, run the
-  historical-killer first. Cuts wall-clock on survivor tails.
+- **ty in-process — shipped.** fermut embeds ty's analysis in-process
+  (a salsa `ProjectDatabase` with a per-file in-memory overlay), one
+  checker per worker, so there is no `ty check` subprocess per mutant.
+  typeshed + deps are analyzed once and only the mutated file
+  re-infers; a persistent verdict cache
+  (`.fermut/ty-cache.json`) skips unchanged mutants across runs. This
+  supersedes the old "reuse one long-lived ty process" idea — in-process
+  beats a daemon (no IPC). Residual, low priority: each worker DB
+  bootstraps typeshed once (N bootstraps + N× stdlib memory). A shared
+  read-only base forked per-worker for the overlay would cut that to
+  ~1×, *if* ty's pre-release salsa API ever exposes cheap DB forking —
+  gate on a benchmark first (the bootstrap is amortized over thousands
+  of mutants, so it may not be worth it).
+- **Smart test ordering — shipped.** When `--coverage` selects more
+  than one test for a mutant, fermut reorders them so the likeliest
+  killer runs first and pytest's `-x` short-circuits sooner. Two
+  signals: a **cold-start** prior from coverage *breadth* (the most
+  targeted test — fewest lines covered — first, so it helps on run 1 and
+  on freshly-changed `--since` lines, no history needed), and a
+  **historical-killer** signal (the test that previously killed this
+  `(file, operator)`, persisted in `.fermut/kill-order.json`). Default
+  on (`--no-smart-order` to disable); it only permutes the selected set,
+  so it never changes a verdict — only speed. (The two signals ship on
+  separate feature branches pending merge to `main`.)
+- **Per-mutant coverage ordering (deeper) — open.** Sharpen the
+  cold-start prior beyond breadth + history with a richer coverage
+  signal — per-line hit weight, or call-graph proximity to the mutated
+  line — to better predict the killer when no history exists.
+- **Time-boxed runs (`--max-time`).** Wall-clock ceiling for big
+  suites that can't run the full catalogue. Evaluates the
+  highest-value mutants first (coverage + smart ordering) and
+  reports the best survivors found within the budget. Predictable
+  PR-gate latency — a time ceiling beats a mutant ceiling for CI
+  trust.
 - **Cross-run mutant cache.** Shareable cache across machines /
   CI runners. Cache server + content-addressed entries. Today's
   cache is local-only.

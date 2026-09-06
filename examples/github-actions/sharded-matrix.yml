@@ -65,6 +65,11 @@ jobs:
           path: shards
           merge-multiple: true
 
+      # Each shard's report describes the WHOLE mutant universe — its own slice
+      # with real verdicts, every other mutant recorded as skipped by the shard
+      # filter. `fermut merge` unions the real verdicts across shards; use a
+      # fermut release whose merge keeps a real verdict over another shard's
+      # skip placeholder (older merges collapsed to the last-read report).
       - name: merge shard reports
         run: |
           uv tool run fermut merge shards/shard-*.json \

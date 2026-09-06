@@ -72,11 +72,26 @@ only costs a slow run), and later runs read it to order. The win is
 proportional to tests-selected-per-mutant; a mutant covered by one test
 gains nothing.
 
-**Ordering never changes a verdict** — only *which* test pytest tries
-first. `-x` still runs until a failure or exhaustion, so the
-kill/survive/timeout result is identical with or without it. Disable with
-`--no-smart-order` (or `smart_order = false` in config); it then uses the
-plain coverage order.
+**Ordering never changes the kill/survive verdict** — only *which* test
+pytest tries first. `-x` exits non-zero iff *some* selected test fails,
+independent of order, so a mutant that survives (or is killed) survives (or
+is killed) either way.
+
+**One caveat when `--timeout` is set.** With a per-mutant timeout, the
+result *is* order-sensitive: if a killing test only runs after a slow
+passing one, a run can hit the timeout before reaching the killer and record
+`timed_out` instead of `killed`. Smart ordering front-loads the historical
+killer, so it makes this *less* likely — but that means enabling/disabling
+it (or a cold vs. warm sidecar) can flip a borderline mutant between
+`timed_out` and `killed`, shifting the score. Two `--no-cache` runs can
+therefore differ, and a learned-ordering bump can partly mask a real
+regression under `--fail-on-regression`. Note also that a `timed_out`
+outcome is cached, so once cached it is *not* re-evaluated even if ordering
+would now kill it. Without a per-mutant timeout the verdict is fully
+order-invariant.
+
+Disable with `--no-smart-order` (or `smart_order = false` in config); it
+then uses the plain coverage order.
 
 ## Time-boxed runs (`--max-time`) { #time-boxed-runs-max-time }
 

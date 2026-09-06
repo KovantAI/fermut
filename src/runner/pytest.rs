@@ -185,27 +185,33 @@ fn select_args(
 /// Grace period to wait for the stdout drain once the child has exited. In the
 /// normal case the drain finishes instantly (the child closing its write end
 /// EOFs the read). It only matters when a lingering grandchild inherited the
-/// pipe's write end: rather than block a worker forever we abandon the drain
-/// after this and forfeit the (advisory) datapoint.
+/// pipe's write end: rather than block a worker forever we wait at most this,
+/// then release the pipe by terminating the process group (see below).
 const DRAIN_GRACE: Duration = Duration::from_secs(5);
 
 /// Wait for `child` with `timeout` while concurrently draining its stdout on a
 /// dedicated thread. Draining concurrently is load-bearing: if the child fills
 /// its stdout pipe (~64 KiB) it blocks on `write`, which would wedge
 /// `wait_timeout` forever and turn a kill into a false timeout — silently
-/// changing the verdict. On timeout, `on_timeout` terminates the child. Returns
-/// the exit status (`None` = timed out) and the captured stdout (`None` when
-/// stdout wasn't piped, or on the timeout path).
+/// changing the verdict. `on_timeout` terminates the child's process group;
+/// it fires on the timeout path, and also on the rare grace-overrun path below.
+/// Returns the exit status (`None` = timed out) and the captured stdout (`None`
+/// when stdout wasn't piped, or when even the group-kill couldn't recover it).
 ///
 /// The drain result is delivered over a channel, not a bare `JoinHandle::join`,
 /// so the wait for it is *bounded* by [`DRAIN_GRACE`]: if the child exits but a
 /// grandchild still holds the pipe's write end the read never EOFs, and joining
-/// would wedge this worker forever. Bytes are decoded lossily rather than via
-/// `read_to_string` so a single non-UTF-8 byte can't discard the whole capture.
+/// would wedge this worker forever. When that grace elapses we call `on_timeout`
+/// (the same process-group kill used on the timeout path) to reap the lingering
+/// grandchild — closing the write end so the reader EOFs and its thread exits
+/// instead of leaking for the worker's lifetime — then make one final bounded
+/// collect, which usually *recovers* the datapoint the child already wrote.
+/// Bytes are decoded lossily rather than via `read_to_string` so a single
+/// non-UTF-8 byte can't discard the whole capture.
 fn wait_draining_stdout(
     child: Child,
     timeout: Duration,
-    on_timeout: impl FnOnce(&mut Child),
+    on_timeout: impl FnMut(&mut Child),
 ) -> Result<(Option<ExitStatus>, Option<String>)> {
     wait_draining_stdout_with_grace(child, timeout, DRAIN_GRACE, on_timeout)
 }
@@ -216,9 +222,9 @@ fn wait_draining_stdout_with_grace(
     mut child: Child,
     timeout: Duration,
     grace: Duration,
-    on_timeout: impl FnOnce(&mut Child),
+    mut on_timeout: impl FnMut(&mut Child),
 ) -> Result<(Option<ExitStatus>, Option<String>)> {
-    let reader = child.stdout.take().map(|mut out| {
+    let mut reader = child.stdout.take().map(|mut out| {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut buf = Vec::new();
@@ -227,21 +233,44 @@ fn wait_draining_stdout_with_grace(
         });
         rx
     });
-    // `None` when stdout wasn't piped or the drain overran the grace window.
-    let collect = |rx: Option<std::sync::mpsc::Receiver<String>>| {
-        rx.and_then(|rx| rx.recv_timeout(grace).ok())
+    let had_pipe = reader.is_some();
+    // Take the drained output within `grace`. On overrun the receiver is left in
+    // place (`reader` untouched) so a later attempt can still reap it; on success
+    // it's consumed. `None` when stdout wasn't piped or the grace elapsed.
+    let collect = |reader: &mut Option<std::sync::mpsc::Receiver<String>>| match reader {
+        Some(rx) => match rx.recv_timeout(grace) {
+            Ok(s) => {
+                *reader = None;
+                Some(s)
+            }
+            Err(_) => None,
+        },
+        None => None,
     };
 
     match child
         .wait_timeout(timeout)
         .context("waiting on test runner")?
     {
-        Some(status) => Ok((Some(status), collect(reader))),
+        Some(status) => {
+            let mut output = collect(&mut reader);
+            // Drain overran the grace → a grandchild still holds the pipe's write
+            // end. Kill the process group to release it (also reaping the stray
+            // subprocess), then make one final bounded collect — this closes the
+            // reader's EOF so its thread exits instead of leaking, and usually
+            // recovers the datapoint the child already wrote.
+            if output.is_none() && had_pipe {
+                on_timeout(&mut child);
+                let _ = child.wait();
+                output = collect(&mut reader);
+            }
+            Ok((Some(status), output))
+        }
         None => {
             on_timeout(&mut child);
             let _ = child.wait();
             // Reap the drain now that the pipe has closed (bounded like above).
-            let _ = collect(reader);
+            let _ = collect(&mut reader);
             Ok((None, None))
         }
     }
@@ -276,7 +305,9 @@ impl Runner for PytestRunner {
             // Smart ordering reorders those ids so a historically-frequent
             // killer for this `(file, operator)` runs first — pytest's `-x` then
             // short-circuits on it. It only permutes the set, never changes it,
-            // so the kill/survive verdict is identical. See [`select_args`].
+            // so the kill/survive verdict is identical. (With a `--timeout` the
+            // result is order-sensitive: reaching the killer sooner can convert
+            // a would-be `timed_out` into a `killed`.) See [`select_args`].
             let (key_file, key_op) = self.kill_key(mutant);
             let ids = self
                 .coverage
@@ -499,37 +530,49 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn wait_draining_does_not_hang_when_grandchild_holds_stdout() {
+    fn wait_draining_reaps_grandchild_holding_stdout_and_recovers() {
         // Regression for the bounded-drain fix: the direct child exits, but a
         // backgrounded grandchild inherited the stdout write end, so the read
-        // never EOFs. An unbounded `join` would wedge the worker forever; the
-        // channel + grace must return promptly instead. `on_timeout` must NOT
-        // fire — the child exited normally, it did not time out.
+        // never EOFs. An unbounded `join` would wedge the worker forever *and*
+        // leak the reader thread. Instead, once the grace elapses we kill the
+        // process group (via `on_timeout`) to reap the grandchild — closing the
+        // pipe so the reader EOFs and its thread exits — then make one final
+        // collect that recovers the `done` the child already wrote.
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
             .arg("sleep 30 & echo done") // shell exits; the `sleep` keeps stdout open
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        with_new_process_group(&mut cmd); // so kill_group reaches the `sleep`
         let child = cmd.spawn().expect("spawn sh");
 
         let grace = Duration::from_millis(300);
+        let mut fired = 0;
         let start = std::time::Instant::now();
         let (status, output) =
-            wait_draining_stdout_with_grace(child, Duration::from_secs(30), grace, never_called)
-                .unwrap();
+            wait_draining_stdout_with_grace(child, Duration::from_secs(30), grace, |c| {
+                fired += 1;
+                kill_group(c); // reap the lingering grandchild → releases the pipe
+            })
+            .unwrap();
         let elapsed = start.elapsed();
 
         assert!(
             status.expect("child exited, not timed out").success(),
             "the direct child exited 0"
         );
-        assert!(
-            output.is_none(),
-            "drain can't EOF while the grandchild holds the pipe → no capture"
+        assert_eq!(
+            fired, 1,
+            "grace overrun must fire the group-kill exactly once"
+        );
+        assert_eq!(
+            output.as_deref().map(str::trim),
+            Some("done"),
+            "reaping the grandchild must recover the child's output, got {output:?}"
         );
         assert!(
             elapsed < Duration::from_secs(10),
-            "must return within the grace, not block on the never-EOFing pipe (took {elapsed:?})"
+            "must return within ~2×grace, not block on the never-EOFing pipe (took {elapsed:?})"
         );
     }
 
@@ -595,5 +638,55 @@ mod tests {
         assert!(status.is_none(), "should have timed out");
         assert!(output.is_none(), "timeout path captures no output");
         assert!(killed, "on_timeout must fire to kill the hung child");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn timeout_makes_the_verdict_order_sensitive() {
+        // Guards the corrected docs claim: ordering never changes kill/survive,
+        // but WITH a per-mutant timeout the killed↔timed_out verdict *is*
+        // order-sensitive — which is exactly why smart ordering (killer first)
+        // helps, and why enabling it can flip a borderline mutant.
+        //
+        // `runner` emulates pytest `-x`: it runs its positional "tests" in the
+        // given order, `slow` sleeps past the timeout (a passing-but-slow test),
+        // `fail` exits non-zero immediately (the killing test, short-circuiting).
+        // Same test SET, two orders, one short timeout → two different verdicts.
+        let runner = "for t in \"$@\"; do \
+                        case $t in \
+                          slow) sleep 5;; \
+                          fail) exit 1;; \
+                        esac; \
+                      done; exit 0";
+        let spawn = |order: &[&str]| {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(runner).arg("sh"); // $0 then positionals
+            for t in order {
+                cmd.arg(t);
+            }
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            with_new_process_group(&mut cmd); // so kill_group reaps the `sleep`
+            cmd.spawn().expect("spawn sh runner")
+        };
+        let timeout = Duration::from_millis(300);
+
+        // Killer first → `-x` short-circuits before the slow test → KILLED
+        // (non-zero exit within the timeout).
+        let (status, _) =
+            wait_draining_stdout(spawn(&["fail", "slow"]), timeout, kill_group).unwrap();
+        let killer_first = status.expect("killer-first must exit, not time out");
+        assert!(
+            !killer_first.success(),
+            "killer-first is a kill (non-zero exit)"
+        );
+
+        // Killer last → the slow test runs first and blows the timeout before the
+        // killer is ever reached → TIMED_OUT. Same set, opposite verdict.
+        let (status, _) =
+            wait_draining_stdout(spawn(&["slow", "fail"]), timeout, kill_group).unwrap();
+        assert!(
+            status.is_none(),
+            "killer-last must time out before reaching the killer"
+        );
     }
 }

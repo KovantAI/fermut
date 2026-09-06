@@ -462,6 +462,37 @@ mod tests {
     }
 
     #[test]
+    fn timed_out_outcomes_are_cached_and_reused() {
+        // Unlike Skipped/Error, a `TimedOut` verdict IS cached. This is what the
+        // smart-ordering docs warn about: once a mutant is cached as timed_out,
+        // a later run (even one whose learned ordering would now reach the killer
+        // in time and kill it) gets the cached timeout back and never re-runs.
+        // Locking it here so the "cached timeout is not re-evaluated" caveat
+        // can't silently regress by dropping TimedOut from the cache.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+
+        let mut c = Cache::default();
+        c.insert(
+            "id-1".into(),
+            "hashA".into(),
+            "scope-x".into(),
+            MutantOutcome::timed_out(make_mutant("id-1")),
+        );
+        // Retained in-memory…
+        assert!(matches!(
+            c.lookup("id-1", "hashA", "scope-x"),
+            Some(MutantOutcome::TimedOut { .. })
+        ));
+        // …and survives a save/load roundtrip, so the next run reuses it.
+        c.save(&path).unwrap();
+        assert!(matches!(
+            Cache::load(&path).lookup("id-1", "hashA", "scope-x"),
+            Some(MutantOutcome::TimedOut { .. })
+        ));
+    }
+
+    #[test]
     fn load_missing_file_yields_empty_cache() {
         let cache = Cache::load(&PathBuf::from("/nonexistent/cache.json"));
         assert!(cache.lookup("id", "hash", "scope").is_none());

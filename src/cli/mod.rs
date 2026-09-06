@@ -335,8 +335,10 @@ enum Cmd {
         /// multiple tests for a mutant, fermut runs the one that historically
         /// killed this file+operator first so pytest's `-x` short-circuits
         /// sooner (kill history in `.fermut/kill-order.json`). Ordering never
-        /// changes a verdict — only which test runs first — so disabling it only
-        /// affects speed. Also settable via `smart_order = false` in config.
+        /// changes the kill/survive verdict — only which test runs first — so
+        /// disabling it only affects speed. (With `--timeout` set the result is
+        /// order-sensitive: reaching the killer sooner can turn a `timed_out`
+        /// into a `killed`.) Also settable via `smart_order = false` in config.
         #[arg(long)]
         no_smart_order: bool,
 

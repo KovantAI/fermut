@@ -689,9 +689,22 @@ mod tests {
         // — it would pick `source_root` (`.../src`) and hand back the wrong
         // cwd, prefixing every node id with `src/`. Assert we fall back to
         // `project_root` (pytest's rootdir) instead.
-        let source_root = Path::new("/proj/src");
-        let project_root = Path::new("/proj");
-        let abs_keys = ["/proj/src/calculator.py", "/proj/src/util.py"];
+        // Keys must be genuinely absolute on the host platform: on Windows a
+        // `/proj/...` path lacks a drive prefix, so `is_absolute()` is false and
+        // the probe would (correctly) treat it as relative. Use a drive-rooted
+        // path there so the "all keys absolute" branch is what we exercise.
+        #[cfg(windows)]
+        let (source_root, project_root, abs_keys) = (
+            Path::new(r"C:\proj\src"),
+            Path::new(r"C:\proj"),
+            [r"C:\proj\src\calculator.py", r"C:\proj\src\util.py"],
+        );
+        #[cfg(not(windows))]
+        let (source_root, project_root, abs_keys) = (
+            Path::new("/proj/src"),
+            Path::new("/proj"),
+            ["/proj/src/calculator.py", "/proj/src/util.py"],
+        );
         assert_eq!(
             detect_coverage_cwd(source_root, project_root, &abs_keys),
             project_root.to_path_buf()

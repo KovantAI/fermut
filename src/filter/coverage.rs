@@ -61,9 +61,12 @@ pub struct CoverageContexts {
     /// syscall after the first hit per unique source file.
     canonical_cache: RwLock<HashMap<PathBuf, PathBuf>>,
     /// Per-test coverage breadth: how many `(file, line)` cells each test node id
-    /// executes. Computed once from `map`. Smart ordering uses it as a
-    /// cold-start prior — a test covering fewer lines is more targeted, so a
-    /// likelier killer, and runs first when no kill history exists yet.
+    /// executes across the whole coverage map. Computed once from `map`. Smart
+    /// ordering uses it as a cold-start prior — a test touching fewer cells is a
+    /// narrower test, so a likelier focused killer, and runs first when no kill
+    /// history exists yet. Breadth is global (not scoped to the mutated file), so
+    /// it's a coarse specificity signal: it can misrank a broad-but-relevant
+    /// killer, which only weakens the `-x` short-circuit — never the verdict.
     test_breadth: HashMap<String, u32>,
 }
 
@@ -346,25 +349,24 @@ impl CoverageContexts {
         &self.test_breadth
     }
 
-    /// Reorder coverage-selected test node ids so the most **targeted** test —
-    /// the one covering the fewest lines — runs first. Under pytest's `-x` a
-    /// specific unit test is the likelier killer, so trying it first lets the
-    /// mutant die (and the run return) sooner. This is the cold-start ordering
-    /// prior: it needs no run history, only the coverage already loaded, so it
-    /// helps on run 1 and on freshly-changed `--since` lines.
+    /// Reorder coverage-selected test node ids so the narrowest test — the one
+    /// covering the fewest `(file, line)` cells globally — runs first. Under
+    /// pytest's `-x` a focused unit test is the likelier killer, so trying it
+    /// first lets the mutant die (and the run return) sooner. This is the
+    /// cold-start ordering prior: it needs no run history, only the coverage
+    /// already loaded, so it helps on run 1 and on freshly-changed `--since`
+    /// lines.
     ///
-    /// Stable: ties (and ids absent from the breadth map, treated as maximally
-    /// broad → sorted last) keep the caller's order. **Only permutes** the set —
-    /// never adds or drops an id — so the kill/survive verdict is unchanged;
-    /// only which test pytest tries first.
-    pub fn order_by_breadth(&self, ids: &[String]) -> Vec<String> {
-        let mut indexed: Vec<(usize, &String)> = ids.iter().enumerate().collect();
-        indexed.sort_by(|a, b| {
-            let ba = self.test_breadth.get(a.1).copied().unwrap_or(u32::MAX);
-            let bb = self.test_breadth.get(b.1).copied().unwrap_or(u32::MAX);
-            ba.cmp(&bb).then_with(|| a.0.cmp(&b.0)) // breadth asc, stable
-        });
-        indexed.into_iter().map(|(_, id)| id.clone()).collect()
+    /// Borrows the input — the returned refs point back into `ids`; the caller
+    /// keeps `ids` alive. `sort_by_key` is stable, so ties (and ids absent from
+    /// the breadth map, treated as maximally broad → sorted last) keep the
+    /// caller's order. **Only permutes** the set — never adds or drops an id —
+    /// so the kill/survive verdict is unchanged; only which test pytest tries
+    /// first.
+    pub fn order_by_breadth<'a>(&self, ids: &'a [String]) -> Vec<&'a String> {
+        let mut ordered: Vec<&String> = ids.iter().collect();
+        ordered.sort_by_key(|id| self.test_breadth.get(*id).copied().unwrap_or(u32::MAX));
+        ordered
     }
 
     /// Test node ids that executed `file:line`, or `None` if none recorded.
@@ -695,7 +697,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let out = ctx.order_by_breadth(&input);
+        let out: Vec<String> = ctx.order_by_breadth(&input).into_iter().cloned().collect();
         assert_eq!(
             out,
             vec![
@@ -716,7 +718,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let out = ctx.order_by_breadth(&input);
+        let out: Vec<String> = ctx.order_by_breadth(&input).into_iter().cloned().collect();
         assert_eq!(out[0], "tests/t.py::narrow");
         assert_eq!(out[1], "tests/t.py::ghost");
     }
@@ -735,7 +737,7 @@ mod tests {
             vec!["ghost", "tests/t.py::wide", "dup", "dup"],
         ] {
             let input: Vec<String> = raw.iter().map(|s| s.to_string()).collect();
-            let out = ctx.order_by_breadth(&input);
+            let out: Vec<String> = ctx.order_by_breadth(&input).into_iter().cloned().collect();
             let mut a = input.clone();
             let mut b = out.clone();
             a.sort();

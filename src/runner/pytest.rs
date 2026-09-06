@@ -74,6 +74,18 @@ impl PytestRunner {
         }
     }
 
+    /// Coverage-selected node ids in the order pytest should try them. With
+    /// smart ordering the narrowest test (fewest covered cells) leads so `-x`
+    /// short-circuits sooner; otherwise the caller's coverage order is kept.
+    /// Only permutes `ids` — never adds or drops — so the verdict is unchanged.
+    fn ordered_ids<'a>(&self, ctx: &CoverageContexts, ids: &'a [String]) -> Vec<&'a String> {
+        if self.smart_order {
+            ctx.order_by_breadth(ids)
+        } else {
+            ids.iter().collect()
+        }
+    }
+
     /// Base command that launches the framework. With a configured interpreter
     /// we go through `<python> -m <exe>` so the run uses *that* interpreter's
     /// framework (and its venv's installed packages) with no reliance on `PATH`.
@@ -116,14 +128,8 @@ impl Runner for PytestRunner {
             match self.coverage.as_ref() {
                 Some(ctx) => match ctx.tests_for_mutant(mutant) {
                     Some(ids) if !ids.is_empty() => {
-                        if self.smart_order {
-                            for id in ctx.order_by_breadth(ids) {
-                                cmd.arg(id);
-                            }
-                        } else {
-                            for id in ids {
-                                cmd.arg(id);
-                            }
+                        for id in self.ordered_ids(ctx, ids) {
+                            cmd.arg(id);
                         }
                     }
                     _ => {
@@ -197,5 +203,105 @@ impl Runner for PytestRunner {
         with_new_process_group(&mut cmd);
         cmd.env("PYTHONPATH", mirror_pythonpath(&mirror)?);
         run_baseline_with_timeout(cmd, self.baseline_timeout)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::path::Path;
+
+    // wide covers 3 lines, mid 1, narrow 1 — same fixture as the coverage tests.
+    fn breadth_ctx(dir: &Path) -> Arc<CoverageContexts> {
+        std::fs::write(dir.join("foo.py"), "a = 1\nb = 2\nc = 3\n").unwrap();
+        let doc = r#"{
+            "files": {
+                "foo.py": {
+                    "contexts": {
+                        "1": ["tests/t.py::wide|run"],
+                        "2": ["tests/t.py::wide|run", "tests/t.py::narrow|run"],
+                        "3": ["tests/t.py::wide|run", "tests/t.py::mid|run"]
+                    }
+                }
+            }
+        }"#;
+        let path = dir.join("coverage.json");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(doc.as_bytes())
+            .unwrap();
+        CoverageContexts::from_json(&path, dir, dir).unwrap()
+    }
+
+    fn runner(smart_order: bool, coverage: Arc<CoverageContexts>) -> PytestRunner {
+        PytestRunner::new(
+            PathBuf::from("tests"),
+            Duration::from_secs(30),
+            Duration::from_secs(300),
+            None,
+            Vec::new(),
+            IsolationMode::Auto,
+            Some(coverage),
+            None,
+            "pytest",
+            smart_order,
+        )
+    }
+
+    fn selected() -> Vec<String> {
+        ["tests/t.py::wide", "tests/t.py::narrow", "tests/t.py::mid"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn ordered_ids_smart_puts_narrowest_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = breadth_ctx(tmp.path());
+        let r = runner(true, ctx.clone());
+        let ids = selected();
+        let out: Vec<String> = r.ordered_ids(&ctx, &ids).into_iter().cloned().collect();
+        // wide (breadth 3) sinks; the two breadth-1 tests keep input order (stable).
+        assert_eq!(
+            out,
+            vec![
+                "tests/t.py::narrow".to_string(),
+                "tests/t.py::mid".to_string(),
+                "tests/t.py::wide".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn ordered_ids_no_smart_keeps_coverage_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = breadth_ctx(tmp.path());
+        let r = runner(false, ctx.clone());
+        let ids = selected();
+        let out: Vec<String> = r.ordered_ids(&ctx, &ids).into_iter().cloned().collect();
+        // Smart ordering off → caller's coverage order is preserved verbatim.
+        assert_eq!(out, ids);
+    }
+
+    #[test]
+    fn ordered_ids_is_a_permutation_either_way() {
+        // Verdict-invariance: both branches return exactly the selected set,
+        // only the order differs — so pytest's `-x` runs the same tests.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = breadth_ctx(tmp.path());
+        let ids = selected();
+        for smart in [true, false] {
+            let r = runner(smart, ctx.clone());
+            let mut out: Vec<String> = r.ordered_ids(&ctx, &ids).into_iter().cloned().collect();
+            let mut want = ids.clone();
+            out.sort();
+            want.sort();
+            assert_eq!(
+                out, want,
+                "smart={smart} must be a permutation of the input"
+            );
+        }
     }
 }

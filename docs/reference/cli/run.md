@@ -69,10 +69,13 @@ loaded, so it helps on the first run and on freshly-changed `--since`
 lines.
 
 **On by default** (only active when `--coverage` is in use). **Ordering
-never changes a verdict** — it only permutes the selected tests, so `-x`
-still runs until a failure or exhaustion and the kill/survive/timeout
-result is identical. Disable with `--no-smart-order` (or `smart_order =
-false` in config); the tests then run in plain coverage order.
+never changes the score** — it only permutes the selected tests, so `-x`
+still runs until a failure or exhaustion and the kill/survive result is
+identical. (Under a tight `--timeout` a mutant can flip between `killed`
+and `timeout` depending on which test runs first, but both count as
+detected, so the score and pass/fail are unchanged.) Disable with
+`--no-smart-order` (or `smart_order = false` in config); the tests then
+run in plain coverage order.
 
 ## Time-boxed runs (`--max-time`) { #time-boxed-runs-max-time }
 

@@ -106,6 +106,12 @@ impl KillOrder {
 /// the prefix, so the trailing reason is ignored. The nodeid itself may contain
 /// spaces (parametrized ids like `test_f[a b]`), so we split on the ` - ` reason
 /// separator rather than whitespace; a line with no separator is all nodeid.
+///
+/// We require the `::` that separates a test's file from its function, so a
+/// *collection* error — which `-rfE` prints as `ERROR <file>` (a bare path, no
+/// `::`) — is not mistaken for a killing test. Recording that bogus "nodeid"
+/// would never match a coverage-selected id (so it can't reorder anything) and
+/// would only pollute the sidecar.
 pub fn parse_first_failed(stdout: &str) -> Option<String> {
     stdout.lines().find_map(|line| {
         let trimmed = line.trim();
@@ -113,7 +119,7 @@ pub fn parse_first_failed(stdout: &str) -> Option<String> {
             .strip_prefix("FAILED ")
             .or_else(|| trimmed.strip_prefix("ERROR "))?;
         let nodeid = rest.split_once(" - ").map_or(rest, |(id, _)| id).trim();
-        (!nodeid.is_empty()).then(|| nodeid.to_string())
+        (nodeid.contains("::")).then(|| nodeid.to_string())
     })
 }
 
@@ -174,6 +180,24 @@ mod tests {
         assert_eq!(parse_first_failed("this FAILED somewhere\n"), None);
         // `FAILED` with nothing after → no nodeid.
         assert_eq!(parse_first_failed("FAILED \n"), None);
+    }
+
+    #[test]
+    fn parse_skips_collection_error_without_nodeid() {
+        // A *collection* error is `ERROR <file>` — a bare path, no `::`. It is
+        // not a killing test, so it must not be recorded (a path-only "nodeid"
+        // never matches a coverage-selected id, only pollutes the sidecar). A
+        // real per-test ERROR later on the same output still wins.
+        assert_eq!(
+            parse_first_failed("ERROR tests/test_x.py - ImportError: boom\n"),
+            None
+        );
+        let out = "ERROR tests/test_x.py - ImportError: boom\n\
+                   ERROR tests/test_x.py::test_add - fixture failed\n";
+        assert_eq!(
+            parse_first_failed(out).as_deref(),
+            Some("tests/test_x.py::test_add")
+        );
     }
 
     #[test]

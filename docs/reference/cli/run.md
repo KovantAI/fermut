@@ -72,6 +72,14 @@ only costs a slow run), and later runs read it to order. The win is
 proportional to tests-selected-per-mutant; a mutant covered by one test
 gains nothing.
 
+**Concurrent runs may lose learnings.** The sidecar is rewritten with a
+plain load-modify-save at the end of a run, with no file locking. Two
+`fermut run` invocations sharing the same `.fermut/` (e.g. parallel shards
+in CI, or `--shard`) both read the old file and each overwrites it — the
+last writer wins and the other run's newly-learned kills are dropped. This
+only forfeits some ordering speedup on the next run, never a verdict. To
+keep every shard's learnings, point each at its own `kill_order_path`.
+
 **Ordering never changes the kill/survive verdict** — only *which* test
 pytest tries first. `-x` exits non-zero iff *some* selected test fails,
 independent of order, so a mutant that survives (or is killed) survives (or

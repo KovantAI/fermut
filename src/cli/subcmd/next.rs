@@ -84,12 +84,13 @@ fn ease(op: Operator) -> Ease {
     match op {
         BoundaryShift | CompareOpSwap | ArithOpSwap | ConstantReplace | NumberShift
         | NumberToZero | NumberToNeg | StringToEmpty | StringSentinel | BytesSentinel
-        | NotInsertion | BoolOpSwap | UnaryOpSwap | StringCaseSwap => Ease::High,
+        | NotInsertion | BoolOpSwap | UnaryOpSwap | StringCaseSwap | MatchGuardNegate => Ease::High,
         ReturnValueToNone | AssignValueToNone | DefaultArgToNone | LambdaBodyToNone | ArgToNone
         | NoneToValue | ExprToNone | KeywordArgDrop | DictItemDrop | PositionalDrop
-        | SliceBoundDrop | SliceStepMutate | AugAssignSwap => Ease::Medium,
+        | SliceBoundDrop | SliceStepMutate | AugAssignSwap | AwaitDrop => Ease::Medium,
         BreakContinueSwap | RemoveDecorator | ExceptionClassSwap | BareExcept
-        | ZeroIterationForLoop | OneIterationForLoop => Ease::Low,
+        | ZeroIterationForLoop | OneIterationForLoop | AsyncForToSync | AsyncWithToSync
+        | RaiseFromDrop | NumericTypeSwap | OptionalTypeDrop | ContainerTypeSwap => Ease::Low,
     }
 }
 

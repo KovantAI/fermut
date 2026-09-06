@@ -78,16 +78,23 @@ return is highest today.
 
 ## Operators for modern Python
 
-- **`match`/`case`.** Pattern swap, guard mutation, wildcard
-  insertion, case reorder.
-- **Type-annotation operators.** `int` ↔ `float`, `Optional[T]` ↔
-  `T`, `List[T]` ↔ `Iterable[T]`. Lights up the kinds of
-  type-narrowing bugs that ty + tests both miss.
-- **Async-aware.** `await` drop, `async for` → `for`, `asyncio.gather`
-  arg reorder. Today's catalogue treats async like sync.
-- **Exception chaining.** `raise X from e` → `raise X`,
-  `raise X from None` swap. Catches tests that assert on
-  exception type but not on `__cause__`.
+- **Async-aware — shipped (partial).** `await-drop` (`await X` →
+  `X`), `async-for-to-sync`, and `async-with-to-sync` are stable
+  operators now. Still open: `asyncio.gather` arg reorder.
+- **`match`/`case` — shipped (partial).** `match-guard-negate`
+  (`case … if g` → `if not (g)`) is a stable operator. Still open:
+  pattern swap, wildcard insertion, case reorder.
+- **Exception chaining — shipped (partial).** `exp:raise-from-drop`
+  (`raise X from e` → `raise X`, also `from None`) catches tests that
+  assert the exception type but not `__cause__`. Experimental. Still
+  open: a distinct `from None` ↔ `from e` swap.
+- **Type-annotation operators — shipped (partial).** Experimental:
+  `exp:numeric-type-swap` (`int` ↔ `float`), `exp:optional-type-drop`
+  (`Optional[T]` / `T | None` → `T`), `exp:container-type-swap`
+  (`list[T]` → `tuple[T]`, builtin containers). Lights up
+  type-narrowing bugs in runtime-validated code (pydantic, dataclass,
+  beartype) that ty + tests both miss. Still open: the typing-generic
+  widening `List[T]` → `Iterable[T]` (needs import-aware emission).
 
 ## Integrations and distribution
 
@@ -122,6 +129,18 @@ return is highest today.
 - **Rust self-mutation.** Mutate fermut's own Rust source as part
   of CI. Eats own dogfood, catches regressions in operator
   emission logic.
+
+## Time-boxed runs (`--max-time`) — shipped
+
+`fermut run --max-time <SECS>` caps the testing phase at a wall-clock
+ceiling. Mutants are evaluated highest-value first (covered ahead of
+uncovered); mutants left untested at the deadline are recorded as
+`skipped`/`time-budget` and excluded from the score, so a truncated run
+reports over what actually ran rather than masquerading as a full sweep.
+A predictable time ceiling for PR gates — a time cap beats a mutant cap
+for CI trust. See **[run reference](reference/cli/run.md#time-boxed-runs-max-time)**.
+Follow-ups still open: coverage-call-graph ordering and historical-killer
+ordering (below) sharpen the "highest-value first" signal.
 
 ## Public PyPI — shipped
 

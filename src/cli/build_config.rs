@@ -49,6 +49,7 @@ pub(crate) fn build_config(
     cli_no_verify_baseline: bool,
     cli_baseline_timeout: Option<u64>,
     cli_no_smart_order: bool,
+    cli_max_time: Option<u64>,
     f: FilterArgs,
 ) -> Result<Config> {
     let loaded = LoadedConfig::load(&cli_path)?;
@@ -231,6 +232,7 @@ pub(crate) fn build_config(
     let baseline_timeout_secs = cli_baseline_timeout
         .or(file.baseline_timeout)
         .unwrap_or(DEFAULT_BASELINE_TIMEOUT_SECS);
+    let max_time_secs = cli_max_time.or(file.max_time);
 
     Ok(Config {
         source_root,
@@ -266,6 +268,7 @@ pub(crate) fn build_config(
         exclude,
         verify_baseline,
         baseline_timeout_secs,
+        max_time_secs,
     })
 }
 
@@ -369,6 +372,7 @@ mod tests {
             false,
             None,
             false, // cli_no_smart_order
+            None,  // cli_max_time
             filter,
         )
     }
@@ -596,6 +600,7 @@ mod tests {
             false,
             None,
             true, // cli_no_smart_order
+            None, // cli_max_time
             empty_filter(),
         )
         .unwrap();

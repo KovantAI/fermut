@@ -46,6 +46,17 @@ jobs:
         with:
           prefix-key: "v1-rust"
           key: ${{ matrix.os }}-${{ matrix.toolchain }}
+      # The `ruff` git dependency contains snapshot files whose paths exceed the
+      # legacy Windows 260-char MAX_PATH limit, which makes cargo's bundled
+      # libgit2 checkout fail (`path too long; class=Filesystem (30)`). Enable
+      # git long-path support and fetch git deps via the git CLI, which honors
+      # `core.longpaths`, so the checkout succeeds.
+      - if: runner.os == 'Windows'
+        name: Enable long paths for cargo git checkouts
+        shell: bash
+        run: |
+          git config --global core.longpaths true
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
       - run: cargo test --all-features --locked
 
   e2e:

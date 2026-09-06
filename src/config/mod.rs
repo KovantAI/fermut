@@ -91,6 +91,15 @@ pub struct Config {
     /// because the baseline runs the entire suite. A hung suite is killed past
     /// this so it can't stall the whole run. Set via `--baseline-timeout`.
     pub baseline_timeout_secs: u64,
+    /// Optional wall-clock ceiling (seconds) on the per-mutant **testing
+    /// phase**. When set, mutants are evaluated highest-value first (covered
+    /// mutants ahead of uncovered ones) and, once the deadline passes, every
+    /// mutant not yet started is recorded as `skipped` with filter
+    /// `time-budget` rather than run. In-flight mutants finish. Bounds only the
+    /// testing phase — baseline verification, generation, and the ty pre-filter
+    /// are separate fixed costs the budget does not cover. `None` = run the
+    /// whole catalogue. Set via `--max-time`.
+    pub max_time_secs: Option<u64>,
 }
 
 /// Cache-key granularity for source-file identity. See `Config::cache_scope`.

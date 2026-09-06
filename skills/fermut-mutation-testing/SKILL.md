@@ -26,11 +26,14 @@ Source repo: https://github.com/KovantAI/fermut
 
 Before invoking fermut, verify:
 
-1. **Binary**: prefer the debug build over the release build — `release` may be stale. Confirm the agent-loop subcommands are present:
+1. **Binary**: install the published wheel — no Rust needed — and confirm the agent-loop subcommands are present:
    ```bash
-   <path-to-fermut>/target/debug/fermut --help | grep -E "next|explain|score|autofix"
+   uv tool install fermut            # or: pipx install fermut / pip install fermut
+   fermut --help | grep -E "next|explain|score|autofix"
    ```
-   `next` (ranked survivor triage) and `score` (reward signal) are used below; if they're missing the binary predates the agent loop — rebuild. If the release binary at `<path>/target/release/fermut` is current, use that; otherwise fall back to debug.
+   `next` (ranked survivor triage) and `score` (reward signal) are used below; if they're missing the binary predates the agent loop — upgrade (`uv tool upgrade fermut`). Org package firewalls (Aikido, Artifactory, Nexus) may block a just-released version until it's vetted — allowlist `fermut` if the install 403s on "not yet vetted".
+
+   **From source instead** (hacking on fermut, or an unsupported platform): build the repo and point at `target/debug/fermut` — prefer debug over release, which may be stale; rebuild if the subcommand check above fails.
 
 2. **Optional deps installed**: many real Python projects gate test modules behind `[project.optional-dependencies]` (msgraph, azure, openai, etc.). pytest collection fails on missing imports and coverage.json comes back empty. Before generating coverage:
    ```bash
@@ -365,7 +368,7 @@ Per file: a focused batch of 6–15 tests typically kills 10–30 mutants. The k
 8. **pytest binary not on PATH** — fermut spawns `pytest` directly. Prepend the venv bin (`PATH="$VENV:$PATH"`). The venv is often NOT at `$PWD/.venv`; locate the dir holding `pytest` and use its **absolute** path (a relative one breaks because fermut chdirs). See pre-flight item 4. **Restricted sandboxes/CI** (harness forbids modifying `PATH` — some agent sandboxes deny any `PATH=` assignment, and may deny invoking `pytest`/`coverage` directly even by absolute path): pass `--python <venv-or-interpreter>` to **both** `fermut run` and `fermut coverage` so fermut runs `<python> -m pytest` itself with an absolute interpreter — no PATH, and no direct pytest/coverage call of your own. The whole loop then becomes:
 
 ```bash
-FERMUT=/abs/path/to/target/debug/fermut
+FERMUT=fermut               # installed on PATH; or an abs path to target/debug/fermut for a source build
 VENV="$PWD/.venv"            # the venv dir (or an interpreter path)
 $FERMUT coverage "$PWD" --tests "$PWD/tests" --source "$PWD/<pkg>" --python "$VENV"   # writes .coverage, no PATH
 $FERMUT run "$PWD" --tests "$PWD/tests" --coverage "$PWD/.coverage" --python "$VENV" --json .fermut/last.json --no-history -q

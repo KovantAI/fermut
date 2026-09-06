@@ -9,7 +9,7 @@ guide or reference page.
 
 ## Mutation testing core
 
-- **26 stable operators + 4 experimental.** Arithmetic / compare /
+- **30 stable operators + 8 experimental.** Arithmetic / compare /
   boundary / boolean / constant / return-to-none / slice / sentinel /
   decorator / and more. See the **[Operators reference](../reference/operators/index.md)**.
 - **Inline ignore markers.** `# fermut: ignore[op-name]` on a line

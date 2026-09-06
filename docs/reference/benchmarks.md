@@ -32,7 +32,7 @@ per-phase timing, mutant total, score, and return code.
 
 ## Cold runs (pinned OSS repos)
 
-The numbers below are `cold`-scenario runs of fermut 0.2.2 vs
+The numbers below are `cold`-scenario runs of fermut 0.3.0 vs
 mutmut 3.6.0, **both re-run back-to-back on the same machine
 (2026-06-12)**, excluding clone / install. fermut runs **with its
 coverage filter on** (the designed configuration — see below);
@@ -282,7 +282,7 @@ and `benchmarks/configs/tools.toml`. Results land in
 ## Caveats — read before trusting the numbers
 
 - **Preliminary data.** This is a small, in-progress sample, not a
-  finished benchmark. fermut is at 0.2.2, pre-optimization.
+  finished benchmark. fermut is at 0.3.0, pre-optimization.
 - **Score parity.** The tools find different mutants because
   operator catalogues differ. Scores are **not** directly
   comparable. A fermut `100.0` on a well-tested repo is a red flag,

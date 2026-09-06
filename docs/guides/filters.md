@@ -81,8 +81,13 @@ Config:
 diff_only = "main"
 ```
 
-The diff *includes* uncommitted working-tree changes — editing a
-file locally re-runs its mutants without needing to commit.
+`--diff-only` is a **three-dot** diff (`git diff base...HEAD`): it
+scopes to the lines this branch changed relative to the merge base with
+`base` — i.e. **committed** changes only. Uncommitted working-tree edits
+are **not** included (use `--since` for those). This is the right
+semantics for a PR gate, where the PR head is committed and you want the
+diff against where the branch forked from `base`, unaffected by `base`
+advancing after the fork.
 
 ## `--since`
 
@@ -99,6 +104,12 @@ fermut run src/ --since '1 week ago'
 
 `SPEC` is resolved as a git ref first, then (on failure) as a date
 that `git log --before=<SPEC>` accepts.
+
+Unlike `--diff-only`, `--since` is a **two-dot** diff (`git diff
+<spec>`): it compares the working tree against `<spec>`, so
+**uncommitted edits are included**. Use `--since` when you want local,
+not-yet-committed changes scoped in (the inner dev loop); use
+`--diff-only` for a committed branch-vs-base gate.
 
 `--diff-only` and `--since` are mutually exclusive.
 

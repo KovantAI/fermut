@@ -32,3 +32,7 @@ markers).
 | `bytes-sentinel`     | `b"Bearer "` → `b"XXBearer XX"`                                     |
 | `keyword-arg-drop`   | `f(x=1, y=2)` → `f(x=1)` (drops one kwarg + its comma)             |
 | `dict-item-drop`     | `{a: 1, b: 2, c: 3}` → `{a: 1, c: 3}` (drops one item + comma)     |
+| `await-drop`         | `x = await f()` → `x = f()` (drops `await` — value becomes the un-awaited coroutine/awaitable) |
+| `async-for-to-sync`  | `async for x in it:` → `for x in it:` (sync iteration over an async iterator raises at runtime) |
+| `async-with-to-sync` | `async with cm:` → `with cm:` (sync context-manager protocol on an async CM raises at runtime) |
+| `match-guard-negate` | `case n if n > 0:` → `case n if not (n > 0):` (flips which `match` arm handles the subject) |

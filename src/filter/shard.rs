@@ -12,6 +12,11 @@ use sha2::{Digest, Sha256};
 use super::Filter;
 use crate::mutator::Mutant;
 
+/// Filter name a sharded run stamps on every mutant *outside* its slice. The
+/// merge step keys its placeholder detection off this exact string, so the two
+/// must never drift — hence one const shared by both.
+pub const SHARD_FILTER_NAME: &str = "shard";
+
 pub struct ShardFilter {
     /// 0-based internally; CLI parses 1-based.
     index: u32,
@@ -32,7 +37,7 @@ impl ShardFilter {
 
 impl Filter for ShardFilter {
     fn name(&self) -> &'static str {
-        "shard"
+        SHARD_FILTER_NAME
     }
 
     fn admits(&self, mutant: &Mutant) -> Result<bool> {

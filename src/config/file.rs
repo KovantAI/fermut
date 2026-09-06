@@ -50,6 +50,11 @@ pub struct FileConfig {
     pub verify_baseline: Option<bool>,
     /// Wall-clock cap (seconds) for the baseline run. Default 300.
     pub baseline_timeout: Option<u64>,
+    /// Wall-clock ceiling (seconds) on the per-mutant testing phase. Mutants
+    /// are evaluated highest-value first and the remainder is skipped
+    /// (`time-budget`) once the deadline passes. Unset = run the whole
+    /// catalogue. Set via `--max-time`.
+    pub max_time: Option<u64>,
     /// Glob patterns matched against paths relative to `source_root`. Files
     /// (and directories) matching any pattern are pruned during mutation
     /// collection. Examples: `"alembic/**"`, `"tests/integration/**"`,

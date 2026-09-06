@@ -304,6 +304,18 @@ enum Cmd {
         #[arg(long, value_name = "SCORE")]
         fail_under: Option<f64>,
 
+        /// Never exit non-zero because of the mutation result — write every
+        /// report and exit 0 even with survivors. For runs that only produce a
+        /// report (a trend shard, a dashboard feed) where the mutants exist to
+        /// be recorded, not to gate. Replaces the `--fail-under 0` idiom.
+        /// Mutually exclusive with the gate flags. Note this also suppresses
+        /// the exit for a scoreless/all-errored run (the vacuous-100% guard):
+        /// the broken run is reported as N/A but still exits 0, so pair a
+        /// report-only shard with a separate gated step if you need to catch a
+        /// suite that errors under mutation.
+        #[arg(long, conflicts_with_all = ["fail_under", "fail_on_regression"])]
+        no_fail: bool,
+
         /// Skip the pre-flight check that the unmutated suite passes. fermut
         /// runs your full test suite once before mutating; a red or erroring
         /// suite makes every covered mutant look killed and inflates the
@@ -319,14 +331,40 @@ enum Cmd {
         #[arg(long, value_name = "SECS")]
         baseline_timeout: Option<u64>,
 
+        /// Wall-clock ceiling (seconds) on the per-mutant testing phase. When
+        /// set, mutants are evaluated highest-value first (covered mutants
+        /// before uncovered) and, once the deadline passes, every mutant not
+        /// yet started is recorded as `skipped` (filter `time-budget`) instead
+        /// of run; mutants already in flight finish. Gives a PR gate a
+        /// predictable ceiling — a time cap beats a mutant cap for CI trust.
+        /// Bounds only the testing phase: baseline verification, generation,
+        /// and the ty pre-filter are separate fixed costs it does not cover.
+        #[arg(long, value_name = "SECS")]
+        max_time: Option<u64>,
+
         #[command(flatten)]
         filter: FilterArgs,
     },
 
     /// Enumerate mutations without running tests.
+    ///
+    /// By default the same pre-test filters as `run` apply (ty type-check,
+    /// coverage, diff scope), so the list reflects what `run` would actually
+    /// test. Pass `--no-ty-filter` to see the raw generated catalogue before
+    /// the ty pre-filter drops type-invalid candidates.
     List {
         #[arg(default_value = ".")]
         path: PathBuf,
+
+        /// Skip the ty pre-filter — list every generated mutant, including ones
+        /// ty would reject as type-invalid. Matches `run --no-ty-filter`.
+        #[arg(long)]
+        no_ty_filter: bool,
+
+        /// Enable the ruff lint pre-filter. Requires `ruff` on PATH. Matches
+        /// `run --ruff-filter`.
+        #[arg(long)]
+        ruff_filter: bool,
 
         #[command(flatten)]
         filter: FilterArgs,
@@ -465,6 +503,16 @@ enum Cmd {
         /// stdout output format.
         #[arg(long, value_enum, default_value_t = TrendFormatCli::Human)]
         format: TrendFormatCli,
+
+        /// Fail if the history log has any malformed (corrupt, unparseable)
+        /// line instead of silently skipping it, so a `fermut trend --strict`
+        /// CI step catches a truncated history file before the trend is
+        /// trusted. Newer-schema lines an older binary can't read are warned,
+        /// not failed — nothing this binary can do about them. Does not change
+        /// the `fermut run --fail-on-regression` gate, which loads history on
+        /// its own; run this as a separate step to guard the shared file.
+        #[arg(long)]
+        strict: bool,
     },
 
     /// Emit the agent reward signal for the latest run: score, delta vs a
@@ -665,6 +713,25 @@ enum Cmd {
         /// Also write a Markdown report.
         #[arg(long)]
         markdown: Option<PathBuf>,
+
+        /// Write a single history entry built from the merged report to this
+        /// path (overwriting). Git sha/branch are read from the merge checkout
+        /// and the fermut version is stamped automatically; the counts are the
+        /// merged full-universe totals. Lets a sharded run record its trend
+        /// point without harvesting a shard's history line as a template.
+        #[arg(long, value_name = "PATH")]
+        history: Option<PathBuf>,
+
+        /// `config_hash` to stamp into the `--history` entry. Merge can't derive
+        /// it (the run config lives in the shard jobs), so pass the value the
+        /// shards recorded, e.g. `$(jq -r .config_hash shard-1-entry.json)`.
+        #[arg(long, value_name = "HEX")]
+        config_hash: Option<String>,
+
+        /// Project root for git sha/branch discovery in the `--history` entry.
+        /// Defaults to the current directory (the merge checkout).
+        #[arg(long, value_name = "DIR", default_value = ".")]
+        project: PathBuf,
     },
 
     /// Post a Markdown report to a pull request as a sticky comment.
@@ -1219,8 +1286,10 @@ impl Cli {
                 trend_branch,
                 fail_on_regression,
                 fail_under,
+                no_fail,
                 no_verify_baseline,
                 baseline_timeout,
+                max_time,
                 filter: f,
             } => {
                 let cfg = build_config(
@@ -1247,6 +1316,7 @@ impl Cli {
                     fail_under,
                     no_verify_baseline,
                     baseline_timeout,
+                    max_time,
                     f,
                 )?;
                 let want_annotations =
@@ -1309,6 +1379,19 @@ impl Cli {
                             );
                             gate_failed = true;
                         } else if let Some(current) = current_entry.as_ref() {
+                            if current.partial {
+                                // A `--max-time` run truncated by the budget
+                                // scored a nondeterministic subset, so it can't
+                                // anchor a regression comparison — `regression_
+                                // against` excludes it. Say so, or a green gate
+                                // reads as "no regression" when it's really "not
+                                // evaluated".
+                                eprintln!(
+                                    "--fail-on-regression skipped: this run hit the --max-time \
+                                     budget and scored a partial subset (not comparable). Run \
+                                     without --max-time to gate on regression."
+                                );
+                            }
                             // Reload post-run so concurrent writers (e.g.
                             // parallel `--shard` workers) become visible,
                             // then compare against the in-memory current
@@ -1329,7 +1412,21 @@ impl Cli {
                             }
                         }
                     }
-                    if report.should_fail(cfg.fail_under) || gate_failed {
+                    // A zero-denominator run has no score. Say so, so a green
+                    // gate is never mistaken for a genuine 100% (an all-errored
+                    // run fails below; nothing-to-score with no errors passes as
+                    // a legitimate N/A). Under `--no-fail` the exit is suppressed
+                    // regardless, so the errored case reports N/A too — claiming
+                    // "the gate fails" would contradict the exit-0 that follows.
+                    if report.is_scoreless() {
+                        eprintln!("{}", scoreless_note(&report, no_fail));
+                    }
+                    // `--no-fail`: the run exists to produce a report, not to
+                    // gate. Conflicts with the gate flags at the parser, so
+                    // `gate_failed` is always false here; the guard is explicit
+                    // so the intent survives a future flag that sets it.
+                    if gate_exits_nonzero(no_fail, report.should_fail(cfg.fail_under), gate_failed)
+                    {
                         std::process::exit(1);
                     }
                     Ok(())
@@ -1464,6 +1561,7 @@ impl Cli {
                 diff,
                 by,
                 format,
+                strict,
             } => trend(TrendOpts {
                 path,
                 history_path,
@@ -1477,6 +1575,7 @@ impl Cli {
                 diff,
                 group_by: by.map(Into::into),
                 format: format.into(),
+                strict,
             }),
             Cmd::Score {
                 path,
@@ -1615,21 +1714,32 @@ impl Cli {
                 junit,
                 html,
                 markdown,
+                history,
+                config_hash,
+                project,
             } => merge_reports(
                 &inputs,
                 json.as_ref(),
                 junit.as_ref(),
                 html.as_ref(),
                 markdown.as_ref(),
+                history.as_ref(),
+                config_hash,
+                &project,
             ),
-            Cmd::List { path, filter: f } => {
+            Cmd::List {
+                path,
+                no_ty_filter,
+                ruff_filter,
+                filter: f,
+            } => {
                 let cfg = build_config(
                     path,
                     None,
                     None,
                     None,
-                    false,
-                    false,
+                    no_ty_filter,
+                    ruff_filter,
                     None,
                     Vec::new(),
                     true,
@@ -1646,6 +1756,7 @@ impl Cli {
                     None,
                     None,
                     true,
+                    None,
                     None,
                     f,
                 )?;
@@ -1679,6 +1790,51 @@ fn load_prior_excluding(path: &std::path::Path, current: &HistoryEntry) -> Vec<H
     prior
 }
 
+/// Whether `fermut run` should exit non-zero after producing its report.
+/// `--no-fail` suppresses the exit unconditionally — the run existed to
+/// produce a report, not to gate — otherwise the run fails if the mutation
+/// result is below the bar (`result_fails`) or a regression gate tripped
+/// (`gate_failed`). Extracted so the gate decision is unit-testable without a
+/// live pytest run.
+fn gate_exits_nonzero(no_fail: bool, result_fails: bool, gate_failed: bool) -> bool {
+    !no_fail && (result_fails || gate_failed)
+}
+
+/// Human note for a scoreless (zero-denominator) run — its score is undefined
+/// (N/A), never a vacuous 100%. Distinguishes the causes so the message is
+/// actionable: all-errored (which fails the gate unless `--no-fail`), a
+/// `--max-time` budget that expired before any mutant ran, or a genuinely
+/// empty scope. Pure so the branch selection is unit-tested.
+fn scoreless_note(report: &Report, no_fail: bool) -> String {
+    let errored = report.counts().errored;
+    if errored > 0 && !no_fail {
+        format!(
+            "no mutants scored: {errored} errored, so the score is \
+             undefined (not 100%) and the gate fails"
+        )
+    } else if errored > 0 {
+        format!(
+            "no mutants scored: {errored} errored, so the score is \
+             undefined (not 100%) — reported N/A, exit suppressed by --no-fail"
+        )
+    } else if let Some((_, n)) = report
+        .skipped_by_filter()
+        .into_iter()
+        .find(|(f, _)| f == crate::engine::TIME_BUDGET_FILTER)
+    {
+        // The budget expired before any mutant was scored — distinct from an
+        // empty scope; say so rather than claiming "nothing to mutate".
+        format!(
+            "no mutants scored: --max-time budget expired before any mutant \
+             ran ({n} skipped/`time-budget`) — mutation score N/A (not 100%)"
+        )
+    } else {
+        "no mutants scored: nothing to mutate in scope — \
+         mutation score N/A (not 100%)"
+            .to_string()
+    }
+}
+
 /// Resolve the run-history log path the same way `build_config` does, but
 /// without requiring the full runtime `Config`. Used by `fermut clean` so
 /// it preserves the user's configured history file (which may live under
@@ -1710,4 +1866,100 @@ fn same_run(a: &HistoryEntry, b: &HistoryEntry) -> bool {
     a.timestamp == b.timestamp
         && a.git_sha == b.git_sha
         && a.mutation_score.to_bits() == b.mutation_score.to_bits()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_fail_suppresses_every_gate_exit() {
+        // Whatever the result/regression state, --no-fail exits 0.
+        for result_fails in [false, true] {
+            for gate_failed in [false, true] {
+                assert!(
+                    !gate_exits_nonzero(true, result_fails, gate_failed),
+                    "no_fail must suppress exit (result_fails={result_fails}, gate_failed={gate_failed})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn without_no_fail_a_failing_result_or_gate_exits_nonzero() {
+        assert!(!gate_exits_nonzero(false, false, false), "clean run passes");
+        assert!(
+            gate_exits_nonzero(false, true, false),
+            "survivors/threshold fail"
+        );
+        assert!(
+            gate_exits_nonzero(false, false, true),
+            "regression gate fails"
+        );
+        assert!(gate_exits_nonzero(false, true, true), "both fail");
+    }
+
+    #[test]
+    fn no_fail_and_gate_flags_are_mutually_exclusive_in_the_parser() {
+        use clap::Parser;
+        // clap rejects --no-fail alongside a gate flag, so gate_failed can never
+        // be set under --no-fail — the runtime guard is belt-and-suspenders.
+        assert!(Cli::try_parse_from(["fermut", "run", "--no-fail", "--fail-under", "50"]).is_err());
+        assert!(
+            Cli::try_parse_from(["fermut", "run", "--no-fail", "--fail-on-regression", "5"])
+                .is_err()
+        );
+        // --no-fail alone parses fine.
+        assert!(Cli::try_parse_from(["fermut", "run", "--no-fail"]).is_ok());
+    }
+
+    fn scoreless_mutant(id: &str) -> crate::mutator::Mutant {
+        use crate::mutator::{Mutant, Operator};
+        use ruff_text_size::TextRange;
+        Mutant {
+            id: id.into(),
+            file: PathBuf::from("a.py"),
+            operator: Operator::ArithOpSwap,
+            range: TextRange::new(0u32.into(), 1u32.into()),
+            original: "+".into(),
+            replacement: "-".into(),
+            line: 1,
+            stmt_line: 1,
+        }
+    }
+
+    #[test]
+    fn scoreless_note_flags_time_budget_exhaustion() {
+        use crate::report::MutantOutcome;
+        // Budget expired before any mutant ran: every mutant is a time-budget
+        // skip, no errors. The note must name the budget, not "nothing to
+        // mutate".
+        let report = Report::new(vec![
+            MutantOutcome::skipped(scoreless_mutant("a"), crate::engine::TIME_BUDGET_FILTER),
+            MutantOutcome::skipped(scoreless_mutant("b"), crate::engine::TIME_BUDGET_FILTER),
+        ]);
+        let note = scoreless_note(&report, false);
+        assert!(note.contains("--max-time budget expired"), "got: {note}");
+        assert!(note.contains("2 skipped"), "reports the count: {note}");
+        assert!(!note.contains("nothing to mutate"));
+    }
+
+    #[test]
+    fn scoreless_note_empty_scope_vs_errored() {
+        use crate::report::MutantOutcome;
+        // No mutants at all → empty scope wording.
+        let empty = Report::new(vec![]);
+        assert!(scoreless_note(&empty, false).contains("nothing to mutate in scope"));
+
+        // All errored, gate live → the gate-fails wording.
+        let errored = Report::new(vec![MutantOutcome::error(
+            scoreless_mutant("e"),
+            "boom".into(),
+        )]);
+        assert!(scoreless_note(&errored, false).contains("and the gate fails"));
+        // Same run under --no-fail → exit-suppressed wording, never "gate fails".
+        let note = scoreless_note(&errored, true);
+        assert!(note.contains("exit suppressed by --no-fail"));
+        assert!(!note.contains("and the gate fails"));
+    }
 }

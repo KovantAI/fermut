@@ -209,7 +209,7 @@ and inline markers. Mapping for the operators with a direct analogue:
 | `break` ↔ `continue`            | `break-continue-swap` |
 | decorator drop                  | `remove-decorator`   |
 
-The full fermut catalogue (26 stable, more experimental) lives in
+The full fermut catalogue (30 stable, more experimental) lives in
 **[Operators → Stable](../reference/operators/stable.md)**. Use
 `--ops` / `--skip-ops` with names, e.g.
 `fermut run --skip-ops string-to-empty,number-to-zero`.
@@ -269,15 +269,16 @@ source_root = "src"
 tests = "tests"
 runner = "pytest"
 pytest_args = ["-x", "-q"]
-coverage = "coverage.json"
+coverage = ".coverage"
 ```
 
 ```yaml
 # .github/workflows/fermut.yml — after
 - run: uv tool install fermut
-- run: |
-    pytest --cov=src --cov-context=test
-    coverage json -o coverage.json --show-contexts
+# `fermut coverage` writes the .coverage database fermut reads directly.
+# Or, manually: pytest --cov=src --cov-context=test && coverage json -o
+# coverage.json --show-contexts  (then set coverage = "coverage.json").
+- run: fermut coverage
 - run: fermut run src/ --tests tests/ \
         --diff-only origin/${{ github.base_ref }} \
         --markdown fermut-report.md

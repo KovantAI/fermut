@@ -28,9 +28,9 @@ here is the absolute number, not the delta.
 ```sh
 fermut init --profile local --force
 # generate per-test coverage first — fermut uses it to skip irrelevant tests per mutant
-# (or just `fermut coverage`; see the Coverage guide for the recipe + tradeoffs)
-pytest --cov=src --cov-context=test && coverage json -o coverage.json --show-contexts
-fermut run src/ --tests tests/ --coverage coverage.json --json baseline.json
+fermut coverage
+# or, manually: pytest --cov=src --cov-context=test && coverage json -o coverage.json --show-contexts
+fermut run src/ --tests tests/ --coverage .coverage --json baseline.json
 ```
 
 See **[Coverage](coverage.md)** for `fermut coverage`, the

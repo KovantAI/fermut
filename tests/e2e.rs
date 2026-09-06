@@ -136,9 +136,9 @@ fn smart_order_builds_sidecar_and_keeps_verdict() {
             .arg(&coverage)
             .arg("--no-ty-filter")
             .arg("--no-cache") // isolate ordering from cache reuse
-            // The sample's `fermut.toml` sets `timeout = 30`, which auto-disables
-            // smart ordering (an explicit timeout makes the verdict order-
-            // sensitive). Force it on so this test actually exercises ordering.
+            // Smart ordering is on by default (timeout or not); pass the flag
+            // explicitly to pin the behavior this test exercises even if the
+            // default ever changes.
             .arg("--smart-order")
             .assert()
             .failure() // survivors → exit 1

@@ -205,11 +205,20 @@ fn select_args(
     }
 }
 
-/// Grace period to wait for the stdout drain once the child has exited. In the
-/// normal case the drain finishes instantly (the child closing its write end
-/// EOFs the read). It only matters when a lingering grandchild inherited the
-/// pipe's write end: rather than block a worker forever we wait at most this,
-/// then release the pipe by terminating the process group (see below).
+/// How long to wait for the stdout drain to *settle* once the direct child has
+/// exited. An exited child has already flushed and closed its own write end, so
+/// its bytes are sitting in the pipe and the reader EOFs after a microsecond
+/// memcpy — this only needs to cover reading whatever is buffered, even a large
+/// flood. If it overruns, the write end is still open, which after the leader
+/// exited means a *grandchild* inherited it: the process group is therefore
+/// still alive, so it is safe to release the pipe by killing the group. Kept
+/// short so a test that leaks a background subprocess costs ~this, not the full
+/// [`DRAIN_GRACE`], per captured mutant.
+const DRAIN_SETTLE: Duration = Duration::from_millis(500);
+
+/// Upper bound on the *final* collect after the process group has been killed
+/// (grandchild reaped, pipe closing). Only a backstop — the reader EOFs almost
+/// immediately once the write end is gone.
 const DRAIN_GRACE: Duration = Duration::from_secs(5);
 
 /// Wait for `child` with `timeout` while concurrently draining its stdout on a
@@ -222,28 +231,30 @@ const DRAIN_GRACE: Duration = Duration::from_secs(5);
 /// when stdout wasn't piped, or when even the group-kill couldn't recover it).
 ///
 /// The drain result is delivered over a channel, not a bare `JoinHandle::join`,
-/// so the wait for it is *bounded* by [`DRAIN_GRACE`]: if the child exits but a
-/// grandchild still holds the pipe's write end the read never EOFs, and joining
-/// would wedge this worker forever. When that grace elapses we call `on_timeout`
-/// (the same process-group kill used on the timeout path) to reap the lingering
-/// grandchild — closing the write end so the reader EOFs and its thread exits
-/// instead of leaking for the worker's lifetime — then make one final bounded
-/// collect, which usually *recovers* the datapoint the child already wrote.
-/// Bytes are decoded lossily rather than via `read_to_string` so a single
+/// so the wait for it is *bounded*: if the child exits but a grandchild still
+/// holds the pipe's write end the read never EOFs, and joining would wedge this
+/// worker forever. We wait only [`DRAIN_SETTLE`] for the drain to finish; on
+/// overrun (⇒ a grandchild holds the pipe) we call `on_timeout` (the same
+/// process-group kill used on the timeout path) to reap the lingering grandchild
+/// — closing the write end so the reader EOFs and its thread exits instead of
+/// leaking for the worker's lifetime — then make one final collect bounded by
+/// [`DRAIN_GRACE`], which usually *recovers* the datapoint the child already
+/// wrote. Bytes are decoded lossily rather than via `read_to_string` so a single
 /// non-UTF-8 byte can't discard the whole capture.
 fn wait_draining_stdout(
     child: Child,
     timeout: Duration,
     on_timeout: impl FnMut(&mut Child),
 ) -> Result<(Option<ExitStatus>, Option<String>)> {
-    wait_draining_stdout_with_grace(child, timeout, DRAIN_GRACE, on_timeout)
+    wait_draining_stdout_with_grace(child, timeout, DRAIN_SETTLE, DRAIN_GRACE, on_timeout)
 }
 
-/// [`wait_draining_stdout`] with the drain grace injected, so a test can prove
-/// the bound holds without waiting the full [`DRAIN_GRACE`].
+/// [`wait_draining_stdout`] with the settle and grace injected, so a test can
+/// prove the bounds hold without waiting the full [`DRAIN_SETTLE`]/[`DRAIN_GRACE`].
 fn wait_draining_stdout_with_grace(
     mut child: Child,
     timeout: Duration,
+    settle: Duration,
     grace: Duration,
     mut on_timeout: impl FnMut(&mut Child),
 ) -> Result<(Option<ExitStatus>, Option<String>)> {
@@ -257,26 +268,30 @@ fn wait_draining_stdout_with_grace(
         rx
     });
     let had_pipe = reader.is_some();
-    // Take the drained output within `grace`. On overrun the receiver is left in
+    // Take the drained output within `wait`. On overrun the receiver is left in
     // place (`reader` untouched) so a later attempt can still reap it; on success
-    // it's consumed. `None` when stdout wasn't piped or the grace elapsed.
-    let collect = |reader: &mut Option<std::sync::mpsc::Receiver<String>>| match reader {
-        Some(rx) => match rx.recv_timeout(grace) {
-            Ok(s) => {
-                *reader = None;
-                Some(s)
-            }
-            Err(_) => None,
-        },
-        None => None,
-    };
+    // it's consumed. `None` when stdout wasn't piped or `wait` elapsed.
+    let collect =
+        |reader: &mut Option<std::sync::mpsc::Receiver<String>>, wait: Duration| match reader {
+            Some(rx) => match rx.recv_timeout(wait) {
+                Ok(s) => {
+                    *reader = None;
+                    Some(s)
+                }
+                Err(_) => None,
+            },
+            None => None,
+        };
 
     match child
         .wait_timeout(timeout)
         .context("waiting on test runner")?
     {
         Some(status) => {
-            let mut output = collect(&mut reader);
+            // Only the short settle here — an exited leader's own output drains
+            // in microseconds, so overrunning `settle` means a grandchild holds
+            // the write end (group still alive), not a slow normal read.
+            let mut output = collect(&mut reader, settle);
             // Drain overran the grace → a grandchild still holds the pipe's write
             // end. Kill the process group to release it (also reaping the stray
             // subprocess), then make one final bounded collect — this closes the
@@ -295,7 +310,7 @@ fn wait_draining_stdout_with_grace(
             if output.is_none() && had_pipe {
                 on_timeout(&mut child);
                 let _ = child.wait();
-                output = collect(&mut reader);
+                output = collect(&mut reader, grace);
             }
             Ok((Some(status), output))
         }
@@ -303,7 +318,7 @@ fn wait_draining_stdout_with_grace(
             on_timeout(&mut child);
             let _ = child.wait();
             // Reap the drain now that the pipe has closed (bounded like above).
-            let _ = collect(&mut reader);
+            let _ = collect(&mut reader, grace);
             Ok((None, None))
         }
     }
@@ -336,9 +351,10 @@ impl Runner for PytestRunner {
             // we only get here when at least one test id exists.
             //
             // Smart ordering reorders those ids without changing the set, so the
-            // kill/survive verdict is identical. (With a `--timeout` the result is
-            // order-sensitive: reaching the killer sooner can convert a would-be
-            // `timed_out` into a `killed`.) Two layers: the cold-start breadth
+            // mutation score is identical. (Under a timeout, reaching the killer
+            // sooner can convert a would-be `timed_out` into a `killed` — but
+            // both count as detected, so the score is unmoved; ordering only
+            // ever changes speed.) Two layers: the cold-start breadth
             // prior (`ordered_ids`) puts the most *targeted* test — fewest of the
             // mutated file's lines — first, then [`select_args`] lifts any learned
             // `(file, operator)` killer ahead of that. Breadth fills the no-history
@@ -590,11 +606,12 @@ mod tests {
         with_new_process_group(&mut cmd); // so kill_group reaches the `sleep`
         let child = cmd.spawn().expect("spawn sh");
 
+        let settle = Duration::from_millis(150);
         let grace = Duration::from_millis(300);
         let mut fired = 0;
         let start = std::time::Instant::now();
         let (status, output) =
-            wait_draining_stdout_with_grace(child, Duration::from_secs(30), grace, |c| {
+            wait_draining_stdout_with_grace(child, Duration::from_secs(30), settle, grace, |c| {
                 fired += 1;
                 kill_group(c); // reap the lingering grandchild → releases the pipe
             })
@@ -617,6 +634,46 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(10),
             "must return within ~2×grace, not block on the never-EOFing pipe (took {elapsed:?})"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn wait_draining_leaked_subprocess_bounded_by_settle_not_grace() {
+        // Finding #2 regression guard: a test that leaks a background
+        // subprocess holding stdout must cost only ~DRAIN_SETTLE per captured
+        // mutant, NOT the full DRAIN_GRACE. Prove it with a SMALL settle and a
+        // LARGE grace: the first collect must overrun `settle` and fire the
+        // group-kill promptly, so the whole call returns on the order of
+        // `settle` even though `grace` is many times larger. A regression that
+        // waited `grace` before killing (the old single-timeout behavior) would
+        // blow this bound.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("sleep 30 & echo done")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        with_new_process_group(&mut cmd);
+        let child = cmd.spawn().expect("spawn sh");
+
+        let settle = Duration::from_millis(100);
+        let grace = Duration::from_secs(5); // deliberately >> settle
+        let start = std::time::Instant::now();
+        let (status, output) =
+            wait_draining_stdout_with_grace(child, Duration::from_secs(30), settle, grace, |c| {
+                kill_group(c);
+            })
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(status.expect("child exited").success());
+        assert_eq!(output.as_deref().map(str::trim), Some("done"));
+        // The kill fires after `settle`; the post-kill collect EOFs at once. Must
+        // be far below `grace` — generous headroom for a loaded CI scheduler.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "leaked-subprocess drain must be bounded by settle ({settle:?}), not grace \
+             ({grace:?}); took {elapsed:?}"
         );
     }
 

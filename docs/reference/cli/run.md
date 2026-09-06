@@ -49,8 +49,8 @@ fermut run [PATH] [flags...]
 | `--fail-under <SCORE>`      | none (any survivor fails)        | Pass when mutation score is at least `SCORE` (0.0–100.0). Equal to threshold passes. |
 | `--no-verify-baseline`      | baseline check on                | Skip the pre-flight run of the unmutated suite. By default fermut runs your full suite once and aborts if it isn't green (a red suite would inflate the score toward 100%). Skip only when you've already confirmed green (e.g. CI ran it). |
 | `--baseline-timeout <SECS>` | `300`                            | Wall-clock cap for the baseline run. Separate from `--timeout` (which bounds a single mutant) because the baseline runs the whole suite. A suite that exceeds it is killed and the run aborts. Raise for large suites. |
-| `--no-smart-order`          | on (auto-off with `--timeout`)   | Disable smart test ordering. On by default, but an explicit `--timeout` (or `timeout` in config) auto-disables it so the score stays order-invariant for gates. See [Smart test ordering](#smart-test-ordering). |
-| `--smart-order`             | off                              | Force smart test ordering on even when an explicit `--timeout`/`timeout` would auto-disable it (accepting the order-sensitive score). Conflicts with `--no-smart-order`. |
+| `--no-smart-order`          | on                               | Disable smart test ordering. On by default, timeout or not — ordering only permutes the selected set, so the score and `--fail-on-regression` gate stay order-invariant. See [Smart test ordering](#smart-test-ordering). |
+| `--smart-order`             | off                              | Force smart test ordering on over `smart_order = false` in config. Conflicts with `--no-smart-order`. |
 | `--max-time <SECS>`         | off (whole catalogue)            | Wall-clock ceiling on the testing phase. Evaluates highest-value mutants first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` (excluded from the score) instead of run — in-flight mutants finish. A predictable time ceiling for PR gates. See [Time-boxed runs](#time-boxed-runs-max-time). |
 | `--fail-on-regression <PTS>`| off                              | Exit non-zero when score dropped more than `PTS` vs the most recent prior entry on the same git branch. Requires history. Ignored in `--watch`. |
 | `--trend-branch <NAME>`     | none                             | Restrict the `--trend` markdown block's "previous run" lookup to entries recorded on this branch. Requires `--trend`. |
@@ -93,26 +93,20 @@ last writer wins and the other run's newly-learned kills are dropped. This
 only forfeits some ordering speedup on the next run, never a verdict. To
 keep every shard's learnings, point each at its own `kill_order_path`.
 
-**Ordering never changes the kill/survive verdict** — only *which* test
-pytest tries first. `-x` exits non-zero iff *some* selected test fails,
-independent of order, so a mutant that survives (or is killed) survives (or
-is killed) either way.
+**Ordering never changes the mutation score** — only *which* test pytest
+tries first. `-x` exits non-zero iff *some* selected test fails, independent
+of order, so a mutant that survives (or is detected) does so either way.
 
-**Auto-off when `--timeout` is set — they're competing knobs.** With a
-per-mutant timeout the verdict *is* order-sensitive: if a killing test only
-runs after a slow passing one, a run can hit the timeout before reaching the
-killer and record `timed_out` instead of `killed`. Ordering front-loads the
-historical killer, so it would flip such borderline mutants between
-`timed_out` and `killed` depending on a cold vs. warm sidecar — two
-`--no-cache` runs could differ, and a learned-ordering bump could partly
-mask a real regression under `--fail-on-regression`. To keep the score
-reproducible for gates, **an explicit `--timeout` (or `timeout` in config)
-auto-disables smart ordering**; without a per-mutant timeout the verdict is
-fully order-invariant and ordering stays on. (The auto-off applies to the
-default only — `--smart-order` or `smart_order = true` forces it back on and
-takes the order-sensitive score; fermut logs a warning in that case. A `timed_out`
-outcome is also cached, so once cached it is not re-evaluated even if
-ordering would now kill it.)
+**Ordering stays on under `--timeout`.** With a per-mutant timeout, reaching
+the killer sooner can convert a `timed_out` into a `killed` — but both count
+as *detected*, and reordering can never produce or remove a `survived`
+mutant. So the mutation score and the `--fail-on-regression` gate (score +
+survivor ids) are order-invariant with or without a timeout. Killer-first
+ordering therefore helps **most** under a timeout, by reaching the kill
+before the deadline instead of burning it on slow non-killer tests. (A
+`timed_out` outcome is cached, so once cached it is not re-evaluated even if
+ordering would now reach the kill in time — the cache, not ordering, decides
+that.)
 
 Disable explicitly with `--no-smart-order` (or `smart_order = false` in
 config); it then uses the plain coverage order.

@@ -464,6 +464,35 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn killed_and_timed_out_score_identically() {
+        // The invariant that makes smart ordering verdict-neutral even under a
+        // per-mutant timeout (finding #1): `timed_out` and `killed` are both
+        // *detected*, so moving a mutant between the two leaves the score and
+        // its denominator untouched. Reordering can only ever flip these two
+        // (never produce/remove a `survived`), so it can't move the score.
+        let with_kill = Counts {
+            killed: 3,
+            timed_out: 0,
+            survived: 2,
+            ..Default::default()
+        };
+        // Same set, but one detection landed as a timeout instead of a kill —
+        // exactly what reordering the selected tests under a timeout can do.
+        let with_timeout = Counts {
+            killed: 2,
+            timed_out: 1,
+            survived: 2,
+            ..Default::default()
+        };
+        assert_eq!(with_kill.scored(), with_timeout.scored());
+        assert_eq!(
+            with_kill.mutation_score_opt(),
+            with_timeout.mutation_score_opt(),
+            "shifting a detection killed↔timed_out must not move the score"
+        );
+    }
+
+    #[test]
     fn operator_stats_ranks_and_flags_noisy_operators() {
         fn m(op: Operator) -> Mutant {
             Mutant {

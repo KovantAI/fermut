@@ -336,21 +336,18 @@ enum Cmd {
         /// so pytest's `-x` short-circuits sooner: the cold-start breadth prior
         /// (covering the fewest of the mutated file's lines) sets the order, and
         /// any test that historically killed this file+operator is lifted ahead
-        /// of it (kill history in `.fermut/kill-order.json`). Ordering never
-        /// changes the kill/survive verdict — only which test runs first — so
-        /// disabling it only affects speed. With `--timeout` set the result is
-        /// order-sensitive (reaching the killer sooner can turn a `timed_out`
-        /// into a `killed`), so an explicit `--timeout` auto-disables the
-        /// default-on ordering to keep the score reproducible; force it back on
-        /// with `--smart-order` or `smart_order = true`. Also settable via
-        /// `smart_order = false`.
+        /// of it (kill history in `.fermut/kill-order.json`). Ordering only
+        /// permutes the selected set, so it never changes the mutation score —
+        /// under `--timeout` it can flip a `timed_out` into a `killed`, but both
+        /// count as detected, so the score and the `--fail-on-regression` gate
+        /// stay order-invariant. Killer-first ordering helps most *with* a
+        /// timeout, by reaching the kill before the deadline. Disabling it only
+        /// affects speed. Also settable via `smart_order = false`.
         #[arg(long)]
         no_smart_order: bool,
 
-        /// Force smart test ordering on, even when an explicit `--timeout` (or
-        /// `timeout` in config) would auto-disable it. Accepts the resulting
-        /// order-sensitive score (see `--no-smart-order`). Conflicts with
-        /// `--no-smart-order`.
+        /// Force smart test ordering on (over `smart_order = false` in config).
+        /// Conflicts with `--no-smart-order`.
         #[arg(long, conflicts_with = "no_smart_order")]
         smart_order: bool,
 

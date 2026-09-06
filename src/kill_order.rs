@@ -124,7 +124,19 @@ impl KillOrder {
 /// run's ordering speedup, never a verdict. If forced color becomes common,
 /// strip ANSI before matching.
 pub fn parse_first_failed(stdout: &str) -> Option<String> {
-    stdout.lines().find_map(|line| {
+    // The `FAILED`/`ERROR <nodeid>` lines we parse belong to pytest's `-rfE`
+    // "short test summary info" section. Anchor to that section when its header
+    // is present, so a `FAILED …`-shaped line printed *earlier* — by the test's
+    // own stdout, a subprocess it runs, or a doctest — can't be mistaken for the
+    // killer and recorded as a bogus nodeid. When the header is absent (already
+    // -sliced input in unit tests, or an unusual pytest build) fall back to
+    // scanning every line.
+    let skip = stdout
+        .lines()
+        .position(|l| l.contains("short test summary info"))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    stdout.lines().skip(skip).find_map(|line| {
         let trimmed = line.trim();
         let rest = trimmed
             .strip_prefix("FAILED ")
@@ -234,6 +246,37 @@ mod tests {
         assert_eq!(
             parse_first_failed(out).as_deref(),
             Some("tests/test_x.py::test_add")
+        );
+    }
+
+    #[test]
+    fn parse_ignores_failed_shaped_lines_before_the_summary() {
+        // Finding #3 regression guard: a test (or a subprocess/doctest it runs)
+        // can print a line that *looks* like a summary `FAILED <nodeid>` to its
+        // own stdout. That pre-summary line must NOT be recorded as the killer —
+        // only lines inside pytest's `short test summary info` section count.
+        let out = "\
+FAILED tests/decoy.py::spoofed - printed by the test itself\n\
+=========== short test summary info ============\n\
+FAILED tests/real.py::test_kills - AssertionError: 3 != 4\n";
+        assert_eq!(
+            parse_first_failed(out).as_deref(),
+            Some("tests/real.py::test_kills"),
+            "must skip the decoy line before the summary header"
+        );
+    }
+
+    #[test]
+    fn parse_still_reads_summary_line_under_the_header() {
+        // The common real shape: the header precedes the killer line. Anchoring
+        // must not break the ordinary case.
+        let out = "\
+F\n\
+=========== short test summary info ============\n\
+FAILED tests/t.py::test_add - AssertionError\n";
+        assert_eq!(
+            parse_first_failed(out).as_deref(),
+            Some("tests/t.py::test_add")
         );
     }
 

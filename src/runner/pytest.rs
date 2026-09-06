@@ -75,12 +75,18 @@ impl PytestRunner {
     }
 
     /// Coverage-selected node ids in the order pytest should try them. With
-    /// smart ordering the narrowest test (fewest covered cells) leads so `-x`
-    /// short-circuits sooner; otherwise the caller's coverage order is kept.
-    /// Only permutes `ids` — never adds or drops — so the verdict is unchanged.
-    fn ordered_ids<'a>(&self, ctx: &CoverageContexts, ids: &'a [String]) -> Vec<&'a String> {
+    /// smart ordering the test most focused on the mutated file (fewest of its
+    /// lines covered) leads so `-x` short-circuits sooner; otherwise the caller's
+    /// coverage order is kept. Only permutes `ids` — never adds or drops — so the
+    /// verdict is unchanged.
+    fn ordered_ids<'a>(
+        &self,
+        ctx: &CoverageContexts,
+        mutant: &Mutant,
+        ids: &'a [String],
+    ) -> Vec<&'a String> {
         if self.smart_order {
-            ctx.order_by_breadth(ids)
+            ctx.order_by_breadth_in(&mutant.file, ids)
         } else {
             ids.iter().collect()
         }
@@ -128,7 +134,7 @@ impl Runner for PytestRunner {
             match self.coverage.as_ref() {
                 Some(ctx) => match ctx.tests_for_mutant(mutant) {
                     Some(ids) if !ids.is_empty() => {
-                        for id in self.ordered_ids(ctx, ids) {
+                        for id in self.ordered_ids(ctx, mutant, ids) {
                             cmd.arg(id);
                         }
                     }
@@ -256,13 +262,29 @@ mod tests {
             .collect()
     }
 
+    // A mutant in `foo.py` — the file the breadth fixture indexes — so scoped
+    // ordering resolves to that file's per-test breadth.
+    fn mutant_in(dir: &Path) -> Mutant {
+        Mutant {
+            id: "id".into(),
+            file: dir.join("foo.py"),
+            operator: crate::mutator::Operator::ArithOpSwap,
+            range: ruff_text_size::TextRange::new(0u32.into(), 1u32.into()),
+            original: "+".into(),
+            replacement: "-".into(),
+            line: 1,
+            stmt_line: 1,
+        }
+    }
+
     #[test]
     fn ordered_ids_smart_puts_narrowest_first() {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = breadth_ctx(tmp.path());
         let r = runner(true, ctx.clone());
         let ids = selected();
-        let out: Vec<String> = r.ordered_ids(&ctx, &ids).into_iter().cloned().collect();
+        let m = mutant_in(tmp.path());
+        let out: Vec<String> = r.ordered_ids(&ctx, &m, &ids).into_iter().cloned().collect();
         // wide (breadth 3) sinks; the two breadth-1 tests keep input order (stable).
         assert_eq!(
             out,
@@ -280,7 +302,8 @@ mod tests {
         let ctx = breadth_ctx(tmp.path());
         let r = runner(false, ctx.clone());
         let ids = selected();
-        let out: Vec<String> = r.ordered_ids(&ctx, &ids).into_iter().cloned().collect();
+        let m = mutant_in(tmp.path());
+        let out: Vec<String> = r.ordered_ids(&ctx, &m, &ids).into_iter().cloned().collect();
         // Smart ordering off → caller's coverage order is preserved verbatim.
         assert_eq!(out, ids);
     }
@@ -292,9 +315,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = breadth_ctx(tmp.path());
         let ids = selected();
+        let m = mutant_in(tmp.path());
         for smart in [true, false] {
             let r = runner(smart, ctx.clone());
-            let mut out: Vec<String> = r.ordered_ids(&ctx, &ids).into_iter().cloned().collect();
+            let mut out: Vec<String> = r.ordered_ids(&ctx, &m, &ids).into_iter().cloned().collect();
             let mut want = ids.clone();
             out.sort();
             want.sort();

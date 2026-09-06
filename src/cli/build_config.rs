@@ -23,6 +23,32 @@ pub(super) const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// the whole suite runs once; raise with `--baseline-timeout` for big suites.
 pub(super) const DEFAULT_BASELINE_TIMEOUT_SECS: u64 = 300;
 
+/// Resolve smart test ordering from the CLI force-off/force-on flags and the
+/// config value. Pure so the precedence is unit-tested.
+///
+/// Precedence: `--no-smart-order` wins; then `--smart-order` /
+/// `smart_order = true` force it on; otherwise it defaults on.
+///
+/// A per-mutant timeout does **not** disable ordering. Ordering only permutes
+/// the coverage-selected set, and under pytest `-x` that can convert a
+/// `killed`↔`timed_out` outcome — but *never* produce or remove a `survived`
+/// one (a failing test still fails whenever it runs; a timeout merely relabels
+/// the kill). fermut's score counts `timed_out` as detected, identical to
+/// `killed` (see [`crate::report::Counts`]), so the mutation score and the
+/// `--fail-on-regression` gate (score + survivor ids) are order-invariant with
+/// or without a timeout. Killer-first ordering only changes speed — and helps
+/// *most* under a timeout, by reaching the kill before the deadline instead of
+/// burning it on slow non-killer tests.
+fn resolve_smart_order(cli_no: bool, cli_yes: bool, file: Option<bool>) -> bool {
+    if cli_no {
+        false
+    } else if cli_yes {
+        true
+    } else {
+        file.unwrap_or(true)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_config(
     cli_path: PathBuf,
@@ -49,6 +75,7 @@ pub(crate) fn build_config(
     cli_no_verify_baseline: bool,
     cli_baseline_timeout: Option<u64>,
     cli_no_smart_order: bool,
+    cli_smart_order: bool,
     cli_max_time: Option<u64>,
     f: FilterArgs,
 ) -> Result<Config> {
@@ -145,13 +172,6 @@ pub(crate) fn build_config(
         file.pytest_args.clone().unwrap_or_default()
     };
 
-    // Smart test ordering: default on; `--no-smart-order` (CLI) wins, else config.
-    let smart_order = if cli_no_smart_order {
-        false
-    } else {
-        file.smart_order.unwrap_or(true)
-    };
-
     let cache = if cli_no_cache {
         false
     } else {
@@ -169,6 +189,21 @@ pub(crate) fn build_config(
     let history_path = cli_history_path
         .or_else(|| file.history_path.clone().map(|p| loaded.resolve_path(p)))
         .unwrap_or_else(|| crate::history::default_history_path(&artifact_root));
+
+    // Smart test ordering is verdict-neutral even with a per-mutant timeout:
+    // reordering only permutes the selected set, so it can flip
+    // `killed`↔`timed_out` (both count as *detected* in the score) but never
+    // produce or remove a `survived` one. The mutation score and the
+    // `--fail-on-regression` gate are therefore order-invariant, so an explicit
+    // timeout does *not* disable ordering — `--no-smart-order` /
+    // `smart_order = false` remain the only off switches. The sidecar lives
+    // beside cache/history.
+    let smart_order = resolve_smart_order(cli_no_smart_order, cli_smart_order, file.smart_order);
+    let kill_order_path = file
+        .kill_order_path
+        .clone()
+        .map(|p| loaded.resolve_path(p))
+        .unwrap_or_else(|| crate::kill_order::default_kill_order_path(&artifact_root));
 
     let sample_ratio = cli_sample.or(file.sample);
     let sample_seed = cli_sample_seed.or(file.sample_seed);
@@ -251,9 +286,10 @@ pub(crate) fn build_config(
         coverage,
         hypothesis_seed,
         pytest_args,
-        smart_order,
         cache,
         cache_path,
+        smart_order,
+        kill_order_path,
         history,
         history_path,
         sample_ratio,
@@ -372,6 +408,7 @@ mod tests {
             false,
             None,
             false, // cli_no_smart_order
+            false, // cli_smart_order
             None,  // cli_max_time
             filter,
         )
@@ -557,10 +594,62 @@ mod tests {
     }
 
     #[test]
+    fn resolve_smart_order_precedence() {
+        // (cli_no, cli_yes, file) -> on. A timeout is deliberately absent from
+        // the signature: ordering is verdict-neutral even under a timeout (it
+        // only flips killed↔timed_out, both detected), so a timeout must never
+        // enter the decision. This is the guard for finding #1 — the old code
+        // auto-disabled the default under an explicit timeout.
+        let cases = [
+            // Default on when nothing forces it.
+            ((false, false, None), true),
+            // Config value honored.
+            ((false, false, Some(false)), false),
+            ((false, false, Some(true)), true),
+            // `--no-smart-order` wins over everything.
+            ((true, false, None), false),
+            ((true, false, Some(true)), false),
+            // `--smart-order` forces on over a config-off.
+            ((false, true, Some(false)), true),
+            ((false, true, None), true),
+        ];
+        for ((cli_no, cli_yes, file), want) in cases {
+            assert_eq!(
+                resolve_smart_order(cli_no, cli_yes, file),
+                want,
+                "resolve_smart_order({cli_no}, {cli_yes}, {file:?})"
+            );
+        }
+    }
+
+    #[test]
     fn smart_order_defaults_on() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
         assert!(cfg.smart_order, "smart ordering is on by default");
+        assert!(cfg.kill_order_path.ends_with(".fermut/kill-order.json"));
+    }
+
+    #[test]
+    fn kill_order_path_from_config_resolves_against_config_dir() {
+        // A relative `kill_order_path` in config resolves against the config
+        // dir, not left hardcoded to `.fermut/kill-order.json`. Guards the
+        // sidecar-path knob against regressing back to a fixed location.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("fermut.toml"),
+            "kill_order_path = \"artifacts/ko.json\"\n",
+        )
+        .unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        // `resolve_path` canonicalizes (on macOS `/var` → `/private/var`), so
+        // compare the tail + absoluteness rather than the exact temp prefix.
+        assert!(cfg.kill_order_path.is_absolute());
+        assert!(
+            cfg.kill_order_path.ends_with("artifacts/ko.json"),
+            "kill_order_path {:?} should resolve under the config dir",
+            cfg.kill_order_path
+        );
     }
 
     #[test]
@@ -573,6 +662,7 @@ mod tests {
 
     #[test]
     fn cli_no_smart_order_overrides_config_on() {
+        // Config says on; the CLI flag must win and turn it off.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("fermut.toml"), "smart_order = true\n").unwrap();
         let cfg = build_config(
@@ -599,12 +689,130 @@ mod tests {
             None,
             false,
             None,
-            true, // cli_no_smart_order
-            None, // cli_max_time
+            true,  // cli_no_smart_order
+            false, // cli_smart_order
+            None,  // cli_max_time
             empty_filter(),
         )
         .unwrap();
         assert!(!cfg.smart_order, "--no-smart-order wins over config on");
+    }
+
+    #[test]
+    fn explicit_config_timeout_keeps_default_smart_order_on() {
+        // Finding #1 regression guard: a per-mutant timeout does NOT disable
+        // smart ordering. Ordering only flips killed↔timed_out (both detected in
+        // the score), never producing or removing a survivor, so the score and
+        // the regression gate stay order-invariant — and killer-first ordering
+        // helps *most* under a timeout. An explicit `timeout` in config must
+        // leave the default-on ordering on.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "timeout = 30\n").unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert!(
+            cfg.smart_order,
+            "an explicit timeout must NOT disable default-on smart ordering"
+        );
+    }
+
+    #[test]
+    fn explicit_smart_order_true_survives_timeout() {
+        // Config `smart_order = true` alongside a timeout stays on (as does the
+        // default — see the sibling test; a timeout never disables ordering).
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("fermut.toml"),
+            "smart_order = true\ntimeout = 30\n",
+        )
+        .unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert!(
+            cfg.smart_order,
+            "explicit smart_order = true must survive an explicit timeout"
+        );
+    }
+
+    #[test]
+    fn explicit_cli_timeout_keeps_smart_order_on() {
+        // Finding #1 guard via the CLI `--timeout`, no config at all: a timeout
+        // must not disable default-on ordering (order-invariant score).
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = build_config(
+            tmp.path().to_path_buf(),
+            None,
+            None,
+            Some(5), // cli_timeout — explicit per-mutant timeout
+            false,
+            false,
+            None,
+            Vec::new(),
+            false,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            false,
+            None,
+            false, // cli_no_smart_order
+            false, // cli_smart_order
+            None,  // cli_max_time
+            empty_filter(),
+        )
+        .unwrap();
+        assert!(
+            cfg.smart_order,
+            "--timeout must NOT disable default-on smart ordering"
+        );
+    }
+
+    #[test]
+    fn cli_smart_order_forces_on_over_config_off_with_timeout() {
+        // `--smart-order` forces ordering on over a config `smart_order = false`,
+        // timeout present or not. (The timeout itself never disables ordering.)
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "smart_order = false\n").unwrap();
+        let cfg = build_config(
+            tmp.path().to_path_buf(),
+            None,
+            None,
+            Some(5), // cli_timeout
+            false,
+            false,
+            None,
+            Vec::new(),
+            false,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            false,
+            None,
+            false, // cli_no_smart_order
+            true,  // cli_smart_order — forces on over config-off
+            None,  // cli_max_time
+            empty_filter(),
+        )
+        .unwrap();
+        assert!(
+            cfg.smart_order,
+            "--smart-order must force ordering on over config smart_order = false"
+        );
     }
 
     #[test]

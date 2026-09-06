@@ -332,12 +332,24 @@ enum Cmd {
         baseline_timeout: Option<u64>,
 
         /// Disable smart test ordering. By default, when coverage selects
-        /// multiple tests for a mutant, fermut runs the most targeted one
-        /// (covering the fewest lines) first so pytest's `-x` short-circuits
-        /// sooner. Ordering never changes a verdict — only which test runs
-        /// first. Also settable via `smart_order = false` in config.
+        /// multiple tests for a mutant, fermut runs the most targeted one first
+        /// so pytest's `-x` short-circuits sooner: the cold-start breadth prior
+        /// (covering the fewest of the mutated file's lines) sets the order, and
+        /// any test that historically killed this file+operator is lifted ahead
+        /// of it (kill history in `.fermut/kill-order.json`). Ordering only
+        /// permutes the selected set, so it never changes the mutation score —
+        /// under `--timeout` it can flip a `timed_out` into a `killed`, but both
+        /// count as detected, so the score and the `--fail-on-regression` gate
+        /// stay order-invariant. Killer-first ordering helps most *with* a
+        /// timeout, by reaching the kill before the deadline. Disabling it only
+        /// affects speed. Also settable via `smart_order = false`.
         #[arg(long)]
         no_smart_order: bool,
+
+        /// Force smart test ordering on (over `smart_order = false` in config).
+        /// Conflicts with `--no-smart-order`.
+        #[arg(long, conflicts_with = "no_smart_order")]
+        smart_order: bool,
 
         /// Wall-clock ceiling (seconds) on the per-mutant testing phase. When
         /// set, mutants are evaluated highest-value first (covered mutants
@@ -1298,6 +1310,7 @@ impl Cli {
                 no_verify_baseline,
                 baseline_timeout,
                 no_smart_order,
+                smart_order,
                 max_time,
                 filter: f,
             } => {
@@ -1326,6 +1339,7 @@ impl Cli {
                     no_verify_baseline,
                     baseline_timeout,
                     no_smart_order,
+                    smart_order,
                     max_time,
                     f,
                 )?;
@@ -1768,6 +1782,7 @@ impl Cli {
                     true,
                     None,
                     false, // no_smart_order (list doesn't run tests)
+                    false, // smart_order
                     None,  // max_time (list doesn't run tests)
                     f,
                 )?;
@@ -1922,6 +1937,21 @@ mod tests {
         );
         // --no-fail alone parses fine.
         assert!(Cli::try_parse_from(["fermut", "run", "--no-fail"]).is_ok());
+    }
+
+    #[test]
+    fn smart_order_and_no_smart_order_are_mutually_exclusive_in_the_parser() {
+        use clap::Parser;
+        // The force-on and force-off knobs contradict, so clap must reject both
+        // together — otherwise the resolution order in build_config would decide
+        // silently.
+        assert!(
+            Cli::try_parse_from(["fermut", "run", ".", "--smart-order", "--no-smart-order"])
+                .is_err()
+        );
+        // Either alone parses fine.
+        assert!(Cli::try_parse_from(["fermut", "run", ".", "--smart-order"]).is_ok());
+        assert!(Cli::try_parse_from(["fermut", "run", ".", "--no-smart-order"]).is_ok());
     }
 
     fn scoreless_mutant(id: &str) -> crate::mutator::Mutant {

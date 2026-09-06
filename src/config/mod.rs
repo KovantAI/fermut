@@ -49,11 +49,15 @@ pub struct Config {
     pub cache_path: PathBuf,
     /// Smart test ordering: when on (and coverage is available), the
     /// coverage-selected tests for a mutant are reordered so the most targeted
-    /// test (fewest lines covered) runs first, letting pytest's `-x`
-    /// short-circuit sooner. Advisory — only permutes the selected set, so it
-    /// never changes a verdict, only speed. Default on; disable with
-    /// `--no-smart-order` / `smart_order = false`.
+    /// test runs first, letting pytest's `-x` short-circuit sooner. Two layers:
+    /// a cold-start breadth prior (fewest of the mutated file's lines covered),
+    /// then any historically-killing test (per `(file, operator)`) lifted ahead
+    /// of it. Advisory — only permutes the selected set, so it never changes a
+    /// verdict, only speed. Default on; disable with `--no-smart-order` /
+    /// `smart_order = false`.
     pub smart_order: bool,
+    /// Path to the advisory kill-order sidecar (`.fermut/kill-order.json`).
+    pub kill_order_path: PathBuf,
     /// When true, each `fermut run` appends a summary line to `history_path`.
     /// Disable with `--no-history` or `history = false` in the config file.
     pub history: bool,

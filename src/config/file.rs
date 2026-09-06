@@ -29,11 +29,16 @@ pub struct FileConfig {
     pub coverage: Option<PathBuf>,
     pub hypothesis_seed: Option<u64>,
     pub pytest_args: Option<Vec<String>>,
-    /// Smart test ordering (cold-start, coverage-breadth prior). Default true;
-    /// CLI `--no-smart-order` overrides.
-    pub smart_order: Option<bool>,
     pub cache: Option<bool>,
     pub cache_path: Option<PathBuf>,
+    /// Smart test ordering: cold-start coverage-breadth prior, then
+    /// historical-killer lifted first. Default true; CLI `--no-smart-order`
+    /// overrides.
+    pub smart_order: Option<bool>,
+    /// Path to the advisory kill-order sidecar. Default
+    /// `<artifact_root>/.fermut/kill-order.json`; relative paths resolve
+    /// against the config file's directory.
+    pub kill_order_path: Option<PathBuf>,
     pub history: Option<bool>,
     pub history_path: Option<PathBuf>,
     pub sample: Option<f64>,

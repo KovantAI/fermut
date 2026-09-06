@@ -220,6 +220,20 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         );
     }
 
+    // Smart ordering: fold the kills learned this run into the kill-order
+    // sidecar so the next run puts proven killers first. Advisory — a write
+    // failure just forfeits the speedup, never the run.
+    if cfg.smart_order {
+        let records = runner.take_kill_records();
+        if !records.is_empty() {
+            let mut ko = crate::kill_order::KillOrder::load(&cfg.kill_order_path);
+            ko.apply(&records);
+            if let Err(e) = ko.save(&cfg.kill_order_path) {
+                warn!(path = %cfg.kill_order_path.display(), error = %e, "failed to save kill-order");
+            }
+        }
+    }
+
     let report = Report::new(outcomes);
 
     let entry = if cfg.history {
@@ -837,9 +851,10 @@ mod tests {
             coverage: None,
             hypothesis_seed: None,
             pytest_args: Vec::new(),
-            smart_order: false,
             cache: false,
             cache_path: PathBuf::from(".fermut/cache.json"),
+            smart_order: false,
+            kill_order_path: PathBuf::from(".fermut/kill-order.json"),
             history: false,
             history_path: PathBuf::from(".fermut/history.jsonl"),
             sample_ratio: None,

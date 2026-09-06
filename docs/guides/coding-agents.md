@@ -18,7 +18,7 @@ specifically to make those loops fast and reliable.
 | Deterministic results across runs                                          | Pinnable Hypothesis seed, deterministic `--sample`, content-hash cache keys. Two runs of the same commit produce the same survivor list.            |
 | Knowing *which test to write next*                                          | `fermut next` ranks survivors by cluster leverage + kill-ease and names the single best target; survivor JSON lines carry file:line, operator, original → replacement for the concrete assertion. |
 | Knowing *if my work is helping*                                             | `.fermut/history.jsonl` + `fermut trend`. Score delta vs the previous iteration is the agent's reward signal.                                       |
-| Targeting only the code the agent just touched                              | `--diff-only` for branch-relative diffs, `--since <SPEC>` for "since I last ran". Both include uncommitted edits.                                  |
+| Targeting only the code the agent just touched                              | `--diff-only` for branch-relative diffs (three-dot, **committed** only), `--since <SPEC>` for "since I last ran" (two-dot, **includes uncommitted** edits). |
 | Narrowing tests per mutant so each iteration runs in seconds, not minutes  | `--coverage coverage.json` (with per-test contexts).                                                                                                |
 | Failing loud when the environment is broken                                 | `fermut doctor` returns exit code 1 with a remediation hint per failed check.                                                                       |
 
@@ -111,12 +111,15 @@ Key invariants:
 4. **Pin determinism.** Set `hypothesis_seed` in `fermut.toml`. Without
    it, Hypothesis-driven tests can mask or fabricate survivors between
    runs and the agent will chase ghosts.
-5. **Regenerate `coverage.json` whenever tests change — not just once.**
+5. **Regenerate coverage whenever tests change — not just once.**
    The coverage filter narrows tests per mutant from this file; a stale
    one silently mis-selects tests (mutants get `skipped (coverage …)` or
-   the wrong tests run), shifting survivor counts with no error. Re-run
-   `pytest --cov … && coverage json …` at the top of any iteration that
-   touched tests. (It's gitignored in the sample — never commit it.)
+   the wrong tests run), shifting survivor counts with no error. Run
+   `fermut coverage` at the top of any iteration that touched tests — it
+   re-measures only the changed test files and writes a `.coverage`
+   database fermut reads directly (`--coverage .coverage`). Or, manually:
+   `pytest --cov … && coverage json …` for a `coverage.json` export. (The
+   coverage file is gitignored in the sample — never commit it.)
 
 ## Cache strategy
 

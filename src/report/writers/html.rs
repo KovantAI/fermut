@@ -27,14 +27,14 @@ impl Report {
              <span class='x'>skipped: {}</span> \
              <span class='q'>equivalent: {}</span> \
              <span class='e'>errored: {}</span> \
-             <span class='score'>score: {:.1}%</span></div>",
+             <span class='score'>score: {}</span></div>",
             c.killed,
             c.survived,
             c.timed_out,
             c.skipped,
             c.equivalent,
             c.errored,
-            c.mutation_score()
+            c.score_label()
         ));
 
         for (file, outcomes) in &by_file {

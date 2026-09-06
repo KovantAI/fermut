@@ -1,6 +1,6 @@
 [package]
 name = "fermut"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.83"
 authors = ["Kovant AB"]
@@ -60,19 +60,19 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # Astral parser + AST + text-range crates. Pinned to a ruff release tag.
 # Bump the tag together to keep API consistency. Verify the tag exists at
 # https://github.com/astral-sh/ruff/tags before changing.
-ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.15.21" }
-ruff_python_ast    = { git = "https://github.com/astral-sh/ruff", tag = "0.15.21" }
-ruff_text_size     = { git = "https://github.com/astral-sh/ruff", tag = "0.15.21" }
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.16.5" }
+ruff_python_ast    = { git = "https://github.com/astral-sh/ruff", tag = "0.16.5" }
+ruff_text_size     = { git = "https://github.com/astral-sh/ruff", tag = "0.16.5" }
 
 # Embedded ty checker. Same git tag as the parser above to share salsa
 # intern tables and avoid duplicate-crate hazards. Wired by
 # `src/filter/ty_embedded.rs`; the subprocess fallback in
 # `src/filter/ty.rs` covers the cases where `ty_project` construction
 # fails (pre-release API surface).
-ruff_db            = { git = "https://github.com/astral-sh/ruff", tag = "0.15.21", features = ["os"] }
-ruff_notebook      = { git = "https://github.com/astral-sh/ruff", tag = "0.15.21" }
-ty_project         = { git = "https://github.com/astral-sh/ruff", tag = "0.15.21" }
-ty_python_semantic = { git = "https://github.com/astral-sh/ruff", tag = "0.15.21" }
+ruff_db            = { git = "https://github.com/astral-sh/ruff", tag = "0.16.5", features = ["os"] }
+ruff_notebook      = { git = "https://github.com/astral-sh/ruff", tag = "0.16.5" }
+ty_project         = { git = "https://github.com/astral-sh/ruff", tag = "0.16.5" }
+ty_python_semantic = { git = "https://github.com/astral-sh/ruff", tag = "0.16.5" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -123,13 +123,46 @@ impl Counts {
         self.killed + self.survived + self.timed_out + self.skipped + self.errored + self.equivalent
     }
 
-    pub fn mutation_score(&self) -> f64 {
-        let detected = self.killed + self.timed_out;
-        let denom = detected + self.survived;
-        if denom == 0 {
-            return 100.0;
+    /// Denominator of the mutation score: mutants that produced a real verdict
+    /// (`killed`, `timed_out`, `survived`). Skipped, errored and equivalent
+    /// mutants are excluded. Zero means the score is *undefined*, not perfect.
+    pub fn scored(&self) -> usize {
+        self.killed + self.timed_out + self.survived
+    }
+
+    /// Mutation score in percent, or `None` when nothing was scored. A zero
+    /// denominator makes the ratio undefined — an all-errored or all-skipped
+    /// run has no score, which is not the same as 100%. Prefer this wherever
+    /// "nothing to score" must be told apart from a genuine perfect run (gates,
+    /// N/A reporting); use [`mutation_score`](Self::mutation_score) only where a
+    /// bare `f64` is required and the empty-denominator floor is acceptable.
+    pub fn mutation_score_opt(&self) -> Option<f64> {
+        let scored = self.scored();
+        if scored == 0 {
+            return None;
         }
-        100.0 * (detected as f64) / (denom as f64)
+        let detected = self.killed + self.timed_out;
+        Some(100.0 * (detected as f64) / (scored as f64))
+    }
+
+    /// Percent score with the historical empty-denominator floor of `100.0`.
+    /// Retained for the JSON summary and history schema, which carry a bare
+    /// `f64`. New gate/reporting logic should use
+    /// [`mutation_score_opt`](Self::mutation_score_opt) instead.
+    pub fn mutation_score(&self) -> f64 {
+        self.mutation_score_opt().unwrap_or(100.0)
+    }
+
+    /// Human display of the score: a one-decimal percent, or `N/A` when
+    /// nothing was scored (a zero denominator is undefined, not 100%). Use
+    /// this for any surface a person reads (`show`, HTML/Markdown reports); the
+    /// bare floored [`mutation_score`](Self::mutation_score) stays only for the
+    /// JSON/history schema.
+    pub fn score_label(&self) -> String {
+        match self.mutation_score_opt() {
+            Some(s) => format!("{s:.1}%"),
+            None => "N/A".to_string(),
+        }
     }
 }
 
@@ -138,6 +171,11 @@ impl Counts {
 /// from `outcomes`. `mutation_score` is rounded to one decimal to match the
 /// human summary line (`score: 86.4%`). Skipped and equivalent mutants are
 /// excluded from the score denominator (see [`Counts::mutation_score`]).
+///
+/// `mutation_score` carries the floored `100.0` when nothing was scored, so a
+/// consumer must read `scored` to tell a genuine perfect run from a vacuous
+/// N/A: `scored == 0` means the score is undefined, not 100% (see
+/// [`Counts::mutation_score_opt`]).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Summary {
     pub total: usize,
@@ -148,6 +186,44 @@ pub struct Summary {
     pub equivalent: usize,
     pub errored: usize,
     pub mutation_score: f64,
+    /// Denominator of `mutation_score` — mutants with a real verdict
+    /// (`killed + timed_out + survived`). `0` means `mutation_score` is a
+    /// vacuous floor, not a genuine 100%. Optional for back-compat with reports
+    /// written before this field existed.
+    #[serde(default)]
+    pub scored: usize,
+}
+
+/// Per-operator verdict breakdown for one run. Only real verdicts are counted;
+/// skipped/errored/equivalent mutants say nothing about an operator's value.
+/// Used to surface "noise" operators whose survivors swamp their kills —
+/// candidates for `skip_ops`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperatorStat {
+    pub operator: &'static str,
+    pub killed: usize,
+    pub survived: usize,
+    pub timed_out: usize,
+}
+
+impl OperatorStat {
+    /// Mutants that produced a real verdict for this operator.
+    pub fn scored(&self) -> usize {
+        self.killed + self.survived + self.timed_out
+    }
+
+    /// Detected mutants (killed or timed out — both count as caught).
+    pub fn detected(&self) -> usize {
+        self.killed + self.timed_out
+    }
+
+    /// True when survivors meet or exceed detections and there is at least one
+    /// survivor — the operator produced at least as much noise as signal this
+    /// run. Mirrors the `survived >= killed` rule projects hand-tune into
+    /// `skip_ops` (e.g. `constant-replace`, `keyword-arg-drop`).
+    pub fn is_noisy(&self) -> bool {
+        self.survived > 0 && self.survived >= self.detected()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -191,6 +267,7 @@ impl Report {
             equivalent: c.equivalent,
             errored: c.errored,
             mutation_score: round1(c.mutation_score()),
+            scored: c.scored(),
         }
     }
 
@@ -200,6 +277,13 @@ impl Report {
             .any(|o| matches!(o, MutantOutcome::Survived { .. }))
     }
 
+    /// True when the run scored no mutant — the denominator is zero, so the
+    /// mutation score is undefined (reported N/A) rather than 100%. Callers gate
+    /// and display this case explicitly instead of trusting a floored percent.
+    pub fn is_scoreless(&self) -> bool {
+        self.counts().scored() == 0
+    }
+
     /// Decide whether the run should exit non-zero.
     ///
     /// With `fail_under` set, round the mutation score to the precision used
@@ -207,10 +291,24 @@ impl Report {
     /// threshold, so a printed `80.0%` never fails against a `--fail-under 80`
     /// due to f64 rounding while sub-decimal thresholds stay honoured exactly.
     /// Without it, any survivor fails the run.
+    ///
+    /// A zero denominator is *not* a passing 100%. When nothing was scored the
+    /// run fails if any mutant errored — an all-errored run otherwise collapses
+    /// to a vacuous 100% and slips through — regardless of whether a threshold
+    /// was set. It passes only when there was genuinely nothing to score and
+    /// nothing errored (e.g. a diff touching no mutable lines), which is a
+    /// legitimate N/A rather than a fake perfect score. When there *is* a real
+    /// score, a threshold gate compares against it and the default gate fails on
+    /// any survivor.
     pub fn should_fail(&self, fail_under: Option<f64>) -> bool {
-        match fail_under {
-            Some(threshold) => round1(self.counts().mutation_score()) < threshold,
-            None => self.has_survivors(),
+        let c = self.counts();
+        match c.mutation_score_opt() {
+            Some(score) => match fail_under {
+                Some(threshold) => round1(score) < threshold,
+                None => self.has_survivors(),
+            },
+            // Scoreless: fail iff something errored, in both gate modes.
+            None => c.errored > 0,
         }
     }
 
@@ -243,6 +341,38 @@ impl Report {
         let mut v: Vec<(String, usize)> =
             map.into_iter().map(|(k, n)| (k.to_string(), n)).collect();
         v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v
+    }
+
+    /// Per-operator verdict breakdown, noisiest (most survivors) first. Only
+    /// operators that produced at least one real verdict appear. Lets a caller
+    /// (or the human summary) surface `is_noisy` operators as `skip_ops`
+    /// candidates without re-scanning `outcomes`.
+    pub fn operator_stats(&self) -> Vec<OperatorStat> {
+        let mut map: std::collections::BTreeMap<&'static str, OperatorStat> =
+            std::collections::BTreeMap::new();
+        for o in &self.outcomes {
+            let name = o.mutant().operator.name();
+            let e = map.entry(name).or_insert(OperatorStat {
+                operator: name,
+                killed: 0,
+                survived: 0,
+                timed_out: 0,
+            });
+            match o {
+                MutantOutcome::Killed { .. } => e.killed += 1,
+                MutantOutcome::Survived { .. } => e.survived += 1,
+                MutantOutcome::TimedOut { .. } => e.timed_out += 1,
+                // Skipped/Error/Equivalent carry no operator-value signal.
+                _ => {}
+            }
+        }
+        let mut v: Vec<OperatorStat> = map.into_values().filter(|s| s.scored() > 0).collect();
+        v.sort_by(|a, b| {
+            b.survived
+                .cmp(&a.survived)
+                .then_with(|| a.operator.cmp(b.operator))
+        });
         v
     }
 
@@ -293,8 +423,11 @@ impl Report {
                 format!("{} ({})", c.skipped, parts.join(", "))
             }
         };
+        // `score_label`, not the floored `mutation_score`: an all-skipped run
+        // (e.g. a `--max-time` budget that expired before any mutant ran) has a
+        // zero denominator and reads `N/A`, never a vacuous `100.0%`.
         println!(
-            "\n{} mutants — killed: {}, survived: {}, timeout: {}, skipped: {}, equivalent: {}, errored: {}  | score: {:.1}%",
+            "\n{} mutants — killed: {}, survived: {}, timeout: {}, skipped: {}, equivalent: {}, errored: {}  | score: {}",
             c.total(),
             c.killed,
             c.survived,
@@ -302,8 +435,24 @@ impl Report {
             skipped,
             c.equivalent,
             c.errored,
-            c.mutation_score()
+            c.score_label()
         );
+        // Flag operators that produced at least as many survivors as kills:
+        // they cost test time for little signal, and are the usual `skip_ops`
+        // candidates. Only shown when there is something to act on.
+        let noisy: Vec<&str> = self
+            .operator_stats()
+            .iter()
+            .filter(|s| s.is_noisy())
+            .map(|s| s.operator)
+            .collect();
+        if !noisy.is_empty() {
+            println!(
+                "noisy operators (survivors ≥ kills): {} — add to `skip_ops` if their \
+                 survivors aren't observably wrong",
+                noisy.join(", ")
+            );
+        }
     }
 }
 
@@ -313,6 +462,53 @@ mod tests {
     use crate::mutator::Operator;
     use ruff_text_size::TextRange;
     use std::path::PathBuf;
+
+    #[test]
+    fn operator_stats_ranks_and_flags_noisy_operators() {
+        fn m(op: Operator) -> Mutant {
+            Mutant {
+                id: "x".into(),
+                file: PathBuf::from("t.py"),
+                operator: op,
+                range: TextRange::new(0u32.into(), 1u32.into()),
+                original: "+".into(),
+                replacement: "-".into(),
+                line: 1,
+                stmt_line: 1,
+            }
+        }
+        let r = Report::new(vec![
+            MutantOutcome::killed(m(Operator::ArithOpSwap)), // 2 killed, 0 surv → signal
+            MutantOutcome::killed(m(Operator::ArithOpSwap)),
+            MutantOutcome::survived(m(Operator::ConstantReplace)), // 0 killed, 2 surv → noise
+            MutantOutcome::survived(m(Operator::ConstantReplace)),
+            MutantOutcome::killed(m(Operator::CompareOpSwap)), // 1 killed, 1 surv → noise (>=)
+            MutantOutcome::survived(m(Operator::CompareOpSwap)),
+            MutantOutcome::skipped(m(Operator::BoundaryShift), "ty"), // no verdict → excluded
+        ]);
+        let stats = r.operator_stats();
+        let names: Vec<&str> = stats.iter().map(|s| s.operator).collect();
+        // Sorted by survivors desc; boundary-shift excluded (only skipped).
+        assert_eq!(
+            names,
+            vec!["constant-replace", "compare-op-swap", "arith-op-swap"]
+        );
+        let noisy: Vec<&str> = stats
+            .iter()
+            .filter(|s| s.is_noisy())
+            .map(|s| s.operator)
+            .collect();
+        assert_eq!(noisy, vec!["constant-replace", "compare-op-swap"]);
+        let arith = stats
+            .iter()
+            .find(|s| s.operator == "arith-op-swap")
+            .unwrap();
+        assert!(
+            !arith.is_noisy(),
+            "an all-killed operator is signal, not noise"
+        );
+        assert_eq!(arith.killed, 2);
+    }
 
     fn make_mutant() -> Mutant {
         Mutant {
@@ -428,6 +624,105 @@ mod tests {
             MutantOutcome::survived(make_mutant()),
         ]);
         assert!(r.should_fail(Some(80.0)));
+    }
+
+    #[test]
+    fn mutation_score_opt_is_none_when_nothing_scored() {
+        // Only skipped/errored mutants — zero denominator.
+        let r = report(vec![
+            MutantOutcome::skipped(make_mutant(), "coverage"),
+            MutantOutcome::error(make_mutant(), "boom".into()),
+        ]);
+        assert!(r.counts().mutation_score_opt().is_none());
+        // The floored accessor still returns the historical 100.0.
+        assert!((r.counts().mutation_score() - 100.0).abs() < f64::EPSILON);
+        assert!(r.is_scoreless());
+    }
+
+    #[test]
+    fn all_time_budget_skipped_run_labels_na_not_vacuous_hundred() {
+        // A --max-time budget that expired before any mutant ran: every mutant
+        // is a time-budget skip, zero denominator. The human summary uses
+        // `score_label`, so it must read N/A, never a vacuous 100.0%.
+        let r = report(vec![
+            MutantOutcome::skipped(make_mutant(), "time-budget"),
+            MutantOutcome::skipped(make_mutant(), "time-budget"),
+        ]);
+        assert!(r.is_scoreless());
+        assert_eq!(r.counts().score_label(), "N/A");
+    }
+
+    #[test]
+    fn score_label_is_na_when_scoreless_else_percent() {
+        let scoreless = report(vec![MutantOutcome::error(make_mutant(), "boom".into())]);
+        assert_eq!(scoreless.counts().score_label(), "N/A");
+        let real = report(vec![
+            MutantOutcome::killed(make_mutant()),
+            MutantOutcome::survived(make_mutant()),
+        ]);
+        assert_eq!(real.counts().score_label(), "50.0%");
+    }
+
+    #[test]
+    fn should_fail_fails_vacuous_hundred_when_all_errored() {
+        // The reported bug: every mutant errored, denominator is zero, the
+        // floored score is a vacuous 100% that must NOT pass a threshold gate.
+        let r = report(vec![
+            MutantOutcome::error(make_mutant(), "boom".into()),
+            MutantOutcome::error(make_mutant(), "boom".into()),
+        ]);
+        assert!(r.should_fail(Some(50.0)));
+    }
+
+    #[test]
+    fn should_fail_default_fails_vacuous_hundred_when_all_errored() {
+        // Same vacuous 100%, but no --fail-under: the default gate must also
+        // fail rather than exit 0 while claiming the gate failed.
+        let r = report(vec![
+            MutantOutcome::error(make_mutant(), "boom".into()),
+            MutantOutcome::error(make_mutant(), "boom".into()),
+        ]);
+        assert!(r.should_fail(None));
+    }
+
+    #[test]
+    fn should_fail_default_passes_when_nothing_to_score_and_no_errors() {
+        // No threshold, nothing scored, nothing errored — legitimate N/A pass.
+        let r = report(vec![MutantOutcome::skipped(make_mutant(), "coverage")]);
+        assert!(!r.should_fail(None));
+        assert!(r.is_scoreless());
+    }
+
+    #[test]
+    fn summary_scored_zero_flags_vacuous_score() {
+        // JSON consumers read `scored` to tell a real 100% from an N/A floor.
+        let r = report(vec![MutantOutcome::error(make_mutant(), "boom".into())]);
+        let s = r.summary();
+        assert_eq!(s.scored, 0);
+        assert!((s.mutation_score - 100.0).abs() < f64::EPSILON);
+
+        let real = report(vec![MutantOutcome::killed(make_mutant())]);
+        assert_eq!(real.summary().scored, 1);
+    }
+
+    #[test]
+    fn should_fail_passes_when_nothing_to_score_and_no_errors() {
+        // Nothing scored and nothing errored — a legitimate N/A (e.g. a diff
+        // touching no mutable lines), a pass rather than a fake perfect score.
+        let r = report(vec![
+            MutantOutcome::skipped(make_mutant(), "coverage"),
+            MutantOutcome::skipped(make_mutant(), "shard"),
+        ]);
+        assert!(!r.should_fail(Some(90.0)));
+        assert!(r.is_scoreless());
+    }
+
+    #[test]
+    fn should_fail_empty_report_passes_threshold_gate() {
+        // No mutants at all: N/A, not a failing gate.
+        let r = report(vec![]);
+        assert!(!r.should_fail(Some(90.0)));
+        assert!(r.is_scoreless());
     }
 
     #[test]

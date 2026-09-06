@@ -10,7 +10,7 @@ plus `fermut list` as the cheap dry-run companion.
 ## The dev-loop one-liner
 
 ```sh
-fermut run src/ --tests tests/ --coverage coverage.json --diff-only main --watch
+fermut run src/ --tests tests/ --coverage .coverage --diff-only main --watch
 ```
 
 What each flag does:
@@ -21,9 +21,9 @@ What each flag does:
   of lines instead of thousands.
 - **`--watch`** — re-runs on every `.py` file change until Ctrl+C.
   Pair with your editor's save-on-blur for true continuous feedback.
-- **`--coverage coverage.json`** — keeps per-mutant test selection
-  on. Same file [First steps step 2](../getting-started/first-steps.md#2-get-an-honest-baseline)
-  generates. Per-mutant cost stays low.
+- **`--coverage .coverage`** — keeps per-mutant test selection
+  on. Same database [First steps step 2](../getting-started/first-steps.md#2-get-an-honest-baseline)
+  generates via `fermut coverage`. Per-mutant cost stays low.
 
 Together: sub-second feedback on whether the test you just wrote
 actually kills the mutant you intended.

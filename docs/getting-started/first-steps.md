@@ -67,7 +67,16 @@ You'll need `coverage` and `pytest-cov` installed (see
 **[Installation prerequisites](installation.md#prerequisites)** if you
 skipped it). Quick sanity check: `coverage --version`.
 
-Generate the per-test coverage JSON:
+Generate per-test coverage the easy way:
+
+```sh
+fermut coverage
+```
+
+This discovers your source and tests from the config, runs the suite
+under coverage, and writes a `.coverage` database fermut reads
+directly (it also refreshes incrementally as you add tests). Or,
+generate a `coverage.json` manually:
 
 ```sh
 pytest --cov=src --cov-context=test
@@ -86,7 +95,7 @@ Then baseline. No `--diff-only`, no CI — just an absolute number to
 anchor everything else.
 
 ```sh
-fermut run src/ --tests tests/ --coverage coverage.json --json baseline.json
+fermut run src/ --tests tests/ --coverage .coverage --json baseline.json
 ```
 
 `fermut run` streams progress logs (the `INFO fermut::…` lines) to
@@ -234,7 +243,7 @@ Once you can read survivors, the next thing to optimize is cycle
 time. The dev-loop one-liner:
 
 ```sh
-fermut run src/ --tests tests/ --coverage coverage.json --diff-only main --watch
+fermut run src/ --tests tests/ --coverage .coverage --diff-only main --watch
 ```
 
 `--diff-only main` scopes mutation to your branch's changes;

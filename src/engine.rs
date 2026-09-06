@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::ast_hash::{self, ScopeMap};
@@ -26,6 +26,36 @@ use crate::mutator::{self, Mutant};
 use crate::report::{MutantOutcome, Report};
 use crate::runner::{self, Runner};
 use crate::sync::lock_recover;
+
+/// Filter name recorded on mutants left untested when `--max-time` runs out.
+/// Callers (the PR gate, `skipped_by_filter`) match on this to tell a
+/// budget-truncated run apart from a coverage/shard skip.
+pub const TIME_BUDGET_FILTER: &str = "time-budget";
+
+/// Reorder `mutants` in place, highest-value first, for a budgeted run.
+///
+/// v1 value signal: a mutant is "covered" when the coverage context maps it to
+/// at least one test. Covered mutants sort ahead of uncovered ones so the
+/// budget is spent on mutants that can actually be reached — an uncovered
+/// mutant would be coverage-skipped regardless. `sort_by_cached_key` is stable,
+/// so generation order is preserved within each tier and the ordering is fully
+/// deterministic. With no coverage context every mutant tiers equal and the
+/// order is unchanged.
+///
+/// Note: the worker pool (`par_iter`) splits the slice across threads, so this
+/// biases *start* order rather than strictly serializing covered-before-
+/// uncovered. In practice uncovered mutants are cheap coverage-skips that drain
+/// fast, so the expensive budget still lands on covered mutants; the ordering
+/// makes that the common case, not a hard guarantee.
+fn order_by_value(mutants: &mut [Mutant], cfg: &Config) {
+    let Some(cov) = cfg.coverage.as_ref() else {
+        return;
+    };
+    // key 0 = covered (run first), 1 = uncovered. `sort_by_cached_key` computes
+    // the coverage lookup once per mutant (O(n)) rather than the O(n log n)
+    // lookups a bare `sort_by_key` comparator would run.
+    mutants.sort_by_cached_key(|m| u8::from(cov.tests_for_mutant(m).is_none_or(<[_]>::is_empty)));
+}
 
 /// Top-level orchestration: parse → mutate → filter chain → pytest → report.
 ///
@@ -40,9 +70,33 @@ use crate::sync::lock_recover;
 pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
     let started = Instant::now();
     info!(path = %cfg.source_root.display(), "collecting mutations");
-    let mutants: Vec<Mutant> = mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)
+    let mut mutants: Vec<Mutant> = mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)
         .with_context(|| format!("collecting mutations under {}", cfg.source_root.display()))?;
     info!(count = mutants.len(), "mutations generated");
+
+    // `--sample` scales only the TESTING phase: every mutant above was still
+    // generated, and the `ty` pre-filter (below) still type-checks the whole
+    // universe. That work is a fixed floor under every run, so wall-clock does
+    // NOT shrink by the sample ratio — sizing a shard by `1/ratio` overshoots.
+    if let Some(ratio) = cfg.sample_ratio {
+        info!(
+            ratio,
+            generated = mutants.len(),
+            "sampling the testing phase only — generation and the ty pre-filter still \
+             cover all {} mutants, a fixed cost the ratio does not reduce",
+            mutants.len()
+        );
+    }
+
+    // With a testing-phase budget, evaluate the highest-value mutants first so
+    // the ones that survive the deadline are the least informative. v1 signal:
+    // covered mutants (a coverage-selected test can actually reach them) ahead
+    // of uncovered ones, which the coverage filter would skip anyway. Stable so
+    // generation order is preserved within each tier — and left untouched
+    // entirely when no budget is set, so non-budgeted runs are byte-identical.
+    if cfg.max_time_secs.is_some() {
+        order_by_value(&mut mutants, cfg);
+    }
 
     let filters = filter::build_chain(cfg)?;
     let runner = runner::build(cfg);
@@ -92,6 +146,13 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         Mutex::new(Cache::default())
     };
 
+    // Testing-phase wall-clock ceiling. Computed here — after baseline
+    // verification and the source-hash pass — so the budget covers the
+    // per-mutant testing phase only, matching the flag's documented scope.
+    let test_deadline = cfg
+        .max_time_secs
+        .map(|secs| Instant::now() + Duration::from_secs(secs));
+
     let progress = make_progress_bar(mutants.len() as u64);
     let pool = build_pool(cfg.jobs)?;
     let outcomes: Vec<MutantOutcome> = pool.install(|| {
@@ -109,6 +170,7 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
                     &scope_prefix,
                     equiv.as_ref(),
                     &file_sources,
+                    test_deadline,
                 );
                 if let Some(pb) = &progress {
                     pb.inc(1);
@@ -119,6 +181,25 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
     });
     if let Some(pb) = &progress {
         pb.finish_and_clear();
+    }
+
+    // Surface the budget cutoff so a partial run reads as partial, not as a
+    // clean pass over the whole catalogue. Mirrors the `--sample` floor note:
+    // the skipped mutants are excluded from the score denominator, so without
+    // this line a time-boxed run looks indistinguishable from a full one.
+    if test_deadline.is_some() {
+        let budget_skipped = outcomes
+            .iter()
+            .filter(|o| matches!(o, MutantOutcome::Skipped { filter, .. } if filter == TIME_BUDGET_FILTER))
+            .count();
+        if budget_skipped > 0 {
+            warn!(
+                budget_skipped,
+                max_time_secs = cfg.max_time_secs,
+                "--max-time budget exhausted: {budget_skipped} mutant(s) not tested \
+                 (recorded as skipped/`{TIME_BUDGET_FILTER}`, excluded from the score)"
+            );
+        }
     }
 
     if cfg.cache {
@@ -173,7 +254,19 @@ fn evaluate(
     scope_prefix: &str,
     equiv: Option<&EquivPipeline>,
     file_sources: &HashMap<PathBuf, String>,
+    deadline: Option<Instant>,
 ) -> MutantOutcome {
+    // Testing-phase budget check first, before the filter chain or the runner.
+    // Past the deadline every remaining mutant is a cheap skip — including the
+    // ty pre-filter, the dominant per-mutant cost — so the wall-clock ceiling
+    // actually holds. In-flight mutants that passed this check already run to
+    // completion; only not-yet-started ones short-circuit here.
+    if let Some(deadline) = deadline {
+        if Instant::now() >= deadline {
+            return MutantOutcome::skipped(mutant.clone(), TIME_BUDGET_FILTER);
+        }
+    }
+
     // Filter chain first — skip decisions depend on current filter config,
     // so we can't satisfy them from cache.
     for f in filters {
@@ -760,7 +853,137 @@ mod tests {
             exclude: Vec::new(),
             verify_baseline: false,
             baseline_timeout_secs: 300,
+            max_time_secs: None,
         }
+    }
+
+    /// Runner that must never be invoked — proves the deadline short-circuits
+    /// before the runner in `evaluate`.
+    struct PanicRunner;
+    impl Runner for PanicRunner {
+        fn run(&self, _m: &Mutant) -> Result<MutantOutcome> {
+            panic!("runner invoked past the --max-time deadline");
+        }
+        fn baseline(&self) -> Result<runner::BaselineStatus> {
+            Ok(runner::BaselineStatus::Passed)
+        }
+    }
+
+    /// Runner that reports every mutant killed. Proves a not-yet-expired
+    /// deadline still lets the runner execute.
+    struct KillRunner;
+    impl Runner for KillRunner {
+        fn run(&self, m: &Mutant) -> Result<MutantOutcome> {
+            Ok(MutantOutcome::killed(m.clone()))
+        }
+        fn baseline(&self) -> Result<runner::BaselineStatus> {
+            Ok(runner::BaselineStatus::Passed)
+        }
+    }
+
+    fn eval_with_deadline(runner: &dyn Runner, deadline: Option<Instant>) -> MutantOutcome {
+        let cfg = base_test_config();
+        let m = arith_mutant("return x + 0", "+", "-");
+        let cache = Mutex::new(Cache::default());
+        evaluate(
+            &m,
+            &cfg,
+            &[],
+            runner,
+            &cache,
+            &HashMap::new(),
+            &HashMap::new(),
+            "",
+            None,
+            &HashMap::new(),
+            deadline,
+        )
+    }
+
+    #[test]
+    fn time_budget_filter_is_stable() {
+        // Callers (PR gate, skipped_by_filter) match this literal.
+        assert_eq!(TIME_BUDGET_FILTER, "time-budget");
+    }
+
+    #[test]
+    fn past_deadline_skips_before_running() {
+        // Deadline already elapsed: must skip with the budget filter and never
+        // touch the runner (PanicRunner would blow up if it did).
+        let past = Instant::now() - Duration::from_secs(1);
+        let out = eval_with_deadline(&PanicRunner, Some(past));
+        match out {
+            MutantOutcome::Skipped { filter, .. } => assert_eq!(filter, TIME_BUDGET_FILTER),
+            other => panic!("expected time-budget skip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn future_deadline_still_runs() {
+        // Plenty of budget left: the runner must execute normally.
+        let future = Instant::now() + Duration::from_secs(3600);
+        let out = eval_with_deadline(&KillRunner, Some(future));
+        assert!(matches!(out, MutantOutcome::Killed { .. }));
+    }
+
+    #[test]
+    fn no_deadline_runs() {
+        // `None` deadline (no --max-time) never short-circuits.
+        let out = eval_with_deadline(&KillRunner, None);
+        assert!(matches!(out, MutantOutcome::Killed { .. }));
+    }
+
+    #[test]
+    fn order_by_value_is_noop_without_coverage() {
+        // No coverage context → no value signal → order preserved exactly.
+        let cfg = base_test_config();
+        let a = arith_mutant("a + 0", "+", "-");
+        let mut b = arith_mutant("b + 0", "+", "-");
+        b.id = "b".into();
+        let mut mutants = vec![a.clone(), b.clone()];
+        order_by_value(&mut mutants, &cfg);
+        assert_eq!(mutants[0].id, a.id);
+        assert_eq!(mutants[1].id, b.id);
+    }
+
+    #[test]
+    fn order_by_value_puts_covered_mutants_first() {
+        use crate::filter::coverage::CoverageContexts;
+        let tmp = tempfile::tempdir().unwrap();
+        let py = tmp.path().join("foo.py");
+        std::fs::write(&py, "x = 1\ny = 2\nz = 3\n").unwrap();
+        // Only line 1 is covered by a test.
+        let doc = r#"{
+            "files": {
+                "foo.py": {
+                    "contexts": { "1": ["tests/test_a.py::test_x|run"] }
+                }
+            }
+        }"#;
+        let cov_path = tmp.path().join("coverage.json");
+        std::fs::write(&cov_path, doc).unwrap();
+        let cov = CoverageContexts::from_json(&cov_path, tmp.path(), tmp.path()).unwrap();
+
+        let mut covered = arith_mutant("x + 0", "+", "-");
+        covered.id = "covered".into();
+        covered.file = py.clone();
+        covered.line = 1;
+        covered.stmt_line = 1;
+        let mut uncovered = arith_mutant("z + 0", "+", "-");
+        uncovered.id = "uncovered".into();
+        uncovered.file = py.clone();
+        uncovered.line = 3;
+        uncovered.stmt_line = 3;
+
+        // Input order is uncovered-first; ordering must swap it.
+        let mut mutants = vec![uncovered.clone(), covered.clone()];
+        let cfg = Config {
+            coverage: Some(cov),
+            ..base_test_config()
+        };
+        order_by_value(&mut mutants, &cfg);
+        assert_eq!(mutants[0].id, "covered", "covered mutant must sort first");
+        assert_eq!(mutants[1].id, "uncovered");
     }
 
     #[test]

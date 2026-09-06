@@ -48,7 +48,7 @@ bottom for what fermut still doesn't do that the others do.
 | Language                         | Rust (mutator) + Python (test runner)                                                    | Python (everything)                                  | Python (everything)                                        |
 | Parser                           | [`ruff_python_parser`](https://github.com/astral-sh/ruff)                                | `parso`                                              | `ast` (stdlib)                                            |
 | Type-aware filter                | :material-check:{ .yes } [`ty`](https://github.com/astral-sh/ty) pre-filter, on by default; ~25 ms/file warm | :material-check:{ .yes } optional `mypy` pre-check (opt-in; pays mypy startup cost on each invocation, so typically off in CI loops) | :material-close:{ .no }                                                          |
-| Operator catalogue (stable)      | 26                                                                                       | ~17 (mutmut's "default")                             | ~20 (configurable; cosmic-ray ships several "subjects")    |
+| Operator catalogue (stable)      | 30                                                                                       | ~17 (mutmut's "default")                             | ~20 (configurable; cosmic-ray ships several "subjects")    |
 | Inline ignore markers            | :material-check:{ .yes } `# fermut: ignore[op-name]`                                                            | :material-check:{ .yes } `# pragma: no mutate`                              | :material-close:{ .no } (use config exclusions)                                  |
 | Docstring auto-skip              | :material-check:{ .yes }                                                                                        | :material-check:{ .yes }                                                    | depends on subject                                         |
 | Diff-only mode                   | :material-check:{ .yes } `--diff-only main`                                                                     | partial (`mutmut run path`)                          | partial (manual filtering)                                 |
@@ -127,8 +127,8 @@ venv, and runs each tool against the **same source tree** with the
 with per-phase timing, mutant total, score, and return code.
 
 Numbers below are **preliminary** `cold`-scenario runs (fermut
-0.2.2 vs mutmut 3.6.0). **They are illustrative — your codebase
-will produce different results**, and fermut 0.2.2 is
+0.3.0 vs mutmut 3.6.0). **They are illustrative — your codebase
+will produce different results**, and fermut 0.3.0 is
 pre-optimization. See [Reference → Benchmarks](../reference/benchmarks.md)
 for the full table and caveats.
 

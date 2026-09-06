@@ -161,14 +161,19 @@ fn render_summary(window: &[HistoryEntry]) -> String {
     let Some(last) = window.last() else {
         return "<div class='card empty'>No runs recorded yet.</div>".into();
     };
-    let prev = if window.len() >= 2 {
-        Some(&window[window.len() - 2])
-    } else {
-        None
-    };
-    let delta_html = match prev {
-        Some(p) => {
-            let d = last.mutation_score - p.mutation_score;
+    // Delta the latest run posted against the previous comparable run.
+    // Suppressed when the latest run isn't comparable — a scoreless run
+    // (headline N/A) or a `--max-time` partial run (subset score) — so a delta
+    // carried over from older runs never misreads as that run's move.
+    // Non-comparable priors are skipped so the comparison is full-vs-full.
+    let mut comparable_rev = window.iter().rev().filter(|e| e.is_comparable());
+    let latest_comparable = last
+        .is_comparable()
+        .then(|| comparable_rev.next())
+        .flatten();
+    let delta_html = match (latest_comparable, comparable_rev.next()) {
+        (Some(cur), Some(p)) => {
+            let d = cur.mutation_score - p.mutation_score;
             let cls = if d > 0.05 {
                 "up"
             } else if d < -0.05 {
@@ -179,7 +184,14 @@ fn render_summary(window: &[HistoryEntry]) -> String {
             let sign = if d >= 0.0 { "+" } else { "" };
             format!("<span class='delta {cls}'>{sign}{d:.1} pts</span>")
         }
-        None => String::new(),
+        _ => String::new(),
+    };
+    // The headline reflects the latest run itself — N/A when it scored nothing,
+    // never the floored 100.0.
+    let score_html = if last.is_scoreless() {
+        "<div class='big-score na'>N/A</div>".to_string()
+    } else {
+        format!("<div class='big-score'>{:.1}%</div>", last.mutation_score)
     };
     let streak_html = match history::trailing_streak(window) {
         Some((StreakDir::Up, n)) => format!(
@@ -209,7 +221,7 @@ fn render_summary(window: &[HistoryEntry]) -> String {
     format!(
         "<section class='card summary'>\
          <h2>Latest run</h2>\
-         <div class='big-score'>{:.1}%</div>\
+         {score_html}\
          {delta_html}\
          {streak_html}\
          <div class='counts'>\
@@ -221,7 +233,6 @@ fn render_summary(window: &[HistoryEntry]) -> String {
          </div>\
          <div class='aux-line'>{} {duration} {git}</div>\
          </section>",
-        last.mutation_score,
         last.killed,
         last.survived,
         last.timed_out,
@@ -232,6 +243,12 @@ fn render_summary(window: &[HistoryEntry]) -> String {
 }
 
 fn render_sparkline(window: &[HistoryEntry]) -> String {
+    // Header counts every run in the window so it matches the history table;
+    // the plot itself uses comparable runs only — a scoreless run's vacuous
+    // 100.0 would spike to the top, and a `--max-time` partial subset score
+    // would draw a phantom dip. Both are still listed (badged) in the table.
+    let total_runs = window.len();
+    let window: Vec<&HistoryEntry> = window.iter().filter(|e| e.is_comparable()).collect();
     if window.is_empty() {
         return String::new();
     }
@@ -274,7 +291,7 @@ fn render_sparkline(window: &[HistoryEntry]) -> String {
     }
     format!(
         "<section class='card chart'>\
-         <h2>Trend ({} runs)</h2>\
+         <h2>Trend ({total_runs} runs)</h2>\
          <svg viewBox='0 0 {W} {H}' role='img' aria-label='mutation score over time'>\
            <line x1='{PAD}' y1='{PAD}' x2='{PAD}' y2='{}' class='axis'/>\
            <line x1='{PAD}' y1='{}' x2='{}' y2='{}' class='axis'/>\
@@ -282,7 +299,6 @@ fn render_sparkline(window: &[HistoryEntry]) -> String {
          </svg>\
          <div class='axis-label'>0% – 100% (fixed scale)</div>\
          </section>",
-        n,
         H - PAD,
         H - PAD,
         W - PAD,
@@ -297,11 +313,22 @@ fn render_trend_table(window: &[HistoryEntry]) -> String {
     let mut rows = String::new();
     let mut prev_score: Option<f64> = None;
     for e in window {
-        let delta_cell = match prev_score.map(|p| e.mutation_score - p) {
+        // Scoreless runs have no real score: N/A cell. A `--max-time` partial
+        // run shows its real subset score but isn't comparable — so neither a
+        // partial nor a scoreless run gets a delta or seeds the next row (see
+        // `history::trend_step`). `scoreless` still gates the score cell.
+        let scoreless = e.is_scoreless();
+        let (delta, next_prev) = history::trend_step(prev_score, e);
+        let delta_cell = match delta {
             Some(d) if d.abs() < 0.05 => "<td class='flat'>0.0</td>".into(),
             Some(d) if d >= 0.0 => format!("<td class='up'>+{d:.1}</td>"),
             Some(d) => format!("<td class='down'>{d:.1}</td>"),
             None => "<td class='flat'>—</td>".into(),
+        };
+        let score_cell = if scoreless {
+            "<td class='score'>N/A</td>".to_string()
+        } else {
+            format!("<td class='score'>{:.1}%</td>", e.mutation_score)
         };
         let git = match (&e.git_branch, &e.git_sha) {
             (Some(b), Some(s)) => format!("{}@{}", html_escape(b), html_escape(s)),
@@ -309,27 +336,30 @@ fn render_trend_table(window: &[HistoryEntry]) -> String {
             (Some(b), None) => html_escape(b),
             _ => String::new(),
         };
-        // Tag the baseline anchor row so it reads as run zero, not a run.
+        // Tag the baseline anchor row so it reads as run zero, not a run; tag a
+        // `--max-time` partial run so a "—" delta on a real score reads as
+        // "truncated subset, not comparable" rather than a glitch.
         let (tr_class, ts_badge) = if e.baseline {
             (" class='baseline'", " <span class='badge'>baseline</span>")
+        } else if e.partial {
+            ("", " <span class='badge'>partial</span>")
         } else {
             ("", "")
         };
         rows.push_str(&format!(
             "<tr{tr_class}>\
              <td class='ts'>{}{ts_badge}</td>\
-             <td class='score'>{:.1}%</td>\
+             {score_cell}\
              {delta_cell}\
              <td>{}</td><td>{}</td><td>{}</td>\
              <td class='git'>{git}</td>\
              </tr>",
             html_escape(&e.timestamp),
-            e.mutation_score,
             e.killed,
             e.survived,
             e.timed_out,
         ));
-        prev_score = Some(e.mutation_score);
+        prev_score = next_prev;
     }
     format!(
         "<section class='card table-wrap'>\
@@ -574,10 +604,12 @@ mod tests {
             total: None,
             duration_ms: None,
             config_hash: None,
+            fermut_version: None,
             git_sha: None,
             git_branch: None,
             survivor_ids: survivors.map(|s| s.iter().map(|x| x.to_string()).collect()),
             baseline: false,
+            partial: false,
         }
     }
 
@@ -594,6 +626,62 @@ mod tests {
         assert!(html.contains("History"));
         assert!(html.contains("Survivors (2)"));
         assert!(html.contains("85.0%"));
+    }
+
+    #[test]
+    fn dashboard_scoreless_latest_shows_na_and_no_delta() {
+        // Latest run scored nothing (killed+survived+timed_out == 0) → vacuous
+        // 100.0. Headline must read N/A, no delta may carry over from the older
+        // real run, and the trend header still counts both runs.
+        let real = entry("2026-01-01T00:00:00Z", 80.0, Some(&["a"]));
+        let scoreless = entry("2026-01-02T00:00:00Z", 100.0, Some(&[]));
+        assert!(scoreless.is_scoreless());
+        let html = render_dashboard(&[real, scoreless], 10, None, Path::new("/tmp/h.jsonl"));
+        // Headline N/A, not a floored 100.0%.
+        assert!(html.contains("big-score na"));
+        assert!(html.contains(">N/A<"));
+        // No summary delta pill carried over from the older run.
+        assert!(!html.contains("class='delta"));
+        // Header counts BOTH runs even though only the scored one is plotted.
+        assert!(html.contains("Trend (2 runs)"));
+    }
+
+    #[test]
+    fn dashboard_partial_latest_shows_score_but_no_delta() {
+        // Latest run was `--max-time`-truncated → real subset score, but not
+        // comparable. Headline shows its % (it IS a measurement, unlike a
+        // scoreless run), yet no summary delta may be computed against it.
+        let real = entry("2026-01-01T00:00:00Z", 80.0, Some(&["a"]));
+        let mut partial = entry("2026-01-02T00:00:00Z", 40.0, Some(&["a", "b"]));
+        partial.partial = true;
+        assert!(!partial.is_scoreless() && !partial.is_comparable());
+        let html = render_dashboard(&[real, partial], 10, None, Path::new("/tmp/h.jsonl"));
+        // Real subset score is shown, not N/A.
+        assert!(html.contains("40.0%"));
+        assert!(!html.contains("big-score na"));
+        // No summary delta pill: 80→40 would be a phantom -40 vs a subset.
+        assert!(!html.contains("class='delta"));
+        // The history row is badged partial and shows a "—" delta cell.
+        assert!(html.contains("<span class='badge'>partial</span>"));
+    }
+
+    #[test]
+    fn dashboard_partial_prior_does_not_seed_next_delta() {
+        // full(80) → partial(40) → full(78). The last row's delta must be
+        // 78−80 = −2 (vs the last FULL run), never 78−40 = +38 (vs the subset).
+        let a = entry("2026-01-01T00:00:00Z", 80.0, Some(&["a"]));
+        let mut b = entry("2026-01-02T00:00:00Z", 40.0, Some(&["a", "b"]));
+        b.partial = true;
+        let c = entry("2026-01-03T00:00:00Z", 78.0, Some(&["a", "c"]));
+        let html = render_dashboard(&[a, b, c], 10, None, Path::new("/tmp/h.jsonl"));
+        assert!(
+            html.contains(">-2.0<"),
+            "delta must skip the partial baseline"
+        );
+        assert!(
+            !html.contains(">+38.0<"),
+            "must not delta against the subset"
+        );
     }
 
     #[test]

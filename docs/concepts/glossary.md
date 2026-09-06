@@ -8,11 +8,14 @@ explained in depth.
 
 ## Coverage filter
 
-Filter stage that drops mutants on lines no test executes. Requires
-`coverage.json` from `pytest --cov=src --cov-context=test` so fermut
-knows **which** tests reach each line. Without per-test contexts, the
-filter still drops uncovered mutants but cannot pick a narrow test
-subset for the survivors. See [coverage guide](../guides/coverage.md).
+Filter stage that drops mutants on lines no test executes. Requires a
+per-test-context coverage database, most easily built with `fermut
+coverage` (writes `.coverage`; or manually `pytest --cov=src
+--cov-context=test` then `coverage json -o coverage.json
+--show-contexts`), so fermut knows **which** tests reach each line.
+Without per-test contexts, the filter still drops uncovered mutants but
+cannot pick a narrow test subset for the survivors. See [coverage
+guide](../guides/coverage.md).
 
 ## cosmic-ray
 
@@ -129,7 +132,7 @@ See [mutation score on the concept page](mutation-testing.md#the-mutation-score)
 
 A *kind* of mutation. Examples: `arith-op-swap` (replace `+` with
 `-`), `boundary-shift` (`<` → `<=`), `return-to-none`. fermut ships
-26 stable operators and 4 experimental. Select with `--ops`, skip
+30 stable operators and 8 experimental. Select with `--ops`, skip
 with `--skip-ops`, enable experimental with `--experimental`. See
 [operator catalogue](../reference/operators/index.md).
 

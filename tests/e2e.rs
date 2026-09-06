@@ -109,6 +109,10 @@ fn smart_order_builds_sidecar_and_keeps_verdict() {
             .arg(&coverage)
             .arg("--no-ty-filter")
             .arg("--no-cache") // isolate ordering from cache reuse
+            // The sample's `fermut.toml` sets `timeout = 30`, which auto-disables
+            // smart ordering (an explicit timeout makes the verdict order-
+            // sensitive). Force it on so this test actually exercises ordering.
+            .arg("--smart-order")
             .assert()
             .failure() // survivors → exit 1
             .stdout(contains("SURVIVED"));
@@ -120,6 +124,52 @@ fn smart_order_builds_sidecar_and_keeps_verdict() {
         "first run must write the kill-order sidecar at {}",
         sidecar.display()
     );
+
+    // The verdict-invariance check above passes even if ordering is a silent
+    // no-op: a killer node id that pytest's `-rfE` summary reports differently
+    // from the coverage-selected id would never match in `order()`, so the
+    // sidecar would grow but never reorder — and the score wouldn't budge. Guard
+    // that link directly: the recorded killer must be a real, `::`-formed test
+    // id whose file resolves under the sample, i.e. exactly the shape a
+    // coverage-selected id has and `order()` can lift. If pytest ever normalizes
+    // ids differently from what we pass as positionals, this assertion trips.
+    //
+    // Sidecar shape: `{ file : { operator : { nodeid : count } } }`.
+    let raw = std::fs::read_to_string(&sidecar).expect("sidecar readable");
+    let ko: serde_json::Value = serde_json::from_str(&raw).expect("sidecar is valid JSON");
+    let mut recorded = 0usize;
+    for (_file, ops) in ko.as_object().expect("top level is a map") {
+        for (_op, nodeids) in ops.as_object().expect("operator level is a map") {
+            for (nodeid, count) in nodeids.as_object().expect("nodeid level is a map") {
+                recorded += 1;
+                assert!(
+                    count.as_u64().is_some_and(|c| c >= 1),
+                    "kill count for {nodeid:?} must be >= 1, got {count}"
+                );
+                // A well-formed pytest nodeid is `path::test`. A bare path (a
+                // collection error) or a whitespace-truncated id would fail here.
+                let (path_part, func_part) = nodeid.split_once("::").unwrap_or_else(|| {
+                    panic!("recorded killer {nodeid:?} is not a `path::test` node id")
+                });
+                assert!(
+                    !func_part.is_empty(),
+                    "recorded killer {nodeid:?} has an empty test part"
+                );
+                // The path the id resolves to must exist under the sample tree.
+                // A normalized-away id (wrong prefix, absolute rewrite) wouldn't.
+                assert!(
+                    sample_path().join(path_part).exists(),
+                    "recorded killer {nodeid:?} resolves to {path_part:?}, which does not \
+                     exist under the sample — pytest reported an id we can't match",
+                );
+            }
+        }
+    }
+    assert!(
+        recorded >= 1,
+        "smart ordering must have learned at least one killer into the sidecar"
+    );
+
     run(); // reads the sidecar to order; same verdict
 
     // Don't leave learned artifacts behind in the shared sample tree — they

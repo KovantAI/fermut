@@ -48,8 +48,9 @@ pub struct PytestRunner {
     kill_order: Arc<crate::kill_order::KillOrder>,
     /// Kills learned this run, folded into the sidecar by the engine afterward.
     kill_sink: Arc<Mutex<Vec<crate::kill_order::KillRecord>>>,
-    /// Base for the `(file, operator)` history key — mutant files are made
-    /// relative to this so the sidecar survives moves/checkouts.
+    /// Base for the `(file, operator)` history key — the run's `source_root`.
+    /// Mutant files are made relative to this so the sidecar survives
+    /// moves/checkouts.
     key_base: PathBuf,
 }
 
@@ -87,7 +88,8 @@ impl PytestRunner {
         }
     }
 
-    /// `(project-relative file, operator name)` history key for a mutant.
+    /// `(source-root-relative file, operator name)` history key for a mutant.
+    /// The file is stripped of `key_base` (the run's `source_root`).
     fn kill_key(&self, mutant: &Mutant) -> (String, &'static str) {
         let file = mutant
             .file

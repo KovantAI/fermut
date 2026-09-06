@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::FilterArgs;
 use crate::config::{CacheScope, Config, ConfigSource, IsolationMode, LoadedConfig, RunnerKind};
@@ -22,6 +22,62 @@ pub(super) const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// Default wall-clock cap for the baseline (full-suite) run. Generous because
 /// the whole suite runs once; raise with `--baseline-timeout` for big suites.
 pub(super) const DEFAULT_BASELINE_TIMEOUT_SECS: u64 = 300;
+
+/// An advisory note to surface after resolving smart ordering against a
+/// per-mutant timeout. The verdict decision itself is the accompanying `bool`.
+#[derive(Debug, PartialEq, Eq)]
+enum SmartOrderNote {
+    /// Ordering is on while an explicit timeout is set → the score is
+    /// order-sensitive. Surfaced as a warning.
+    WarnOrderSensitive,
+    /// The default-on ordering was auto-disabled by an explicit timeout → tell
+    /// the user how to force it back on. Surfaced as info.
+    InfoAutoDisabled,
+}
+
+/// Resolve smart test ordering from the CLI force-off/force-on flags, the
+/// config value, and whether a per-mutant timeout is *explicitly* set. Pure so
+/// the precedence *and* the advisory note (which the caller logs) are
+/// unit-tested without a tracing subscriber.
+///
+/// Precedence: `--no-smart-order` wins; then `--smart-order` /
+/// `smart_order = true` force it on; otherwise it defaults on, except an
+/// explicit timeout auto-disables the default to keep the gate score
+/// order-invariant. The note is emitted only under an explicit timeout, and the
+/// auto-disabled note never fires when the user chose `--no-smart-order`.
+fn resolve_smart_order(
+    cli_no: bool,
+    cli_yes: bool,
+    file: Option<bool>,
+    timeout_explicit: bool,
+) -> (bool, Option<SmartOrderNote>) {
+    let on = if cli_no {
+        false
+    } else if cli_yes {
+        true
+    } else {
+        match file {
+            // User was explicit in config — honor it, even against a timeout.
+            Some(explicit) => explicit,
+            // Default on, but a per-mutant timeout makes it order-sensitive, so
+            // auto-disable to keep the score reproducible under the gate.
+            None => !timeout_explicit,
+        }
+    };
+    let note = if !timeout_explicit {
+        None
+    } else if on {
+        Some(SmartOrderNote::WarnOrderSensitive)
+    } else if file.is_none() && !cli_no {
+        // Only when the *default* was auto-disabled — not when the user
+        // explicitly passed --no-smart-order (that's their choice, not the
+        // timeout's doing).
+        Some(SmartOrderNote::InfoAutoDisabled)
+    } else {
+        None
+    };
+    (on, note)
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_config(
@@ -49,6 +105,7 @@ pub(crate) fn build_config(
     cli_no_verify_baseline: bool,
     cli_baseline_timeout: Option<u64>,
     cli_no_smart_order: bool,
+    cli_smart_order: bool,
     cli_max_time: Option<u64>,
     f: FilterArgs,
 ) -> Result<Config> {
@@ -163,13 +220,36 @@ pub(crate) fn build_config(
         .or_else(|| file.history_path.clone().map(|p| loaded.resolve_path(p)))
         .unwrap_or_else(|| crate::history::default_history_path(&artifact_root));
 
-    // Smart test ordering: default on; `--no-smart-order` (CLI) wins, else the
-    // config value, else on. The sidecar lives beside cache/history.
-    let smart_order = if cli_no_smart_order {
-        false
-    } else {
-        file.smart_order.unwrap_or(true)
-    };
+    // Smart test ordering vs. an explicit per-mutant timeout are competing
+    // knobs. Ordering is verdict-neutral *without* a timeout, but with one the
+    // `killed`↔`timed_out` outcome is order-sensitive, so ordering would shift
+    // the score and could mask a real regression under `--fail-on-regression`.
+    // Resolution: `--no-smart-order` (CLI) always wins; `--smart-order` /
+    // `smart_order = true` force it on (escape hatch); otherwise an *explicit*
+    // `timeout` (CLI or config — not the built-in default) turns the default-on
+    // ordering *off* so the gate stays reproducible. Forcing it on under a
+    // timeout is warned, since the score is then order-sensitive. The sidecar
+    // lives beside cache/history.
+    let timeout_explicit = cli_timeout.is_some() || file.timeout.is_some();
+    let (smart_order, note) = resolve_smart_order(
+        cli_no_smart_order,
+        cli_smart_order,
+        file.smart_order,
+        timeout_explicit,
+    );
+    match note {
+        Some(SmartOrderNote::WarnOrderSensitive) => warn!(
+            "smart test ordering is on with an explicit per-mutant timeout: the \
+             killed/timed_out verdict is order-sensitive, so the score can shift \
+             (and partly mask a regression under --fail-on-regression). Drop the \
+             timeout or pass --no-smart-order to keep it order-invariant."
+        ),
+        Some(SmartOrderNote::InfoAutoDisabled) => info!(
+            "explicit per-mutant timeout set: smart test ordering auto-disabled to \
+             keep the score order-invariant. Force it on with --smart-order."
+        ),
+        None => {}
+    }
     let kill_order_path = file
         .kill_order_path
         .clone()
@@ -379,6 +459,7 @@ mod tests {
             false,
             None,
             false, // cli_no_smart_order
+            false, // cli_smart_order
             None,  // cli_max_time
             filter,
         )
@@ -564,6 +645,39 @@ mod tests {
     }
 
     #[test]
+    fn resolve_smart_order_precedence_and_notes() {
+        use SmartOrderNote::*;
+        // (cli_no, cli_yes, file, timeout_explicit) -> (on, note)
+        let cases = [
+            // No timeout: default on, no note; config/flags honored, no note.
+            ((false, false, None, false), (true, None)),
+            ((false, false, Some(false), false), (false, None)),
+            ((true, false, None, false), (false, None)),
+            ((false, true, None, false), (true, None)),
+            // Timeout set, default → auto-off with the info note.
+            ((false, false, None, true), (false, Some(InfoAutoDisabled))),
+            // Timeout set + explicit --no-smart-order → off, but NO info note
+            // (the user disabled it, not the timeout). This is the guard.
+            ((true, false, None, true), (false, None)),
+            // Timeout set + force-on (CLI or config) → on with the warn note.
+            ((false, true, None, true), (true, Some(WarnOrderSensitive))),
+            (
+                (false, false, Some(true), true),
+                (true, Some(WarnOrderSensitive)),
+            ),
+            // Timeout set + config false → off, and no info note (explicit off).
+            ((false, false, Some(false), true), (false, None)),
+        ];
+        for ((cli_no, cli_yes, file, to), want) in cases {
+            assert_eq!(
+                resolve_smart_order(cli_no, cli_yes, file, to),
+                want,
+                "resolve_smart_order({cli_no}, {cli_yes}, {file:?}, {to})"
+            );
+        }
+    }
+
+    #[test]
     fn smart_order_defaults_on() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
@@ -630,12 +744,126 @@ mod tests {
             None,
             false,
             None,
-            true, // cli_no_smart_order
-            None, // cli_max_time
+            true,  // cli_no_smart_order
+            false, // cli_smart_order
+            None,  // cli_max_time
             empty_filter(),
         )
         .unwrap();
         assert!(!cfg.smart_order, "--no-smart-order wins over config on");
+    }
+
+    #[test]
+    fn explicit_config_timeout_auto_disables_default_smart_order() {
+        // A per-mutant timeout makes the killed/timed_out verdict order-sensitive,
+        // so the default-on ordering auto-disables to keep the score reproducible
+        // (they compete). Only an *explicit* timeout does this, not the built-in
+        // default.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "timeout = 30\n").unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert!(
+            !cfg.smart_order,
+            "an explicit timeout must auto-disable default-on smart ordering"
+        );
+    }
+
+    #[test]
+    fn explicit_smart_order_true_survives_timeout() {
+        // The escape hatch: a user who explicitly opts into smart ordering keeps
+        // it even with a timeout set (accepting the order-sensitive score).
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("fermut.toml"),
+            "smart_order = true\ntimeout = 30\n",
+        )
+        .unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert!(
+            cfg.smart_order,
+            "explicit smart_order = true must survive an explicit timeout"
+        );
+    }
+
+    #[test]
+    fn explicit_cli_timeout_auto_disables_smart_order() {
+        // Same competing-flags rule via the CLI `--timeout`, no config at all.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = build_config(
+            tmp.path().to_path_buf(),
+            None,
+            None,
+            Some(5), // cli_timeout — explicit per-mutant timeout
+            false,
+            false,
+            None,
+            Vec::new(),
+            false,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            false,
+            None,
+            false, // cli_no_smart_order
+            false, // cli_smart_order
+            None,  // cli_max_time
+            empty_filter(),
+        )
+        .unwrap();
+        assert!(
+            !cfg.smart_order,
+            "--timeout must auto-disable default-on smart ordering"
+        );
+    }
+
+    #[test]
+    fn cli_smart_order_forces_on_despite_timeout() {
+        // The CLI escape hatch: `--smart-order` forces ordering on even when an
+        // explicit `--timeout` would otherwise auto-disable it.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = build_config(
+            tmp.path().to_path_buf(),
+            None,
+            None,
+            Some(5), // cli_timeout — would auto-disable…
+            false,
+            false,
+            None,
+            Vec::new(),
+            false,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            false,
+            None,
+            false, // cli_no_smart_order
+            true,  // cli_smart_order — …but this forces it on
+            None,  // cli_max_time
+            empty_filter(),
+        )
+        .unwrap();
+        assert!(
+            cfg.smart_order,
+            "--smart-order must force ordering on despite an explicit timeout"
+        );
     }
 
     #[test]

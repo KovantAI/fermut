@@ -8,8 +8,9 @@
 //! ordering, and the pytest-output parse that learns the killer. No I/O beyond
 //! an advisory JSON sidecar; losing it costs a slow run, never correctness.
 //!
-//! Key is `(project-relative file, operator name)` — robust to line shifts, so
-//! a normal edit doesn't discard the history. Value is a per-node-id kill count;
+//! Key is `(source-root-relative file, operator name)` — the file is made
+//! relative to the run's `source_root`, robust to line shifts so a normal edit
+//! doesn't discard the history. Value is a per-node-id kill count;
 //! ordering is count-descending, ties keeping the caller's (coverage) order.
 
 use std::collections::HashMap;

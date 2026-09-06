@@ -513,6 +513,7 @@ fn tool_run(args: &Value) -> Result<Value> {
         false,
         None,
         false, // no_smart_order
+        false, // smart_order
         max_time,
         filter,
     )?;

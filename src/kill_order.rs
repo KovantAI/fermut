@@ -105,8 +105,10 @@ impl KillOrder {
 /// `None` when there is no such line (a survivor, or output we can't read).
 /// pytest prints `<PREFIX> <nodeid> - <reason>`; we take the first token after
 /// the prefix, so the trailing reason is ignored. The nodeid itself may contain
-/// spaces (parametrized ids like `test_f[a b]`), so we split on the ` - ` reason
-/// separator rather than whitespace; a line with no separator is all nodeid.
+/// spaces (parametrized ids like `test_f[a b]`) *and* the ` - ` sequence
+/// (a param repr like `test_f[a - b]`), so we split on the reason separator
+/// only at bracket depth 0 — a ` - ` inside `[...]` belongs to the params, not
+/// the reason. A line with no depth-0 separator is all nodeid.
 ///
 /// We require the `::` that separates a test's file from its function, so a
 /// *collection* error — which `-rfE` prints as `ERROR <file>` (a bare path, no
@@ -119,9 +121,35 @@ pub fn parse_first_failed(stdout: &str) -> Option<String> {
         let rest = trimmed
             .strip_prefix("FAILED ")
             .or_else(|| trimmed.strip_prefix("ERROR "))?;
-        let nodeid = rest.split_once(" - ").map_or(rest, |(id, _)| id).trim();
+        let nodeid = split_nodeid_reason(rest).trim();
         (nodeid.contains("::")).then(|| nodeid.to_string())
     })
+}
+
+/// Return the nodeid portion of a pytest `-rfE` summary tail (`<nodeid> - <reason>`),
+/// cutting at the first ` - ` that sits **outside** any `[...]` param bracket.
+/// A ` - ` inside brackets is part of a parametrized id's value, not the reason
+/// separator, so it must not truncate the nodeid. No depth-0 separator → the
+/// whole string is the nodeid.
+fn split_nodeid_reason(rest: &str) -> &str {
+    let bytes = rest.as_bytes();
+    let mut depth: i32 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'[' => depth += 1,
+            b']' => depth = depth.saturating_sub(1),
+            b' ' if depth == 0
+                && bytes.get(i + 1) == Some(&b'-')
+                && bytes.get(i + 2) == Some(&b' ') =>
+            {
+                return &rest[..i];
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    rest
 }
 
 #[cfg(test)]
@@ -215,6 +243,30 @@ mod tests {
         assert_eq!(
             parse_first_failed("FAILED tests/t.py::test_x[a b]\n").as_deref(),
             Some("tests/t.py::test_x[a b]")
+        );
+    }
+
+    #[test]
+    fn parse_keeps_param_id_containing_the_reason_separator() {
+        // A param repr can itself contain ` - ` (e.g. a string value "a - b").
+        // Splitting on the first ` - ` would truncate the id to `...test_f[a`
+        // — which never matches the coverage-selected id, silently killing
+        // ordering for such tests. Only a ` - ` OUTSIDE the brackets is the
+        // real reason separator.
+        let out = "FAILED tests/t.py::test_f[a - b] - AssertionError: nope\n";
+        assert_eq!(
+            parse_first_failed(out).as_deref(),
+            Some("tests/t.py::test_f[a - b]")
+        );
+        // ` - ` inside brackets, and no reason at all → whole rest is the id.
+        assert_eq!(
+            parse_first_failed("FAILED tests/t.py::test_f[a - b]\n").as_deref(),
+            Some("tests/t.py::test_f[a - b]")
+        );
+        // Nested brackets with an inner ` - ` still bound to depth 0.
+        assert_eq!(
+            parse_first_failed("FAILED tests/t.py::test_f[x[a - b]] - E\n").as_deref(),
+            Some("tests/t.py::test_f[x[a - b]]")
         );
     }
 

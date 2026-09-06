@@ -82,6 +82,21 @@ fn smart_order_builds_sidecar_and_keeps_verdict() {
     // Kill-order sidecar lands at the project root's `.fermut/`.
     let sidecar = sample_path().join(".fermut").join("kill-order.json");
     let coverage = sample_path().join(".coverage");
+
+    // This test writes learned artifacts into the SHARED sample tree, not a temp
+    // copy. Remove them via a Drop guard so a mid-test panic (a failed assert)
+    // still cleans up — otherwise they'd linger as untracked files and could
+    // bleed into other e2e runs that share the sample.
+    struct Cleanup<'a>(&'a [&'a std::path::Path]);
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            for p in self.0 {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    let _cleanup = Cleanup(&[&sidecar, &coverage]);
+    // Start from a clean slate too (a prior aborted run may have left them).
     let _ = std::fs::remove_file(&sidecar);
     let _ = std::fs::remove_file(&coverage);
 
@@ -172,10 +187,7 @@ fn smart_order_builds_sidecar_and_keeps_verdict() {
 
     run(); // reads the sidecar to order; same verdict
 
-    // Don't leave learned artifacts behind in the shared sample tree — they
-    // would show as untracked and could bleed into other e2e runs.
-    let _ = std::fs::remove_file(&sidecar);
-    let _ = std::fs::remove_file(&coverage);
+    // Artifacts removed by `_cleanup`'s Drop, on this path and on any panic above.
 }
 
 #[test]

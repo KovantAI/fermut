@@ -282,6 +282,16 @@ fn wait_draining_stdout_with_grace(
             // subprocess), then make one final bounded collect — this closes the
             // reader's EOF so its thread exits instead of leaking, and usually
             // recovers the datapoint the child already wrote.
+            //
+            // Note: on this path `wait_timeout` already reaped the direct child
+            // (the group *leader*), so `on_timeout`/`kill_group` signals
+            // `-child.id()` for a leader that has exited. This is safe only
+            // because the surviving grandchild keeps the process group alive, and
+            // Linux/BSD reserve the leader's pid as the pgid while the group has
+            // members — so `kill(-pgid)` still targets the grandchild and can't
+            // hit an unrelated, pid-recycled process. (Contrast the timeout arm
+            // below, which kills *before* the child is reaped.) If a future
+            // change reaps the leader without a live group member, revisit this.
             if output.is_none() && had_pipe {
                 on_timeout(&mut child);
                 let _ = child.wait();

@@ -22,6 +22,24 @@ fn monorepo_path() -> PathBuf {
     p
 }
 
+/// Recursively copy `src` into `dst` (both dirs). Used to run write-heavy tests
+/// against a throwaway copy of a shared example tree, so learned artifacts
+/// (`.coverage`, `.fermut/`) never land in the checked-in sample or race a
+/// sibling test that reads the same tree.
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).unwrap();
+        }
+    }
+}
+
 #[test]
 fn list_emits_mutations() {
     Command::cargo_bin("fermut")
@@ -77,34 +95,28 @@ fn smart_order_builds_sidecar_and_keeps_verdict() {
     // So we generate a per-test `.coverage` first and feed it to `run`. The
     // sample's `test_add`/`test_add_commutes` pair covers `add`'s mutated line
     // twice — the >1-test case the capture path needs.
-    let src = sample_path().join("src");
-    let tests = sample_path().join("tests");
-    // Kill-order sidecar lands at the project root's `.fermut/`.
-    let sidecar = sample_path().join(".fermut").join("kill-order.json");
-    let coverage = sample_path().join(".coverage");
+    //
+    // This test WRITES learned artifacts (`.coverage`, `.fermut/kill-order.json`)
+    // beside the project, so run it against a throwaway copy of the sample rather
+    // than the checked-in tree — otherwise those files linger as untracked and
+    // could race a sibling e2e reading the same sample under `cargo test`'s
+    // parallelism. The tempdir (and everything under it) is removed on drop, on
+    // the happy path and on any panic below.
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
 
-    // This test writes learned artifacts into the SHARED sample tree, not a temp
-    // copy. Remove them via a Drop guard so a mid-test panic (a failed assert)
-    // still cleans up — otherwise they'd linger as untracked files and could
-    // bleed into other e2e runs that share the sample.
-    struct Cleanup<'a>(&'a [&'a std::path::Path]);
-    impl Drop for Cleanup<'_> {
-        fn drop(&mut self) {
-            for p in self.0 {
-                let _ = std::fs::remove_file(p);
-            }
-        }
-    }
-    let _cleanup = Cleanup(&[&sidecar, &coverage]);
-    // Start from a clean slate too (a prior aborted run may have left them).
-    let _ = std::fs::remove_file(&sidecar);
-    let _ = std::fs::remove_file(&coverage);
+    let src = sample.join("src");
+    let tests = sample.join("tests");
+    // Kill-order sidecar lands at the project root's `.fermut/`.
+    let sidecar = sample.join(".fermut").join("kill-order.json");
+    let coverage = sample.join(".coverage");
 
     // Build the per-test coverage database (pytest-cov contexts).
     Command::cargo_bin("fermut")
         .unwrap()
         .arg("coverage")
-        .arg(sample_path())
+        .arg(&sample)
         .assert()
         .success();
     assert!(
@@ -173,7 +185,7 @@ fn smart_order_builds_sidecar_and_keeps_verdict() {
                 // The path the id resolves to must exist under the sample tree.
                 // A normalized-away id (wrong prefix, absolute rewrite) wouldn't.
                 assert!(
-                    sample_path().join(path_part).exists(),
+                    sample.join(path_part).exists(),
                     "recorded killer {nodeid:?} resolves to {path_part:?}, which does not \
                      exist under the sample — pytest reported an id we can't match",
                 );
@@ -187,7 +199,7 @@ fn smart_order_builds_sidecar_and_keeps_verdict() {
 
     run(); // reads the sidecar to order; same verdict
 
-    // Artifacts removed by `_cleanup`'s Drop, on this path and on any panic above.
+    // Artifacts live under `tmp`, removed when the tempdir drops.
 }
 
 #[test]

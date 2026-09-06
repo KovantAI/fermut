@@ -123,6 +123,14 @@ command line. A test-shuffling plugin (`pytest-randomly`,
 disable the plugin for fermut runs (e.g. `pytest_args = ["-p",
 "no:randomly"]`) if you want the `-x` short-circuit.
 
+Learning the killer also relies on parsing pytest's `FAILED`/`ERROR`
+summary lines, which fermut reads uncolored (it pipes stdout, so pytest
+drops color by default). Forcing color on regardless — `PY_COLORS=1`,
+`force_color`, or `--color=yes` in `addopts` — wraps those lines in ANSI
+escapes and the killer isn't recorded. This only forfeits the next run's
+ordering speedup, never a verdict; drop the forced color for fermut runs
+to keep the learning working.
+
 ## Time-boxed runs (`--max-time`) { #time-boxed-runs-max-time }
 
 `--max-time <SECS>` caps the **testing phase** at a wall-clock ceiling —

@@ -115,6 +115,14 @@ impl KillOrder {
 /// `::`) — is not mistaken for a killing test. Recording that bogus "nodeid"
 /// would never match a coverage-selected id (so it can't reorder anything) and
 /// would only pollute the sidecar.
+///
+/// Matches the plain `FAILED `/`ERROR ` prefix, so it assumes an uncolored
+/// summary. fermut pipes stdout (not a TTY), which makes pytest drop color by
+/// default; but a forced color (`PY_COLORS=1`, `force_color`, or `--color=yes`
+/// in `addopts`) wraps the prefix in ANSI escapes, the `strip_prefix` misses,
+/// and the killer simply isn't learned. Advisory only — this forfeits the next
+/// run's ordering speedup, never a verdict. If forced color becomes common,
+/// strip ANSI before matching.
 pub fn parse_first_failed(stdout: &str) -> Option<String> {
     stdout.lines().find_map(|line| {
         let trimmed = line.trim();

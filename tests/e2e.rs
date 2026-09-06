@@ -64,17 +64,39 @@ fn run_finds_known_survivor() {
 }
 
 #[test]
-#[ignore = "requires pytest + ty on PATH; enable once env is set up"]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn smart_order_builds_sidecar_and_keeps_verdict() {
     // Two runs: the first learns which tests kill mutants and writes
     // `.fermut/kill-order.json`; the second reads it to order tests. The
     // mutation result must be identical across both — ordering only changes
     // *which test runs first*, never the kill/survive verdict.
+    //
+    // Smart ordering only ever reorders *coverage-selected* tests, so the
+    // feature is a no-op without per-test coverage: with the whole-tests-dir
+    // sweep there is nothing to reorder and the sidecar is never written.
+    // So we generate a per-test `.coverage` first and feed it to `run`. The
+    // sample's `test_add`/`test_add_commutes` pair covers `add`'s mutated line
+    // twice — the >1-test case the capture path needs.
     let src = sample_path().join("src");
     let tests = sample_path().join("tests");
     // Kill-order sidecar lands at the project root's `.fermut/`.
     let sidecar = sample_path().join(".fermut").join("kill-order.json");
+    let coverage = sample_path().join(".coverage");
     let _ = std::fs::remove_file(&sidecar);
+    let _ = std::fs::remove_file(&coverage);
+
+    // Build the per-test coverage database (pytest-cov contexts).
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(sample_path())
+        .assert()
+        .success();
+    assert!(
+        coverage.exists(),
+        "coverage step must write the .coverage database at {}",
+        coverage.display()
+    );
 
     let run = || {
         Command::cargo_bin("fermut")
@@ -83,6 +105,8 @@ fn smart_order_builds_sidecar_and_keeps_verdict() {
             .arg(&src)
             .arg("--tests")
             .arg(&tests)
+            .arg("--coverage")
+            .arg(&coverage)
             .arg("--no-ty-filter")
             .arg("--no-cache") // isolate ordering from cache reuse
             .assert()
@@ -98,9 +122,10 @@ fn smart_order_builds_sidecar_and_keeps_verdict() {
     );
     run(); // reads the sidecar to order; same verdict
 
-    // Don't leave the learned sidecar behind in the shared sample tree — it
+    // Don't leave learned artifacts behind in the shared sample tree — they
     // would show as untracked and could bleed into other e2e runs.
     let _ = std::fs::remove_file(&sidecar);
+    let _ = std::fs::remove_file(&coverage);
 }
 
 #[test]

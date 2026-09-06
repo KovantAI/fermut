@@ -243,7 +243,7 @@ impl CoverageContexts {
         project_root: &Path,
     ) -> Result<Arc<Self>> {
         let file_keys: Vec<&str> = records.iter().map(|(f, _)| f.as_str()).collect();
-        let coverage_cwd = detect_coverage_cwd(source_root, &file_keys);
+        let coverage_cwd = detect_coverage_cwd(source_root, project_root, &file_keys);
         // Canonicalize both anchors so prefix stripping works under symlink
         // roots (e.g., `/tmp` → `/private/tmp` on macOS). Without this,
         // rebase_node_id strips against `/private/var/...` while abs paths
@@ -429,28 +429,42 @@ fn is_sqlite(path: &Path) -> Result<bool> {
 }
 
 /// Find the directory `coverage run` was invoked from by probing for the
-/// recorded file keys. Coverage.py records paths relative to that cwd, so
-/// the lowest ancestor of `source_root` where the keys resolve on disk is
-/// our answer. Falls back to `source_root` if nothing matches — same shape
-/// as the old behavior, which assumed coverage and source share a cwd.
-fn detect_coverage_cwd(source_root: &Path, keys: &[&str]) -> PathBuf {
+/// recorded file keys. Coverage.py records *relative* paths relative to that
+/// cwd, so the lowest ancestor of `source_root` where the keys resolve on disk
+/// is our answer. When keys are *absolute* (the coverage.py default, and what
+/// `.coverage` SQLite stores) they can't discriminate a cwd, so we return
+/// `project_root` — pytest's rootdir, which its recorded node ids are relative
+/// to. Falls back to `source_root` if there are no keys or no relative key
+/// resolves.
+fn detect_coverage_cwd(source_root: &Path, project_root: &Path, keys: &[&str]) -> PathBuf {
     if keys.is_empty() {
         return source_root.to_path_buf();
     }
     // 8 is enough to disambiguate any realistic project layout while staying
     // cheap. A real mismatch shows up on the first key; we sample a few more
     // only so a single oddly-named file doesn't dominate the decision.
-    let sample: Vec<&str> = keys.iter().take(8).copied().collect();
-    let resolves_in = |dir: &Path| -> bool {
-        sample.iter().any(|k| {
-            let p = Path::new(k);
-            if p.is_absolute() {
-                p.exists()
-            } else {
-                dir.join(k).exists()
-            }
-        })
-    };
+    //
+    // Only *relative* file keys discriminate the coverage cwd: joining a
+    // relative key onto a candidate dir either resolves to a real file or it
+    // doesn't. An *absolute* key (coverage.py with `relative_files` off — the
+    // default, and what `.coverage` SQLite stores) `exists()` no matter which
+    // dir we probe, so it would falsely "resolve" under the first candidate
+    // (`source_root`) and hand back the wrong cwd — node ids would then get a
+    // spurious `src/` prefix, pytest collects nothing, and every mutant is
+    // falsely killed (vacuous 100%). So probe with relative keys only.
+    let sample: Vec<&str> = keys
+        .iter()
+        .copied()
+        .filter(|k| Path::new(k).is_relative())
+        .take(8)
+        .collect();
+    if sample.is_empty() {
+        // All keys absolute → nothing to probe. Pytest node ids are recorded
+        // relative to pytest's rootdir, which in the mirror is `project_root`,
+        // so that is the cwd node ids resolve against.
+        return project_root.to_path_buf();
+    }
+    let resolves_in = |dir: &Path| -> bool { sample.iter().any(|k| dir.join(k).exists()) };
 
     if resolves_in(source_root) {
         return source_root.to_path_buf();
@@ -570,6 +584,38 @@ mod tests {
             line,
             stmt_line: line,
         }
+    }
+
+    #[test]
+    fn detect_coverage_cwd_absolute_keys_use_project_root() {
+        // `.coverage` SQLite (and any coverage.py run with `relative_files`
+        // off) records ABSOLUTE file keys. Those `exists()` regardless of the
+        // dir we probe, so the relative-key join heuristic can't discriminate
+        // — it would pick `source_root` (`.../src`) and hand back the wrong
+        // cwd, prefixing every node id with `src/`. Assert we fall back to
+        // `project_root` (pytest's rootdir) instead.
+        let source_root = Path::new("/proj/src");
+        let project_root = Path::new("/proj");
+        let abs_keys = ["/proj/src/calculator.py", "/proj/src/util.py"];
+        assert_eq!(
+            detect_coverage_cwd(source_root, project_root, &abs_keys),
+            project_root.to_path_buf()
+        );
+    }
+
+    #[test]
+    fn detect_coverage_cwd_relative_keys_probe_ancestors() {
+        // Relative keys still drive the join-probe: coverage run from the
+        // project root records `src/calculator.py`, which resolves under the
+        // parent of `source_root`, not `source_root` itself.
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path();
+        let src = proj.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("calculator.py"), "x = 1\n").unwrap();
+
+        let cwd = detect_coverage_cwd(&src, proj, &["src/calculator.py"]);
+        assert_eq!(cwd, proj.to_path_buf());
     }
 
     #[test]

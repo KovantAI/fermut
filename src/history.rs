@@ -909,6 +909,7 @@ mod tests {
             coverage: None,
             hypothesis_seed: None,
             pytest_args: Vec::new(),
+            smart_order: false,
             cache: false,
             cache_path: PathBuf::from(".fermut/cache.json"),
             history: false,

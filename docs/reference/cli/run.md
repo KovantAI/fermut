@@ -49,12 +49,42 @@ fermut run [PATH] [flags...]
 | `--fail-under <SCORE>`      | none (any survivor fails)        | Pass when mutation score is at least `SCORE` (0.0–100.0). Equal to threshold passes. |
 | `--no-verify-baseline`      | baseline check on                | Skip the pre-flight run of the unmutated suite. By default fermut runs your full suite once and aborts if it isn't green (a red suite would inflate the score toward 100%). Skip only when you've already confirmed green (e.g. CI ran it). |
 | `--baseline-timeout <SECS>` | `300`                            | Wall-clock cap for the baseline run. Separate from `--timeout` (which bounds a single mutant) because the baseline runs the whole suite. A suite that exceeds it is killed and the run aborts. Raise for large suites. |
+| `--no-smart-order`          | ordering on                      | Disable smart test ordering. See [Smart test ordering](#smart-test-ordering). |
 | `--max-time <SECS>`         | off (whole catalogue)            | Wall-clock ceiling on the testing phase. Evaluates highest-value mutants first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` (excluded from the score) instead of run — in-flight mutants finish. A predictable time ceiling for PR gates. See [Time-boxed runs](#time-boxed-runs-max-time). |
 | `--fail-on-regression <PTS>`| off                              | Exit non-zero when score dropped more than `PTS` vs the most recent prior entry on the same git branch. Requires history. Ignored in `--watch`. |
 | `--trend-branch <NAME>`     | none                             | Restrict the `--trend` markdown block's "previous run" lookup to entries recorded on this branch. Requires `--trend`. |
 
 Exit code is non-zero when any mutant survives — wire that into CI to
 gate on mutation score.
+
+## Smart test ordering { #smart-test-ordering }
+
+When coverage selects **more than one** test for a mutant, fermut runs
+them under pytest's `-x` (stop at the first failure), so the mutant dies
+as soon as any selected test fails. Smart ordering runs the **most
+targeted** test first — the one covering the fewest lines *of the mutated
+file* — because a test focused on that file is the likelier killer, so
+`-x` short-circuits sooner. Scoping to the mutated file (rather than the
+test's repo-wide footprint) keeps a broad integration test that heavily
+exercises the mutated function ranked ahead of a test that merely grazes
+one of its lines. It needs no run history: the signal comes from the
+coverage data already loaded, so it helps on the first run and on
+freshly-changed `--since` lines.
+
+**On by default** (only active when `--coverage` is in use). **Ordering
+never changes the score** — it only permutes the selected tests, so `-x`
+still runs until a failure or exhaustion and the kill/survive result is
+identical. (Under a tight `--timeout` a mutant can flip between `killed`
+and `timeout` depending on which test runs first, but both count as
+detected, so the score and pass/fail are unchanged.) Disable with
+`--no-smart-order` (or `smart_order = false` in config); the tests then
+run in plain coverage order.
+
+Ordering relies on pytest honoring the node-id order fermut passes on the
+command line. A test-shuffling plugin (`pytest-randomly`,
+`pytest-random-order`) re-sorts collected tests and silently defeats it —
+disable the plugin for fermut runs (e.g. `pytest_args = ["-p",
+"no:randomly"]`) if you want the `-x` short-circuit.
 
 ## Time-boxed runs (`--max-time`) { #time-boxed-runs-max-time }
 

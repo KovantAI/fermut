@@ -48,6 +48,7 @@ pub(crate) fn build_config(
     cli_fail_under: Option<f64>,
     cli_no_verify_baseline: bool,
     cli_baseline_timeout: Option<u64>,
+    cli_no_smart_order: bool,
     cli_max_time: Option<u64>,
     f: FilterArgs,
 ) -> Result<Config> {
@@ -142,6 +143,13 @@ pub(crate) fn build_config(
         cli_pytest_args
     } else {
         file.pytest_args.clone().unwrap_or_default()
+    };
+
+    // Smart test ordering: default on; `--no-smart-order` (CLI) wins, else config.
+    let smart_order = if cli_no_smart_order {
+        false
+    } else {
+        file.smart_order.unwrap_or(true)
     };
 
     let cache = if cli_no_cache {
@@ -243,6 +251,7 @@ pub(crate) fn build_config(
         coverage,
         hypothesis_seed,
         pytest_args,
+        smart_order,
         cache,
         cache_path,
         history,
@@ -362,7 +371,8 @@ mod tests {
             cli_fail_under,
             false,
             None,
-            None,
+            false, // cli_no_smart_order
+            None,  // cli_max_time
             filter,
         )
     }
@@ -544,6 +554,57 @@ mod tests {
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
         assert!(cfg.coverage_path.is_none());
         assert!(cfg.coverage.is_none());
+    }
+
+    #[test]
+    fn smart_order_defaults_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert!(cfg.smart_order, "smart ordering is on by default");
+    }
+
+    #[test]
+    fn smart_order_config_false_disables() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "smart_order = false\n").unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert!(!cfg.smart_order);
+    }
+
+    #[test]
+    fn cli_no_smart_order_overrides_config_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "smart_order = true\n").unwrap();
+        let cfg = build_config(
+            tmp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            Vec::new(),
+            false,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            false,
+            None,
+            true, // cli_no_smart_order
+            None, // cli_max_time
+            empty_filter(),
+        )
+        .unwrap();
+        assert!(!cfg.smart_order, "--no-smart-order wins over config on");
     }
 
     #[test]

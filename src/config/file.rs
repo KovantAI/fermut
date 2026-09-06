@@ -29,6 +29,9 @@ pub struct FileConfig {
     pub coverage: Option<PathBuf>,
     pub hypothesis_seed: Option<u64>,
     pub pytest_args: Option<Vec<String>>,
+    /// Smart test ordering (cold-start, coverage-breadth prior). Default true;
+    /// CLI `--no-smart-order` overrides.
+    pub smart_order: Option<bool>,
     pub cache: Option<bool>,
     pub cache_path: Option<PathBuf>,
     pub history: Option<bool>,

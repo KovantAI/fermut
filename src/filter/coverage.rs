@@ -60,6 +60,23 @@ pub struct CoverageContexts {
     /// Populated lazily on first miss so per-mutant lookups skip a `canonicalize`
     /// syscall after the first hit per unique source file.
     canonical_cache: RwLock<HashMap<PathBuf, PathBuf>>,
+    /// Global per-test coverage breadth: how many `(file, line)` cells each test
+    /// node id executes across the whole coverage map. Computed once from `map`.
+    /// Used as the smart-order *tie-breaker* (and cold-start fallback) behind the
+    /// mutated-file-scoped [`file_test_breadth`](Self::file_test_breadth): among
+    /// tests tied on the mutated file, the one narrower across the whole repo
+    /// sinks below the one narrower there too. Global breadth alone can misrank a
+    /// broad-but-relevant killer, which only weakens the `-x` short-circuit —
+    /// never the verdict.
+    test_breadth: HashMap<String, u32>,
+    /// Per-`(file, test)` breadth: for each source file, how many of *its* lines
+    /// each test node id executes. This is the specificity signal smart ordering
+    /// actually wants — a test touching the fewest lines *of the mutated file* is
+    /// the most focused on it, so the likeliest `-x` killer, even if it ranges
+    /// widely across other files. Scoping to the mutated file is what keeps a
+    /// broad integration test that heavily exercises the mutated function from
+    /// sinking below a narrow test that merely grazes one of its lines.
+    file_test_breadth: HashMap<PathBuf, HashMap<String, u32>>,
 }
 
 /// Intermediate shape both readers (JSON export, SQLite DB) produce before
@@ -316,10 +333,107 @@ impl CoverageContexts {
             ));
         }
 
+        // Per-test breadth: count the `(file, line)` cells each node id covers,
+        // both globally and per file. One pass over the built map — cheap, done
+        // once at load. The per-file counts drive smart ordering; the global
+        // counts are the tie-breaker.
+        let mut test_breadth: HashMap<String, u32> = HashMap::new();
+        let mut file_test_breadth: HashMap<PathBuf, HashMap<String, u32>> = HashMap::new();
+        for (path, per_line) in &map {
+            let per_file = file_test_breadth.entry(path.clone()).or_default();
+            for ids in per_line.values() {
+                for id in ids {
+                    *test_breadth.entry(id.clone()).or_insert(0) += 1;
+                    *per_file.entry(id.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+
         Ok(Arc::new(Self {
             map,
             canonical_cache: RwLock::new(HashMap::new()),
+            test_breadth,
+            file_test_breadth,
         }))
+    }
+
+    /// Per-test coverage breadth (number of covered `(file, line)` cells),
+    /// keyed by test node id. Empty when there are no contexts. The smart-order
+    /// cold-start prior reads this to prefer more-targeted tests.
+    pub fn breadth_map(&self) -> &HashMap<String, u32> {
+        &self.test_breadth
+    }
+
+    /// Reorder coverage-selected test node ids so the test most focused on
+    /// `file` — the one covering the fewest of *its* lines — runs first, with
+    /// global breadth as the tie-breaker. Under pytest's `-x` a focused unit
+    /// test is the likelier killer, so trying it first lets the mutant die (and
+    /// the run return) sooner. This is the cold-start ordering prior: it needs no
+    /// run history, only the coverage already loaded, so it helps on run 1 and on
+    /// freshly-changed `--since` lines.
+    ///
+    /// Scoping to `file` (the mutated file) is what makes the signal correct: a
+    /// broad integration test that heavily exercises the mutated function ranks
+    /// by *its lines in this file*, not its repo-wide footprint, so it no longer
+    /// sinks below a narrow test that merely grazes one line here.
+    ///
+    /// Borrows the input — the returned refs point back into `ids`; the caller
+    /// keeps `ids` alive. `sort_by_key` is stable, so ties (and ids absent from
+    /// the breadth maps, treated as maximally broad → sorted last) keep the
+    /// caller's order. **Only permutes** the set — never adds or drops an id —
+    /// so the kill/survive verdict is unchanged; only which test pytest tries
+    /// first.
+    pub fn order_by_breadth_in<'a>(&self, file: &Path, ids: &'a [String]) -> Vec<&'a String> {
+        let per_file = self.file_test_breadth.get(&self.resolve_key(file));
+        let mut ordered: Vec<&String> = ids.iter().collect();
+        ordered.sort_by_key(|id| {
+            let local = per_file
+                .and_then(|m| m.get(*id))
+                .copied()
+                .unwrap_or(u32::MAX);
+            let global = self.test_breadth.get(*id).copied().unwrap_or(u32::MAX);
+            (local, global)
+        });
+        ordered
+    }
+
+    /// Global-breadth-only ordering: rank by repo-wide `(file, line)` cell count,
+    /// ignoring which file the mutant is in. Retained as the breadth primitive
+    /// and for callers with no file to scope by; prefer
+    /// [`order_by_breadth_in`](Self::order_by_breadth_in) whenever a mutated file
+    /// is known. Permutation-only, same as the scoped form.
+    pub fn order_by_breadth<'a>(&self, ids: &'a [String]) -> Vec<&'a String> {
+        let mut ordered: Vec<&String> = ids.iter().collect();
+        ordered.sort_by_key(|id| self.test_breadth.get(*id).copied().unwrap_or(u32::MAX));
+        ordered
+    }
+
+    /// Resolve a caller-supplied path to the canonical key `map` and
+    /// `file_test_breadth` are indexed by, reusing (and populating) the canonical
+    /// cache. The single path-resolution ladder shared by
+    /// [`tests_for`](Self::tests_for) and the breadth ordering, so the two can
+    /// never disagree about a file's key. Direct hit (path already keys `map`)
+    /// avoids the `canonicalize` syscall; misses canonicalize once and cache the
+    /// mapping — unique-file count is small relative to mutant count, so hit rate
+    /// is high after warm-up. Returns the path unchanged when it already keys
+    /// `map`.
+    fn resolve_key(&self, file: &Path) -> PathBuf {
+        if self.map.contains_key(file) {
+            return file.to_path_buf();
+        }
+        if let Some(canonical) = self
+            .canonical_cache
+            .read()
+            .ok()
+            .and_then(|g| g.get(file).cloned())
+        {
+            return canonical;
+        }
+        let canonical = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+        if let Ok(mut guard) = self.canonical_cache.write() {
+            guard.insert(file.to_path_buf(), canonical.clone());
+        }
+        canonical
     }
 
     /// Test node ids that executed `file:line`, or `None` if none recorded.
@@ -331,27 +445,8 @@ impl CoverageContexts {
     /// unique-file count is small relative to mutant count, so cache hit rate
     /// is high after warm-up.
     pub fn tests_for(&self, file: &Path, line: u32) -> Option<&[String]> {
-        if let Some(per_line) = self.map.get(file) {
-            return per_line.get(&line).map(|v| v.as_slice());
-        }
-        if let Some(canonical) = self
-            .canonical_cache
-            .read()
-            .ok()
-            .and_then(|g| g.get(file).cloned())
-        {
-            return self
-                .map
-                .get(&canonical)
-                .and_then(|per_line| per_line.get(&line))
-                .map(|v| v.as_slice());
-        }
-        let canonical = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
-        if let Ok(mut guard) = self.canonical_cache.write() {
-            guard.insert(file.to_path_buf(), canonical.clone());
-        }
         self.map
-            .get(&canonical)
+            .get(&self.resolve_key(file))
             .and_then(|per_line| per_line.get(&line))
             .map(|v| v.as_slice())
     }
@@ -595,6 +690,212 @@ mod tests {
         assert_eq!(tests, &["tests/test_a.py::test_x".to_string()]);
         // Line 2 only had empty contexts → dropped entirely.
         assert!(ctx.tests_for(&py, 2).is_none());
+    }
+
+    #[test]
+    fn breadth_map_counts_lines_per_test() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("foo.py"), "a = 1\nb = 2\nc = 3\n").unwrap();
+        // test_wide covers 3 lines; test_narrow covers 1.
+        let doc = r#"{
+            "files": {
+                "foo.py": {
+                    "contexts": {
+                        "1": ["tests/t.py::test_wide|run"],
+                        "2": ["tests/t.py::test_wide|run", "tests/t.py::test_narrow|run"],
+                        "3": ["tests/t.py::test_wide|run"]
+                    }
+                }
+            }
+        }"#;
+        let path = write_doc(tmp.path(), doc);
+        let ctx = CoverageContexts::from_json(&path, tmp.path(), tmp.path()).unwrap();
+        let breadth = ctx.breadth_map();
+        assert_eq!(breadth.get("tests/t.py::test_wide"), Some(&3));
+        assert_eq!(breadth.get("tests/t.py::test_narrow"), Some(&1));
+        // A test not in the coverage map has no breadth.
+        assert_eq!(breadth.get("tests/t.py::test_absent"), None);
+    }
+
+    fn ctx_with_breadth(dir: &Path) -> Arc<CoverageContexts> {
+        std::fs::write(dir.join("foo.py"), "a = 1\nb = 2\nc = 3\n").unwrap();
+        let doc = r#"{
+            "files": {
+                "foo.py": {
+                    "contexts": {
+                        "1": ["tests/t.py::wide|run"],
+                        "2": ["tests/t.py::wide|run", "tests/t.py::narrow|run"],
+                        "3": ["tests/t.py::wide|run", "tests/t.py::mid|run"]
+                    }
+                }
+            }
+        }"#;
+        // wide→3 lines, mid→1, narrow→1.
+        let path = write_doc(dir, doc);
+        CoverageContexts::from_json(&path, dir, dir).unwrap()
+    }
+
+    #[test]
+    fn order_by_breadth_puts_the_most_specific_test_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_breadth(tmp.path());
+        // Input in an arbitrary order; wide (breadth 3) must sink, the two
+        // breadth-1 tests keep their relative input order (stable).
+        let input: Vec<String> = ["tests/t.py::wide", "tests/t.py::narrow", "tests/t.py::mid"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let out: Vec<String> = ctx.order_by_breadth(&input).into_iter().cloned().collect();
+        assert_eq!(
+            out,
+            vec![
+                "tests/t.py::narrow".to_string(),
+                "tests/t.py::mid".to_string(),
+                "tests/t.py::wide".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn order_by_breadth_unknown_ids_sort_last_and_keep_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_breadth(tmp.path());
+        // `ghost` isn't in the coverage map → treated as maximally broad → last;
+        // `narrow` (breadth 1) leads.
+        let input: Vec<String> = ["tests/t.py::ghost", "tests/t.py::narrow"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let out: Vec<String> = ctx.order_by_breadth(&input).into_iter().cloned().collect();
+        assert_eq!(out[0], "tests/t.py::narrow");
+        assert_eq!(out[1], "tests/t.py::ghost");
+    }
+
+    #[test]
+    fn order_by_breadth_is_always_a_permutation() {
+        // Verdict-invariance: ordering only permutes the set. pytest `-x` exits
+        // non-zero iff any selected test fails — independent of order — so an
+        // identical set is an identical kill/survive verdict.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_breadth(tmp.path());
+        for raw in [
+            vec![],
+            vec!["tests/t.py::wide"],
+            vec!["tests/t.py::wide", "tests/t.py::narrow", "tests/t.py::mid"],
+            vec!["ghost", "tests/t.py::wide", "dup", "dup"],
+        ] {
+            let input: Vec<String> = raw.iter().map(|s| s.to_string()).collect();
+            let out: Vec<String> = ctx.order_by_breadth(&input).into_iter().cloned().collect();
+            let mut a = input.clone();
+            let mut b = out.clone();
+            a.sort();
+            b.sort();
+            assert_eq!(a, b, "must be a permutation of {input:?}, got {out:?}");
+        }
+    }
+
+    #[test]
+    fn order_by_breadth_in_scopes_to_the_mutated_file() {
+        // `big` covers 2 lines of foo.py and nothing else → global breadth 2.
+        // `small` covers 1 line of foo.py but all 3 lines of bar.py → global 4.
+        // Global ordering would put `big` first (2 < 4); scoped-to-foo ordering
+        // must put `small` first (1 foo-line < 2), because `small` is the test
+        // most focused on the mutated file — the fix for the "broad-but-relevant
+        // killer sinks" misrank.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("foo.py"), "a = 1\nb = 2\n").unwrap();
+        std::fs::write(tmp.path().join("bar.py"), "x = 1\ny = 2\nz = 3\n").unwrap();
+        let doc = r#"{
+            "files": {
+                "foo.py": {
+                    "contexts": {
+                        "1": ["tests/t.py::big|run"],
+                        "2": ["tests/t.py::big|run", "tests/t.py::small|run"]
+                    }
+                },
+                "bar.py": {
+                    "contexts": {
+                        "1": ["tests/t.py::small|run"],
+                        "2": ["tests/t.py::small|run"],
+                        "3": ["tests/t.py::small|run"]
+                    }
+                }
+            }
+        }"#;
+        let path = write_doc(tmp.path(), doc);
+        let ctx = CoverageContexts::from_json(&path, tmp.path(), tmp.path()).unwrap();
+
+        let input: Vec<String> = ["tests/t.py::big", "tests/t.py::small"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // Global ordering: big (2) before small (4).
+        let global: Vec<String> = ctx.order_by_breadth(&input).into_iter().cloned().collect();
+        assert_eq!(global[0], "tests/t.py::big");
+
+        // Scoped to foo.py: small (1 foo-line) before big (2 foo-lines).
+        let foo = tmp.path().join("foo.py");
+        let scoped: Vec<String> = ctx
+            .order_by_breadth_in(&foo, &input)
+            .into_iter()
+            .cloned()
+            .collect();
+        assert_eq!(
+            scoped,
+            vec![
+                "tests/t.py::small".to_string(),
+                "tests/t.py::big".to_string()
+            ],
+            "scoped ordering prefers the test narrowest in the mutated file"
+        );
+    }
+
+    #[test]
+    fn order_by_breadth_in_unknown_file_falls_back_to_global() {
+        // A mutated file with no coverage entry → no per-file breadth → the
+        // scoped method must fall back to global breadth, not scramble the order.
+        // wide→3 global, narrow/mid→1 global → narrow, mid, wide.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_breadth(tmp.path());
+        let input: Vec<String> = ["tests/t.py::wide", "tests/t.py::narrow", "tests/t.py::mid"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let out: Vec<String> = ctx
+            .order_by_breadth_in(Path::new("/nonexistent/nope.py"), &input)
+            .into_iter()
+            .cloned()
+            .collect();
+        assert_eq!(
+            out,
+            vec![
+                "tests/t.py::narrow".to_string(),
+                "tests/t.py::mid".to_string(),
+                "tests/t.py::wide".to_string(),
+            ],
+            "no per-file breadth → global tie-breaker orders the set"
+        );
+    }
+
+    #[test]
+    fn order_by_breadth_in_unknown_ids_sort_last_and_keep_order() {
+        // `ghost` is in neither the per-file nor the global breadth map → both
+        // keys u32::MAX → sorts last; the known narrow test leads.
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_breadth(tmp.path());
+        let foo = tmp.path().join("foo.py");
+        let input: Vec<String> = ["tests/t.py::ghost", "tests/t.py::narrow"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let out: Vec<String> = ctx
+            .order_by_breadth_in(&foo, &input)
+            .into_iter()
+            .cloned()
+            .collect();
+        assert_eq!(out[0], "tests/t.py::narrow");
+        assert_eq!(out[1], "tests/t.py::ghost");
     }
 
     #[test]

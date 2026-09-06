@@ -177,7 +177,8 @@ fn build_run_config(opts: &AutofixOpts) -> Result<crate::config::Config> {
         None,
         false,
         None,
-        None, // max_time
+        false, // no_smart_order
+        None,  // max_time
         filter,
     )
 }

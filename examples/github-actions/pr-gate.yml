@@ -29,6 +29,7 @@ jobs:
       - name: install project + fermut
         run: |
           uv sync
+          uv pip install pytest-cov # `fermut coverage` shells `pytest --cov` into this venv
           uv tool install fermut
 
       # Per-test coverage. fermut reads coverage.py's `.coverage` SQLite

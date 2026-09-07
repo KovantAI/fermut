@@ -241,6 +241,23 @@ const DRAIN_GRACE: Duration = Duration::from_secs(5);
 /// [`DRAIN_GRACE`], which usually *recovers* the datapoint the child already
 /// wrote. Bytes are decoded lossily rather than via `read_to_string` so a single
 /// non-UTF-8 byte can't discard the whole capture.
+/// Human-readable label for a pytest anomaly exit code (see the [pytest docs]).
+/// Used to describe an [`MutantOutcome::Error`] when a per-mutant run produced no
+/// real verdict — most importantly exit 5, "no tests collected", which the old
+/// "non-zero == kill" logic would have miscounted as a kill.
+///
+/// [pytest docs]: https://docs.pytest.org/en/stable/reference/exit-codes.html
+fn pytest_anomaly_message(code: i32) -> String {
+    let what = match code {
+        2 => "test session interrupted",
+        3 => "internal error",
+        4 => "usage error",
+        5 => "no tests collected",
+        _ => "anomalous exit",
+    };
+    format!("pytest exit {code}: {what} (not a kill)")
+}
+
 fn wait_draining_stdout(
     child: Child,
     timeout: Duration,
@@ -413,18 +430,37 @@ impl Runner for PytestRunner {
             let child = cmd.spawn().context("spawning test runner")?;
 
             match wait_draining_stdout(child, self.timeout, kill_group)? {
-                (Some(status), output) => {
-                    if status.success() {
-                        Ok(MutantOutcome::survived(mutant.clone()))
-                    } else {
-                        // Killed. When capturing, learn which test did it and
-                        // record it for next time's ordering.
+                (Some(status), output) => match status.code() {
+                    Some(0) => Ok(MutantOutcome::survived(mutant.clone())),
+                    // Only a genuine test failure (pytest exit 1) is a kill.
+                    // Learn which test did it for next time's ordering.
+                    Some(1) => {
                         if let Some(out) = output {
                             self.record_killer(&out, &key_file, key_op);
                         }
                         Ok(MutantOutcome::killed(mutant.clone()))
                     }
-                }
+                    // pytest anomalies, NOT verdicts: 2 interrupted, 3 internal
+                    // error, 4 usage error, 5 no tests collected. The per-mutant
+                    // path feeds coverage-selected node ids; one stale/mis-rebased
+                    // id collects nothing (exit 5) and — counted as a kill — would
+                    // manufacture a fake kill that inflates the score. stdout here
+                    // is `Stdio::null()`, so it would be silent. Surface as an
+                    // Error outcome: excluded from the score denominator.
+                    Some(code @ 2..=5) => Ok(MutantOutcome::error(
+                        mutant.clone(),
+                        pytest_anomaly_message(code),
+                    )),
+                    // Any other non-zero code or a signal death (segfault etc.):
+                    // the process died running the tests — count it as killed, as
+                    // before.
+                    _ => {
+                        if let Some(out) = output {
+                            self.record_killer(&out, &key_file, key_op);
+                        }
+                        Ok(MutantOutcome::killed(mutant.clone()))
+                    }
+                },
                 (None, _) => Ok(MutantOutcome::timed_out(mutant.clone())),
             }
         })
@@ -907,6 +943,26 @@ mod tests {
                 out, want,
                 "smart={smart} must be a permutation of the input"
             );
+        }
+    }
+
+    // --- pytest_anomaly_message: exit 2/3/4/5 are anomalies, not kills.
+
+    #[test]
+    fn pytest_anomaly_message_names_each_code() {
+        // Exit 5 (no tests collected) is the one that used to masquerade as a
+        // kill; the rest round out the anomaly set. Every message must carry the
+        // numeric code and disclaim that it is not a kill.
+        for (code, needle) in [
+            (2, "interrupted"),
+            (3, "internal error"),
+            (4, "usage error"),
+            (5, "no tests collected"),
+        ] {
+            let msg = pytest_anomaly_message(code);
+            assert!(msg.contains(&code.to_string()), "code in {msg:?}");
+            assert!(msg.contains(needle), "{needle:?} in {msg:?}");
+            assert!(msg.contains("not a kill"), "disclaimer in {msg:?}");
         }
     }
 }

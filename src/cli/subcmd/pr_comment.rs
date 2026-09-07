@@ -283,3 +283,27 @@ mod tests {
         assert_eq!(resolve_repo(Some("o/r")).unwrap(), "o/r");
     }
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct PrCommentArgs {
+    /// Markdown file to post (produced by a prior `fermut run --markdown …`).
+    #[arg(long)]
+    pub(crate) markdown: std::path::PathBuf,
+
+    /// `owner/repo`. Defaults to `$GITHUB_REPOSITORY` (set automatically on GHA).
+    #[arg(long)]
+    pub(crate) repo: Option<String>,
+
+    /// Pull-request number. Defaults to one inferred from `$GITHUB_REF` or `$PR_NUMBER`.
+    #[arg(long)]
+    pub(crate) pr: Option<u64>,
+
+    /// Override the comment marker. Defaults to `<!-- fermut:report -->`.
+    /// Use to keep multiple gates (e.g. per-shard) as independent comments.
+    #[arg(long)]
+    pub(crate) marker: Option<String>,
+
+    /// Print the resolved plan without contacting GitHub.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+}

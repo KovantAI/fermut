@@ -911,3 +911,67 @@ mod tests {
         assert!(t.is_empty());
     }
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct SuggestArgs {
+    /// Path to a JSON report produced by `fermut run --json …`.
+    pub(crate) report: std::path::PathBuf,
+
+    /// Mutant selector: 1-based index, or substring of mutant id.
+    /// Omit when `--all-survivors` is set.
+    pub(crate) target: Option<String>,
+
+    /// Generate a test for every surviving (or timed-out) mutant in
+    /// the report.
+    #[arg(long)]
+    pub(crate) all_survivors: bool,
+
+    /// Append the generated test to the test file that already
+    /// references the enclosing symbol. Falls back to `--out` if no
+    /// candidate test file is found.
+    #[arg(long)]
+    pub(crate) apply: bool,
+
+    /// Append the generated test to this path instead of stdout.
+    #[arg(long)]
+    pub(crate) out: Option<std::path::PathBuf>,
+
+    /// Anthropic model id. Defaults to `claude-sonnet-4-6`.
+    #[arg(long)]
+    pub(crate) model: Option<String>,
+
+    /// Tests directory to mine for style samples. Defaults to `tests/`.
+    #[arg(long, num_args = 0..=1, default_missing_value = "tests")]
+    pub(crate) tests: Option<std::path::PathBuf>,
+
+    /// Source lines of context to include in the prompt on each side
+    /// of the mutant line.
+    #[arg(long, default_value_t = 8)]
+    pub(crate) context: usize,
+
+    /// How many existing tests to include in the prompt for style
+    /// reference.
+    #[arg(long, default_value_t = 2)]
+    pub(crate) sample_count: usize,
+
+    /// Disable the LLM response cache.
+    #[arg(long)]
+    pub(crate) no_cache: bool,
+
+    /// Custom path for the LLM response cache. Defaults to
+    /// `.fermut/llm-cache.json` under the project root.
+    #[arg(long)]
+    pub(crate) cache_path: Option<std::path::PathBuf>,
+
+    /// Output format. `human` (default) prints generated code blocks
+    /// and progress logs. `json` emits the structured `SuggestReport`
+    /// for agent consumers.
+    #[arg(long, value_enum, default_value_t = crate::cli::Format::Human)]
+    pub(crate) format: crate::cli::Format,
+
+    /// Run up to N Anthropic calls concurrently. Default `1`. Raise to
+    /// shorten wall-clock when `--all-survivors` is large; keep within
+    /// your tenant's rate limit. File writes stay serial.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) parallel: usize,
+}

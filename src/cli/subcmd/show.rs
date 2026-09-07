@@ -90,3 +90,17 @@ fn locate_outcome<'a>(report: &'a Report, target: &str) -> Result<&'a MutantOutc
     // first) when a partial selector is ambiguous.
     crate::cli::subcmd::explain::locate_outcome_impl(&report.outcomes, target)
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct ShowArgs {
+    /// Path to a JSON report produced by `fermut run --json …`.
+    pub(crate) report: std::path::PathBuf,
+
+    /// Optional mutant selector: 1-based index, or substring of mutant id.
+    /// Omit to print a summary list of survivors.
+    pub(crate) target: Option<String>,
+
+    /// Show all outcomes, not just survivors, when target is omitted.
+    #[arg(long)]
+    pub(crate) all: bool,
+}

@@ -578,3 +578,30 @@ mod tests {
         assert_eq!(ids_f, ids_r);
     }
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct NextArgs {
+    /// Path to a JSON report produced by `fermut run --json …`.
+    pub(crate) report: std::path::PathBuf,
+
+    /// Number of ranked survivors to emit. Defaults to 1 — the single
+    /// best next target.
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    pub(crate) limit: usize,
+
+    /// Emit every ranked survivor instead of just `--limit`.
+    #[arg(long, conflicts_with = "limit")]
+    pub(crate) all: bool,
+
+    /// Cap the output at this many estimated tokens: emit the
+    /// highest-ranked survivors that fit, drop the rest (count logged to
+    /// stderr). Overrides `--limit`. The single top target is always
+    /// included. For agents budgeting context window.
+    #[arg(long, value_name = "N", conflicts_with_all = ["limit", "all"])]
+    pub(crate) max_tokens: Option<usize>,
+
+    /// Output format. `json` (default) emits the ranked list for machine
+    /// consumers; `human` prints a readable summary.
+    #[arg(long, value_enum, default_value_t = crate::cli::Format::Json)]
+    pub(crate) format: crate::cli::Format,
+}

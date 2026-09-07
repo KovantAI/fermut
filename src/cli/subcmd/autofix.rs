@@ -654,3 +654,71 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "original\n");
     }
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct AutofixArgs {
+    /// Path to a JSON report produced by `fermut run --json …`.
+    pub(crate) report: std::path::PathBuf,
+
+    /// Mutant selector: 1-based index, or substring of mutant id.
+    /// Omit when `--all-survivors` is set.
+    pub(crate) target: Option<String>,
+
+    /// Fix every surviving (or timed-out) mutant in the report.
+    #[arg(long)]
+    pub(crate) all_survivors: bool,
+
+    /// Python source root (for the runner + baseline). Defaults to the
+    /// configured source_root or `.`.
+    #[arg(long, default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Tests directory: mined for style samples + the apply target, and
+    /// mirrored by the verifier. Defaults to the configured tests dir.
+    #[arg(long)]
+    pub(crate) tests: Option<std::path::PathBuf>,
+
+    /// Python interpreter (path) or virtualenv (dir) the verifier runs
+    /// pytest with (`<python> -m pytest`). Same discovery as `fermut run`.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) python: Option<std::path::PathBuf>,
+
+    /// Force generated tests into this file instead of the inferred one.
+    /// Must live inside the tests tree or the verifier won't see it.
+    #[arg(long)]
+    pub(crate) out: Option<std::path::PathBuf>,
+
+    /// Anthropic model id. Defaults to `claude-sonnet-4-6`.
+    #[arg(long)]
+    pub(crate) model: Option<String>,
+
+    /// Source lines of context around the mutant in the prompt.
+    #[arg(long, default_value_t = 8)]
+    pub(crate) context: usize,
+
+    /// How many existing tests to include in the prompt for style.
+    #[arg(long, default_value_t = 2)]
+    pub(crate) sample_count: usize,
+
+    /// Per-mutant verification timeout, in seconds.
+    #[arg(long, value_name = "SECS")]
+    pub(crate) timeout: Option<u64>,
+
+    /// Disable the LLM response cache.
+    #[arg(long)]
+    pub(crate) no_cache: bool,
+
+    /// Custom path for the LLM response cache.
+    #[arg(long)]
+    pub(crate) cache_path: Option<std::path::PathBuf>,
+
+    /// Keep generated tests even when verification fails (default reverts
+    /// them). Useful for inspecting why a suggestion didn't work.
+    #[arg(long)]
+    pub(crate) keep_failed: bool,
+
+    /// Output format. `json` (default) emits the structured report;
+    /// `human` prints a per-mutant summary.
+    #[arg(long, value_enum, default_value_t = crate::cli::Format::Json)]
+    pub(crate) format: crate::cli::Format,
+}

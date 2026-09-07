@@ -795,3 +795,14 @@ mod tests {
         assert!(c.detail.contains(".mutmut-cache"));
     }
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct DoctorArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Treat warnings as failures (exit non-zero on any warn).
+    #[arg(long)]
+    pub(crate) strict: bool,
+}

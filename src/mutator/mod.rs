@@ -8,6 +8,7 @@
 
 pub mod encoding;
 pub mod ignore;
+mod lexeme;
 pub mod loader;
 pub mod operators;
 mod text_range_serde;

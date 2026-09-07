@@ -1244,3 +1244,38 @@ name = "celery4"
         assert!(!paths.iter().any(|p| p.starts_with(&hidden)));
     }
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct MigrateArgs {
+    /// Which tool to migrate from.
+    #[arg(value_enum)]
+    pub(crate) from: crate::cli::MigrateSourceCli,
+
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Explicit source config file. Defaults: `pyproject.toml` /
+    /// `setup.cfg` for mutmut, `cosmic-ray.toml` for cosmic-ray.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) config: Option<std::path::PathBuf>,
+
+    /// Write `[tool.fermut]` into `pyproject.toml` instead of a
+    /// standalone `fermut.toml`.
+    #[arg(long)]
+    pub(crate) pyproject: bool,
+
+    /// Overwrite an existing `fermut.toml` or `[tool.fermut]` block.
+    #[arg(long)]
+    pub(crate) force: bool,
+
+    /// Print what would be written and which files would be rewritten,
+    /// without touching the filesystem.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+
+    /// Skip rewriting `# pragma: no mutate` → `# fermut: ignore`
+    /// (mutmut only; no-op for cosmic-ray).
+    #[arg(long)]
+    pub(crate) no_pragma_rewrite: bool,
+}

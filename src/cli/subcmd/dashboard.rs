@@ -806,3 +806,36 @@ mod tests {
         assert!(!html.contains("class='streak"));
     }
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct DashboardArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Custom path to the history log. Defaults to `<path>/.fermut/history.jsonl`.
+    #[arg(long)]
+    pub(crate) history_path: Option<std::path::PathBuf>,
+
+    /// Output path for the generated HTML. Created if missing.
+    #[arg(long, default_value = "fermut-dashboard.html")]
+    pub(crate) output: std::path::PathBuf,
+
+    /// Optional JSON report (from `fermut run --json`) used to
+    /// attach inline source diffs to each survivor. Without it the
+    /// survivor list still renders, but only the IDs are shown.
+    #[arg(long)]
+    pub(crate) report: Option<std::path::PathBuf>,
+
+    /// How many trailing history entries to show in the chart and
+    /// table. Defaults to 30.
+    #[arg(long, default_value_t = 30)]
+    pub(crate) limit: usize,
+
+    /// After writing, hand the file off to the OS's default browser
+    /// (`open` / `xdg-open` / `start`). Best-effort: a failure to
+    /// launch the helper degrades to a printed hint, not a non-zero
+    /// exit.
+    #[arg(long)]
+    pub(crate) open: bool,
+}

@@ -1108,3 +1108,46 @@ mod tests {
         assert_eq!(count_py_files(tmp.path()), 2);
     }
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct InitArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Write `[tool.fermut]` into `pyproject.toml` instead of a
+    /// standalone `fermut.toml`.
+    #[arg(long)]
+    pub(crate) pyproject: bool,
+
+    /// Overwrite an existing `fermut.toml` or `[tool.fermut]` block.
+    #[arg(long)]
+    pub(crate) force: bool,
+
+    /// Also drop a PR-gate workflow at `.github/workflows/fermut.yml`.
+    #[arg(long)]
+    pub(crate) with_gha: bool,
+
+    /// Wire `coverage = "coverage.json"` into the config even when no
+    /// coverage dependency is detected in the project. Use when you'll
+    /// install `coverage` yourself — `init` prints the install command
+    /// matching your package manager.
+    #[arg(long)]
+    pub(crate) with_coverage: bool,
+
+    /// Pre-seed the config with one of fermut's curated profiles:
+    /// `pr-gate` (CI gate), `nightly` (full sweep), `local` (dev loop),
+    /// or `library` (lib authors). Without `--profile`, init falls back
+    /// to a size-based heuristic.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) profile: Option<String>,
+
+    /// Print the profile catalogue (name, description, key overrides)
+    /// and exit. Nothing is written.
+    #[arg(long)]
+    pub(crate) list_profiles: bool,
+
+    /// Print what would be written without touching the filesystem.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+}

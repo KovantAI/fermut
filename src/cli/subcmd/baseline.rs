@@ -24,11 +24,53 @@ use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
+use clap::Args;
 use serde::Serialize;
 
 use crate::cli::build_config::build_config;
+use crate::cli::convert::Format;
 use crate::cli::FilterArgs;
 use crate::report::{MutantOutcome, Report};
+
+#[derive(Args, Debug)]
+pub struct BaselineArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+
+    /// Mutate every covered mutant for the exact score instead of a
+    /// sampled estimate. Slower; use once the sampled run looks right.
+    #[arg(long)]
+    pub full: bool,
+
+    /// Sampling fraction (0.0–1.0) for the fast pass. Defaults to 0.1.
+    /// Ignored with `--full`.
+    #[arg(long, value_name = "RATIO")]
+    pub sample: Option<f64>,
+
+    /// How many worst-offender files to list. Defaults to 3.
+    #[arg(long, default_value_t = 3, value_name = "N")]
+    pub top: usize,
+
+    /// Output format. `human` (default) prints the graded verdict;
+    /// `json` emits the same numbers for an agent / dashboard.
+    #[arg(long, value_enum, default_value_t = Format::Human)]
+    pub format: Format,
+
+    #[command(flatten)]
+    pub filter: FilterArgs,
+}
+
+pub fn run(args: BaselineArgs) -> Result<()> {
+    baseline(BaselineOpts {
+        path: args.path,
+        full: args.full,
+        sample: args.sample,
+        top: args.top,
+        format: args.format.into(),
+        filter: args.filter,
+    })
+}
 
 /// Default fraction of mutants tested in the sampled pass. Tuned for a
 /// minutes-not-hours first impression; `--full` overrides to 1.0.

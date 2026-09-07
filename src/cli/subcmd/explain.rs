@@ -22,8 +22,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use clap::Args;
 use serde::Serialize;
 
+use crate::cli::convert::Format;
 use crate::filter::coverage::CoverageContexts;
 use crate::llm::cache::{default_cache_path, LlmCache};
 use crate::llm::client::client_from_env;
@@ -41,6 +43,74 @@ pub enum ExplainFormat {
     Json,
 }
 
+#[derive(Args, Debug)]
+pub struct ExplainArgs {
+    /// Path to a JSON report produced by `fermut run --json …`.
+    pub report: PathBuf,
+
+    /// Mutant selector: 1-based index into the report, or substring of
+    /// mutant id (matches `fermut show`'s selector grammar).
+    pub target: String,
+
+    /// Number of source lines to show on each side of the mutant line.
+    #[arg(long, default_value_t = 5)]
+    pub context: usize,
+
+    /// Tests directory to grep for the enclosing symbol. Defaults to
+    /// `tests/` if it exists under cwd.
+    #[arg(long, num_args = 0..=1, default_missing_value = "tests")]
+    pub tests: Option<PathBuf>,
+
+    /// Path to a `coverage.json` (with contexts). When present, the
+    /// explanation includes whether any test executed the mutant line
+    /// and which tests they were.
+    #[arg(long, num_args = 0..=1, default_missing_value = "coverage.json")]
+    pub coverage: Option<PathBuf>,
+
+    /// Augment the heuristic explanation with an Anthropic-generated
+    /// prose explanation + killing test. Requires `ANTHROPIC_API_KEY`
+    /// (or `FERMUT_LLM_MOCK=1` for offline runs).
+    #[arg(long)]
+    pub llm: bool,
+
+    /// Anthropic model id. Defaults to `claude-sonnet-4-6`.
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Disable the LLM response cache.
+    #[arg(long)]
+    pub no_cache: bool,
+
+    /// Custom path for the LLM response cache. Defaults to
+    /// `.fermut/llm-cache.json` under the project root.
+    #[arg(long)]
+    pub cache_path: Option<PathBuf>,
+
+    /// Output format. `human` (default) prints the laid-out terminal
+    /// view. `json` emits the structured `ExplainReport` for agent
+    /// consumers.
+    #[arg(long, value_enum, default_value_t = Format::Human)]
+    pub format: Format,
+}
+
+pub fn run(args: ExplainArgs) -> Result<()> {
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    explain(ExplainOpts {
+        report: args.report,
+        target: args.target,
+        context_lines: args.context,
+        tests: args.tests,
+        coverage: args.coverage,
+        llm: args.llm,
+        model: args.model,
+        no_cache: args.no_cache,
+        cache_path: args.cache_path,
+        project_root,
+        format: args.format.into(),
+    })
+}
+
+#[derive(Debug, Clone)]
 pub struct ExplainOpts {
     pub report: PathBuf,
     pub target: String,

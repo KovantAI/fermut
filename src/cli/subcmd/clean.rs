@@ -10,9 +10,28 @@
 //! resolves the actual path and passes it in — we can't assume the
 //! default `history.jsonl`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use clap::Args;
+
+#[derive(Args, Debug)]
+pub struct CleanArgs {
+    /// Where to look for `.fermut/`. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+
+    /// Path of the history log to preserve. Overrides any value
+    /// resolved from the config file. Defaults to
+    /// `<path>/.fermut/history.jsonl`.
+    #[arg(long)]
+    pub history_path: Option<PathBuf>,
+}
+
+pub fn run(args: CleanArgs) -> Result<()> {
+    let resolved = crate::cli::gate::resolve_history_path(&args.path, args.history_path)?;
+    clean_cache(&args.path, &resolved)
+}
 
 pub fn clean_cache(path: &Path, history_path: &Path) -> Result<()> {
     let cache_dir = path.join(".fermut");

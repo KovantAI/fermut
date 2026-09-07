@@ -16,9 +16,54 @@
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
+use clap::Args;
 use serde::Serialize;
 
+use crate::cli::convert::Format;
 use crate::history::{self, HistoryEntry};
+
+#[derive(Args, Debug)]
+pub struct ScoreArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+
+    /// Custom path to the history log. Defaults to `<path>/.fermut/history.jsonl`.
+    #[arg(long)]
+    pub history_path: Option<PathBuf>,
+
+    /// Compare against the entry this many branch-comparable runs back.
+    /// `1` (default) is the immediately prior run.
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    pub baseline: usize,
+
+    /// Restrict current/baseline selection to this git branch. Pin to
+    /// `main` in CI where the cache restores main-branch history into a
+    /// PR build.
+    #[arg(long)]
+    pub branch: Option<String>,
+
+    /// Exit non-zero if the score dropped more than this many points vs
+    /// the baseline. Agent rollback / CI gate.
+    #[arg(long, value_name = "PTS")]
+    pub fail_on_regression: Option<f64>,
+
+    /// Output format. `json` (default) emits the reward signal for
+    /// machine consumers; `human` prints a short summary.
+    #[arg(long, value_enum, default_value_t = Format::Json)]
+    pub format: Format,
+}
+
+pub fn run(args: ScoreArgs) -> Result<()> {
+    score(ScoreOpts {
+        path: args.path,
+        history_path: args.history_path,
+        baseline: args.baseline,
+        branch: args.branch,
+        fail_on_regression: args.fail_on_regression,
+        format: args.format.into(),
+    })
+}
 
 /// Float-noise floor for score comparisons. A delta inside `±SCORE_NOISE`
 /// is treated as flat — not a regression. Shared by the `regressed` flag

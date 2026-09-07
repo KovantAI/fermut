@@ -15,11 +15,56 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use clap::Args;
 
 use crate::history::{self, HistoryEntry, StreakDir};
 use crate::report::diff::unified_diff_for;
 use crate::report::writers::html_escape;
 use crate::report::{MutantOutcome, Report};
+
+#[derive(Args, Debug)]
+pub struct DashboardArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+
+    /// Custom path to the history log. Defaults to `<path>/.fermut/history.jsonl`.
+    #[arg(long)]
+    pub history_path: Option<PathBuf>,
+
+    /// Output path for the generated HTML. Created if missing.
+    #[arg(long, default_value = "fermut-dashboard.html")]
+    pub output: PathBuf,
+
+    /// Optional JSON report (from `fermut run --json`) used to
+    /// attach inline source diffs to each survivor. Without it the
+    /// survivor list still renders, but only the IDs are shown.
+    #[arg(long)]
+    pub report: Option<PathBuf>,
+
+    /// How many trailing history entries to show in the chart and
+    /// table. Defaults to 30.
+    #[arg(long, default_value_t = 30)]
+    pub limit: usize,
+
+    /// After writing, hand the file off to the OS's default browser
+    /// (`open` / `xdg-open` / `start`). Best-effort: a failure to
+    /// launch the helper degrades to a printed hint, not a non-zero
+    /// exit.
+    #[arg(long)]
+    pub open: bool,
+}
+
+pub fn run(args: DashboardArgs) -> Result<()> {
+    dashboard(DashboardOpts {
+        path: args.path,
+        history_path: args.history_path,
+        output: args.output,
+        report: args.report,
+        limit: args.limit,
+        open: args.open,
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct DashboardOpts {

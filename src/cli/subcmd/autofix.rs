@@ -24,10 +24,12 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use clap::Args;
 use serde::Serialize;
 
 use super::explain::MutantSummary;
 use super::suggest::{append_to_test_file, generate_test_code, infer_apply_target, select_targets};
+use crate::cli::convert::Format;
 use crate::llm::cache::default_cache_path;
 use crate::llm::DEFAULT_MODEL;
 use crate::mutator::Mutant;
@@ -38,6 +40,94 @@ use crate::runner::{self, BaselineStatus, Runner};
 pub enum AutofixFormat {
     Human,
     Json,
+}
+
+#[derive(Args, Debug)]
+pub struct AutofixArgs {
+    /// Path to a JSON report produced by `fermut run --json …`.
+    pub report: PathBuf,
+
+    /// Mutant selector: 1-based index, or substring of mutant id.
+    /// Omit when `--all-survivors` is set.
+    pub target: Option<String>,
+
+    /// Fix every surviving (or timed-out) mutant in the report.
+    #[arg(long)]
+    pub all_survivors: bool,
+
+    /// Python source root (for the runner + baseline). Defaults to the
+    /// configured source_root or `.`.
+    #[arg(long, default_value = ".")]
+    pub path: PathBuf,
+
+    /// Tests directory: mined for style samples + the apply target, and
+    /// mirrored by the verifier. Defaults to the configured tests dir.
+    #[arg(long)]
+    pub tests: Option<PathBuf>,
+
+    /// Python interpreter (path) or virtualenv (dir) the verifier runs
+    /// pytest with (`<python> -m pytest`). Same discovery as `fermut run`.
+    #[arg(long, value_name = "PATH")]
+    pub python: Option<PathBuf>,
+
+    /// Force generated tests into this file instead of the inferred one.
+    /// Must live inside the tests tree or the verifier won't see it.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+
+    /// Anthropic model id. Defaults to `claude-sonnet-4-6`.
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Source lines of context around the mutant in the prompt.
+    #[arg(long, default_value_t = 8)]
+    pub context: usize,
+
+    /// How many existing tests to include in the prompt for style.
+    #[arg(long, default_value_t = 2)]
+    pub sample_count: usize,
+
+    /// Per-mutant verification timeout, in seconds.
+    #[arg(long, value_name = "SECS")]
+    pub timeout: Option<u64>,
+
+    /// Disable the LLM response cache.
+    #[arg(long)]
+    pub no_cache: bool,
+
+    /// Custom path for the LLM response cache.
+    #[arg(long)]
+    pub cache_path: Option<PathBuf>,
+
+    /// Keep generated tests even when verification fails (default reverts
+    /// them). Useful for inspecting why a suggestion didn't work.
+    #[arg(long)]
+    pub keep_failed: bool,
+
+    /// Output format. `json` (default) emits the structured report;
+    /// `human` prints a per-mutant summary.
+    #[arg(long, value_enum, default_value_t = Format::Json)]
+    pub format: Format,
+}
+
+pub fn run(args: AutofixArgs) -> Result<()> {
+    autofix(AutofixOpts {
+        report: args.report,
+        target: args.target,
+        all_survivors: args.all_survivors,
+        path: args.path,
+        tests: args.tests,
+        python: args.python,
+        out: args.out,
+        model: args.model,
+        context_lines: args.context,
+        sample_count: args.sample_count,
+        timeout: args.timeout,
+        no_cache: args.no_cache,
+        cache_path: args.cache_path,
+        keep_failed: args.keep_failed,
+        format: args.format.into(),
+    })
 }
 
 pub struct AutofixOpts {

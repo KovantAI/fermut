@@ -42,11 +42,49 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use clap::Args;
 use serde::Serialize;
 
+use crate::cli::convert::Format;
 use crate::cli::subcmd::explain::operator_hint;
 use crate::mutator::{Mutant, Operator};
 use crate::report::{MutantOutcome, Report};
+
+#[derive(Args, Debug)]
+pub struct NextArgs {
+    /// Path to a JSON report produced by `fermut run --json …`.
+    pub report: PathBuf,
+
+    /// Number of ranked survivors to emit. Defaults to 1 — the single
+    /// best next target.
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    pub limit: usize,
+
+    /// Emit every ranked survivor instead of just `--limit`.
+    #[arg(long, conflicts_with = "limit")]
+    pub all: bool,
+
+    /// Cap the output at this many estimated tokens: emit the
+    /// highest-ranked survivors that fit, drop the rest (count logged to
+    /// stderr). Overrides `--limit`. The single top target is always
+    /// included. For agents budgeting context window.
+    #[arg(long, value_name = "N", conflicts_with_all = ["limit", "all"])]
+    pub max_tokens: Option<usize>,
+
+    /// Output format. `json` (default) emits the ranked list for machine
+    /// consumers; `human` prints a readable summary.
+    #[arg(long, value_enum, default_value_t = Format::Json)]
+    pub format: Format,
+}
+
+pub fn run(args: NextArgs) -> Result<()> {
+    next(NextOpts {
+        report: args.report,
+        limit: if args.all { None } else { Some(args.limit) },
+        max_tokens: args.max_tokens,
+        format: args.format.into(),
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct NextOpts {

@@ -17,8 +17,43 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
+use clap::Args;
 
 use crate::report::writers::markdown::STICKY_MARKER;
+
+#[derive(Args, Debug)]
+pub struct PrCommentArgs {
+    /// Markdown file to post (produced by a prior `fermut run --markdown …`).
+    #[arg(long)]
+    pub markdown: PathBuf,
+
+    /// `owner/repo`. Defaults to `$GITHUB_REPOSITORY` (set automatically on GHA).
+    #[arg(long)]
+    pub repo: Option<String>,
+
+    /// Pull-request number. Defaults to one inferred from `$GITHUB_REF` or `$PR_NUMBER`.
+    #[arg(long)]
+    pub pr: Option<u64>,
+
+    /// Override the comment marker. Defaults to `<!-- fermut:report -->`.
+    /// Use to keep multiple gates (e.g. per-shard) as independent comments.
+    #[arg(long)]
+    pub marker: Option<String>,
+
+    /// Print the resolved plan without contacting GitHub.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+pub fn run(args: PrCommentArgs) -> Result<()> {
+    pr_comment(PrCommentOpts {
+        markdown: args.markdown,
+        repo: args.repo,
+        pr: args.pr,
+        marker: args.marker,
+        dry_run: args.dry_run,
+    })
+}
 
 /// Inputs for `fermut pr-comment`. Most fields default from environment
 /// variables that GitHub Actions sets automatically — keeps the CLI call

@@ -14,9 +14,58 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+use clap::Args;
 use walkdir::WalkDir;
 
 use super::init;
+use crate::cli::convert::MigrateSourceCli;
+
+#[derive(Args, Debug)]
+pub struct MigrateArgs {
+    /// Which tool to migrate from.
+    #[arg(value_enum)]
+    pub from: MigrateSourceCli,
+
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+
+    /// Explicit source config file. Defaults: `pyproject.toml` /
+    /// `setup.cfg` for mutmut, `cosmic-ray.toml` for cosmic-ray.
+    #[arg(long, value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
+    /// Write `[tool.fermut]` into `pyproject.toml` instead of a
+    /// standalone `fermut.toml`.
+    #[arg(long)]
+    pub pyproject: bool,
+
+    /// Overwrite an existing `fermut.toml` or `[tool.fermut]` block.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Print what would be written and which files would be rewritten,
+    /// without touching the filesystem.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Skip rewriting `# pragma: no mutate` → `# fermut: ignore`
+    /// (mutmut only; no-op for cosmic-ray).
+    #[arg(long)]
+    pub no_pragma_rewrite: bool,
+}
+
+pub fn run(args: MigrateArgs) -> Result<()> {
+    migrate(MigrateOpts {
+        source: args.from.into(),
+        path: args.path,
+        config: args.config,
+        pyproject: args.pyproject,
+        force: args.force,
+        dry_run: args.dry_run,
+        no_pragma_rewrite: args.no_pragma_rewrite,
+    })
+}
 
 /// CLI inputs. Mirror of the `Cmd::Migrate` clap arm in `cli/mod.rs`.
 #[derive(Debug, Clone)]

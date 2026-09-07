@@ -48,10 +48,57 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use clap::Args;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::loader::LoadedConfig;
+
+#[derive(Args, Debug)]
+pub struct CoverageArgs {
+    /// Where to start project-root discovery. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+
+    /// Measured source root (`--cov=<this>`). Defaults to the configured
+    /// `source_root`, else the project root.
+    #[arg(long)]
+    pub source: Option<PathBuf>,
+
+    /// Tests location. Defaults to the configured `tests`, else `<source>/tests`.
+    #[arg(long)]
+    pub tests: Option<PathBuf>,
+
+    /// Re-run the full suite even when an up-to-date `.coverage` exists.
+    #[arg(long)]
+    pub full: bool,
+
+    /// Database output path. Defaults to `<project>/.coverage`.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+
+    /// Python interpreter (path) or virtualenv (dir) to run pytest with,
+    /// same as `fermut run --python`. Lets coverage generation work
+    /// without `pytest` on PATH. Auto-discovers a venv when omitted.
+    #[arg(long, value_name = "PATH")]
+    pub python: Option<PathBuf>,
+
+    /// Extra arguments forwarded to pytest. Repeatable.
+    #[arg(long = "pytest-arg", value_name = "ARG")]
+    pub pytest_args: Vec<String>,
+}
+
+pub fn run(args: CoverageArgs) -> Result<()> {
+    coverage(CoverageOpts {
+        path: args.path,
+        source: args.source,
+        tests: args.tests,
+        full: args.full,
+        output: args.output,
+        python: args.python,
+        pytest_args: args.pytest_args,
+    })
+}
 
 /// Current fingerprint-sidecar schema version. `load_fingerprints` rejects any
 /// sidecar not stamped with exactly this value, so bumping it here genuinely

@@ -30,8 +30,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
+use clap::Args;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use serde::Serialize;
+
+use crate::cli::convert::Format;
 
 use super::explain::{
     enclosing_symbol, grep_symbol, render_source_snippet, EnclosingSymbol, MutantSummary,
@@ -52,6 +55,90 @@ use crate::sync::lock_recover;
 pub enum SuggestFormat {
     Human,
     Json,
+}
+
+#[derive(Args, Debug)]
+pub struct SuggestArgs {
+    /// Path to a JSON report produced by `fermut run --json …`.
+    pub report: PathBuf,
+
+    /// Mutant selector: 1-based index, or substring of mutant id.
+    /// Omit when `--all-survivors` is set.
+    pub target: Option<String>,
+
+    /// Generate a test for every surviving (or timed-out) mutant in
+    /// the report.
+    #[arg(long)]
+    pub all_survivors: bool,
+
+    /// Append the generated test to the test file that already
+    /// references the enclosing symbol. Falls back to `--out` if no
+    /// candidate test file is found.
+    #[arg(long)]
+    pub apply: bool,
+
+    /// Append the generated test to this path instead of stdout.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+
+    /// Anthropic model id. Defaults to `claude-sonnet-4-6`.
+    #[arg(long)]
+    pub model: Option<String>,
+
+    /// Tests directory to mine for style samples. Defaults to `tests/`.
+    #[arg(long, num_args = 0..=1, default_missing_value = "tests")]
+    pub tests: Option<PathBuf>,
+
+    /// Source lines of context to include in the prompt on each side
+    /// of the mutant line.
+    #[arg(long, default_value_t = 8)]
+    pub context: usize,
+
+    /// How many existing tests to include in the prompt for style
+    /// reference.
+    #[arg(long, default_value_t = 2)]
+    pub sample_count: usize,
+
+    /// Disable the LLM response cache.
+    #[arg(long)]
+    pub no_cache: bool,
+
+    /// Custom path for the LLM response cache. Defaults to
+    /// `.fermut/llm-cache.json` under the project root.
+    #[arg(long)]
+    pub cache_path: Option<PathBuf>,
+
+    /// Output format. `human` (default) prints generated code blocks
+    /// and progress logs. `json` emits the structured `SuggestReport`
+    /// for agent consumers.
+    #[arg(long, value_enum, default_value_t = Format::Human)]
+    pub format: Format,
+
+    /// Run up to N Anthropic calls concurrently. Default `1`. Raise to
+    /// shorten wall-clock when `--all-survivors` is large; keep within
+    /// your tenant's rate limit. File writes stay serial.
+    #[arg(long, default_value_t = 1)]
+    pub parallel: usize,
+}
+
+pub fn run(args: SuggestArgs) -> Result<()> {
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    suggest(SuggestOpts {
+        report: args.report,
+        target: args.target,
+        all_survivors: args.all_survivors,
+        apply: args.apply,
+        out: args.out,
+        model: args.model,
+        tests: args.tests,
+        context_lines: args.context,
+        sample_count: args.sample_count,
+        no_cache: args.no_cache,
+        cache_path: args.cache_path,
+        project_root,
+        format: args.format.into(),
+        parallel: args.parallel,
+    })
 }
 
 pub struct SuggestOpts {

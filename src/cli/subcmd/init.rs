@@ -9,8 +9,94 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
+use clap::Args;
 
 const GHA_PR_GATE: &str = include_str!("../../../examples/github-actions/pr-gate.yml");
+
+#[derive(Args, Debug)]
+pub struct InitArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+
+    /// Write `[tool.fermut]` into `pyproject.toml` instead of a
+    /// standalone `fermut.toml`.
+    #[arg(long)]
+    pub pyproject: bool,
+
+    /// Overwrite an existing `fermut.toml` or `[tool.fermut]` block.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Also drop a PR-gate workflow at `.github/workflows/fermut.yml`.
+    #[arg(long)]
+    pub with_gha: bool,
+
+    /// Wire `coverage = "coverage.json"` into the config even when no
+    /// coverage dependency is detected in the project. Use when you'll
+    /// install `coverage` yourself — `init` prints the install command
+    /// matching your package manager.
+    #[arg(long)]
+    pub with_coverage: bool,
+
+    /// Pre-seed the config with one of fermut's curated profiles:
+    /// `pr-gate` (CI gate), `nightly` (full sweep), `local` (dev loop),
+    /// or `library` (lib authors). Without `--profile`, init falls back
+    /// to a size-based heuristic.
+    #[arg(long, value_name = "NAME")]
+    pub profile: Option<String>,
+
+    /// Print the profile catalogue (name, description, key overrides)
+    /// and exit. Nothing is written.
+    #[arg(long)]
+    pub list_profiles: bool,
+
+    /// Print what would be written without touching the filesystem.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+pub fn run(args: InitArgs) -> Result<()> {
+    if args.list_profiles {
+        print_profile_catalogue();
+        return Ok(());
+    }
+    let profile = match args.profile {
+        Some(name) => Some(Profile::parse(&name).ok_or_else(|| {
+            anyhow!(
+                "unknown profile `{name}`. Run `fermut init --list-profiles` to see the catalogue."
+            )
+        })?),
+        None => None,
+    };
+    init(InitOpts {
+        path: args.path,
+        pyproject: args.pyproject,
+        force: args.force,
+        with_gha: args.with_gha,
+        with_coverage: args.with_coverage,
+        profile,
+        dry_run: args.dry_run,
+    })
+}
+
+/// Print the curated-profile catalogue for `fermut init --list-profiles`.
+fn print_profile_catalogue() {
+    println!("Available profiles (pass with --profile <name>):\n");
+    let name_width = Profile::ALL
+        .iter()
+        .map(|p| p.name().len())
+        .max()
+        .unwrap_or(0);
+    for p in Profile::ALL {
+        println!(
+            "  {:<width$}  {}",
+            p.name(),
+            p.description(),
+            width = name_width
+        );
+    }
+}
 
 /// All the inputs `fermut init` needs. Kept in a struct so the dispatch
 /// site in `cli/mod.rs` can build it from clap and we can test the writer

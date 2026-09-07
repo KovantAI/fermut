@@ -2,11 +2,30 @@
 //! and prints either a list (default: survivors only) or a single mutant's
 //! detail view with a regenerated unified diff.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use clap::Args;
 
 use crate::report::{unified_diff_for, MutantOutcome, Report};
+
+#[derive(Args, Debug)]
+pub struct ShowArgs {
+    /// Path to a JSON report produced by `fermut run --json …`.
+    pub report: PathBuf,
+
+    /// Optional mutant selector: 1-based index, or substring of mutant id.
+    /// Omit to print a summary list of survivors.
+    pub target: Option<String>,
+
+    /// Show all outcomes, not just survivors, when target is omitted.
+    #[arg(long)]
+    pub all: bool,
+}
+
+pub fn run(args: ShowArgs) -> Result<()> {
+    show(&args.report, args.target.as_deref(), args.all)
+}
 
 pub fn show(report_path: &Path, target: Option<&str>, all: bool) -> Result<()> {
     let raw = std::fs::read_to_string(report_path)

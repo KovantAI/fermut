@@ -15,8 +15,27 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::Result;
+use clap::Args;
 
 use crate::config::loader::{ConfigSource, LoadedConfig};
+
+#[derive(Args, Debug)]
+pub struct DoctorArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+
+    /// Treat warnings as failures (exit non-zero on any warn).
+    #[arg(long)]
+    pub strict: bool,
+}
+
+pub fn run(args: DoctorArgs) -> Result<()> {
+    doctor(DoctorOpts {
+        path: args.path,
+        strict: args.strict,
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct DoctorOpts {

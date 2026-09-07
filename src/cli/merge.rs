@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::filter::shard::SHARD_FILTER_NAME;
-use crate::report::{MutantOutcome, Report, ReportFormat};
+use crate::report::{MutantOutcome, Report, ReportFormat, ReportSinks};
 
 /// A `Skipped { filter: "shard" }` outcome is not a verdict — it is the
 /// placeholder a sharded run emits for every mutant *outside* its own slice.
@@ -69,13 +69,9 @@ pub(super) fn parse_shard_spec(s: &str) -> Result<(u32, u32), String> {
     Ok((i, n))
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn merge_reports(
     inputs: &[PathBuf],
-    json: Option<&PathBuf>,
-    junit: Option<&PathBuf>,
-    html: Option<&PathBuf>,
-    markdown: Option<&PathBuf>,
+    sinks: &ReportSinks,
     history: Option<&PathBuf>,
     config_hash: Option<String>,
     project_root: &Path,
@@ -93,20 +89,10 @@ pub(super) fn merge_reports(
     let outcomes = combine_outcomes(reports)?;
     let merged = Report::new(outcomes);
 
-    if let Some(p) = json {
-        merged.write_json(p)?;
-    } else if junit.is_none() && html.is_none() && markdown.is_none() && history.is_none() {
+    sinks.write_all(&merged)?;
+    if !sinks.any() && history.is_none() {
         // Nothing requested → print JSON to stdout so the command is useful by default.
         merged.print(ReportFormat::Json);
-    }
-    if let Some(p) = junit {
-        merged.write_junit(p)?;
-    }
-    if let Some(p) = html {
-        merged.write_html(p)?;
-    }
-    if let Some(p) = markdown {
-        merged.write_markdown(p)?;
     }
 
     // Emit a complete history entry from the merged report. This is what lets a
@@ -251,10 +237,10 @@ mod tests {
         let hist = tmp.path().join("entry.json");
         merge_reports(
             &[p1, p2],
-            Some(&combined),
-            None,
-            None,
-            None,
+            &ReportSinks {
+                json: Some(combined),
+                ..Default::default()
+            },
             Some(&hist),
             Some("deadbeef".into()),
             tmp.path(),
@@ -286,10 +272,10 @@ mod tests {
         for _ in 0..2 {
             merge_reports(
                 std::slice::from_ref(&p),
-                Some(&tmp.path().join("c.json")),
-                None,
-                None,
-                None,
+                &ReportSinks {
+                    json: Some(tmp.path().join("c.json")),
+                    ..Default::default()
+                },
                 Some(&hist),
                 None,
                 tmp.path(),

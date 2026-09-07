@@ -57,23 +57,42 @@ pub struct PytestRunner {
     key_base: PathBuf,
 }
 
+/// Construction parameters for [`PytestRunner`], bundled so the runner is
+/// built from one value instead of a 13-argument call. Every field is sourced
+/// off the runtime [`Config`] (or derived from it) by [`super::build`].
+pub struct PytestConfig {
+    pub tests: PathBuf,
+    pub timeout: Duration,
+    pub baseline_timeout: Duration,
+    pub hypothesis_seed: Option<u64>,
+    pub extra_args: Vec<String>,
+    pub isolation: IsolationMode,
+    pub coverage: Option<Arc<CoverageContexts>>,
+    pub python: Option<PathBuf>,
+    pub exe: &'static str,
+    pub smart_order: bool,
+    pub kill_order: Arc<crate::kill_order::KillOrder>,
+    pub kill_sink: Arc<Mutex<Vec<crate::kill_order::KillRecord>>>,
+    pub key_base: PathBuf,
+}
+
 impl PytestRunner {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        tests: PathBuf,
-        timeout: Duration,
-        baseline_timeout: Duration,
-        hypothesis_seed: Option<u64>,
-        extra_args: Vec<String>,
-        isolation: IsolationMode,
-        coverage: Option<Arc<CoverageContexts>>,
-        python: Option<PathBuf>,
-        exe: &'static str,
-        smart_order: bool,
-        kill_order: Arc<crate::kill_order::KillOrder>,
-        kill_sink: Arc<Mutex<Vec<crate::kill_order::KillRecord>>>,
-        key_base: PathBuf,
-    ) -> Self {
+    pub fn new(config: PytestConfig) -> Self {
+        let PytestConfig {
+            tests,
+            timeout,
+            baseline_timeout,
+            hypothesis_seed,
+            extra_args,
+            isolation,
+            coverage,
+            python,
+            exe,
+            smart_order,
+            kill_order,
+            kill_sink,
+            key_base,
+        } = config;
         Self {
             tests,
             timeout,
@@ -874,21 +893,21 @@ mod tests {
     }
 
     fn runner(smart_order: bool, coverage: Arc<CoverageContexts>) -> PytestRunner {
-        PytestRunner::new(
-            PathBuf::from("tests"),
-            Duration::from_secs(30),
-            Duration::from_secs(300),
-            None,
-            Vec::new(),
-            IsolationMode::Auto,
-            Some(coverage),
-            None,
-            "pytest",
+        PytestRunner::new(PytestConfig {
+            tests: PathBuf::from("tests"),
+            timeout: Duration::from_secs(30),
+            baseline_timeout: Duration::from_secs(300),
+            hypothesis_seed: None,
+            extra_args: Vec::new(),
+            isolation: IsolationMode::Auto,
+            coverage: Some(coverage),
+            python: None,
+            exe: "pytest",
             smart_order,
-            Arc::new(crate::kill_order::KillOrder::default()),
-            Arc::new(Mutex::new(Vec::new())),
-            PathBuf::from("."),
-        )
+            kill_order: Arc::new(crate::kill_order::KillOrder::default()),
+            kill_sink: Arc::new(Mutex::new(Vec::new())),
+            key_base: PathBuf::from("."),
+        })
     }
 
     fn selected() -> Vec<String> {

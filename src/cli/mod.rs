@@ -82,7 +82,7 @@ impl Cli {
 }
 
 /// Args common to every subcommand that needs to compute the filter chain.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Debug, Clone, Default)]
 pub(crate) struct FilterArgs {
     /// Restrict to these operators (comma-separated names, e.g. `arith-op-swap,boundary-shift`).
     #[arg(long, value_delimiter = ',')]
@@ -137,6 +137,176 @@ pub(crate) struct FilterArgs {
     pub exclude: Vec<String>,
 }
 
+/// Config-shaping args for `run` — everything that feeds [`build_config`] into
+/// a runtime `Config`. Grouped into a `#[command(flatten)]` struct so the `Run`
+/// variant and `build_config` pass one value instead of ~26 positional args.
+/// The report/gate flags (annotate, format, json, gate thresholds, …) stay on
+/// the variant because the `run` arm consumes them directly.
+#[derive(Args, Debug, Default)]
+pub(crate) struct RunConfigArgs {
+    /// Test directory passed to pytest. Defaults to `<path>/tests`.
+    #[arg(long)]
+    pub tests: Option<PathBuf>,
+
+    /// Parallel worker count. Defaults to logical CPU count.
+    #[arg(long)]
+    pub jobs: Option<usize>,
+
+    /// Per-mutant pytest timeout, in seconds.
+    #[arg(long)]
+    pub timeout: Option<u64>,
+
+    /// Skip the ty pre-filter stage.
+    #[arg(long)]
+    pub no_ty_filter: bool,
+
+    /// Enable the ruff lint pre-filter. Requires `ruff` on PATH.
+    #[arg(long)]
+    pub ruff_filter: bool,
+
+    /// Enable the TCE (bytecode-equivalence) pre-filter. Drops mutants that
+    /// `compile()` to a byte-identical code object — provably equivalent, so
+    /// never worth a test run. Requires `python3` (or `FERMUT_PYTHON`).
+    #[arg(long)]
+    pub tce: bool,
+
+    /// Pin the Hypothesis seed across every mutant run for determinism.
+    /// Passes `--hypothesis-seed=<N>` to pytest. Without this, Hypothesis
+    /// tests can mask or fabricate survivors via random example draws.
+    #[arg(long)]
+    pub hypothesis_seed: Option<u64>,
+
+    /// Extra arguments forwarded to pytest. Repeatable.
+    /// Example: `--pytest-arg "-k" --pytest-arg "myfilter"`.
+    #[arg(long = "pytest-arg", value_name = "ARG")]
+    pub pytest_args: Vec<String>,
+
+    /// Disable the result cache (`.fermut/cache.json`).
+    #[arg(long)]
+    pub no_cache: bool,
+
+    /// Custom path for the result cache file.
+    #[arg(long)]
+    pub cache_path: Option<PathBuf>,
+
+    /// Disable the run-history log (`.fermut/history.jsonl`).
+    /// History is what `fermut trend` reads.
+    #[arg(long)]
+    pub no_history: bool,
+
+    /// Custom path for the run-history log.
+    #[arg(long)]
+    pub history_path: Option<PathBuf>,
+
+    /// Test only this fraction of mutants (0.0–1.0). Deterministic for a
+    /// fixed `--sample-seed`. Useful for fast feedback on huge repos.
+    #[arg(long, value_name = "RATIO")]
+    pub sample: Option<f64>,
+
+    /// Seed for `--sample` selection. Defaults to 0.
+    #[arg(long, value_name = "N")]
+    pub sample_seed: Option<u64>,
+
+    /// Distributed execution: process only the i-th of n disjoint slices.
+    /// Format `i/n`, both 1-based. Run all n in parallel (CI matrix,
+    /// separate hosts), then `fermut merge` the JSON reports.
+    #[arg(long, value_name = "I/N", value_parser = parse_shard_spec)]
+    pub shard: Option<(u32, u32)>,
+
+    /// Test runner. `pytest` (default), `rstest` (pytest-compatible
+    /// drop-in), or `unittest`.
+    #[arg(long, value_enum)]
+    pub runner: Option<RunnerCli>,
+
+    /// Python interpreter (path) or virtualenv (dir) to run pytest with.
+    /// fermut invokes `<python> -m pytest`, so it uses that interpreter's
+    /// pytest with no reliance on PATH — useful in restricted sandboxes/CI
+    /// that won't let you activate a venv. When omitted, fermut
+    /// auto-discovers an active venv or a nearby `.venv`, else falls back
+    /// to a bare `pytest` on PATH.
+    #[arg(long, value_name = "PATH")]
+    pub python: Option<PathBuf>,
+
+    /// Per-worker mirror isolation scheme.
+    /// `auto` (default) picks reflink/clonefile when supported else copy.
+    /// `hardlink` is fastest but shares inodes — unsafe if tests write
+    /// back into the source tree. `copy` is the original behavior.
+    #[arg(long, value_enum)]
+    pub isolation: Option<IsolationCli>,
+
+    /// Disable the equivalent-mutant detector. By default, survivors are
+    /// post-processed by an AST-pattern + CPython-bytecode check; mutants
+    /// proven equivalent are excluded from the score.
+    #[arg(long)]
+    pub no_equiv_detect: bool,
+
+    /// Cache-key granularity for source identity.
+    /// `file` (default) keys cache entries on the AST hash of the whole
+    /// file — any structural edit invalidates every mutant in the file.
+    /// `scope` keys on the file prelude + the enclosing top-level
+    /// def/class body, so edits inside one function leave cache hits
+    /// intact for mutants in sibling functions. `scope` is opt-in
+    /// because it can return stale verdicts when a test for one
+    /// function indirectly calls another.
+    #[arg(long, value_enum)]
+    pub cache_scope: Option<CacheScopeCli>,
+
+    /// Fail the run only when the mutation score is below this percentage
+    /// (0.0–100.0). A score exactly equal to the threshold passes.
+    /// Without it, any survivor exits 1.
+    #[arg(long, value_name = "SCORE")]
+    pub fail_under: Option<f64>,
+
+    /// Skip the pre-flight check that the unmutated suite passes. fermut
+    /// runs your full test suite once before mutating; a red or erroring
+    /// suite makes every covered mutant look killed and inflates the
+    /// score. Pass this only when you've already confirmed the suite is
+    /// green (e.g. CI ran it in a prior step).
+    #[arg(long)]
+    pub no_verify_baseline: bool,
+
+    /// Wall-clock cap (seconds) for the baseline run. The baseline runs
+    /// the whole suite once, so this is separate from `--timeout` (which
+    /// bounds a single mutant). Default 300. Raise it for large suites; a
+    /// suite that exceeds it is killed and the run aborts.
+    #[arg(long, value_name = "SECS")]
+    pub baseline_timeout: Option<u64>,
+
+    /// Disable smart test ordering. By default, when coverage selects
+    /// multiple tests for a mutant, fermut runs the most targeted one first
+    /// so pytest's `-x` short-circuits sooner: the cold-start breadth prior
+    /// (covering the fewest of the mutated file's lines) sets the order, and
+    /// any test that historically killed this file+operator is lifted ahead
+    /// of it (kill history in `.fermut/kill-order.json`). Ordering only
+    /// permutes the selected set, so it never changes the mutation score —
+    /// under `--timeout` it can flip a `timed_out` into a `killed`, but both
+    /// count as detected, so the score and the `--fail-on-regression` gate
+    /// stay order-invariant. Killer-first ordering helps most *with* a
+    /// timeout, by reaching the kill before the deadline. Disabling it only
+    /// affects speed. Also settable via `smart_order = false`.
+    #[arg(long)]
+    pub no_smart_order: bool,
+
+    /// Force smart test ordering on (over `smart_order = false` in config).
+    /// Conflicts with `--no-smart-order`.
+    #[arg(long, conflicts_with = "no_smart_order")]
+    pub smart_order: bool,
+
+    /// Wall-clock ceiling (seconds) on the per-mutant testing phase. When
+    /// set, mutants are evaluated highest-value first (covered mutants
+    /// before uncovered) and, once the deadline passes, every mutant not
+    /// yet started is recorded as `skipped` (filter `time-budget`) instead
+    /// of run; mutants already in flight finish. Gives a PR gate a
+    /// predictable ceiling — a time cap beats a mutant cap for CI trust.
+    /// Bounds only the testing phase: baseline verification, generation,
+    /// and the ty pre-filter are separate fixed costs it does not cover.
+    #[arg(long, value_name = "SECS")]
+    pub max_time: Option<u64>,
+
+    #[command(flatten)]
+    pub filter: FilterArgs,
+}
+
 #[derive(Subcommand, Debug)]
 #[allow(clippy::large_enum_variant)]
 enum Cmd {
@@ -146,112 +316,8 @@ enum Cmd {
         #[arg(default_value = ".")]
         path: PathBuf,
 
-        /// Test directory passed to pytest. Defaults to `<path>/tests`.
-        #[arg(long)]
-        tests: Option<PathBuf>,
-
-        /// Parallel worker count. Defaults to logical CPU count.
-        #[arg(long)]
-        jobs: Option<usize>,
-
-        /// Per-mutant pytest timeout, in seconds.
-        #[arg(long)]
-        timeout: Option<u64>,
-
-        /// Skip the ty pre-filter stage.
-        #[arg(long)]
-        no_ty_filter: bool,
-
-        /// Enable the ruff lint pre-filter. Requires `ruff` on PATH.
-        #[arg(long)]
-        ruff_filter: bool,
-
-        /// Enable the TCE (bytecode-equivalence) pre-filter. Drops mutants that
-        /// `compile()` to a byte-identical code object — provably equivalent, so
-        /// never worth a test run. Requires `python3` (or `FERMUT_PYTHON`).
-        #[arg(long)]
-        tce: bool,
-
-        /// Pin the Hypothesis seed across every mutant run for determinism.
-        /// Passes `--hypothesis-seed=<N>` to pytest. Without this, Hypothesis
-        /// tests can mask or fabricate survivors via random example draws.
-        #[arg(long)]
-        hypothesis_seed: Option<u64>,
-
-        /// Extra arguments forwarded to pytest. Repeatable.
-        /// Example: `--pytest-arg "-k" --pytest-arg "myfilter"`.
-        #[arg(long = "pytest-arg", value_name = "ARG")]
-        pytest_args: Vec<String>,
-
-        /// Disable the result cache (`.fermut/cache.json`).
-        #[arg(long)]
-        no_cache: bool,
-
-        /// Custom path for the result cache file.
-        #[arg(long)]
-        cache_path: Option<PathBuf>,
-
-        /// Disable the run-history log (`.fermut/history.jsonl`).
-        /// History is what `fermut trend` reads.
-        #[arg(long)]
-        no_history: bool,
-
-        /// Custom path for the run-history log.
-        #[arg(long)]
-        history_path: Option<PathBuf>,
-
-        /// Test only this fraction of mutants (0.0–1.0). Deterministic for a
-        /// fixed `--sample-seed`. Useful for fast feedback on huge repos.
-        #[arg(long, value_name = "RATIO")]
-        sample: Option<f64>,
-
-        /// Seed for `--sample` selection. Defaults to 0.
-        #[arg(long, value_name = "N")]
-        sample_seed: Option<u64>,
-
-        /// Distributed execution: process only the i-th of n disjoint slices.
-        /// Format `i/n`, both 1-based. Run all n in parallel (CI matrix,
-        /// separate hosts), then `fermut merge` the JSON reports.
-        #[arg(long, value_name = "I/N", value_parser = parse_shard_spec)]
-        shard: Option<(u32, u32)>,
-
-        /// Test runner. `pytest` (default), `rstest` (pytest-compatible
-        /// drop-in), or `unittest`.
-        #[arg(long, value_enum)]
-        runner: Option<RunnerCli>,
-
-        /// Python interpreter (path) or virtualenv (dir) to run pytest with.
-        /// fermut invokes `<python> -m pytest`, so it uses that interpreter's
-        /// pytest with no reliance on PATH — useful in restricted sandboxes/CI
-        /// that won't let you activate a venv. When omitted, fermut
-        /// auto-discovers an active venv or a nearby `.venv`, else falls back
-        /// to a bare `pytest` on PATH.
-        #[arg(long, value_name = "PATH")]
-        python: Option<PathBuf>,
-
-        /// Per-worker mirror isolation scheme.
-        /// `auto` (default) picks reflink/clonefile when supported else copy.
-        /// `hardlink` is fastest but shares inodes — unsafe if tests write
-        /// back into the source tree. `copy` is the original behavior.
-        #[arg(long, value_enum)]
-        isolation: Option<IsolationCli>,
-
-        /// Disable the equivalent-mutant detector. By default, survivors are
-        /// post-processed by an AST-pattern + CPython-bytecode check; mutants
-        /// proven equivalent are excluded from the score.
-        #[arg(long)]
-        no_equiv_detect: bool,
-
-        /// Cache-key granularity for source identity.
-        /// `file` (default) keys cache entries on the AST hash of the whole
-        /// file — any structural edit invalidates every mutant in the file.
-        /// `scope` keys on the file prelude + the enclosing top-level
-        /// def/class body, so edits inside one function leave cache hits
-        /// intact for mutants in sibling functions. `scope` is opt-in
-        /// because it can return stale verdicts when a test for one
-        /// function indirectly calls another.
-        #[arg(long, value_enum)]
-        cache_scope: Option<CacheScopeCli>,
+        #[command(flatten)]
+        cfg_args: RunConfigArgs,
 
         /// Emit GitHub Actions workflow-command annotations to stdout for
         /// each survivor / timeout / error. Auto-on when `GITHUB_ACTIONS=true`.
@@ -304,12 +370,6 @@ enum Cmd {
         #[arg(long, value_name = "PTS")]
         fail_on_regression: Option<f64>,
 
-        /// Fail the run only when the mutation score is below this percentage
-        /// (0.0–100.0). A score exactly equal to the threshold passes.
-        /// Without it, any survivor exits 1.
-        #[arg(long, value_name = "SCORE")]
-        fail_under: Option<f64>,
-
         /// Never exit non-zero because of the mutation result — write every
         /// report and exit 0 even with survivors. For runs that only produce a
         /// report (a trend shard, a dashboard feed) where the mutants exist to
@@ -321,55 +381,6 @@ enum Cmd {
         /// suite that errors under mutation.
         #[arg(long, conflicts_with_all = ["fail_under", "fail_on_regression"])]
         no_fail: bool,
-
-        /// Skip the pre-flight check that the unmutated suite passes. fermut
-        /// runs your full test suite once before mutating; a red or erroring
-        /// suite makes every covered mutant look killed and inflates the
-        /// score. Pass this only when you've already confirmed the suite is
-        /// green (e.g. CI ran it in a prior step).
-        #[arg(long)]
-        no_verify_baseline: bool,
-
-        /// Wall-clock cap (seconds) for the baseline run. The baseline runs
-        /// the whole suite once, so this is separate from `--timeout` (which
-        /// bounds a single mutant). Default 300. Raise it for large suites; a
-        /// suite that exceeds it is killed and the run aborts.
-        #[arg(long, value_name = "SECS")]
-        baseline_timeout: Option<u64>,
-
-        /// Disable smart test ordering. By default, when coverage selects
-        /// multiple tests for a mutant, fermut runs the most targeted one first
-        /// so pytest's `-x` short-circuits sooner: the cold-start breadth prior
-        /// (covering the fewest of the mutated file's lines) sets the order, and
-        /// any test that historically killed this file+operator is lifted ahead
-        /// of it (kill history in `.fermut/kill-order.json`). Ordering only
-        /// permutes the selected set, so it never changes the mutation score —
-        /// under `--timeout` it can flip a `timed_out` into a `killed`, but both
-        /// count as detected, so the score and the `--fail-on-regression` gate
-        /// stay order-invariant. Killer-first ordering helps most *with* a
-        /// timeout, by reaching the kill before the deadline. Disabling it only
-        /// affects speed. Also settable via `smart_order = false`.
-        #[arg(long)]
-        no_smart_order: bool,
-
-        /// Force smart test ordering on (over `smart_order = false` in config).
-        /// Conflicts with `--no-smart-order`.
-        #[arg(long, conflicts_with = "no_smart_order")]
-        smart_order: bool,
-
-        /// Wall-clock ceiling (seconds) on the per-mutant testing phase. When
-        /// set, mutants are evaluated highest-value first (covered mutants
-        /// before uncovered) and, once the deadline passes, every mutant not
-        /// yet started is recorded as `skipped` (filter `time-budget`) instead
-        /// of run; mutants already in flight finish. Gives a PR gate a
-        /// predictable ceiling — a time cap beats a mutant cap for CI trust.
-        /// Bounds only the testing phase: baseline verification, generation,
-        /// and the ty pre-filter are separate fixed costs it does not cover.
-        #[arg(long, value_name = "SECS")]
-        max_time: Option<u64>,
-
-        #[command(flatten)]
-        filter: FilterArgs,
     },
 
     /// Enumerate mutations without running tests.
@@ -1136,7 +1147,7 @@ impl From<TrendGroupByCli> for TrendGroupBy {
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
-enum RunnerCli {
+pub(crate) enum RunnerCli {
     Pytest,
     Rstest,
     Unittest,
@@ -1169,7 +1180,7 @@ impl From<MigrateSourceCli> for MigrateSource {
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
-enum IsolationCli {
+pub(crate) enum IsolationCli {
     Auto,
     Copy,
     Hardlink,
@@ -1188,7 +1199,7 @@ impl From<IsolationCli> for crate::config::IsolationMode {
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
-enum CacheScopeCli {
+pub(crate) enum CacheScopeCli {
     File,
     Scope,
 }
@@ -1287,26 +1298,7 @@ impl Cli {
         match self.cmd {
             Cmd::Run {
                 path,
-                tests,
-                jobs,
-                timeout,
-                no_ty_filter,
-                ruff_filter,
-                tce,
-                hypothesis_seed,
-                pytest_args,
-                no_cache,
-                cache_path,
-                no_history,
-                history_path,
-                sample,
-                sample_seed,
-                shard,
-                runner,
-                python,
-                isolation,
-                no_equiv_detect,
-                cache_scope,
+                cfg_args,
                 annotate,
                 watch,
                 format,
@@ -1317,45 +1309,9 @@ impl Cli {
                 trend,
                 trend_branch,
                 fail_on_regression,
-                fail_under,
                 no_fail,
-                no_verify_baseline,
-                baseline_timeout,
-                no_smart_order,
-                smart_order,
-                max_time,
-                filter: f,
             } => {
-                let cfg = build_config(
-                    path,
-                    tests,
-                    jobs,
-                    timeout,
-                    no_ty_filter,
-                    ruff_filter,
-                    tce,
-                    hypothesis_seed,
-                    pytest_args,
-                    no_cache,
-                    cache_path,
-                    no_history,
-                    history_path,
-                    sample,
-                    sample_seed,
-                    shard,
-                    runner.map(Into::into),
-                    python,
-                    isolation.map(Into::into),
-                    no_equiv_detect,
-                    cache_scope.map(Into::into),
-                    fail_under,
-                    no_verify_baseline,
-                    baseline_timeout,
-                    no_smart_order,
-                    smart_order,
-                    max_time,
-                    f,
-                )?;
+                let cfg = build_config(path, cfg_args)?;
                 let want_annotations =
                     annotate || std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true");
                 let fmt = format.into();
@@ -1773,33 +1729,19 @@ impl Cli {
             } => {
                 let cfg = build_config(
                     path,
-                    None,
-                    None,
-                    None,
-                    no_ty_filter,
-                    ruff_filter,
-                    tce,
-                    None,
-                    Vec::new(),
-                    true,
-                    None,
-                    true,
-                    None,
-                    None, // sample
-                    None, // sample_seed
-                    None, // shard
-                    None, // runner
-                    None, // python
-                    None, // isolation
-                    true,
-                    None,
-                    None,
-                    true,
-                    None,
-                    false, // no_smart_order (list doesn't run tests)
-                    false, // smart_order
-                    None,  // max_time (list doesn't run tests)
-                    f,
+                    RunConfigArgs {
+                        no_ty_filter,
+                        ruff_filter,
+                        tce,
+                        // `list` never runs tests, so disable the run-only
+                        // machinery (cache, history, equiv detect, baseline).
+                        no_cache: true,
+                        no_history: true,
+                        no_equiv_detect: true,
+                        no_verify_baseline: true,
+                        filter: f,
+                        ..Default::default()
+                    },
                 )?;
                 let mutants = crate::mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)?;
                 let chain = filter::build_chain_for_list(&cfg)?;

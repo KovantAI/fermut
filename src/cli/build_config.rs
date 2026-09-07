@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::info;
 
-use super::FilterArgs;
+use super::RunConfigArgs;
 use crate::config::{CacheScope, Config, ConfigSource, IsolationMode, LoadedConfig, RunnerKind};
 use crate::filter;
 use crate::mutator::Operator;
@@ -49,37 +49,42 @@ fn resolve_smart_order(cli_no: bool, cli_yes: bool, file: Option<bool>) -> bool 
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_config(
-    cli_path: PathBuf,
-    cli_tests: Option<PathBuf>,
-    cli_jobs: Option<usize>,
-    cli_timeout: Option<u64>,
-    cli_no_ty_filter: bool,
-    cli_ruff_filter: bool,
-    cli_tce: bool,
-    cli_hypothesis_seed: Option<u64>,
-    cli_pytest_args: Vec<String>,
-    cli_no_cache: bool,
-    cli_cache_path: Option<PathBuf>,
-    cli_no_history: bool,
-    cli_history_path: Option<PathBuf>,
-    cli_sample: Option<f64>,
-    cli_sample_seed: Option<u64>,
-    cli_shard: Option<(u32, u32)>,
-    cli_runner: Option<RunnerKind>,
-    cli_python: Option<PathBuf>,
-    cli_isolation: Option<IsolationMode>,
-    cli_no_equiv_detect: bool,
-    cli_cache_scope: Option<CacheScope>,
-    cli_fail_under: Option<f64>,
-    cli_no_verify_baseline: bool,
-    cli_baseline_timeout: Option<u64>,
-    cli_no_smart_order: bool,
-    cli_smart_order: bool,
-    cli_max_time: Option<u64>,
-    f: FilterArgs,
-) -> Result<Config> {
+/// Merge the parsed `run` CLI args (`cli_path` positional + the flattened
+/// [`RunConfigArgs`]) with the loaded config file into a runtime `Config`.
+pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Config> {
+    let RunConfigArgs {
+        tests: cli_tests,
+        jobs: cli_jobs,
+        timeout: cli_timeout,
+        no_ty_filter: cli_no_ty_filter,
+        ruff_filter: cli_ruff_filter,
+        tce: cli_tce,
+        hypothesis_seed: cli_hypothesis_seed,
+        pytest_args: cli_pytest_args,
+        no_cache: cli_no_cache,
+        cache_path: cli_cache_path,
+        no_history: cli_no_history,
+        history_path: cli_history_path,
+        sample: cli_sample,
+        sample_seed: cli_sample_seed,
+        shard: cli_shard,
+        runner: cli_runner,
+        python: cli_python,
+        isolation: cli_isolation,
+        no_equiv_detect: cli_no_equiv_detect,
+        cache_scope: cli_cache_scope,
+        fail_under: cli_fail_under,
+        no_verify_baseline: cli_no_verify_baseline,
+        baseline_timeout: cli_baseline_timeout,
+        no_smart_order: cli_no_smart_order,
+        smart_order: cli_smart_order,
+        max_time: cli_max_time,
+        filter: f,
+    } = args;
+    let cli_runner: Option<RunnerKind> = cli_runner.map(Into::into);
+    let cli_isolation: Option<IsolationMode> = cli_isolation.map(Into::into);
+    let cli_cache_scope: Option<CacheScope> = cli_cache_scope.map(Into::into);
+
     let loaded = LoadedConfig::load(&cli_path)?;
     let file = &loaded.file;
 
@@ -362,6 +367,7 @@ fn merge_op_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::FilterArgs;
 
     fn empty_filter() -> FilterArgs {
         FilterArgs {
@@ -378,6 +384,40 @@ mod tests {
         }
     }
 
+    /// A `RunConfigArgs` with every flag defaulted off/none, carrying the
+    /// given `filter`. Tests tweak individual fields before calling.
+    fn run_args(filter: FilterArgs) -> RunConfigArgs {
+        RunConfigArgs {
+            tests: None,
+            jobs: None,
+            timeout: None,
+            no_ty_filter: false,
+            ruff_filter: false,
+            tce: false,
+            hypothesis_seed: None,
+            pytest_args: Vec::new(),
+            no_cache: false,
+            cache_path: None,
+            no_history: false,
+            history_path: None,
+            sample: None,
+            sample_seed: None,
+            shard: None,
+            runner: None,
+            python: None,
+            isolation: None,
+            no_equiv_detect: false,
+            cache_scope: None,
+            fail_under: None,
+            no_verify_baseline: false,
+            baseline_timeout: None,
+            no_smart_order: false,
+            smart_order: false,
+            max_time: None,
+            filter,
+        }
+    }
+
     fn call(cli_path: PathBuf, cli_fail_under: Option<f64>) -> Result<Config> {
         call_with_filter(cli_path, cli_fail_under, empty_filter())
     }
@@ -387,36 +427,9 @@ mod tests {
         cli_fail_under: Option<f64>,
         filter: FilterArgs,
     ) -> Result<Config> {
-        build_config(
-            cli_path,
-            None,
-            None,
-            None,
-            false,
-            false,
-            false, // cli_tce
-            None,
-            Vec::new(),
-            false,
-            None,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None, // cli_runner
-            None, // cli_python
-            None, // cli_isolation
-            false,
-            None,
-            cli_fail_under,
-            false,
-            None,
-            false, // cli_no_smart_order
-            false, // cli_smart_order
-            None,  // cli_max_time
-            filter,
-        )
+        let mut args = run_args(filter);
+        args.fail_under = cli_fail_under;
+        build_config(cli_path, args)
     }
 
     #[test]
@@ -670,37 +683,9 @@ mod tests {
         // Config says on; the CLI flag must win and turn it off.
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("fermut.toml"), "smart_order = true\n").unwrap();
-        let cfg = build_config(
-            tmp.path().to_path_buf(),
-            None,
-            None,
-            None,
-            false,
-            false,
-            false, // cli_tce
-            None,
-            Vec::new(),
-            false,
-            None,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            false,
-            None,
-            true,  // cli_no_smart_order
-            false, // cli_smart_order
-            None,  // cli_max_time
-            empty_filter(),
-        )
-        .unwrap();
+        let mut args = run_args(empty_filter());
+        args.no_smart_order = true;
+        let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
         assert!(!cfg.smart_order, "--no-smart-order wins over config on");
     }
 
@@ -743,37 +728,9 @@ mod tests {
         // Finding #1 guard via the CLI `--timeout`, no config at all: a timeout
         // must not disable default-on ordering (order-invariant score).
         let tmp = tempfile::tempdir().unwrap();
-        let cfg = build_config(
-            tmp.path().to_path_buf(),
-            None,
-            None,
-            Some(5), // cli_timeout — explicit per-mutant timeout
-            false,
-            false,
-            false, // cli_tce
-            None,
-            Vec::new(),
-            false,
-            None,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            false,
-            None,
-            false, // cli_no_smart_order
-            false, // cli_smart_order
-            None,  // cli_max_time
-            empty_filter(),
-        )
-        .unwrap();
+        let mut args = run_args(empty_filter());
+        args.timeout = Some(5); // explicit per-mutant timeout
+        let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
         assert!(
             cfg.smart_order,
             "--timeout must NOT disable default-on smart ordering"
@@ -786,37 +743,10 @@ mod tests {
         // timeout present or not. (The timeout itself never disables ordering.)
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("fermut.toml"), "smart_order = false\n").unwrap();
-        let cfg = build_config(
-            tmp.path().to_path_buf(),
-            None,
-            None,
-            Some(5), // cli_timeout
-            false,
-            false,
-            false, // cli_tce
-            None,
-            Vec::new(),
-            false,
-            None,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-            false,
-            None,
-            false, // cli_no_smart_order
-            true,  // cli_smart_order — forces on over config-off
-            None,  // cli_max_time
-            empty_filter(),
-        )
-        .unwrap();
+        let mut args = run_args(empty_filter());
+        args.timeout = Some(5);
+        args.smart_order = true; // forces on over config-off
+        let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
         assert!(
             cfg.smart_order,
             "--smart-order must force ordering on over config smart_order = false"

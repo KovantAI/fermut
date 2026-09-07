@@ -1802,7 +1802,7 @@ impl Cli {
                     f,
                 )?;
                 let mutants = crate::mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)?;
-                let chain = filter::build_chain_for_list(&cfg)?;
+                let chain = filter::build_chain(&cfg)?;
                 let mut kept = 0usize;
                 for m in &mutants {
                     if filter::first_rejector(&chain, m)?.is_none() {

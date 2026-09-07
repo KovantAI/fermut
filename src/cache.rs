@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use hmac::{KeyInit, Mac, SimpleHmac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -48,7 +48,7 @@ use crate::report::MutantOutcome;
 /// at least 128 bits of entropy.
 const CACHE_KEY_ENV: &str = "FERMUT_CACHE_KEY";
 
-type HmacSha256 = SimpleHmac<Sha256>;
+type HmacSha256 = Hmac<Sha256>;
 
 fn hmac_sha256(key: &[u8], msg: &[u8]) -> Result<[u8; 32]> {
     let mut mac = HmacSha256::new_from_slice(key).context("hmac key init")?;

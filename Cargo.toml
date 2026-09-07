@@ -41,6 +41,10 @@ rayon = "1"
 reflink-copy = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# sha2 0.11 / hmac 0.13 are the current RustCrypto majors (successors to the
+# long-stable 0.10/0.12 line). Deliberately on latest for the cache-integrity
+# HMAC-SHA256 path — same audited primitives, current API. Revisit only on a
+# RUSTSEC advisory or a breaking-API bump.
 sha2 = "0.11"
 hex = "0.4"
 hmac = "0.13"
@@ -54,7 +58,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2"
 wait-timeout = "0.2"
 which = "6"
-ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+# Minimal on purpose: the Anthropic client is a single stateless JSON POST, so
+# cookie storage and gzip (with their cookie_store / time / flate2 trees) are
+# dead weight. `rustls` brings TLS + webpki roots; `json` brings send/read_json.
+# The tests/deps_hygiene.rs guard fails if this set drifts back to defaults.
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 
@@ -85,6 +93,9 @@ windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Fou
 assert_cmd = "2"
 predicates = "3"
 serde_json = "1"
+# Only to construct a `ureq::Error::Rustls` in the transport-retry test; must
+# track the rustls major ureq 3 links (0.23).
+rustls = "0.23"
 
 [profile.release]
 lto = "thin"

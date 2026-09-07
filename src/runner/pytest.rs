@@ -27,6 +27,7 @@ use crate::config::IsolationMode;
 use crate::filter::coverage::CoverageContexts;
 use crate::mutator::Mutant;
 use crate::report::MutantOutcome;
+use crate::sync::lock_recover;
 
 pub struct PytestRunner {
     tests: PathBuf,
@@ -104,17 +105,17 @@ impl PytestRunner {
 
     /// Parse the killing test's node id from captured pytest output (the `-rfE`
     /// summary) and append it to the shared sink for the engine to fold into the
-    /// kill-order sidecar. Best-effort: any misfire (no failure line, unparsable,
-    /// poisoned lock) just forfeits this datapoint.
+    /// kill-order sidecar. Best-effort: any misfire (no failure line,
+    /// unparsable) just forfeits this datapoint. A poisoned sink is recovered
+    /// via [`lock_recover`] so a panicked worker can't silently stop ordering
+    /// from learning for the rest of the run.
     fn record_killer(&self, output: &str, file: &str, op: &'static str) {
         if let Some(nodeid) = crate::kill_order::parse_first_failed(output) {
-            if let Ok(mut sink) = self.kill_sink.lock() {
-                sink.push(crate::kill_order::KillRecord {
-                    file: file.to_string(),
-                    operator: op.to_string(),
-                    nodeid,
-                });
-            }
+            lock_recover(&self.kill_sink).push(crate::kill_order::KillRecord {
+                file: file.to_string(),
+                operator: op.to_string(),
+                nodeid,
+            });
         }
     }
 
@@ -157,6 +158,7 @@ impl PytestRunner {
 /// Only worth it when smart ordering is on AND more than one test was selected:
 /// with a single (or zero) selected test there's nothing to reorder next run, so
 /// the pipe + read + `-rfE` are pure overhead. Kept pure so the wiring is tested.
+#[must_use]
 fn should_capture(smart_order: bool, selected_len: usize) -> bool {
     smart_order && selected_len > 1
 }
@@ -177,6 +179,7 @@ enum Selection {
 /// wiring (smart reordering, the `-rfE` capture flag, and the sweep fallback)
 /// is unit-tested without launching pytest. `ids` is the coverage selection;
 /// `None` or empty falls back to [`Selection::Sweep`].
+#[must_use]
 fn select_args(
     ids: Option<&[String]>,
     smart_order: bool,
@@ -375,10 +378,7 @@ fn wait_draining_stdout_with_grace(
 
 impl Runner for PytestRunner {
     fn take_kill_records(&self) -> Vec<crate::kill_order::KillRecord> {
-        self.kill_sink
-            .lock()
-            .map(|mut g| std::mem::take(&mut *g))
-            .unwrap_or_default()
+        std::mem::take(&mut *lock_recover(&self.kill_sink))
     }
 
     fn run(&self, mutant: &Mutant) -> Result<MutantOutcome> {

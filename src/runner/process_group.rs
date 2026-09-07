@@ -8,8 +8,12 @@
 //! Approach:
 //! - Unix: put the child in its own process group via `process_group(0)`.
 //!   Kill the whole group with `killpg(-pid, SIGKILL)`.
-//! - Windows: spawn into a new process group; send `CTRL_BREAK_EVENT` to it
-//!   on timeout. (TODO — currently a best-effort `child.kill()`.)
+//! - Windows: spawn into a new process group (`CREATE_NEW_PROCESS_GROUP`);
+//!   send `CTRL_BREAK_EVENT` to the group on timeout via
+//!   `GenerateConsoleCtrlEvent`, then force-kill the leader. The group id is
+//!   the leader's pid, so only the mutant's own tree is signalled — xdist
+//!   workers, hypothesis subprocesses, and fixture servers all receive the
+//!   break and exit instead of leaking one stuck process per timed-out mutant.
 
 use std::process::{Child, Command};
 
@@ -46,6 +50,22 @@ pub(crate) fn kill_group(child: &mut Child) {
         let pid = child.id() as i32;
         unsafe {
             libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
+        // The child was spawned with CREATE_NEW_PROCESS_GROUP, so its group id
+        // equals its pid. CTRL_BREAK_EVENT reaches every process in that group
+        // that shares our console — the whole mutant test tree. The leader is
+        // then force-killed below in case it installed a break handler.
+        //
+        // SAFETY: GenerateConsoleCtrlEvent is a plain Win32 call taking two
+        // DWORDs; it shares no memory with the child. The BOOL result is
+        // intentionally ignored — like the Unix path, we already lost the race
+        // against the wall clock and this is best-effort cleanup.
+        unsafe {
+            GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id());
         }
     }
     let _ = child.kill();

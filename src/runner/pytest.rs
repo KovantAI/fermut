@@ -244,6 +244,55 @@ const DRAIN_GRACE: Duration = Duration::from_secs(5);
 /// [`DRAIN_GRACE`], which usually *recovers* the datapoint the child already
 /// wrote. Bytes are decoded lossily rather than via `read_to_string` so a single
 /// non-UTF-8 byte can't discard the whole capture.
+/// Human-readable label for a pytest anomaly exit code (see the [pytest docs]).
+/// Used to describe an [`MutantOutcome::Error`] when a per-mutant run produced no
+/// real verdict — most importantly exit 5, "no tests collected", which the old
+/// "non-zero == kill" logic would have miscounted as a kill. Only the anomaly
+/// codes ([`classify_exit`] emits `Anomaly` for 3/4/5) reach here.
+///
+/// [pytest docs]: https://docs.pytest.org/en/stable/reference/exit-codes.html
+fn pytest_anomaly_message(code: i32) -> String {
+    let what = match code {
+        3 => "internal error",
+        4 => "usage error",
+        5 => "no tests collected",
+        _ => "anomalous exit",
+    };
+    format!("pytest exit {code}: {what} (not a kill)")
+}
+
+/// Verdict a finished pytest process's exit status implies, decoupled from any
+/// I/O so the mapping can be unit-tested. `code` is `status.code()`; `None` means
+/// the process was killed by a signal (segfault etc.).
+///
+/// - exit 0 → survived (tests passed, mutant undetected).
+/// - exit 1 → killed (a test failed).
+/// - exit 2 → killed. Exit 2 is a *collection error* in the per-mutant path: a
+///   mutant that breaks the module's import makes pytest fail to collect. That
+///   IS a kill — the suite cannot pass because of the mutant — so it must stay in
+///   the score, not be dropped as an anomaly.
+/// - exit 3/4/5 → anomaly (internal error / usage error / no tests collected).
+///   These are not verdicts: a stale or mis-rebased coverage-selected node id is
+///   rejected as a usage error (exit 4), and a filter or path that matches no
+///   tests collects nothing (exit 5). Counting them as kills manufactures fake
+///   kills that inflate the score, so surface them as [`MutantOutcome::Error`],
+///   excluded from the score denominator.
+/// - any other non-zero code, or a signal death → killed, as before.
+enum ExitVerdict {
+    Survived,
+    Killed,
+    Anomaly(i32),
+}
+
+fn classify_exit(code: Option<i32>) -> ExitVerdict {
+    match code {
+        Some(0) => ExitVerdict::Survived,
+        Some(1 | 2) => ExitVerdict::Killed,
+        Some(c @ 3..=5) => ExitVerdict::Anomaly(c),
+        _ => ExitVerdict::Killed,
+    }
+}
+
 fn wait_draining_stdout(
     child: Child,
     timeout: Duration,
@@ -413,18 +462,24 @@ impl Runner for PytestRunner {
             let child = cmd.spawn().context("spawning test runner")?;
 
             match wait_draining_stdout(child, self.timeout, kill_group)? {
-                (Some(status), output) => {
-                    if status.success() {
-                        Ok(MutantOutcome::survived(mutant.clone()))
-                    } else {
-                        // Killed. When capturing, learn which test did it and
-                        // record it for next time's ordering.
+                (Some(status), output) => match classify_exit(status.code()) {
+                    ExitVerdict::Survived => Ok(MutantOutcome::survived(mutant.clone())),
+                    // A real kill (test failed, or a mutant that broke import so
+                    // pytest couldn't collect). When capturing, learn which test
+                    // did it and record it for next time's ordering.
+                    ExitVerdict::Killed => {
                         if let Some(out) = output {
                             self.record_killer(&out, &key_file, key_op);
                         }
                         Ok(MutantOutcome::killed(mutant.clone()))
                     }
-                }
+                    // Not a verdict — surface as Error, excluded from the score
+                    // denominator so a stale node id can't manufacture a fake kill.
+                    ExitVerdict::Anomaly(code) => Ok(MutantOutcome::error(
+                        mutant.clone(),
+                        pytest_anomaly_message(code),
+                    )),
+                },
                 (None, _) => Ok(MutantOutcome::timed_out(mutant.clone())),
             }
         })
@@ -908,5 +963,47 @@ mod tests {
                 "smart={smart} must be a permutation of the input"
             );
         }
+    }
+
+    // --- pytest_anomaly_message: exit 3/4/5 are anomalies, not kills.
+
+    #[test]
+    fn pytest_anomaly_message_names_each_code() {
+        // Exit 5 (no tests collected) is the one that used to masquerade as a
+        // kill; 3/4 round out the anomaly set. Every message must carry the
+        // numeric code and disclaim that it is not a kill.
+        for (code, needle) in [
+            (3, "internal error"),
+            (4, "usage error"),
+            (5, "no tests collected"),
+        ] {
+            let msg = pytest_anomaly_message(code);
+            assert!(msg.contains(&code.to_string()), "code in {msg:?}");
+            assert!(msg.contains(needle), "{needle:?} in {msg:?}");
+            assert!(msg.contains("not a kill"), "disclaimer in {msg:?}");
+        }
+    }
+
+    // --- classify_exit: the exit-code → verdict mapping. Guards the whole point
+    // of this change so a future edit to an arm can't silently regress it.
+
+    #[test]
+    fn classify_exit_maps_codes_to_verdicts() {
+        use ExitVerdict::{Anomaly, Killed, Survived};
+        // exit 0: tests passed, mutant undetected.
+        assert!(matches!(classify_exit(Some(0)), Survived));
+        // exit 1: a test failed — real kill.
+        assert!(matches!(classify_exit(Some(1)), Killed));
+        // exit 2: collection/import error. A mutant that breaks import makes the
+        // suite un-collectable — that IS a kill and must stay in the score, not
+        // be dropped as an anomaly (the regression this test locks down).
+        assert!(matches!(classify_exit(Some(2)), Killed));
+        // exit 3/4/5: anomalies, excluded from the score denominator.
+        assert!(matches!(classify_exit(Some(3)), Anomaly(3)));
+        assert!(matches!(classify_exit(Some(4)), Anomaly(4)));
+        assert!(matches!(classify_exit(Some(5)), Anomaly(5)));
+        // any other non-zero code, or a signal death (None) → killed.
+        assert!(matches!(classify_exit(Some(139)), Killed));
+        assert!(matches!(classify_exit(None), Killed));
     }
 }

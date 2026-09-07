@@ -57,6 +57,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2"
 wait-timeout = "0.2"
+which = "6"
 ureq = { version = "3", features = ["json"] }  # rustls TLS on by default in 3.x
 regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -80,6 +81,9 @@ ty_python_semantic = { git = "https://github.com/astral-sh/ruff", tag = "0.16.5"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Foundation"] }
 
 [dev-dependencies]
 assert_cmd = "2"

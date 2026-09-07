@@ -73,7 +73,7 @@ pub fn build_chain(cfg: &Config) -> Result<Vec<Box<dyn Filter>>> {
     }
 
     if cfg.ruff_filter {
-        chain.push(Box::new(ruff::RuffFilter::new()?));
+        chain.push(Box::new(ruff::RuffFilter::new(&cfg.source_root)?));
     }
 
     if cfg.ty_filter {

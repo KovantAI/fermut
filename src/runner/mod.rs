@@ -441,7 +441,8 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
             .file_type()
             .with_context(|| format!("no file type for {}", path.display()))?;
         if file_type.is_dir() {
-            std::fs::create_dir_all(&target).ok();
+            std::fs::create_dir_all(&target)
+                .with_context(|| format!("create mirror dir {}", target.display()))?;
         } else if file_type.is_file() {
             // Skip stray compiled bytecode outside `__pycache__` (e.g. legacy
             // sidecar `.pyc`); same staleness hazard as above.
@@ -452,7 +453,8 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
                 continue;
             }
             if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent).ok();
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create mirror dir {}", parent.display()))?;
             }
             clone_file(path, &target, mode)?;
         }

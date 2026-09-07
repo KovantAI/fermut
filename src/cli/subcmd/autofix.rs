@@ -141,47 +141,16 @@ pub fn autofix(opts: AutofixOpts) -> Result<()> {
 /// `fermut run`'s defaults; only `path`, `tests`, and `timeout` are wired
 /// through — autofix doesn't mutate, it just needs the runner + baseline.
 fn build_run_config(opts: &AutofixOpts) -> Result<crate::config::Config> {
-    let filter = super::super::FilterArgs {
-        ops: None,
-        skip_ops: None,
-        diff_only: None,
-        since: None,
-        no_diff_only: false,
-        coverage: None,
-        no_coverage: false,
-        experimental: false,
-        parity: false,
-        exclude: Vec::new(),
-    };
     crate::cli::build_config::build_config(
         opts.path.clone(),
-        opts.tests.clone(),
-        None,
-        opts.timeout,
-        false,
-        false,
-        false, // tce
-        None,
-        Vec::new(),
-        true, // no_cache: autofix doesn't read the mutation cache
-        None,
-        true,                // no_history: a verify run isn't a real scored run
-        None,                // history_path
-        None,                // sample
-        None,                // sample_seed
-        None,                // shard
-        None,                // runner
-        opts.python.clone(), // python
-        None,                // isolation
-        false,
-        None,
-        None,
-        false,
-        None,
-        false, // no_smart_order
-        false, // smart_order
-        None,  // max_time
-        filter,
+        crate::cli::RunConfigArgs {
+            tests: opts.tests.clone(),
+            timeout: opts.timeout,
+            no_cache: true,   // autofix doesn't read the mutation cache
+            no_history: true, // a verify run isn't a real scored run
+            python: opts.python.clone(),
+            ..Default::default()
+        },
     )
 }
 

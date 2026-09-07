@@ -74,7 +74,15 @@ impl Filter for TceFilter {
     }
 
     fn admits(&self, mutant: &Mutant) -> Result<bool> {
-        let source = self.source_for(&mutant.file)?;
+        // Fail open on an unreadable source: a filter must never drop a mutant
+        // it cannot prove equivalent, and this keeps the two call sites
+        // consistent — the engine's per-mutant loop maps `Err` to admit, but
+        // the `list` subcommand's `first_rejector` propagates it and would
+        // otherwise abort the whole listing.
+        let source = match self.source_for(&mutant.file) {
+            Ok(src) => src,
+            Err(_) => return Ok(true),
+        };
         // Drop only on *proof*. `BytecodeIdentity` returns either
         // `ProvablyEquivalent` or `NotEquivalent` (never a `Likely`), and it
         // already fails open to `NotEquivalent` on a missing/broken interpreter,
@@ -161,8 +169,9 @@ mod tests {
     #[test]
     fn unreadable_file_fails_open() {
         // A path that does not exist makes `source_for` error; the filter
-        // surfaces that as an `Err`, which the engine treats as fail-open
-        // (admits the mutant). We assert the error path here.
+        // fails open — admits the mutant (`Ok(true)`) rather than surfacing an
+        // `Err` — so both call sites (engine loop, `list`'s `first_rejector`)
+        // behave the same and no mutant is dropped without proof.
         let f = TceFilter::new();
         let m = Mutant {
             id: "t".into(),
@@ -174,7 +183,7 @@ mod tests {
             line: 1,
             stmt_line: 1,
         };
-        assert!(f.admits(&m).is_err());
+        assert!(f.admits(&m).unwrap(), "unreadable file must fail open");
     }
 
     #[test]

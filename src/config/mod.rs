@@ -110,7 +110,7 @@ pub struct Config {
     /// be counted "killed", inflating the score toward 100%. Default on;
     /// disable with `--no-verify-baseline` or `verify_baseline = false`.
     pub verify_baseline: bool,
-    /// Wall-clock cap (seconds) for the [`verify_baseline`] run. Separate from
+    /// Wall-clock cap (seconds) for the [`Self::verify_baseline`] run. Separate from
     /// `timeout_secs` (which bounds a single mutant's coverage-selected subset)
     /// because the baseline runs the entire suite. A hung suite is killed past
     /// this so it can't stall the whole run. Set via `--baseline-timeout`.

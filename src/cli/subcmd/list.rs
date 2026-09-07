@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::cli::build_config::build_config;
-use crate::cli::FilterArgs;
+use crate::cli::{FilterArgs, RunConfigArgs};
 use crate::filter;
 
 /// `fermut list` flags, mirrored from the `Cmd::List` clap variant.
@@ -30,36 +30,22 @@ pub fn run(opts: ListOpts) -> Result<()> {
     } = opts;
     let cfg = build_config(
         path,
-        None,
-        None,
-        None,
-        no_ty_filter,
-        ruff_filter,
-        tce,
-        None,
-        Vec::new(),
-        true,
-        None,
-        true,
-        None,
-        None, // sample
-        None, // sample_seed
-        None, // shard
-        None, // runner
-        None, // python
-        None, // isolation
-        true,
-        None,
-        None,
-        true,
-        None,
-        false, // no_smart_order (list doesn't run tests)
-        false, // smart_order
-        None,  // max_time (list doesn't run tests)
-        f,
+        RunConfigArgs {
+            no_ty_filter,
+            ruff_filter,
+            tce,
+            // `list` never runs tests, so disable the run-only machinery
+            // (cache, history, equiv detect, baseline).
+            no_cache: true,
+            no_history: true,
+            no_equiv_detect: true,
+            no_verify_baseline: true,
+            filter: f,
+            ..Default::default()
+        },
     )?;
     let mutants = crate::mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)?;
-    let chain = filter::build_chain_for_list(&cfg)?;
+    let chain = filter::build_chain(&cfg)?;
     let mut kept = 0usize;
     for m in &mutants {
         if filter::first_rejector(&chain, m)?.is_none() {

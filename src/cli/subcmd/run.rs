@@ -10,37 +10,17 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::cli::build_config::build_config;
-use crate::cli::{CacheScopeCli, FilterArgs, Format, IsolationCli, RunnerCli};
+use crate::cli::{Format, RunConfigArgs};
 use crate::history::HistoryEntry;
 use crate::report::{Report, ReportSinks};
 
 /// Every `fermut run` flag, mirrored from the `Cmd::Run` clap variant. The
-/// dispatch arm destructures `Cmd::Run` straight into this struct; keeping the
-/// CLI enum types (`RunnerCli`, …) here means the body stays a verbatim move of
-/// the old inline handler.
+/// config-building flags are grouped in the flattened [`RunConfigArgs`]; the
+/// dispatch arm destructures `Cmd::Run` straight into this struct.
 #[derive(Debug)]
 pub struct RunOpts {
     pub path: PathBuf,
-    pub tests: Option<PathBuf>,
-    pub jobs: Option<usize>,
-    pub timeout: Option<u64>,
-    pub no_ty_filter: bool,
-    pub ruff_filter: bool,
-    pub tce: bool,
-    pub hypothesis_seed: Option<u64>,
-    pub pytest_args: Vec<String>,
-    pub no_cache: bool,
-    pub cache_path: Option<PathBuf>,
-    pub no_history: bool,
-    pub history_path: Option<PathBuf>,
-    pub sample: Option<f64>,
-    pub sample_seed: Option<u64>,
-    pub shard: Option<(u32, u32)>,
-    pub runner: Option<RunnerCli>,
-    pub python: Option<PathBuf>,
-    pub isolation: Option<IsolationCli>,
-    pub no_equiv_detect: bool,
-    pub cache_scope: Option<CacheScopeCli>,
+    pub cfg_args: RunConfigArgs,
     pub annotate: bool,
     pub watch: bool,
     pub format: Format,
@@ -48,39 +28,13 @@ pub struct RunOpts {
     pub trend: bool,
     pub trend_branch: Option<String>,
     pub fail_on_regression: Option<f64>,
-    pub fail_under: Option<f64>,
     pub no_fail: bool,
-    pub no_verify_baseline: bool,
-    pub baseline_timeout: Option<u64>,
-    pub no_smart_order: bool,
-    pub smart_order: bool,
-    pub max_time: Option<u64>,
-    pub filter: FilterArgs,
 }
 
 pub fn run(opts: RunOpts) -> Result<()> {
     let RunOpts {
         path,
-        tests,
-        jobs,
-        timeout,
-        no_ty_filter,
-        ruff_filter,
-        tce,
-        hypothesis_seed,
-        pytest_args,
-        no_cache,
-        cache_path,
-        no_history,
-        history_path,
-        sample,
-        sample_seed,
-        shard,
-        runner,
-        python,
-        isolation,
-        no_equiv_detect,
-        cache_scope,
+        cfg_args,
         annotate,
         watch,
         format,
@@ -88,45 +42,9 @@ pub fn run(opts: RunOpts) -> Result<()> {
         trend,
         trend_branch,
         fail_on_regression,
-        fail_under,
         no_fail,
-        no_verify_baseline,
-        baseline_timeout,
-        no_smart_order,
-        smart_order,
-        max_time,
-        filter: f,
     } = opts;
-    let cfg = build_config(
-        path,
-        tests,
-        jobs,
-        timeout,
-        no_ty_filter,
-        ruff_filter,
-        tce,
-        hypothesis_seed,
-        pytest_args,
-        no_cache,
-        cache_path,
-        no_history,
-        history_path,
-        sample,
-        sample_seed,
-        shard,
-        runner.map(Into::into),
-        python,
-        isolation.map(Into::into),
-        no_equiv_detect,
-        cache_scope.map(Into::into),
-        fail_under,
-        no_verify_baseline,
-        baseline_timeout,
-        no_smart_order,
-        smart_order,
-        max_time,
-        f,
-    )?;
+    let cfg = build_config(path, cfg_args)?;
     let want_annotations = annotate || std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true");
     let fmt = format.into();
     // The closure receives the *prior* history (entries that

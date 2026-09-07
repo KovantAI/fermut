@@ -2,7 +2,7 @@
 //!
 //! Invokes `<exe> -x --tb=no -q [--hypothesis-seed=N] [<extra args>]
 //! <mirrored-tests>` per mutant inside the per-worker project mirror managed
-//! by [`with_worker_mirror`](super::with_worker_mirror). Exit 0 → mutant
+//! by `with_worker_mirror`. Exit 0 → mutant
 //! survived; non-zero → killed; wall-clock past `--timeout` → timed out.
 //!
 //! `exe` is the framework executable — `pytest`, or `rstest` (a pytest-CLI-

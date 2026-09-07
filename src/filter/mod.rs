@@ -16,11 +16,16 @@ pub mod ty_embedded;
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::process::{Command, Output};
 use std::sync::Once;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tempfile::NamedTempFile;
 use tracing::warn;
+use wait_timeout::ChildExt;
+
+use crate::runner::process_group::{kill_group, with_new_process_group};
 
 use crate::config::Config;
 use crate::mutator::{Mutant, Operator};
@@ -91,6 +96,60 @@ pub(crate) fn patched_tempfile(original: &Path, patched: &str) -> Result<NamedTe
     };
     std::fs::write(tmp.path(), patched).context("writing patched source")?;
     Ok(tmp)
+}
+
+/// Wall-clock cap for a single filter subprocess (one `ty`/`ruff check` on one
+/// file). Type-checking or linting a single file is sub-second in practice; this
+/// bound only fires when the tool wedges (a bad plugin, a stuck filesystem, a
+/// runaway inference loop). Without it a hung filter stalls the *entire* run
+/// forever — the test runners already cap themselves with `wait_timeout`, but
+/// the filters used a plain blocking `.output()` with no escape hatch.
+pub(crate) const FILTER_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Run `cmd`, capturing stdout/stderr, but kill it (and its whole process
+/// group) if it outruns [`FILTER_SUBPROCESS_TIMEOUT`]. Returns `Ok(None)` on
+/// timeout so the caller can *bypass* the filter (admit the mutant) instead of
+/// hanging the run.
+///
+/// Output is buffered to temp files rather than OS pipes so a chatty tool can't
+/// deadlock on a full pipe buffer while we sit in `wait_timeout` — same guard
+/// the baseline runner uses.
+pub(crate) fn run_filter_with_timeout(mut cmd: Command) -> Result<Option<Output>> {
+    let out_file = NamedTempFile::new().context("creating filter stdout buffer")?;
+    let err_file = NamedTempFile::new().context("creating filter stderr buffer")?;
+    cmd.stdout(
+        out_file
+            .reopen()
+            .context("reopening filter stdout buffer")?,
+    );
+    cmd.stderr(
+        err_file
+            .reopen()
+            .context("reopening filter stderr buffer")?,
+    );
+    // Own process group so the kill reaches any children the tool spawned.
+    with_new_process_group(&mut cmd);
+
+    let mut child = cmd.spawn().context("spawning filter subprocess")?;
+    match child
+        .wait_timeout(FILTER_SUBPROCESS_TIMEOUT)
+        .context("waiting on filter subprocess")?
+    {
+        Some(status) => {
+            let stdout = std::fs::read(out_file.path()).unwrap_or_default();
+            let stderr = std::fs::read(err_file.path()).unwrap_or_default();
+            Ok(Some(Output {
+                status,
+                stdout,
+                stderr,
+            }))
+        }
+        None => {
+            kill_group(&mut child);
+            let _ = child.wait();
+            Ok(None)
+        }
+    }
 }
 
 /// Build the filter chain implied by the config, cheap-to-expensive.
@@ -168,13 +227,6 @@ pub fn build_chain(cfg: &Config) -> Result<Vec<Box<dyn Filter>>> {
     }
 
     Ok(chain)
-}
-
-/// Same as `build_chain` but skips filters that need a project root / external
-/// binary, for use in the `list` subcommand. Currently identical — kept as a
-/// hook so we can later opt out of expensive filters here without code churn.
-pub fn build_chain_for_list(cfg: &Config) -> Result<Vec<Box<dyn Filter>>> {
-    build_chain(cfg)
 }
 
 /// Convenience: parse a comma-separated operator name list into a HashSet.
@@ -414,6 +466,40 @@ mod chain_order_tests {
                 "duplicate filter name in CANONICAL_ORDER: {name}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod filter_timeout_tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn fast_command_returns_captured_output() {
+        // A command that finishes well under the timeout returns Some(Output)
+        // with its stdout captured — the happy path the filters depend on.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf hello"]);
+        let out = run_filter_with_timeout(cmd)
+            .expect("helper must not error")
+            .expect("fast command must not time out");
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn nonzero_exit_is_still_some() {
+        // ty/ruff exit non-zero when they find diagnostics; the helper must
+        // return Some (not None), since None is reserved for a timeout bypass.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 1"]);
+        let out = run_filter_with_timeout(cmd).unwrap();
+        assert!(
+            out.is_some(),
+            "non-timeout exit must yield Some, not a bypass"
+        );
+        assert!(!out.unwrap().status.success());
     }
 }
 

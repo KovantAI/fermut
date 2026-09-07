@@ -233,18 +233,26 @@ impl TyFilter {
         source_root.join(FERMUT_DIR).join(TY_CACHE_FILENAME)
     }
 
-    fn check(&self, mutant: &Mutant) -> Result<bool> {
-        let baseline_count = self.baseline_count_for(&mutant.file)?;
-        let mutant_count = self.mutant_error_count(mutant)?;
-        Ok(mutant_count <= baseline_count)
+    /// `Ok(None)` when a subprocess `ty check` timed out — the caller treats
+    /// that as a filter-bypass (admit the mutant) rather than hanging the run.
+    fn check(&self, mutant: &Mutant) -> Result<Option<bool>> {
+        let Some(baseline_count) = self.baseline_count_for(&mutant.file)? else {
+            return Ok(None);
+        };
+        let Some(mutant_count) = self.mutant_error_count(mutant)? else {
+            return Ok(None);
+        };
+        Ok(Some(mutant_count <= baseline_count))
     }
 
-    fn mutant_error_count(&self, mutant: &Mutant) -> Result<usize> {
+    fn mutant_error_count(&self, mutant: &Mutant) -> Result<Option<usize>> {
         if let Some(pool) = &self.embedded {
             let original = std::fs::read_to_string(&mutant.file)
                 .with_context(|| format!("reading {}", mutant.file.display()))?;
             let patched = patch_source(&original, mutant.range, &mutant.replacement);
-            return pool.with(|c| c.check_patched(&mutant.file, &patched));
+            return pool
+                .with(|c| c.check_patched(&mutant.file, &patched))
+                .map(Some);
         }
         // Subprocess fallback: patch to a tempfile, run `ty check`.
         let original = std::fs::read_to_string(&mutant.file)
@@ -254,20 +262,24 @@ impl TyFilter {
         self.error_count(tmp.path().to_string_lossy().as_ref())
     }
 
-    fn baseline_count_for(&self, file: &PathBuf) -> Result<usize> {
+    fn baseline_count_for(&self, file: &PathBuf) -> Result<Option<usize>> {
         if let Some(&n) = lock_recover(&self.baseline).get(file) {
-            return Ok(n);
+            return Ok(Some(n));
         }
         let n = if let Some(pool) = &self.embedded {
             pool.with(|c| c.error_count(file))?
         } else {
-            self.error_count(file.to_string_lossy().as_ref())?
+            match self.error_count(file.to_string_lossy().as_ref())? {
+                Some(n) => n,
+                None => return Ok(None),
+            }
         };
         lock_recover(&self.baseline).insert(file.clone(), n);
-        Ok(n)
+        Ok(Some(n))
     }
 
-    fn error_count(&self, path: &str) -> Result<usize> {
+    /// `Ok(None)` when the `ty` subprocess outran the filter timeout.
+    fn error_count(&self, path: &str) -> Result<Option<usize>> {
         let bin = self.bin.as_deref().ok_or_else(|| {
             anyhow!(
                 "ty subprocess path requested but ty binary not on PATH \
@@ -275,18 +287,28 @@ impl TyFilter {
                  forgets to use the embedded pool)"
             )
         })?;
-        let out = Command::new(bin)
-            .args(["check", "--output-format", "concise", path])
-            .output()
-            .with_context(|| format!("invoking `{} check {}`", bin, path))?;
+        let mut cmd = Command::new(bin);
+        cmd.args(["check", "--output-format", "concise", path]);
+        let Some(out) = super::run_filter_with_timeout(cmd)
+            .with_context(|| format!("invoking `{} check {}`", bin, path))?
+        else {
+            warn!(
+                path,
+                timeout_secs = super::FILTER_SUBPROCESS_TIMEOUT.as_secs(),
+                "ty check timed out; bypassing ty filter for this file"
+            );
+            return Ok(None);
+        };
         // ty exits non-zero when there are diagnostics; we count, not gate on, exit code.
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
         let combined = format!("{stdout}{stderr}");
-        Ok(combined
-            .lines()
-            .filter(|l| looks_like_error_line(l))
-            .count())
+        Ok(Some(
+            combined
+                .lines()
+                .filter(|l| looks_like_error_line(l))
+                .count(),
+        ))
     }
 
     /// Memoized AST hash for the file containing `mutant`. Falls back to an
@@ -350,12 +372,19 @@ impl Filter for TyFilter {
             if let Some(&hit) = lock_recover(&self.cache).entries.get(&key) {
                 return Ok(hit);
             }
-            let admits = self.check(mutant)?;
-            lock_recover(&self.cache).entries.insert(key, admits);
-            return Ok(admits);
+            // A timeout bypass (None) is deliberately *not* cached — the hang is
+            // transient, so a later run should get a real chance to type-check.
+            match self.check(mutant)? {
+                Some(admits) => {
+                    lock_recover(&self.cache).entries.insert(key, admits);
+                    Ok(admits)
+                }
+                None => Ok(true),
+            }
+        } else {
+            // No AST hash → skip caching but still run ty.
+            Ok(self.check(mutant)?.unwrap_or(true))
         }
-        // No AST hash → skip caching but still run ty.
-        self.check(mutant)
     }
 }
 

@@ -210,35 +210,16 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
     }
     let cfg = build_config(
         opts.path.clone(),
-        None,       // tests
-        None,       // jobs
-        None,       // timeout
-        false,      // no_ty_filter
-        false,      // ruff_filter
-        false,      // tce
-        None,       // hypothesis_seed
-        Vec::new(), // pytest_args
-        false,      // no_cache
-        None,       // cache_path
-        true,       // no_history — engine must NOT append; we write our
-        // own entry below marked `baseline: true`, else the
-        // anchor would be an ordinary, unmarked run entry.
-        None,   // history_path
-        sample, // sample
-        Some(SAMPLE_SEED),
-        None,  // shard
-        None,  // runner
-        None,  // python
-        None,  // isolation
-        false, // no_equiv_detect
-        None,  // cache_scope
-        None,  // fail_under
-        false, // no_verify_baseline
-        None,  // baseline_timeout
-        false, // no_smart_order
-        false, // smart_order
-        None,  // max_time
-        filter,
+        crate::cli::RunConfigArgs {
+            // engine must NOT append history; we write our own entry below
+            // marked `baseline: true`, else the anchor would be an ordinary,
+            // unmarked run entry.
+            no_history: true,
+            sample,
+            sample_seed: Some(SAMPLE_SEED),
+            filter,
+            ..Default::default()
+        },
     )?;
 
     let started = Instant::now();

@@ -48,6 +48,7 @@ pub(crate) fn kill_group(child: &mut Child) {
         // signals the entire process group. No memory is shared with the
         // child. `child.id()` is u32; we cast to i32 because killpg is i32.
         let pid = child.id() as i32;
+        #[allow(unsafe_code)] // sole FFI site: signal the child's process group
         unsafe {
             libc::kill(-pid, libc::SIGKILL);
         }
@@ -64,6 +65,7 @@ pub(crate) fn kill_group(child: &mut Child) {
         // DWORDs; it shares no memory with the child. The BOOL result is
         // intentionally ignored — like the Unix path, we already lost the race
         // against the wall clock and this is best-effort cleanup.
+        #[allow(unsafe_code)] // sole FFI site: signal the child's console group
         unsafe {
             GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id());
         }

@@ -97,6 +97,30 @@ serde_json = "1"
 # track the rustls major ureq 3 links (0.23).
 rustls = "0.23"
 
+# Lint baseline. CI runs `cargo clippy -- -D warnings`, so every lint below is
+# an error in CI and locally/IDE, not just an advisory. Kept curated + green
+# rather than blanket `clippy::pedantic`, which currently fires ~40 lints
+# (mostly `cast_possible_truncation`) — tighten toward pedantic incrementally.
+[lints.rust]
+# No new `unsafe` without an explicit, reviewed opt-in. The only two FFI sites
+# (process-group kill in `runner/process_group.rs`) carry a scoped
+# `#[allow(unsafe_code)]` with a SAFETY note.
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"           # no stray `dbg!` in committed code
+todo = "warn"                # `todo!()` must not ship
+unimplemented = "warn"       # nor `unimplemented!()`
+mem_forget = "warn"
+verbose_file_reads = "warn"
+inefficient_to_string = "warn"
+lossy_float_literal = "warn"
+
+[lints.rustdoc]
+# `lib.rs` documents the module map with intra-doc links; fail the build if any
+# break so the doc can't silently drift from the code.
+broken_intra_doc_links = "deny"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

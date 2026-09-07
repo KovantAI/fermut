@@ -490,33 +490,15 @@ fn tool_run(args: &Value) -> Result<Value> {
     // fermut.toml is honored and only the explicitly-passed args override it.
     let cfg = crate::cli::build_config::build_config(
         path,
-        tests,
-        jobs,
-        timeout,
-        false,
-        false,
-        false, // tce
-        None,
-        Vec::new(),
-        false,
-        None,
-        false,
-        None,   // history_path
-        None,   // sample
-        None,   // sample_seed
-        None,   // shard
-        None,   // runner
-        python, // python
-        None,   // isolation
-        false,
-        None,
-        None,
-        false,
-        None,
-        false, // no_smart_order
-        false, // smart_order
-        max_time,
-        filter,
+        crate::cli::RunConfigArgs {
+            tests,
+            jobs,
+            timeout,
+            python,
+            max_time,
+            filter,
+            ..Default::default()
+        },
     )?;
 
     let (report, _entry) = crate::engine::run(&cfg)?;

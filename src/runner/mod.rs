@@ -15,7 +15,7 @@ pub mod pytest;
 pub mod python;
 pub mod unittest;
 
-pub use python::{resolve_python, resolve_tool};
+pub use python::{interpreter, resolve_python, resolve_tool};
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -229,6 +229,11 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
             timeout,
             baseline_timeout,
             isolation,
+            // Resolve the interpreter once: the configured `--python` when set,
+            // else a PATH-probed `python3`/`python`. `unittest` has no console
+            // script, so it's always `<interp> -m unittest`.
+            interpreter(cfg.python.as_deref()),
+            cfg.unittest_pattern.clone(),
         )),
     }
 }

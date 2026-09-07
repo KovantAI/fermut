@@ -863,6 +863,7 @@ mod tests {
             shard: None,
             runner: RunnerKind::Pytest,
             python: None,
+            unittest_pattern: None,
             isolation: IsolationMode::Auto,
             equiv_detect: false,
             cache_scope: CacheScope::File,

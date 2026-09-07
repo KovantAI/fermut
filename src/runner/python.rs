@@ -107,6 +107,74 @@ fn venv_python(venv: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Program to invoke `<interp> -m <module>` with for contexts that have no
+/// console-script equivalent — `unittest` and `coverage`. Unlike
+/// [`resolve_python`] (which returns `None` to signal the bare-`pytest`-on-PATH
+/// fallback), this ALWAYS yields something to spawn.
+///
+/// `explicit` is an already-resolved interpreter (typically the output of
+/// [`resolve_python`], i.e. `--python` / the `python` key / an auto-discovered
+/// venv). When `None`, probe `PATH` for `python3` then `python` — so a
+/// `python3`-only system (no bare `python`) still works — and fall back to
+/// `python3` when neither is found, so a genuine missing-interpreter faceplant
+/// names a real program instead of a stale hardcoded `python`.
+pub fn interpreter(explicit: Option<&Path>) -> PathBuf {
+    interpreter_in(explicit, std::env::var_os("PATH").as_deref())
+}
+
+/// [`interpreter`] with `PATH` injected, so the probe is unit-testable without
+/// mutating the process-global environment (which would race other tests).
+fn interpreter_in(explicit: Option<&Path>, path: Option<&std::ffi::OsStr>) -> PathBuf {
+    if let Some(p) = explicit {
+        return p.to_path_buf();
+    }
+    for name in ["python3", "python"] {
+        if program_on_path(name, path) {
+            return PathBuf::from(name);
+        }
+    }
+    PathBuf::from("python3")
+}
+
+/// Whether `name` resolves to an executable file on `path` (a `PATH`-style
+/// value). On Windows also accepts a `.exe` sibling. Read-only.
+fn program_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    std::env::split_paths(&path)
+        // An empty PATH element means "current directory" in shell lore. Probing
+        // it would make interpreter discovery depend on the process CWD — a
+        // stray `./python3` file would masquerade as the interpreter — so skip
+        // empty elements and consider only real directories.
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .any(|dir| {
+            let candidate = dir.join(name);
+            is_executable_file(&candidate) || is_executable_file(&candidate.with_extension("exe"))
+        })
+}
+
+/// Whether `path` is a regular file that is actually runnable: on Unix it must
+/// carry an executable bit (matching `which` semantics, so a non-executable
+/// file named `python3` on PATH isn't mistaken for an interpreter); on other
+/// platforms existence as a file suffices.
+fn is_executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +244,26 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    #[test]
+    fn interpreter_explicit_passthrough() {
+        // An explicit resolved interpreter is used verbatim — never PATH-probed.
+        let p = Path::new("/opt/py/bin/python3.12");
+        assert_eq!(interpreter(Some(p)), p.to_path_buf());
+    }
+
+    #[test]
+    fn interpreter_probes_path_and_finds_python3() {
+        // A PATH dir holding only `python3` (the `python3`-only system) must
+        // resolve to `python3`, not the stale hardcoded `python`.
+        let root = tmp("interp-py3");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        make_exe(&bin.join("python3"));
+        let path = std::ffi::OsString::from(&bin);
+        assert_eq!(interpreter_in(None, Some(&path)), PathBuf::from("python3"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     /// Write an executable file at `path` (0o755 on Unix so `which` accepts it).
     fn make_exe(path: &Path) {
         fs::write(path, "").unwrap();
@@ -201,6 +289,79 @@ mod tests {
         make_exe(&tool);
 
         assert_eq!(resolve_tool_in("faketool", Some(&bin)), Some(tool));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn interpreter_prefers_python3_over_python() {
+        // Both present → `python3` wins (probe order), so we never regress to a
+        // Python-2 `python` on a mixed system.
+        let root = tmp("interp-both");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        make_exe(&bin.join("python"));
+        make_exe(&bin.join("python3"));
+        let path = std::ffi::OsString::from(&bin);
+        assert_eq!(interpreter_in(None, Some(&path)), PathBuf::from("python3"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn interpreter_falls_back_to_python3_when_none_on_path() {
+        // Neither program on PATH → `python3` so the spawn error names a real
+        // program rather than silently doing nothing.
+        assert_eq!(
+            interpreter_in(None, Some(std::ffi::OsStr::new(""))),
+            PathBuf::from("python3")
+        );
+        assert_eq!(interpreter_in(None, None), PathBuf::from("python3"));
+    }
+
+    /// Regression (review #1): a non-executable file named `python`/`python3` on
+    /// PATH must NOT be treated as an interpreter — otherwise the spawn later
+    /// faceplants with `permission denied` instead of falling through. Unix-only
+    /// because the exec bit is meaningless on other platforms.
+    #[test]
+    #[cfg(unix)]
+    fn interpreter_requires_executable_bit() {
+        let root = tmp("interp-execbit");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let py = bin.join("python");
+        fs::write(&py, "").unwrap(); // present but NOT executable
+        let path = std::ffi::OsString::from(&bin);
+        // Non-exec `python`, no `python3` → nothing matches → fallback `python3`.
+        assert_eq!(interpreter_in(None, Some(&path)), PathBuf::from("python3"));
+        // Flip the exec bit → `python` is now a runnable match.
+        make_exe(&py);
+        assert_eq!(interpreter_in(None, Some(&path)), PathBuf::from("python"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Regression (review #2): an empty PATH element (shell lore's "current
+    /// directory") must be skipped, so interpreter discovery never depends on
+    /// the process CWD. A PATH of only empty elements matches nothing and falls
+    /// back — even though `dir.join("python3")` for an empty dir is the relative
+    /// `python3`, which `is_file()` would resolve against CWD if not filtered.
+    #[test]
+    fn interpreter_skips_empty_path_elements() {
+        // Bare empty string, and a leading/trailing/interior empty element.
+        for raw in ["", ":", "::"] {
+            assert_eq!(
+                interpreter_in(None, Some(std::ffi::OsStr::new(raw))),
+                PathBuf::from("python3"),
+                "empty PATH elements in {raw:?} must not be probed"
+            );
+        }
+        // And an empty element next to a real bin still finds the real one —
+        // the empty element neither short-circuits nor panics the walk.
+        let root = tmp("interp-empty-plus-real");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        make_exe(&bin.join("python3"));
+        // Build `<empty>{sep}<bin>` with the platform's PATH separator.
+        let path = std::env::join_paths([std::path::PathBuf::new(), bin.clone()]).unwrap();
+        assert_eq!(interpreter_in(None, Some(&path)), PathBuf::from("python3"));
         fs::remove_dir_all(&root).unwrap();
     }
 

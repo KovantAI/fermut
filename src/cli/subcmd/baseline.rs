@@ -184,7 +184,14 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
         python: None,
     })
     .context("building coverage database for baseline")?;
-    let line_coverage = read_line_coverage(&loaded.base_dir);
+    // `coverage` has no console script we rely on, so it's `<interp> -m
+    // coverage`. Resolve the same interpreter the runner would (venv near the
+    // source root, else a PATH-probed `python3`/`python`) so a `python3`-only
+    // box doesn't silently drop the line-coverage headline.
+    let interp = crate::runner::interpreter(
+        crate::runner::resolve_python(&loaded.base_dir, None).as_deref(),
+    );
+    let line_coverage = read_line_coverage(&interp, &loaded.base_dir);
 
     // 3. Sampled mutation pass, restricted to covered lines. We reuse the
     //    full `build_config` path so the filter chain (coverage, excludes,
@@ -290,8 +297,8 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
 /// more robust than re-parsing the SQLite numbits ourselves. Best-effort:
 /// any failure degrades to `None` and the mutation half of the report still
 /// stands.
-fn read_line_coverage(path: &std::path::Path) -> Option<f64> {
-    let out = Command::new("python")
+fn read_line_coverage(interp: &std::path::Path, path: &std::path::Path) -> Option<f64> {
+    let out = Command::new(interp)
         .arg("-m")
         .arg("coverage")
         .arg("report")

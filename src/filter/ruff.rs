@@ -9,7 +9,7 @@
 //! pre-filter in front of ty.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -68,18 +68,7 @@ impl Filter for RuffFilter {
             .with_context(|| format!("reading {}", mutant.file.display()))?;
         let patched = patch_source(&original, mutant.range, &mutant.replacement);
 
-        // Temp file goes in the original's directory, not /tmp, so ruff picks
-        // up the same nearest `[tool.ruff]` config and per-file ignores the
-        // baseline saw. A /tmp file would resolve a different (or no) config,
-        // skewing the diagnostic count asymmetrically.
-        let parent = mutant.file.parent().unwrap_or_else(|| Path::new("."));
-        let tmp = tempfile::Builder::new()
-            .prefix("fermut-ruff-")
-            .suffix(".py")
-            .tempfile_in(parent)
-            .context("creating temp file")?;
-        std::fs::write(tmp.path(), &patched).context("writing patched source")?;
-
+        let tmp = super::patched_tempfile(&mutant.file, &patched)?;
         let mutated = self.diagnostic_count(tmp.path().to_string_lossy().as_ref())?;
         Ok(mutated <= baseline)
     }

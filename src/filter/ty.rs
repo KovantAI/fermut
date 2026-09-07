@@ -244,20 +244,7 @@ impl TyFilter {
         let original = std::fs::read_to_string(&mutant.file)
             .with_context(|| format!("reading {}", mutant.file.display()))?;
         let patched = patch_source(&original, mutant.range, &mutant.replacement);
-        // Materialize the temp file *inside the original's directory* so the
-        // patched mutant sees the same project context the baseline does —
-        // sibling modules, package `__init__`, and the nearest pyproject
-        // `[tool.ty]` all resolve. Writing to /tmp instead leaves the mutant
-        // a lone file where every intra-project import is unresolved, adding
-        // spurious errors that push `mutant_count` past `baseline_count` and
-        // wrongly drop valid mutants.
-        let parent = mutant.file.parent().unwrap_or_else(|| Path::new("."));
-        let tmp = tempfile::Builder::new()
-            .prefix("fermut-")
-            .suffix(".py")
-            .tempfile_in(parent)
-            .context("creating temp file")?;
-        std::fs::write(tmp.path(), &patched).context("writing patched source")?;
+        let tmp = super::patched_tempfile(&mutant.file, &patched)?;
         self.error_count(tmp.path().to_string_lossy().as_ref())
     }
 

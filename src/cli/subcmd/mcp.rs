@@ -495,6 +495,7 @@ fn tool_run(args: &Value) -> Result<Value> {
         timeout,
         false,
         false,
+        false, // tce
         None,
         Vec::new(),
         false,

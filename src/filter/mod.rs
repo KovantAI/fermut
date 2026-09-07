@@ -10,6 +10,7 @@ pub mod parity;
 pub mod ruff;
 pub mod sample;
 pub mod shard;
+pub mod tce;
 pub mod ty;
 pub mod ty_embedded;
 
@@ -159,6 +160,13 @@ pub fn build_chain(cfg: &Config) -> Result<Vec<Box<dyn Filter>>> {
         )?));
     }
 
+    // TCE (bytecode-equivalence) last: it spawns a `compile()` subprocess per
+    // mutant, so run it after ty's type-error cull has already dropped the
+    // cheap-to-reject mutants — fewer survivors reach the per-mutant subprocess.
+    if cfg.tce {
+        chain.push(Box::new(tce::TceFilter::new()));
+    }
+
     Ok(chain)
 }
 
@@ -213,6 +221,7 @@ pub(crate) const CANONICAL_ORDER: &[&str] = &[
     "coverage",
     "ruff",
     "ty",
+    "tce",
 ];
 
 #[cfg(test)]
@@ -245,6 +254,7 @@ mod chain_order_tests {
             timeout_secs: 30,
             ty_filter: false,
             ruff_filter: false,
+            tce: false,
             experimental: false,
             parity: false,
             ops_allow: None,
@@ -370,14 +380,16 @@ mod chain_order_tests {
         // Documentation invariant: the canonical list itself must group
         // filters by cost category — cheap selection (experimental,
         // operator, shard, sample), then git/coverage-driven (diff,
-        // since, coverage), then external-process (ruff, ty). If someone
-        // edits CANONICAL_ORDER, this asserts they kept the buckets in
-        // the right order.
+        // since, coverage), then external-process (ruff, ty), then tce
+        // (a `compile()` subprocess per mutant — the most expensive, so it
+        // runs after ty's cull). If someone edits CANONICAL_ORDER, this
+        // asserts they kept the buckets in the right order.
         fn bucket(name: &str) -> u8 {
             match name {
                 "experimental" | "parity" | "operator" | "shard" | "sample" => 0,
                 "diff-only" | "since" | "coverage" => 1,
                 "ruff" | "ty" => 2,
+                "tce" => 3,
                 _ => panic!("unknown filter name in canonical order: {name}"),
             }
         }

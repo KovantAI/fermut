@@ -841,6 +841,7 @@ mod tests {
             timeout_secs: 30,
             ty_filter: false,
             ruff_filter: false,
+            tce: false,
             experimental: false,
             parity: false,
             ops_allow: None,

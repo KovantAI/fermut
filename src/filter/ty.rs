@@ -250,12 +250,7 @@ impl TyFilter {
         let original = std::fs::read_to_string(&mutant.file)
             .with_context(|| format!("reading {}", mutant.file.display()))?;
         let patched = patch_source(&original, mutant.range, &mutant.replacement);
-        let tmp = tempfile::Builder::new()
-            .prefix("fermut-")
-            .suffix(".py")
-            .tempfile()
-            .context("creating temp file")?;
-        std::fs::write(tmp.path(), &patched).context("writing patched source")?;
+        let tmp = super::patched_tempfile(&mutant.file, &patched)?;
         self.error_count(tmp.path().to_string_lossy().as_ref())
     }
 

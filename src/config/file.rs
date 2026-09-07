@@ -49,6 +49,10 @@ pub struct FileConfig {
     /// fermut invokes `<python> -m pytest` instead of a bare `pytest` from
     /// PATH. A relative value resolves against the config's base dir.
     pub python: Option<PathBuf>,
+    /// Glob for `unittest discover -p` (the `unittest` runner only). The
+    /// unittest default `test*.py` misses `*_test.py`; set e.g. `"*_test.py"`
+    /// to match that convention. Ignored by pytest/rstest.
+    pub unittest_pattern: Option<String>,
     pub isolation: Option<IsolationMode>,
     pub equiv_detect: Option<bool>,
     pub cache_scope: Option<CacheScope>,

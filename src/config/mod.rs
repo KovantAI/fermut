@@ -71,6 +71,13 @@ pub struct Config {
     /// the `python` config key, or auto-discovered from an active venv / a
     /// `.venv` near the source root. See [`crate::runner::resolve_python`].
     pub python: Option<PathBuf>,
+    /// Glob passed to `unittest discover -p` (the `Unittest` runner only). The
+    /// unittest default `test*.py` misses the `*_test.py` convention; set this
+    /// to match a project's layout. A pattern that collects zero tests makes
+    /// the baseline vacuously "pass", so the runner errors on zero-collection
+    /// rather than silently reporting every mutant as surviving. Ignored by the
+    /// pytest/rstest runners. `None` = the unittest default `test*.py`.
+    pub unittest_pattern: Option<String>,
     pub isolation: IsolationMode,
     /// Run the equivalent-mutant detector on `Survived` outcomes. Provably-
     /// equivalent mutants are remapped to `Equivalent` and excluded from the

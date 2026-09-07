@@ -297,6 +297,7 @@ pub(crate) fn build_config(
         shard,
         runner,
         python,
+        unittest_pattern: file.unittest_pattern.clone(),
         isolation,
         equiv_detect,
         cache_scope,

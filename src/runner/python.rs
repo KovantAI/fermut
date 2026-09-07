@@ -73,6 +73,47 @@ fn venv_python(venv: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Program to invoke `<interp> -m <module>` with for contexts that have no
+/// console-script equivalent — `unittest` and `coverage`. Unlike
+/// [`resolve_python`] (which returns `None` to signal the bare-`pytest`-on-PATH
+/// fallback), this ALWAYS yields something to spawn.
+///
+/// `explicit` is an already-resolved interpreter (typically the output of
+/// [`resolve_python`], i.e. `--python` / the `python` key / an auto-discovered
+/// venv). When `None`, probe `PATH` for `python3` then `python` — so a
+/// `python3`-only system (no bare `python`) still works — and fall back to
+/// `python3` when neither is found, so a genuine missing-interpreter faceplant
+/// names a real program instead of a stale hardcoded `python`.
+pub fn interpreter(explicit: Option<&Path>) -> PathBuf {
+    interpreter_in(explicit, std::env::var_os("PATH").as_deref())
+}
+
+/// [`interpreter`] with `PATH` injected, so the probe is unit-testable without
+/// mutating the process-global environment (which would race other tests).
+fn interpreter_in(explicit: Option<&Path>, path: Option<&std::ffi::OsStr>) -> PathBuf {
+    if let Some(p) = explicit {
+        return p.to_path_buf();
+    }
+    for name in ["python3", "python"] {
+        if program_on_path(name, path) {
+            return PathBuf::from(name);
+        }
+    }
+    PathBuf::from("python3")
+}
+
+/// Whether `name` resolves to an executable file on `path` (a `PATH`-style
+/// value). On Windows also accepts a `.exe` sibling. Read-only.
+fn program_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> bool {
+    let Some(path) = path else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(name);
+        candidate.is_file() || candidate.with_extension("exe").is_file()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +181,50 @@ mod tests {
 
         assert_eq!(discover_dot_venv(&nested), None);
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn interpreter_explicit_passthrough() {
+        // An explicit resolved interpreter is used verbatim — never PATH-probed.
+        let p = Path::new("/opt/py/bin/python3.12");
+        assert_eq!(interpreter(Some(p)), p.to_path_buf());
+    }
+
+    #[test]
+    fn interpreter_probes_path_and_finds_python3() {
+        // A PATH dir holding only `python3` (the `python3`-only system) must
+        // resolve to `python3`, not the stale hardcoded `python`.
+        let root = tmp("interp-py3");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("python3"), "").unwrap();
+        let path = std::ffi::OsString::from(&bin);
+        assert_eq!(interpreter_in(None, Some(&path)), PathBuf::from("python3"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn interpreter_prefers_python3_over_python() {
+        // Both present → `python3` wins (probe order), so we never regress to a
+        // Python-2 `python` on a mixed system.
+        let root = tmp("interp-both");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("python"), "").unwrap();
+        fs::write(bin.join("python3"), "").unwrap();
+        let path = std::ffi::OsString::from(&bin);
+        assert_eq!(interpreter_in(None, Some(&path)), PathBuf::from("python3"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn interpreter_falls_back_to_python3_when_none_on_path() {
+        // Neither program on PATH → `python3` so the spawn error names a real
+        // program rather than silently doing nothing.
+        assert_eq!(
+            interpreter_in(None, Some(std::ffi::OsStr::new(""))),
+            PathBuf::from("python3")
+        );
+        assert_eq!(interpreter_in(None, None), PathBuf::from("python3"));
     }
 }

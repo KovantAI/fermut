@@ -155,23 +155,23 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
 
     let progress = make_progress_bar(mutants.len() as u64);
     let pool = build_pool(cfg.jobs)?;
+    let ctx = EvalCtx {
+        cfg,
+        filters: &filters,
+        runner: runner.as_ref(),
+        cache: &cache,
+        file_hashes: &file_hashes,
+        scope_maps: &scope_maps,
+        scope_prefix: &scope_prefix,
+        equiv: equiv.as_ref(),
+        file_sources: &file_sources,
+        deadline: test_deadline,
+    };
     let outcomes: Vec<MutantOutcome> = pool.install(|| {
         mutants
             .par_iter()
             .map(|m| {
-                let outcome = evaluate(
-                    m,
-                    cfg,
-                    &filters,
-                    runner.as_ref(),
-                    &cache,
-                    &file_hashes,
-                    &scope_maps,
-                    &scope_prefix,
-                    equiv.as_ref(),
-                    &file_sources,
-                    test_deadline,
-                );
+                let outcome = evaluate(&ctx, m);
                 if let Some(pb) = &progress {
                     pb.inc(1);
                 }
@@ -256,26 +256,31 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
     Ok((report, entry))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn evaluate(
-    mutant: &Mutant,
-    cfg: &Config,
-    filters: &[Box<dyn Filter>],
-    runner: &dyn Runner,
-    cache: &Mutex<Cache>,
-    file_hashes: &HashMap<PathBuf, String>,
-    scope_maps: &HashMap<PathBuf, ScopeMap>,
-    scope_prefix: &str,
-    equiv: Option<&EquivPipeline>,
-    file_sources: &HashMap<PathBuf, String>,
+/// Read-only, per-run context shared by every `evaluate` call. Built once
+/// before the per-mutant fan-out (only `mutant` varies across calls), so the
+/// hot loop passes one reference instead of ten identical arguments.
+struct EvalCtx<'a> {
+    cfg: &'a Config,
+    filters: &'a [Box<dyn Filter>],
+    runner: &'a dyn Runner,
+    cache: &'a Mutex<Cache>,
+    file_hashes: &'a HashMap<PathBuf, String>,
+    scope_maps: &'a HashMap<PathBuf, ScopeMap>,
+    scope_prefix: &'a str,
+    equiv: Option<&'a EquivPipeline>,
+    file_sources: &'a HashMap<PathBuf, String>,
+    /// Testing-phase wall-clock ceiling. Identical for every mutant in the
+    /// run; a mutant reaching `evaluate` past it is a cheap `time-budget` skip.
     deadline: Option<Instant>,
-) -> MutantOutcome {
+}
+
+fn evaluate(ctx: &EvalCtx, mutant: &Mutant) -> MutantOutcome {
     // Testing-phase budget check first, before the filter chain or the runner.
     // Past the deadline every remaining mutant is a cheap skip — including the
     // ty pre-filter, the dominant per-mutant cost — so the wall-clock ceiling
     // actually holds. In-flight mutants that passed this check already run to
     // completion; only not-yet-started ones short-circuit here.
-    if let Some(deadline) = deadline {
+    if let Some(deadline) = ctx.deadline {
         if Instant::now() >= deadline {
             return MutantOutcome::skipped(mutant.clone(), TIME_BUDGET_FILTER);
         }
@@ -283,7 +288,7 @@ fn evaluate(
 
     // Filter chain first — skip decisions depend on current filter config,
     // so we can't satisfy them from cache.
-    for f in filters {
+    for f in ctx.filters {
         match f.admits(mutant) {
             Ok(true) => continue,
             Ok(false) => return MutantOutcome::skipped(mutant.clone(), f.name()),
@@ -293,11 +298,11 @@ fn evaluate(
         }
     }
 
-    let scope = compute_mutant_scope(scope_prefix, cfg, mutant);
-    let identity_hash = mutant_identity_hash(cfg, mutant, file_hashes, scope_maps);
+    let scope = compute_mutant_scope(ctx.scope_prefix, ctx.cfg, mutant);
+    let identity_hash = mutant_identity_hash(ctx.cfg, mutant, ctx.file_hashes, ctx.scope_maps);
 
     if let Some(hash) = &identity_hash {
-        if let Some(cached) = lock_recover(cache).lookup(&mutant.id, hash, &scope) {
+        if let Some(cached) = lock_recover(ctx.cache).lookup(&mutant.id, hash, &scope) {
             // Translate the cached verdict against the current detector
             // setting before returning. The cache stores the post-equiv
             // outcome, but `maybe_remap_equivalent` is invertible:
@@ -305,18 +310,19 @@ fn evaluate(
             // Lets `--no-equiv-detect` toggle take effect without busting
             // the cache. Detector rule changes are *not* covered — those
             // need a scope-prefix bump.
-            return maybe_remap_equivalent(cached, equiv, file_sources);
+            return maybe_remap_equivalent(cached, ctx.equiv, ctx.file_sources);
         }
     }
 
-    let outcome = runner
+    let outcome = ctx
+        .runner
         .run(mutant)
         .unwrap_or_else(|e| MutantOutcome::error(mutant.clone(), e.to_string()));
 
-    let outcome = maybe_remap_equivalent(outcome, equiv, file_sources);
+    let outcome = maybe_remap_equivalent(outcome, ctx.equiv, ctx.file_sources);
 
     if let Some(hash) = identity_hash {
-        lock_recover(cache).insert(mutant.id.clone(), hash, scope, outcome.clone());
+        lock_recover(ctx.cache).insert(mutant.id.clone(), hash, scope, outcome.clone());
     }
 
     outcome
@@ -903,19 +909,19 @@ mod tests {
         let cfg = base_test_config();
         let m = arith_mutant("return x + 0", "+", "-");
         let cache = Mutex::new(Cache::default());
-        evaluate(
-            &m,
-            &cfg,
-            &[],
+        let ctx = EvalCtx {
+            cfg: &cfg,
+            filters: &[],
             runner,
-            &cache,
-            &HashMap::new(),
-            &HashMap::new(),
-            "",
-            None,
-            &HashMap::new(),
+            cache: &cache,
+            file_hashes: &HashMap::new(),
+            scope_maps: &HashMap::new(),
+            scope_prefix: "",
+            equiv: None,
+            file_sources: &HashMap::new(),
             deadline,
-        )
+        };
+        evaluate(&ctx, &m)
     }
 
     #[test]

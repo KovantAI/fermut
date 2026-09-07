@@ -205,21 +205,21 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
     // `rstest` is a pytest-CLI-compatible drop-in, so it reuses the pytest
     // runner wholesale — only the framework executable name differs.
     let pytest_compatible = |exe: &'static str| -> Box<dyn Runner> {
-        Box::new(pytest::PytestRunner::new(
-            tests.clone(),
+        Box::new(pytest::PytestRunner::new(pytest::PytestConfig {
+            tests: tests.clone(),
             timeout,
             baseline_timeout,
-            cfg.hypothesis_seed,
-            cfg.pytest_args.clone(),
+            hypothesis_seed: cfg.hypothesis_seed,
+            extra_args: cfg.pytest_args.clone(),
             isolation,
-            cfg.coverage.clone(),
-            cfg.python.clone(),
+            coverage: cfg.coverage.clone(),
+            python: cfg.python.clone(),
             exe,
-            cfg.smart_order,
-            kill_order.clone(),
-            kill_sink.clone(),
-            key_base.clone(),
-        ))
+            smart_order: cfg.smart_order,
+            kill_order: kill_order.clone(),
+            kill_sink: kill_sink.clone(),
+            key_base: key_base.clone(),
+        }))
     };
     match cfg.runner {
         RunnerKind::Pytest => pytest_compatible("pytest"),

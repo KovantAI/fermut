@@ -268,9 +268,11 @@ fn fix_one(core: &Core, m: &Mutant) -> AutofixEntry {
             snapshot,
             &target_path,
             applied,
-            OUTCOME_SUITE_RED,
-            "generated test fails on unmutated code",
-            Some(out),
+            Rejection {
+                outcome: OUTCOME_SUITE_RED,
+                reason: "generated test fails on unmutated code",
+                extra: Some(out),
+            },
         ),
         Ok(Verdict::StillSurvives) => revert_or_keep(
             core,
@@ -278,9 +280,11 @@ fn fix_one(core: &Core, m: &Mutant) -> AutofixEntry {
             snapshot,
             &target_path,
             applied,
-            OUTCOME_STILL_SURVIVES,
-            "generated test does not catch the mutation",
-            None,
+            Rejection {
+                outcome: OUTCOME_STILL_SURVIVES,
+                reason: "generated test does not catch the mutation",
+                extra: None,
+            },
         ),
         Err(e) => revert_or_keep(
             core,
@@ -288,24 +292,40 @@ fn fix_one(core: &Core, m: &Mutant) -> AutofixEntry {
             snapshot,
             &target_path,
             applied,
-            OUTCOME_ERROR,
-            "verification error",
-            Some(e.to_string()),
+            Rejection {
+                outcome: OUTCOME_ERROR,
+                reason: "verification error",
+                extra: Some(e.to_string()),
+            },
         ),
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Why a generated test was rejected at verification, and how to label the
+/// resulting entry. Bundles the three fields that vary per rejection branch so
+/// `revert_or_keep` takes the run environment plus one decision value.
+struct Rejection {
+    /// Stable `OUTCOME_*` label recorded on the entry.
+    outcome: &'static str,
+    /// Human reason, prefixed onto the detail line and the log message.
+    reason: &'static str,
+    /// Extra context (suite tail / error message) appended to `reason`.
+    extra: Option<String>,
+}
+
 fn revert_or_keep(
     core: &Core,
     summary: MutantSummary,
     snapshot: Snapshot,
     path: &Path,
     applied: Option<String>,
-    outcome: &'static str,
-    reason: &str,
-    extra: Option<String>,
+    rej: Rejection,
 ) -> AutofixEntry {
+    let Rejection {
+        outcome,
+        reason,
+        extra,
+    } = rej;
     let detail = match extra {
         Some(x) => Some(format!("{reason}: {x}")),
         None => Some(reason.to_string()),

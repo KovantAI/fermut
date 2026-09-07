@@ -1153,3 +1153,53 @@ mod tests {
         assert_eq!(ctx.lines, vec!["b".to_string(), "c".into(), "d".into()]);
     }
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct ExplainArgs {
+    /// Path to a JSON report produced by `fermut run --json …`.
+    pub(crate) report: std::path::PathBuf,
+
+    /// Mutant selector: 1-based index into the report, or substring of
+    /// mutant id (matches `fermut show`'s selector grammar).
+    pub(crate) target: String,
+
+    /// Number of source lines to show on each side of the mutant line.
+    #[arg(long, default_value_t = 5)]
+    pub(crate) context: usize,
+
+    /// Tests directory to grep for the enclosing symbol. Defaults to
+    /// `tests/` if it exists under cwd.
+    #[arg(long, num_args = 0..=1, default_missing_value = "tests")]
+    pub(crate) tests: Option<std::path::PathBuf>,
+
+    /// Path to a `coverage.json` (with contexts). When present, the
+    /// explanation includes whether any test executed the mutant line
+    /// and which tests they were.
+    #[arg(long, num_args = 0..=1, default_missing_value = "coverage.json")]
+    pub(crate) coverage: Option<std::path::PathBuf>,
+
+    /// Augment the heuristic explanation with an Anthropic-generated
+    /// prose explanation + killing test. Requires `ANTHROPIC_API_KEY`
+    /// (or `FERMUT_LLM_MOCK=1` for offline runs).
+    #[arg(long)]
+    pub(crate) llm: bool,
+
+    /// Anthropic model id. Defaults to `claude-sonnet-4-6`.
+    #[arg(long)]
+    pub(crate) model: Option<String>,
+
+    /// Disable the LLM response cache.
+    #[arg(long)]
+    pub(crate) no_cache: bool,
+
+    /// Custom path for the LLM response cache. Defaults to
+    /// `.fermut/llm-cache.json` under the project root.
+    #[arg(long)]
+    pub(crate) cache_path: Option<std::path::PathBuf>,
+
+    /// Output format. `human` (default) prints the laid-out terminal
+    /// view. `json` emits the structured `ExplainReport` for agent
+    /// consumers.
+    #[arg(long, value_enum, default_value_t = crate::cli::Format::Human)]
+    pub(crate) format: crate::cli::Format,
+}

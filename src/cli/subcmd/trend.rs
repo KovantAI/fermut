@@ -760,3 +760,78 @@ mod tests {
         assert!(trend(strict_opts(p)).is_ok());
     }
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct TrendArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Custom path to the history log. Defaults to `<path>/.fermut/history.jsonl`.
+    #[arg(long)]
+    pub(crate) history_path: Option<std::path::PathBuf>,
+
+    /// Show only the most recent N entries (default 10). Ignored when `--all` is set.
+    #[arg(long, default_value_t = 10)]
+    pub(crate) limit: usize,
+
+    /// Show every recorded entry.
+    #[arg(long)]
+    pub(crate) all: bool,
+
+    /// Keep only entries recorded on this git branch. Useful in CI where
+    /// feature-branch runs would otherwise dilute the main-branch trend.
+    #[arg(long)]
+    pub(crate) branch: Option<String>,
+
+    /// Keep only entries newer than this date. Accepts `YYYY-MM-DD`
+    /// (start-of-day UTC) or a full `YYYY-MM-DDTHH:MM:SSZ` timestamp.
+    #[arg(long, value_name = "DATE")]
+    pub(crate) since: Option<String>,
+
+    /// Keep only entries older than this date. Accepts `YYYY-MM-DD`
+    /// (end-of-day UTC, so the full day is included) or a full
+    /// `YYYY-MM-DDTHH:MM:SSZ` timestamp.
+    #[arg(long, value_name = "DATE")]
+    pub(crate) until: Option<String>,
+
+    /// Exit non-zero if the most recent run dropped more than this many
+    /// score points vs the previous filtered entry. CI gate.
+    #[arg(long, value_name = "PTS")]
+    pub(crate) fail_on_regression: Option<f64>,
+
+    /// Sparkline scaling. `fixed` (default) renders against [0, 100]
+    /// so charts from different windows are visually comparable.
+    /// `auto` rescales to the window's own min/max to expose small
+    /// drifts; loses cross-window comparability and falls back to
+    /// fixed when the window's span is under 1 point.
+    #[arg(long, value_enum, default_value_t = crate::cli::TrendScaleCli::Fixed)]
+    pub(crate) scale: crate::cli::TrendScaleCli,
+
+    /// Expand the per-run survivor diff into the full new-survivor and
+    /// newly-killed mutant-id lists below the table. Without this flag,
+    /// only the counts are shown.
+    #[arg(long)]
+    pub(crate) diff: bool,
+
+    /// Aggregate the latest run's survivors. `file` groups by source
+    /// file and prints counts + the oldest survivor's age per group.
+    /// Reads only data already stored in `history.jsonl`, no report
+    /// needed.
+    #[arg(long, value_enum, value_name = "AXIS")]
+    pub(crate) by: Option<crate::cli::TrendGroupByCli>,
+
+    /// stdout output format.
+    #[arg(long, value_enum, default_value_t = crate::cli::TrendFormatCli::Human)]
+    pub(crate) format: crate::cli::TrendFormatCli,
+
+    /// Fail if the history log has any malformed (corrupt, unparseable)
+    /// line instead of silently skipping it, so a `fermut trend --strict`
+    /// CI step catches a truncated history file before the trend is
+    /// trusted. Newer-schema lines an older binary can't read are warned,
+    /// not failed — nothing this binary can do about them. Does not change
+    /// the `fermut run --fail-on-regression` gate, which loads history on
+    /// its own; run this as a separate step to guard the shared file.
+    #[arg(long)]
+    pub(crate) strict: bool,
+}

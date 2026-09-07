@@ -416,3 +416,45 @@ mod tests {
         assert_eq!(labels(&merged), vec![("a", "killed")]);
     }
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct MergeArgs {
+    /// Input JSON reports to combine. At least one required.
+    #[arg(required = true, num_args = 1..)]
+    pub(crate) inputs: Vec<std::path::PathBuf>,
+
+    /// Write the combined JSON report here. Otherwise prints to stdout.
+    #[arg(long)]
+    pub(crate) json: Option<std::path::PathBuf>,
+
+    /// Also write a JUnit XML report.
+    #[arg(long)]
+    pub(crate) junit: Option<std::path::PathBuf>,
+
+    /// Also write an HTML report.
+    #[arg(long)]
+    pub(crate) html: Option<std::path::PathBuf>,
+
+    /// Also write a Markdown report.
+    #[arg(long)]
+    pub(crate) markdown: Option<std::path::PathBuf>,
+
+    /// Write a single history entry built from the merged report to this
+    /// path (overwriting). Git sha/branch are read from the merge checkout
+    /// and the fermut version is stamped automatically; the counts are the
+    /// merged full-universe totals. Lets a sharded run record its trend
+    /// point without harvesting a shard's history line as a template.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) history: Option<std::path::PathBuf>,
+
+    /// `config_hash` to stamp into the `--history` entry. Merge can't derive
+    /// it (the run config lives in the shard jobs), so pass the value the
+    /// shards recorded, e.g. `$(jq -r .config_hash shard-1-entry.json)`.
+    #[arg(long, value_name = "HEX")]
+    pub(crate) config_hash: Option<String>,
+
+    /// Project root for git sha/branch discovery in the `--history` entry.
+    /// Defaults to the current directory (the merge checkout).
+    #[arg(long, value_name = "DIR", default_value = ".")]
+    pub(crate) project: std::path::PathBuf,
+}

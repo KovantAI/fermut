@@ -4,6 +4,7 @@
 pub mod autofix;
 pub mod baseline;
 pub mod clean;
+pub mod completions;
 pub mod coverage;
 pub mod dashboard;
 pub mod doctor;

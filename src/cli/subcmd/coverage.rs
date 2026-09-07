@@ -970,3 +970,37 @@ mod tests {
         assert_eq!(got, vec![PathBuf::from("tests/test_x.py")]);
     }
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct CoverageArgs {
+    /// Where to start project-root discovery. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Measured source root (`--cov=<this>`). Defaults to the configured
+    /// `source_root`, else the project root.
+    #[arg(long)]
+    pub(crate) source: Option<std::path::PathBuf>,
+
+    /// Tests location. Defaults to the configured `tests`, else `<source>/tests`.
+    #[arg(long)]
+    pub(crate) tests: Option<std::path::PathBuf>,
+
+    /// Re-run the full suite even when an up-to-date `.coverage` exists.
+    #[arg(long)]
+    pub(crate) full: bool,
+
+    /// Database output path. Defaults to `<project>/.coverage`.
+    #[arg(long)]
+    pub(crate) output: Option<std::path::PathBuf>,
+
+    /// Python interpreter (path) or virtualenv (dir) to run pytest with,
+    /// same as `fermut run --python`. Lets coverage generation work
+    /// without `pytest` on PATH. Auto-discovers a venv when omitted.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) python: Option<std::path::PathBuf>,
+
+    /// Extra arguments forwarded to pytest. Repeatable.
+    #[arg(long = "pytest-arg", value_name = "ARG")]
+    pub(crate) pytest_args: Vec<String>,
+}

@@ -137,3 +137,16 @@ mod tests {
         assert!(!cache_dir.exists());
     }
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct CleanArgs {
+    /// Where to look for `.fermut/`. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Path of the history log to preserve. Overrides any value
+    /// resolved from the config file. Defaults to
+    /// `<path>/.fermut/history.jsonl`.
+    #[arg(long)]
+    pub(crate) history_path: Option<std::path::PathBuf>,
+}

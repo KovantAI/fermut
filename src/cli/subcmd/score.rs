@@ -574,3 +574,35 @@ mod tests {
         assert!(score(opts(path)).is_ok());
     }
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct ScoreArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Custom path to the history log. Defaults to `<path>/.fermut/history.jsonl`.
+    #[arg(long)]
+    pub(crate) history_path: Option<std::path::PathBuf>,
+
+    /// Compare against the entry this many branch-comparable runs back.
+    /// `1` (default) is the immediately prior run.
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    pub(crate) baseline: usize,
+
+    /// Restrict current/baseline selection to this git branch. Pin to
+    /// `main` in CI where the cache restores main-branch history into a
+    /// PR build.
+    #[arg(long)]
+    pub(crate) branch: Option<String>,
+
+    /// Exit non-zero if the score dropped more than this many points vs
+    /// the baseline. Agent rollback / CI gate.
+    #[arg(long, value_name = "PTS")]
+    pub(crate) fail_on_regression: Option<f64>,
+
+    /// Output format. `json` (default) emits the reward signal for
+    /// machine consumers; `human` prints a short summary.
+    #[arg(long, value_enum, default_value_t = crate::cli::Format::Json)]
+    pub(crate) format: crate::cli::Format,
+}

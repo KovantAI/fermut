@@ -440,3 +440,32 @@ mod tests {
         assert!((round1(28.05) - 28.1).abs() < f64::EPSILON);
     }
 }
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct BaselineArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Mutate every covered mutant for the exact score instead of a
+    /// sampled estimate. Slower; use once the sampled run looks right.
+    #[arg(long)]
+    pub(crate) full: bool,
+
+    /// Sampling fraction (0.0–1.0) for the fast pass. Defaults to 0.1.
+    /// Ignored with `--full`.
+    #[arg(long, value_name = "RATIO")]
+    pub(crate) sample: Option<f64>,
+
+    /// How many worst-offender files to list. Defaults to 3.
+    #[arg(long, default_value_t = 3, value_name = "N")]
+    pub(crate) top: usize,
+
+    /// Output format. `human` (default) prints the graded verdict;
+    /// `json` emits the same numbers for an agent / dashboard.
+    #[arg(long, value_enum, default_value_t = crate::cli::Format::Human)]
+    pub(crate) format: crate::cli::Format,
+
+    #[command(flatten)]
+    pub(crate) filter: crate::cli::FilterArgs,
+}

@@ -10,6 +10,7 @@ pub mod parity;
 pub mod ruff;
 pub mod sample;
 pub mod shard;
+pub mod tce;
 pub mod ty;
 pub mod ty_embedded;
 
@@ -74,6 +75,12 @@ pub fn build_chain(cfg: &Config) -> Result<Vec<Box<dyn Filter>>> {
 
     if cfg.ruff_filter {
         chain.push(Box::new(ruff::RuffFilter::new()?));
+    }
+
+    // TCE (bytecode-equivalence) before ty: a `compile()` is cheaper than ty's
+    // type inference, and a mutant proven equivalent here needn't pay for ty.
+    if cfg.tce {
+        chain.push(Box::new(tce::TceFilter::new()));
     }
 
     if cfg.ty_filter {
@@ -147,6 +154,7 @@ pub(crate) const CANONICAL_ORDER: &[&str] = &[
     "since",
     "coverage",
     "ruff",
+    "tce",
     "ty",
 ];
 
@@ -180,6 +188,7 @@ mod chain_order_tests {
             timeout_secs: 30,
             ty_filter: false,
             ruff_filter: false,
+            tce: false,
             experimental: false,
             parity: false,
             ops_allow: None,
@@ -312,7 +321,7 @@ mod chain_order_tests {
             match name {
                 "experimental" | "parity" | "operator" | "shard" | "sample" => 0,
                 "diff-only" | "since" | "coverage" => 1,
-                "ruff" | "ty" => 2,
+                "ruff" | "tce" | "ty" => 2,
                 _ => panic!("unknown filter name in canonical order: {name}"),
             }
         }

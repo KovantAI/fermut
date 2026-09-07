@@ -57,6 +57,7 @@ pub(crate) fn build_config(
     cli_timeout: Option<u64>,
     cli_no_ty_filter: bool,
     cli_ruff_filter: bool,
+    cli_tce: bool,
     cli_hypothesis_seed: Option<u64>,
     cli_pytest_args: Vec<String>,
     cli_no_cache: bool,
@@ -127,6 +128,7 @@ pub(crate) fn build_config(
         file.ty_filter.unwrap_or(true)
     };
     let ruff_filter = cli_ruff_filter || file.ruff_filter.unwrap_or(false);
+    let tce = cli_tce || file.tce.unwrap_or(false);
     let experimental = f.experimental || file.experimental.unwrap_or(false);
     let parity = f.parity || file.parity.unwrap_or(false);
 
@@ -276,6 +278,7 @@ pub(crate) fn build_config(
         timeout_secs,
         ty_filter,
         ruff_filter,
+        tce,
         experimental,
         parity,
         ops_allow,
@@ -390,6 +393,7 @@ mod tests {
             None,
             false,
             false,
+            false, // cli_tce
             None,
             Vec::new(),
             false,
@@ -672,6 +676,7 @@ mod tests {
             None,
             false,
             false,
+            false, // cli_tce
             None,
             Vec::new(),
             false,
@@ -744,6 +749,7 @@ mod tests {
             Some(5), // cli_timeout — explicit per-mutant timeout
             false,
             false,
+            false, // cli_tce
             None,
             Vec::new(),
             false,
@@ -786,6 +792,7 @@ mod tests {
             Some(5), // cli_timeout
             false,
             false,
+            false, // cli_tce
             None,
             Vec::new(),
             false,

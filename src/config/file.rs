@@ -20,6 +20,9 @@ pub struct FileConfig {
     pub timeout: Option<u64>,
     pub ty_filter: Option<bool>,
     pub ruff_filter: Option<bool>,
+    /// Trivial Compiler Equivalence pre-filter: drop mutants that `compile()`
+    /// to a byte-identical code object. Default false; CLI `--tce` overrides.
+    pub tce: Option<bool>,
     pub experimental: Option<bool>,
     pub parity: Option<bool>,
     pub ops: Option<Vec<String>>,

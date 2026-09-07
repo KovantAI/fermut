@@ -166,6 +166,12 @@ enum Cmd {
         #[arg(long)]
         ruff_filter: bool,
 
+        /// Enable the TCE (bytecode-equivalence) pre-filter. Drops mutants that
+        /// `compile()` to a byte-identical code object — provably equivalent, so
+        /// never worth a test run. Requires `python3` (or `FERMUT_PYTHON`).
+        #[arg(long)]
+        tce: bool,
+
         /// Pin the Hypothesis seed across every mutant run for determinism.
         /// Passes `--hypothesis-seed=<N>` to pytest. Without this, Hypothesis
         /// tests can mask or fabricate survivors via random example draws.
@@ -385,6 +391,11 @@ enum Cmd {
         /// `run --ruff-filter`.
         #[arg(long)]
         ruff_filter: bool,
+
+        /// Enable the TCE (bytecode-equivalence) pre-filter — drop mutants that
+        /// `compile()` to a byte-identical code object. Matches `run --tce`.
+        #[arg(long)]
+        tce: bool,
 
         #[command(flatten)]
         filter: FilterArgs,
@@ -1281,6 +1292,7 @@ impl Cli {
                 timeout,
                 no_ty_filter,
                 ruff_filter,
+                tce,
                 hypothesis_seed,
                 pytest_args,
                 no_cache,
@@ -1321,6 +1333,7 @@ impl Cli {
                     timeout,
                     no_ty_filter,
                     ruff_filter,
+                    tce,
                     hypothesis_seed,
                     pytest_args,
                     no_cache,
@@ -1755,6 +1768,7 @@ impl Cli {
                 path,
                 no_ty_filter,
                 ruff_filter,
+                tce,
                 filter: f,
             } => {
                 let cfg = build_config(
@@ -1764,6 +1778,7 @@ impl Cli {
                     None,
                     no_ty_filter,
                     ruff_filter,
+                    tce,
                     None,
                     Vec::new(),
                     true,

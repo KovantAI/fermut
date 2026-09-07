@@ -208,6 +208,7 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
         None,       // timeout
         false,      // no_ty_filter
         false,      // ruff_filter
+        false,      // tce
         None,       // hypothesis_seed
         Vec::new(), // pytest_args
         false,      // no_cache

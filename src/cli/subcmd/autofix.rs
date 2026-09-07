@@ -160,6 +160,7 @@ fn build_run_config(opts: &AutofixOpts) -> Result<crate::config::Config> {
         opts.timeout,
         false,
         false,
+        false, // tce
         None,
         Vec::new(),
         true, // no_cache: autofix doesn't read the mutation cache

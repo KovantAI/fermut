@@ -292,8 +292,26 @@ pub(crate) struct PatchGuard {
 
 impl Drop for PatchGuard {
     fn drop(&mut self) {
-        if let Some(bytes) = self.original.take() {
-            let _ = std::fs::write(&self.path, bytes);
+        let Some(bytes) = self.original.take() else {
+            return;
+        };
+        if std::fs::write(&self.path, &bytes).is_ok() {
+            return;
+        }
+        // Retry once — a transient failure (a concurrent reader still holding
+        // the file, a momentary FS hiccup) may clear on a second try.
+        if let Err(e) = std::fs::write(&self.path, &bytes) {
+            // Drop can't return a Result, but a swallowed restore failure is
+            // dangerous: the mirror file is left MUTATED, so every later mutant
+            // this worker runs on that file measures against corrupt source and
+            // may report bogus survivors/kills. At minimum, name the path.
+            tracing::error!(
+                path = %self.path.display(),
+                error = %e,
+                "failed to restore mirror file after mutant (retried once); \
+                 file left MUTATED — later mutants on this file in this worker \
+                 may report incorrect results"
+            );
         }
     }
 }

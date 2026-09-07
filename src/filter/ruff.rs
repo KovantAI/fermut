@@ -9,7 +9,7 @@
 //! pre-filter in front of ty.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -18,18 +18,25 @@ use anyhow::{anyhow, Context, Result};
 use super::Filter;
 use crate::emit::patch_source;
 use crate::mutator::Mutant;
+use crate::runner::resolve_tool;
 use crate::sync::lock_recover;
 
 pub struct RuffFilter {
-    bin: String,
+    bin: PathBuf,
     baseline: Mutex<HashMap<PathBuf, usize>>,
 }
 
 impl RuffFilter {
-    pub fn new() -> Result<Self> {
-        let bin = which("ruff").context(
-            "ruff binary not found; install via `pipx install ruff` or `uv tool install ruff`, or omit the --ruff-filter flag",
-        )?;
+    /// Resolve `ruff` preferring the project's venv `bin/` (derived from
+    /// `source_root`), then the ambient PATH — the same resolution `doctor`
+    /// reports, so a green `ruff ok` there means the run finds it too.
+    pub fn new(source_root: &Path) -> Result<Self> {
+        let bin = resolve_tool("ruff", source_root).ok_or_else(|| {
+            anyhow!(
+                "ruff binary not found in the project venv or on PATH; install via \
+                 `uv tool install ruff` (or `pipx install ruff`), or omit the --ruff-filter flag"
+            )
+        })?;
         Ok(Self {
             bin,
             baseline: Mutex::new(HashMap::new()),
@@ -49,7 +56,7 @@ impl RuffFilter {
         let out = Command::new(&self.bin)
             .args(["check", "--no-fix", "--output-format", "concise", path])
             .output()
-            .with_context(|| format!("invoking `{} check {}`", self.bin, path))?;
+            .with_context(|| format!("invoking `{} check {}`", self.bin.display(), path))?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         // Concise lines look like `path:line:col: RULE message`. Each line
         // is one diagnostic; ignore footer like `Found N error(s).`.
@@ -92,17 +99,4 @@ fn looks_like_diagnostic(line: &str) -> bool {
         }
     }
     false
-}
-
-fn which(bin: &str) -> Result<String> {
-    let out = Command::new("which").arg(bin).output();
-    if let Ok(o) = out {
-        if o.status.success() {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if !s.is_empty() {
-                return Ok(s);
-            }
-        }
-    }
-    Err(anyhow!("`{bin}` not on PATH"))
 }

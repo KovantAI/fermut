@@ -54,9 +54,11 @@ pub enum MutantOutcome {
 }
 
 impl MutantOutcome {
+    #[must_use]
     pub fn killed(m: Mutant) -> Self {
         Self::Killed { mutant: m }
     }
+    #[must_use]
     pub fn survived(m: Mutant) -> Self {
         Self::Survived { mutant: m }
     }
@@ -251,6 +253,7 @@ impl Serialize for Report {
 }
 
 impl Report {
+    #[must_use]
     pub fn new(outcomes: Vec<MutantOutcome>) -> Self {
         Self { outcomes }
     }

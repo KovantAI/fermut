@@ -153,6 +153,36 @@ pub enum IsolationMode {
     Reflink,
 }
 
+impl std::fmt::Display for CacheScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CacheScope::File => "file",
+            CacheScope::Scope => "scope",
+        })
+    }
+}
+
+impl std::fmt::Display for RunnerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RunnerKind::Pytest => "pytest",
+            RunnerKind::Rstest => "rstest",
+            RunnerKind::Unittest => "unittest",
+        })
+    }
+}
+
+impl std::fmt::Display for IsolationMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            IsolationMode::Auto => "auto",
+            IsolationMode::Copy => "copy",
+            IsolationMode::Hardlink => "hardlink",
+            IsolationMode::Reflink => "reflink",
+        })
+    }
+}
+
 impl Config {
     pub fn tests_path(&self) -> PathBuf {
         self.tests

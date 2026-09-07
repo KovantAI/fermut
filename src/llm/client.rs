@@ -106,10 +106,17 @@ impl AnthropicClient {
         // pool, TLS context, and timeout config don't get rebuilt per
         // request. Timeouts apply to every request issued through this
         // agent; ureq's default is unbounded.
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(HTTP_CONNECT_TIMEOUT)
-            .timeout(HTTP_TIMEOUT)
+        //
+        // http_status_as_error(false): keep 4xx/5xx as `Ok(response)` so we
+        // can read the body into the error message and drive our own retry
+        // policy. With the default (true) a non-2xx becomes
+        // `Error::StatusCode(code)` with no body attached.
+        let config = ureq::Agent::config_builder()
+            .timeout_connect(Some(HTTP_CONNECT_TIMEOUT))
+            .timeout_global(Some(HTTP_TIMEOUT))
+            .http_status_as_error(false)
             .build();
+        let agent: ureq::Agent = config.into();
         Self { api_key, agent }
     }
 }
@@ -156,18 +163,23 @@ impl LlmClient for AnthropicClient {
 
         let mut last_err: Option<anyhow::Error> = None;
         for attempt in 1..=MAX_ATTEMPTS {
+            // `send_json` sets `content-type: application/json` itself. The
+            // agent is built with `http_status_as_error(false)`, so a non-2xx
+            // arrives as `Ok(response)` (body intact) rather than an error.
             let resp = self
                 .agent
                 .post(API_URL)
-                .set("x-api-key", &self.api_key)
-                .set("anthropic-version", API_VERSION)
-                .set("content-type", "application/json")
-                .send_json(payload.clone());
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", API_VERSION)
+                .send_json(&payload);
 
             match resp {
-                Ok(r) => return parse_response(r),
-                Err(ureq::Error::Status(code, r)) => {
-                    let body = r.into_string().unwrap_or_default();
+                Ok(mut r) => {
+                    let code = r.status().as_u16();
+                    if (200..300).contains(&code) {
+                        return parse_response(r);
+                    }
+                    let body = r.body_mut().read_to_string().unwrap_or_default();
                     let err = anyhow!("Anthropic API returned {code}: {body}");
                     if is_retryable_status(code) && attempt < MAX_ATTEMPTS {
                         warn!(
@@ -200,9 +212,10 @@ impl LlmClient for AnthropicClient {
     }
 }
 
-fn parse_response(resp: ureq::Response) -> Result<String> {
+fn parse_response(mut resp: ureq::http::Response<ureq::Body>) -> Result<String> {
     let parsed: WireResponse = resp
-        .into_json()
+        .body_mut()
+        .read_json()
         .context("parse Anthropic Messages response")?;
     let text = parsed
         .content

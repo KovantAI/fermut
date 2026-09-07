@@ -58,6 +58,15 @@ pub enum BaselineStatus {
     Failed { output: String },
 }
 
+impl std::fmt::Display for BaselineStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            BaselineStatus::Passed => "passed",
+            BaselineStatus::Failed { .. } => "failed",
+        })
+    }
+}
+
 /// Build a one-shot mirror for a baseline run. Unlike [`with_worker_mirror`],
 /// this isn't cached in a thread-local — the baseline runs once on the calling
 /// thread before the rayon pool spins up, so there is nothing to reuse.
@@ -449,7 +458,7 @@ fn clone_file(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
     };
     attempt.with_context(|| {
         format!(
-            "materializing {} -> {} (mode={:?})",
+            "materializing {} -> {} (mode={})",
             src.display(),
             dst.display(),
             mode

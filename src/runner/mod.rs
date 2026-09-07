@@ -15,7 +15,7 @@ pub mod pytest;
 pub mod python;
 pub mod unittest;
 
-pub use python::{interpreter, resolve_python};
+pub use python::{interpreter, resolve_python, resolve_tool};
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};

@@ -30,6 +30,12 @@ pub struct Config {
     pub timeout_secs: u64,
     pub ty_filter: bool,
     pub ruff_filter: bool,
+    /// Trivial Compiler Equivalence pre-filter. When on, each mutant is
+    /// `compile()`d against its original and dropped (never tested) when the
+    /// code-object signatures are byte-identical — a proof of equivalence.
+    /// Off by default (adds a `compile()` subprocess per surviving-the-cheaper-
+    /// filters mutant); enable with `--tce` or `tce = true`.
+    pub tce: bool,
     pub experimental: bool,
     /// Include parity operators (expr→None, positional/element drop, string
     /// case-swap) — for cross-tool comparison only, never a default score.

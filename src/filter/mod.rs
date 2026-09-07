@@ -10,13 +10,17 @@ pub mod parity;
 pub mod ruff;
 pub mod sample;
 pub mod shard;
+pub mod tce;
 pub mod ty;
 pub mod ty_embedded;
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::Once;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use tempfile::NamedTempFile;
+use tracing::warn;
 
 use crate::config::Config;
 use crate::mutator::{Mutant, Operator};
@@ -25,6 +29,68 @@ pub trait Filter: Send + Sync {
     fn name(&self) -> &'static str;
     /// Returns Ok(true) if the mutant should be tested, Ok(false) to drop it.
     fn admits(&self, mutant: &Mutant) -> Result<bool>;
+}
+
+/// Write `patched` to a temp `.py` file for a subprocess linter/type-checker.
+///
+/// Two properties matter for baseline-vs-mutant symmetry:
+///
+/// 1. **Location.** The temp file sits *next to* `original` so the nearest
+///    `pyproject`/tool config, sibling modules, and package `__init__` resolve
+///    the same way they did for the baseline. A `/tmp` file would resolve a
+///    different (or no) config and leave every intra-project import unresolved,
+///    inflating the mutant's diagnostic count asymmetrically.
+/// 2. **Name.** The filename stem is derived from `original`'s stem plus an
+///    underscore separator, so it stays a *valid Python module name*. A hyphen
+///    (the old `fermut-` prefix) makes the module name invalid and trips
+///    module-name lints (ruff `N999`, ty) on the mutant but not the baseline —
+///    the exact asymmetry this whole approach exists to avoid.
+///
+/// If the source directory is not writable (installed package, read-only mount,
+/// CI cache), fall back to the system temp dir: degrading config fidelity beats
+/// aborting the entire filter phase.
+pub(crate) fn patched_tempfile(original: &Path, patched: &str) -> Result<NamedTempFile> {
+    let stem = original
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("mutant");
+    let prefix = format!("{stem}_fermut_");
+    // `Path::new("foo.py").parent()` is `Some("")`, not `None`, so guard the
+    // empty case explicitly rather than relying on the `None` branch.
+    let parent = match original.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let tmp = match tempfile::Builder::new()
+        .prefix(&prefix)
+        .suffix(".py")
+        .tempfile_in(parent)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            // Fallback to /tmp restores the config-asymmetry the in-dir temp
+            // exists to avoid, so warn once — otherwise a read-only source tree
+            // silently drops valid mutants with no signal.
+            static WARNED: Once = Once::new();
+            WARNED.call_once(|| {
+                warn!(
+                    dir = %parent.display(),
+                    error = %e,
+                    "source dir not writable; writing mutant temp files to the system \
+                     temp dir instead — tool config may resolve differently and skew \
+                     diagnostic counts"
+                );
+            });
+            tempfile::Builder::new()
+                .prefix(&prefix)
+                .suffix(".py")
+                .tempfile()
+                .context("creating temp file")?
+        }
+    };
+    std::fs::write(tmp.path(), patched).context("writing patched source")?;
+    Ok(tmp)
 }
 
 /// Build the filter chain implied by the config, cheap-to-expensive.
@@ -73,7 +139,7 @@ pub fn build_chain(cfg: &Config) -> Result<Vec<Box<dyn Filter>>> {
     }
 
     if cfg.ruff_filter {
-        chain.push(Box::new(ruff::RuffFilter::new()?));
+        chain.push(Box::new(ruff::RuffFilter::new(&cfg.source_root)?));
     }
 
     if cfg.ty_filter {
@@ -92,6 +158,13 @@ pub fn build_chain(cfg: &Config) -> Result<Vec<Box<dyn Filter>>> {
             &cfg.source_root,
             pool_size,
         )?));
+    }
+
+    // TCE (bytecode-equivalence) last: it spawns a `compile()` subprocess per
+    // mutant, so run it after ty's type-error cull has already dropped the
+    // cheap-to-reject mutants — fewer survivors reach the per-mutant subprocess.
+    if cfg.tce {
+        chain.push(Box::new(tce::TceFilter::new()));
     }
 
     Ok(chain)
@@ -148,6 +221,7 @@ pub(crate) const CANONICAL_ORDER: &[&str] = &[
     "coverage",
     "ruff",
     "ty",
+    "tce",
 ];
 
 #[cfg(test)]
@@ -180,6 +254,7 @@ mod chain_order_tests {
             timeout_secs: 30,
             ty_filter: false,
             ruff_filter: false,
+            tce: false,
             experimental: false,
             parity: false,
             ops_allow: None,
@@ -306,14 +381,16 @@ mod chain_order_tests {
         // Documentation invariant: the canonical list itself must group
         // filters by cost category — cheap selection (experimental,
         // operator, shard, sample), then git/coverage-driven (diff,
-        // since, coverage), then external-process (ruff, ty). If someone
-        // edits CANONICAL_ORDER, this asserts they kept the buckets in
-        // the right order.
+        // since, coverage), then external-process (ruff, ty), then tce
+        // (a `compile()` subprocess per mutant — the most expensive, so it
+        // runs after ty's cull). If someone edits CANONICAL_ORDER, this
+        // asserts they kept the buckets in the right order.
         fn bucket(name: &str) -> u8 {
             match name {
                 "experimental" | "parity" | "operator" | "shard" | "sample" => 0,
                 "diff-only" | "since" | "coverage" => 1,
                 "ruff" | "ty" => 2,
+                "tce" => 3,
                 _ => panic!("unknown filter name in canonical order: {name}"),
             }
         }
@@ -337,5 +414,75 @@ mod chain_order_tests {
                 "duplicate filter name in CANONICAL_ORDER: {name}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod patched_tempfile_tests {
+    use super::*;
+
+    /// True iff `stem` is a valid Python module name: first char a letter or
+    /// underscore, rest alphanumeric or underscore. A hyphen fails this — which
+    /// is the whole point of the check (ruff N999 / ty module-name lints).
+    fn is_valid_module_name(stem: &str) -> bool {
+        let mut chars = stem.chars();
+        match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+            _ => return false,
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    #[test]
+    fn temp_lands_next_to_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("mymod.py");
+        let tmp = patched_tempfile(&original, "x = 1\n").unwrap();
+        assert_eq!(
+            tmp.path().parent().unwrap(),
+            dir.path(),
+            "temp file must sit in the original's directory for config/import symmetry"
+        );
+        assert_eq!(std::fs::read_to_string(tmp.path()).unwrap(), "x = 1\n");
+    }
+
+    #[test]
+    fn temp_filename_is_a_valid_python_module_name() {
+        // Regression guard: a hyphenated temp name trips module-name lints on
+        // the mutant but not the baseline, asymmetrically inflating the count.
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("mymod.py");
+        let tmp = patched_tempfile(&original, "x = 1\n").unwrap();
+        let stem = tmp.path().file_stem().unwrap().to_str().unwrap();
+        assert!(
+            is_valid_module_name(stem),
+            "temp module name `{stem}` is not a valid Python identifier"
+        );
+        assert!(
+            stem.starts_with("mymod_fermut_"),
+            "temp stem `{stem}` should derive from the original's stem"
+        );
+    }
+
+    #[test]
+    fn falls_back_when_source_dir_unwritable() {
+        // Regression guard: a non-existent parent dir stands in for a
+        // read-only source tree (installed package, ro mount, CI cache).
+        // The old `.tempfile_in(parent)?` aborted the whole filter phase;
+        // now we degrade to the system temp dir instead.
+        let original = Path::new("/no/such/fermut/dir/mymod.py");
+        let tmp = patched_tempfile(original, "y = 2\n")
+            .expect("must fall back to system temp dir, not error");
+        assert_eq!(std::fs::read_to_string(tmp.path()).unwrap(), "y = 2\n");
+        let stem = tmp.path().file_stem().unwrap().to_str().unwrap();
+        assert!(is_valid_module_name(stem), "fallback name `{stem}` invalid");
+    }
+
+    #[test]
+    fn handles_bare_relative_filename() {
+        // `Path::new("bare.py").parent()` is `Some("")` — the empty-parent
+        // guard must route this to `.` (or fallback) without panicking.
+        let tmp = patched_tempfile(Path::new("bare.py"), "z = 3\n").unwrap();
+        assert_eq!(std::fs::read_to_string(tmp.path()).unwrap(), "z = 3\n");
     }
 }

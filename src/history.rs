@@ -359,6 +359,11 @@ pub fn config_hash(cfg: &Config) -> String {
     } else {
         &b"off"[..]
     });
+    // The TCE pre-filter drops provably-equivalent mutants before they run,
+    // shrinking the denominator just like ruff/ty. A `--tce` run scores over a
+    // different mutant universe than one without it.
+    h.update(b"|tce=");
+    h.update(if cfg.tce { &b"on"[..] } else { &b"off"[..] });
     // Equivalent-mutant detection flips otherwise-`Survived` mutants to
     // `Equivalent`, removing them from the killable denominator and moving the
     // score. On by default; `--no-equiv-detect` changes the universe.
@@ -899,6 +904,7 @@ mod tests {
             timeout_secs: 30,
             ty_filter: false,
             ruff_filter: false,
+            tce: false,
             experimental: false,
             parity: false,
             ops_allow: None,
@@ -1029,10 +1035,12 @@ mod tests {
             equiv_detect: true,
             ..cfg()
         });
+        let tce = config_hash(&Config { tce: true, ..cfg() });
         assert_ne!(base, ruff, "ruff-filtered run must differ");
         assert_ne!(base, ty, "ty-filtered run must differ");
         assert_ne!(ruff, ty, "ruff vs ty must differ");
         assert_ne!(base, equiv, "equiv-detect toggle must differ");
+        assert_ne!(base, tce, "tce-filtered run must differ");
 
         // Test-suite / coverage-file selection: pointing at a different suite
         // or coverage file is a shape change, so the hash must differ.

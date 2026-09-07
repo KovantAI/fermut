@@ -134,7 +134,9 @@ impl TyFilter {
     /// entirely (used in tests). No embedded checker — every call
     /// spawns `ty` subprocesses.
     pub fn with_cache_path(cache_path: Option<PathBuf>) -> Result<Self> {
-        Self::build(cache_path, None)
+        // No project scope here (used by `new()` and tests) — resolve `ty`
+        // against the current directory's venv/PATH.
+        Self::build(cache_path, None, Path::new("."))
     }
 
     /// Construct a `TyFilter` that prefers a pool of in-process
@@ -174,10 +176,14 @@ impl TyFilter {
                 }
             }
         };
-        Self::build(cache_path, embedded)
+        Self::build(cache_path, embedded, project_path)
     }
 
-    fn build(cache_path: Option<PathBuf>, embedded: Option<EmbeddedPool>) -> Result<Self> {
+    fn build(
+        cache_path: Option<PathBuf>,
+        embedded: Option<EmbeddedPool>,
+        scope: &Path,
+    ) -> Result<Self> {
         // When the embedded pool is in use, the `ty` binary is only
         // needed as a subprocess fallback for non-embedded code paths
         // (e.g. baseline counts via `error_count`). The embedded path
@@ -185,7 +191,7 @@ impl TyFilter {
         // we record it as None and any subprocess attempt will surface
         // its own error. When embedded is disabled the binary is hard-
         // required.
-        let bin = match which_ty() {
+        let bin = match which_ty(scope) {
             Ok(b) => Some(b),
             Err(e) => {
                 if embedded.is_none() {
@@ -244,12 +250,7 @@ impl TyFilter {
         let original = std::fs::read_to_string(&mutant.file)
             .with_context(|| format!("reading {}", mutant.file.display()))?;
         let patched = patch_source(&original, mutant.range, &mutant.replacement);
-        let tmp = tempfile::Builder::new()
-            .prefix("fermut-")
-            .suffix(".py")
-            .tempfile()
-            .context("creating temp file")?;
-        std::fs::write(tmp.path(), &patched).context("writing patched source")?;
+        let tmp = super::patched_tempfile(&mutant.file, &patched)?;
         self.error_count(tmp.path().to_string_lossy().as_ref())
     }
 
@@ -414,17 +415,14 @@ fn looks_like_error_line(line: &str) -> bool {
     line.contains(": error[") || line.contains(": error:")
 }
 
-fn which_ty() -> Result<String> {
-    let out = Command::new("which").arg("ty").output();
-    if let Ok(o) = out {
-        if o.status.success() {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if !s.is_empty() {
-                return Ok(s);
-            }
-        }
-    }
-    Err(anyhow!("`ty` not on PATH"))
+/// Resolve the `ty` binary, preferring the project's venv `bin/` (derived from
+/// `scope`), then the ambient PATH — the same resolution `doctor` reports, so a
+/// green `ty ok` there means a real run finds it too. Portable across Windows
+/// (no `which` binary there) via the shared [`crate::runner::resolve_tool`].
+fn which_ty(scope: &Path) -> Result<String> {
+    crate::runner::resolve_tool("ty", scope)
+        .map(|p| p.to_string_lossy().into_owned())
+        .ok_or_else(|| anyhow!("`ty` not found in the project venv or on PATH"))
 }
 
 #[cfg(test)]

@@ -40,6 +40,40 @@ pub fn resolve_python(scope: &Path, explicit: Option<&Path>) -> Option<PathBuf> 
     discover_dot_venv(scope)
 }
 
+/// Resolve an executable `name` (e.g. `ty`, `ruff`) to an absolute path,
+/// preferring the project's virtualenv `bin/` — derived from `scope` via
+/// [`resolve_python`] — and falling back to the ambient `PATH`.
+///
+/// This is the single tool-resolution used by both the filter runners
+/// (`filter::ty`, `filter::ruff`) and `fermut doctor`, so doctor's verdict
+/// ("ty ok") matches what a real run resolves. Previously the filters shelled
+/// out to `which <name>` (searching ambient PATH only) while doctor prepended
+/// the venv `bin/`, so doctor could report a tool present that the run then
+/// failed to find. It also fixes Windows, where there is no `which` binary —
+/// the `which` crate handles `.exe`/`PATHEXT` and the platform PATH split.
+pub fn resolve_tool(name: &str, scope: &Path) -> Option<PathBuf> {
+    let venv_bin = resolve_python(scope, None)
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    resolve_tool_in(name, venv_bin.as_deref())
+}
+
+/// Env-free core of [`resolve_tool`]: search `venv_bin` (when given) ahead of
+/// the ambient `PATH`. Split out so the precedence is unit-testable without
+/// mutating process-global `VIRTUAL_ENV`/`PATH`.
+fn resolve_tool_in(name: &str, venv_bin: Option<&Path>) -> Option<PathBuf> {
+    let ambient = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(bin) = venv_bin {
+        dirs.push(bin.to_path_buf());
+    }
+    dirs.extend(std::env::split_paths(&ambient));
+    let search = std::env::join_paths(dirs).ok()?;
+    let cwd = std::env::current_dir().ok()?;
+    which::which_in(name, Some(search), cwd).ok()
+}
+
 /// Walk up from `scope` looking for a `.venv` interpreter, stopping at the
 /// repo root so we never reach a `.venv` outside the project. Env-free, so
 /// it's unit-testable without touching `VIRTUAL_ENV`.
@@ -203,6 +237,34 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    /// Write an executable file at `path` (0o755 on Unix so `which` accepts it).
+    fn make_exe(path: &Path) {
+        fs::write(path, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn resolve_tool_prefers_venv_bin_over_path() {
+        let root = tmp("resolve-venv-first");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        // On Windows `which` needs the executable extension.
+        let exe = if cfg!(windows) {
+            "faketool.exe"
+        } else {
+            "faketool"
+        };
+        let tool = bin.join(exe);
+        make_exe(&tool);
+
+        assert_eq!(resolve_tool_in("faketool", Some(&bin)), Some(tool));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn interpreter_prefers_python3_over_python() {
         // Both present → `python3` wins (probe order), so we never regress to a
@@ -226,5 +288,19 @@ mod tests {
             PathBuf::from("python3")
         );
         assert_eq!(interpreter_in(None, None), PathBuf::from("python3"));
+    }
+
+    #[test]
+    fn resolve_tool_missing_returns_none() {
+        // A name that exists in neither the (empty) venv bin nor PATH.
+        let root = tmp("resolve-missing");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+
+        assert_eq!(
+            resolve_tool_in("fermut-nonexistent-tool-xyz", Some(&bin)),
+            None
+        );
+        fs::remove_dir_all(&root).unwrap();
     }
 }

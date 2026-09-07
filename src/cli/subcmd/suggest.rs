@@ -43,7 +43,7 @@ use crate::llm::prompt::{
     build_suggest_prompt, cache_key, extract_first_code_block, file_sha256, PromptContext,
     SampleTest,
 };
-use crate::llm::DEFAULT_MODEL;
+use crate::llm::{LlmCallOpts, DEFAULT_MODEL};
 use crate::mutator::Mutant;
 use crate::report::{MutantOutcome, Report};
 use crate::sync::lock_recover;
@@ -157,24 +157,20 @@ pub fn suggest(opts: SuggestOpts) -> Result<()> {
 
     let log_progress = matches!(opts.format, SuggestFormat::Human);
 
+    // Loop-invariant LLM knobs, resolved once and shared by every worker.
+    let llm_opts = LlmCallOpts {
+        model: model.clone(),
+        no_cache: opts.no_cache,
+        cache_path: cache_path.clone(),
+    };
+
     // Generation phase: parallel-safe. File writes happen later, serial.
     // Cache persists per-response inside `generate_one` so an interrupt mid-loop
     // does not discard responses already paid for.
     let work = mutants.into_iter().zip(contexts).collect::<Vec<_>>();
     let raw_results: Vec<GenResult> = if parallel == 1 {
         work.into_iter()
-            .map(|(m, ctx)| {
-                generate_one(
-                    &m,
-                    &ctx,
-                    &model,
-                    &client_cell,
-                    &cache,
-                    &cache_path,
-                    opts.no_cache,
-                    log_progress,
-                )
-            })
+            .map(|(m, ctx)| generate_one(&m, &ctx, &llm_opts, &client_cell, &cache, log_progress))
             .collect()
     } else {
         let pool = rayon::ThreadPoolBuilder::new()
@@ -185,16 +181,7 @@ pub fn suggest(opts: SuggestOpts) -> Result<()> {
             work.into_par_iter()
                 .with_max_len(1)
                 .map(|(m, ctx)| {
-                    generate_one(
-                        &m,
-                        &ctx,
-                        &model,
-                        &client_cell,
-                        &cache,
-                        &cache_path,
-                        opts.no_cache,
-                        log_progress,
-                    )
+                    generate_one(&m, &ctx, &llm_opts, &client_cell, &cache, log_progress)
                 })
                 .collect()
         })
@@ -230,15 +217,12 @@ struct GenResult {
     response: Result<String>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn generate_one(
     m: &Mutant,
     ctx: &PromptContext,
-    model: &str,
+    opts: &LlmCallOpts,
     client_cell: &OnceLock<std::result::Result<Arc<dyn crate::llm::client::LlmClient>, String>>,
     cache: &Arc<Mutex<LlmCache>>,
-    cache_path: &Path,
-    no_cache: bool,
     log: bool,
 ) -> GenResult {
     if log {
@@ -250,11 +234,11 @@ fn generate_one(
         );
     }
 
-    let req = build_suggest_prompt(m, ctx, model);
+    let req = build_suggest_prompt(m, ctx, &opts.model);
     let sha = file_sha256(&m.file).unwrap_or_default();
     let key = cache_key(&m.id, &sha, &req.user);
 
-    let cached_hit = if no_cache {
+    let cached_hit = if opts.no_cache {
         None
     } else {
         lock_recover(cache).lookup(&key).map(str::to_string)
@@ -280,16 +264,16 @@ fn generate_one(
                 Err(e) => (Err(anyhow!(e.clone())), false),
                 Ok(client) => match client.complete(&req) {
                     Ok(text) => {
-                        if !no_cache {
+                        if !opts.no_cache {
                             // Hold the lock across save so concurrent rayon
                             // workers serialize disk writes and never race on
                             // the shared tmp-sibling path.
                             let mut guard = lock_recover(cache);
                             guard.insert(key, text.clone());
-                            if let Err(e) = guard.save(cache_path) {
+                            if let Err(e) = guard.save(&opts.cache_path) {
                                 eprintln!(
                                     "  warning: persisting llm cache to {} failed: {e}",
-                                    cache_path.display()
+                                    opts.cache_path.display()
                                 );
                             }
                         }
@@ -460,11 +444,13 @@ pub(crate) fn generate_test_code(
     let r = generate_one(
         m,
         &ctx,
-        model,
+        &LlmCallOpts {
+            model: model.to_string(),
+            no_cache,
+            cache_path: cache_path.to_path_buf(),
+        },
         &client_cell,
         &cache,
-        cache_path,
-        no_cache,
         false,
     );
     let text = r.response?;
@@ -880,11 +866,13 @@ mod tests {
         let result = generate_one(
             &mutant,
             &ctx,
-            DEFAULT_MODEL,
+            &LlmCallOpts {
+                model: DEFAULT_MODEL.to_string(),
+                no_cache: false,
+                cache_path: cache_path.clone(),
+            },
             &client_cell,
             &cache,
-            &cache_path,
-            false,
             false,
         );
 

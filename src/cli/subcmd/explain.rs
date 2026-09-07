@@ -31,7 +31,7 @@ use crate::llm::prompt::{
     build_explain_prompt, cache_key, extract_first_code_block, file_sha256, PromptContext,
     SampleTest,
 };
-use crate::llm::DEFAULT_MODEL;
+use crate::llm::{LlmCallOpts, DEFAULT_MODEL};
 use crate::mutator::{Mutant, Operator};
 use crate::report::{MutantOutcome, Report};
 
@@ -179,10 +179,17 @@ pub(crate) fn build_explain_report(opts: &ExplainOpts) -> Result<ExplainReport> 
             opts.context_lines,
             opts.tests.as_deref(),
             enclosing.as_ref(),
-            &opts.model,
-            opts.no_cache,
-            opts.cache_path.as_deref(),
-            &opts.project_root,
+            &LlmCallOpts {
+                model: opts
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+                no_cache: opts.no_cache,
+                cache_path: opts
+                    .cache_path
+                    .clone()
+                    .unwrap_or_else(|| default_cache_path(&opts.project_root)),
+            },
         )?)
     } else {
         None
@@ -306,46 +313,36 @@ fn build_skeleton(m: &Mutant, enclosing: Option<&EnclosingSymbol>) -> TestSkelet
     TestSkeleton { name, code }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn call_llm(
     m: &Mutant,
     context_lines: usize,
     tests_dir: Option<&Path>,
     enclosing: Option<&EnclosingSymbol>,
-    model_override: &Option<String>,
-    no_cache: bool,
-    cache_path_override: Option<&Path>,
-    project_root: &Path,
+    opts: &LlmCallOpts,
 ) -> Result<LlmBlock> {
-    let model = model_override
-        .clone()
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let ctx = PromptContext {
         source_snippet: render_source_snippet(m, context_lines),
         enclosing_symbol: enclosing.map(|s| s.name.clone()),
         sample_tests: sample_tests_for_symbol(tests_dir, enclosing.map(|s| s.name.as_str())),
     };
-    let req = build_explain_prompt(m, &ctx, &model);
+    let req = build_explain_prompt(m, &ctx, &opts.model);
 
-    let cache_path = cache_path_override
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| default_cache_path(project_root));
-    let mut cache = if no_cache {
+    let mut cache = if opts.no_cache {
         LlmCache::default()
     } else {
-        LlmCache::load(&cache_path)
+        LlmCache::load(&opts.cache_path)
     };
     let sha = file_sha256(&m.file).unwrap_or_default();
     let key = cache_key(&m.id, &sha, &req.user);
 
-    let (response, cached) = match (no_cache, cache.lookup(&key)) {
+    let (response, cached) = match (opts.no_cache, cache.lookup(&key)) {
         (false, Some(hit)) => (hit.to_string(), true),
         _ => {
             let client = client_from_env()?;
             let text = client.complete(&req)?;
-            if !no_cache {
+            if !opts.no_cache {
                 cache.insert(key, text.clone());
-                cache.save(&cache_path)?;
+                cache.save(&opts.cache_path)?;
             }
             (text, false)
         }
@@ -353,7 +350,7 @@ fn call_llm(
 
     let extracted_code = extract_first_code_block(&response);
     Ok(LlmBlock {
-        model,
+        model: opts.model.clone(),
         cached,
         response,
         extracted_code,

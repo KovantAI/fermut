@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize, Serializer};
 use crate::mutator::Mutant;
 
 pub use diff::unified_diff_for;
+pub use writers::ReportSinks;
 
 #[derive(Copy, Clone, Debug)]
 #[non_exhaustive]

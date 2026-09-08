@@ -288,7 +288,11 @@ impl TyFilter {
             )
         })?;
         let mut cmd = Command::new(bin);
-        cmd.args(["check", "--output-format", "concise", path]);
+        // `gitlab` is a structured JSON array — each diagnostic carries a
+        // `severity` field, so we count real diagnostics instead of substring-
+        // matching `": error["` against human output (where a message body
+        // echoing that substring double-counts and flips the verdict).
+        cmd.args(["check", "--output-format", "gitlab", path]);
         let Some(out) = super::run_filter_with_timeout(cmd)
             .with_context(|| format!("invoking `{} check {}`", bin, path))?
         else {
@@ -300,15 +304,7 @@ impl TyFilter {
             return Ok(None);
         };
         // ty exits non-zero when there are diagnostics; we count, not gate on, exit code.
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        let combined = format!("{stdout}{stderr}");
-        Ok(Some(
-            combined
-                .lines()
-                .filter(|l| looks_like_error_line(l))
-                .count(),
-        ))
+        Ok(count_error_diagnostics(&out.stdout))
     }
 
     /// Memoized AST hash for the file containing `mutant`. Falls back to an
@@ -409,20 +405,15 @@ impl TyCache {
 }
 
 fn load_cache(path: &Path) -> TyCache {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
-        Err(_) => TyCache::default(),
-    }
+    // Route through the shared loader so a corrupt cache is quarantined and
+    // warned about, not silently reset to zero verdicts (a full ty re-run —
+    // the most expensive filter — with no trace of why).
+    crate::cache::load_or_quarantine(path)
 }
 
 fn save_cache(path: &Path, cache: &TyCache) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
     let raw = serde_json::to_string_pretty(cache).context("serializing ty cache")?;
-    std::fs::write(path, raw).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    crate::cache::atomic_write(path, raw)
 }
 
 /// True when the user has set `FERMUT_TY_EMBEDDED=0`. Any other value
@@ -439,9 +430,30 @@ fn probe_version(bin: &str) -> String {
     }
 }
 
-fn looks_like_error_line(line: &str) -> bool {
-    // ty's `concise` format is `path:line:col: error[code]: message`.
-    line.contains(": error[") || line.contains(": error:")
+/// One entry of ty's `--output-format gitlab` JSON array. Only the severity
+/// matters here.
+#[derive(Deserialize)]
+struct GitlabDiagnostic {
+    severity: String,
+}
+
+/// Count error-severity diagnostics in ty's gitlab JSON. ruff_db's gitlab
+/// emitter maps ty `Error`→"major" and `Fatal`→"critical" (Warning→"minor",
+/// Info→"info"), so counting `major`/`critical` mirrors the embedded path's
+/// `Severity::Error | Severity::Fatal` filter exactly — the two ty backends
+/// agree on what counts as a new type error.
+///
+/// Returns `None` when stdout isn't the expected JSON array (e.g. ty crashed
+/// mid-write); the caller then bypasses the filter rather than gating on a
+/// count it can't trust — same conservative direction as a timeout.
+fn count_error_diagnostics(stdout: &[u8]) -> Option<usize> {
+    let diags: Vec<GitlabDiagnostic> = serde_json::from_slice(stdout).ok()?;
+    Some(
+        diags
+            .iter()
+            .filter(|d| d.severity == "major" || d.severity == "critical")
+            .count(),
+    )
 }
 
 /// Resolve the `ty` binary, preferring the project's venv `bin/` (derived from
@@ -477,6 +489,55 @@ mod tests {
     fn cache_default_path_under_dot_fermut() {
         let p = TyFilter::default_cache_path(Path::new("/proj"));
         assert!(p.ends_with(Path::new(".fermut").join("ty-cache.json")));
+    }
+
+    #[test]
+    fn count_error_diagnostics_counts_major_and_critical_only() {
+        let json = r#"[
+            {"severity": "major",    "description": "e1"},
+            {"severity": "critical", "description": "e2"},
+            {"severity": "minor",    "description": "a warning"},
+            {"severity": "info",     "description": "note"}
+        ]"#;
+        assert_eq!(count_error_diagnostics(json.as_bytes()), Some(2));
+    }
+
+    #[test]
+    fn count_error_diagnostics_empty_array_is_zero() {
+        assert_eq!(count_error_diagnostics(b"[]"), Some(0));
+    }
+
+    #[test]
+    fn count_error_diagnostics_ignores_substring_in_message() {
+        // Regression: a diagnostic message echoing `: error[` must not inflate
+        // the count — structured severity is the only signal.
+        let json = r#"[
+            {"severity": "major", "description": "unexpected token near: error[code]: oops"}
+        ]"#;
+        assert_eq!(count_error_diagnostics(json.as_bytes()), Some(1));
+    }
+
+    #[test]
+    fn count_error_diagnostics_bad_json_is_none() {
+        assert_eq!(count_error_diagnostics(b"ty panicked"), None);
+    }
+
+    #[test]
+    fn load_cache_quarantines_corrupt_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ty-cache.json");
+        std::fs::write(&path, "{ not json").unwrap();
+
+        let c = load_cache(&path);
+        assert!(c.entries.is_empty());
+        // Corrupt bytes moved aside, not silently overwritten on next save.
+        assert!(!path.exists());
+        let quarantined: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with("ty-cache.corrupt-"))
+            .collect();
+        assert_eq!(quarantined.len(), 1, "expected one quarantine file");
     }
 
     #[test]

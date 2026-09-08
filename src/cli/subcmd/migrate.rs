@@ -263,27 +263,26 @@ fn translate_mutmut_key(key: &str, raw: &str, out: &mut Translation) {
         "paths_to_mutate" | "source_paths" => {
             // Accept "src/", "src/, lib/", or a TOML list rendered as `["src/"]`.
             // Pick the first non-empty path; the rest are surfaced as a note.
-            let first = first_path(raw);
-            if let Some(p) = first {
+            if let Some(p) = take_single_path(
+                raw,
+                key,
+                "fermut takes one source root — review and add inline `# fermut: ignore-file` markers for the rest if needed.",
+                out,
+            ) {
                 out.config.source_root = Some(p);
-            }
-            if extra_paths_present(raw) {
-                out.notes.push(format!(
-                    "`{key}` had multiple entries ({raw}); fermut takes one source root — review and add inline `# fermut: ignore-file` markers for the rest if needed.",
-                ));
             }
         }
         "tests_dir" => {
             out.config.tests = Some(PathBuf::from(unquote(raw)));
         }
         "pytest_add_cli_args_test_selection" => {
-            if let Some(p) = first_path(raw) {
+            if let Some(p) = take_single_path(
+                raw,
+                key,
+                "fermut takes one tests path — append the rest to `pytest_args` if you need them on the pytest command line.",
+                out,
+            ) {
                 out.config.tests = Some(p);
-            }
-            if extra_paths_present(raw) {
-                out.notes.push(format!(
-                    "`pytest_add_cli_args_test_selection` had multiple entries ({raw}); fermut takes one tests path — append the rest to `pytest_args` if you need them on the pytest command line.",
-                ));
             }
         }
         "pytest_add_cli_args" => match parse_string_list(raw) {
@@ -541,6 +540,25 @@ impl FermutConfig {
             && self.isolation.is_none()
             && self.exclude.is_empty()
     }
+}
+
+/// Parse a config value that fermut treats as a *single* path but the source
+/// tool may express as several ("src/, lib/" or a TOML list). Returns the
+/// first path, and when extra entries were present pushes a note joining
+/// `key`/`raw` with `on_extra` (the tool-specific fallback advice) so nothing
+/// is silently dropped.
+fn take_single_path(
+    raw: &str,
+    key: &str,
+    on_extra: &str,
+    out: &mut Translation,
+) -> Option<PathBuf> {
+    let first = first_path(raw);
+    if extra_paths_present(raw) {
+        out.notes
+            .push(format!("`{key}` had multiple entries ({raw}); {on_extra}"));
+    }
+    first
 }
 
 /// Parse a shell-style runner command (`"python -m pytest -x -q"`) into

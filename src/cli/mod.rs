@@ -461,178 +461,101 @@ pub(crate) enum Format {
     Json,
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub(crate) enum TrendFormatCli {
-    Human,
-    Json,
+/// Define a clap `ValueEnum` CLI enum plus its `From` conversion to the
+/// runtime type, one arm per variant. Collapses the def+impl boilerplate that
+/// every CLI-facing enum otherwise repeats. Per-variant attrs (e.g.
+/// `#[value(alias = "…")]`) are forwarded.
+macro_rules! cli_enum {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident => $target:ty {
+            $( $(#[$vmeta:meta])* $variant:ident => $tvariant:ident ),+ $(,)?
+        }
+    ) => {
+        #[derive(Copy, Clone, Debug, ValueEnum)]
+        $(#[$meta])*
+        $vis enum $name {
+            $( $(#[$vmeta])* $variant ),+
+        }
+
+        impl From<$name> for $target {
+            fn from(v: $name) -> Self {
+                match v {
+                    $( $name::$variant => <$target>::$tvariant ),+
+                }
+            }
+        }
+    };
 }
 
-impl From<TrendFormatCli> for TrendFormat {
-    fn from(f: TrendFormatCli) -> Self {
-        match f {
-            TrendFormatCli::Human => Self::Human,
-            TrendFormatCli::Json => Self::Json,
+/// Convert the shared `Format` CLI enum into each subcommand's own
+/// `Human`/`Json` report-format type — every target has the same two variants.
+macro_rules! impl_format_from {
+    ($($target:ty),+ $(,)?) => {$(
+        impl From<Format> for $target {
+            fn from(f: Format) -> Self {
+                match f {
+                    Format::Human => <$target>::Human,
+                    Format::Json => <$target>::Json,
+                }
+            }
         }
+    )+};
+}
+
+cli_enum! {
+    pub(crate) enum TrendFormatCli => TrendFormat { Human => Human, Json => Json }
+}
+
+cli_enum! {
+    pub(crate) enum TrendScaleCli => TrendScale { Fixed => Fixed, Auto => Auto }
+}
+
+cli_enum! {
+    pub(crate) enum TrendGroupByCli => TrendGroupBy { File => File }
+}
+
+cli_enum! {
+    pub(crate) enum RunnerCli => crate::config::RunnerKind {
+        Pytest => Pytest,
+        Rstest => Rstest,
+        Unittest => Unittest,
     }
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub(crate) enum TrendScaleCli {
-    Fixed,
-    Auto,
-}
-
-impl From<TrendScaleCli> for TrendScale {
-    fn from(s: TrendScaleCli) -> Self {
-        match s {
-            TrendScaleCli::Fixed => Self::Fixed,
-            TrendScaleCli::Auto => Self::Auto,
-        }
+cli_enum! {
+    pub(crate) enum MigrateSourceCli => MigrateSource {
+        Mutmut => Mutmut,
+        #[value(alias = "cosmic_ray")]
+        CosmicRay => CosmicRay,
     }
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub(crate) enum TrendGroupByCli {
-    File,
-}
-
-impl From<TrendGroupByCli> for TrendGroupBy {
-    fn from(g: TrendGroupByCli) -> Self {
-        match g {
-            TrendGroupByCli::File => Self::File,
-        }
+cli_enum! {
+    pub(crate) enum IsolationCli => crate::config::IsolationMode {
+        Auto => Auto,
+        Copy => Copy,
+        Hardlink => Hardlink,
+        Reflink => Reflink,
     }
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub(crate) enum RunnerCli {
-    Pytest,
-    Rstest,
-    Unittest,
-}
-
-impl From<RunnerCli> for crate::config::RunnerKind {
-    fn from(r: RunnerCli) -> Self {
-        match r {
-            RunnerCli::Pytest => Self::Pytest,
-            RunnerCli::Rstest => Self::Rstest,
-            RunnerCli::Unittest => Self::Unittest,
-        }
+cli_enum! {
+    pub(crate) enum CacheScopeCli => crate::config::CacheScope {
+        File => File,
+        Scope => Scope,
     }
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub(crate) enum MigrateSourceCli {
-    Mutmut,
-    #[value(alias = "cosmic_ray")]
-    CosmicRay,
-}
-
-impl From<MigrateSourceCli> for MigrateSource {
-    fn from(s: MigrateSourceCli) -> Self {
-        match s {
-            MigrateSourceCli::Mutmut => Self::Mutmut,
-            MigrateSourceCli::CosmicRay => Self::CosmicRay,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub(crate) enum IsolationCli {
-    Auto,
-    Copy,
-    Hardlink,
-    Reflink,
-}
-
-impl From<IsolationCli> for crate::config::IsolationMode {
-    fn from(m: IsolationCli) -> Self {
-        match m {
-            IsolationCli::Auto => Self::Auto,
-            IsolationCli::Copy => Self::Copy,
-            IsolationCli::Hardlink => Self::Hardlink,
-            IsolationCli::Reflink => Self::Reflink,
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub(crate) enum CacheScopeCli {
-    File,
-    Scope,
-}
-
-impl From<CacheScopeCli> for crate::config::CacheScope {
-    fn from(c: CacheScopeCli) -> Self {
-        match c {
-            CacheScopeCli::File => Self::File,
-            CacheScopeCli::Scope => Self::Scope,
-        }
-    }
-}
-
-impl From<Format> for ReportFormat {
-    fn from(f: Format) -> Self {
-        match f {
-            Format::Human => ReportFormat::Human,
-            Format::Json => ReportFormat::Json,
-        }
-    }
-}
-
-impl From<Format> for ExplainFormat {
-    fn from(f: Format) -> Self {
-        match f {
-            Format::Human => ExplainFormat::Human,
-            Format::Json => ExplainFormat::Json,
-        }
-    }
-}
-
-impl From<Format> for SuggestFormat {
-    fn from(f: Format) -> Self {
-        match f {
-            Format::Human => SuggestFormat::Human,
-            Format::Json => SuggestFormat::Json,
-        }
-    }
-}
-
-impl From<Format> for ScoreFormat {
-    fn from(f: Format) -> Self {
-        match f {
-            Format::Human => ScoreFormat::Human,
-            Format::Json => ScoreFormat::Json,
-        }
-    }
-}
-
-impl From<Format> for NextFormat {
-    fn from(f: Format) -> Self {
-        match f {
-            Format::Human => NextFormat::Human,
-            Format::Json => NextFormat::Json,
-        }
-    }
-}
-
-impl From<Format> for BaselineFormat {
-    fn from(f: Format) -> Self {
-        match f {
-            Format::Human => BaselineFormat::Human,
-            Format::Json => BaselineFormat::Json,
-        }
-    }
-}
-
-impl From<Format> for AutofixFormat {
-    fn from(f: Format) -> Self {
-        match f {
-            Format::Human => AutofixFormat::Human,
-            Format::Json => AutofixFormat::Json,
-        }
-    }
-}
+impl_format_from!(
+    ReportFormat,
+    ExplainFormat,
+    SuggestFormat,
+    ScoreFormat,
+    NextFormat,
+    BaselineFormat,
+    AutofixFormat,
+);
 
 fn print_profile_catalogue() {
     println!("Available profiles (pass with --profile <name>):\n");

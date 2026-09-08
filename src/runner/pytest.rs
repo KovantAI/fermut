@@ -171,6 +171,125 @@ impl PytestRunner {
             None => Command::new(self.exe),
         }
     }
+
+    /// Assemble the per-mutant test command inside `mirror`: base flags, the
+    /// coverage/smart-ordering test selection (or whole-dir sweep), working
+    /// directory, PYTHONPATH/pyc env, and stdio. Returns the ready-to-spawn
+    /// `Command` plus whether its stdout is captured (to learn the killer).
+    fn build_mutant_command(
+        &self,
+        mirror: &super::Mirror,
+        mutant: &Mutant,
+        key_file: &str,
+        key_op: &'static str,
+    ) -> Result<Command> {
+        let mut cmd = self.framework_command();
+        cmd.arg("-x").arg("--tb=no").arg("-q");
+        if let Some(seed) = self.hypothesis_seed {
+            cmd.arg(format!("--hypothesis-seed={seed}"));
+        }
+        for arg in &self.extra_args {
+            cmd.arg(arg);
+        }
+        // Coverage-driven selection: when contexts are available we know
+        // exactly which tests cross the mutated line. Pass them as positional
+        // node ids and skip the default "whole tests dir" sweep. The filter
+        // chain has already dropped mutants with no recorded context, so
+        // we only get here when at least one test id exists.
+        //
+        // Smart ordering reorders those ids without changing the set, so the
+        // mutation score is identical. (Under a timeout, reaching the killer
+        // sooner can convert a would-be `timed_out` into a `killed` — but
+        // both count as detected, so the score is unmoved; ordering only
+        // ever changes speed.) Two layers: the cold-start breadth
+        // prior (`ordered_ids`) puts the most *targeted* test — fewest of the
+        // mutated file's lines — first, then [`select_args`] lifts any learned
+        // `(file, operator)` killer ahead of that. Breadth fills the no-history
+        // gap; history dominates once a killer is known.
+        let ordered: Option<Vec<String>> = self.coverage.as_ref().and_then(|ctx| {
+            ctx.tests_for_mutant(mutant).map(|ids| {
+                self.ordered_ids(ctx, mutant, ids)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            })
+        });
+        let capture = match select_args(
+            ordered.as_deref(),
+            self.smart_order,
+            &self.kill_order,
+            key_file,
+            key_op,
+        ) {
+            Selection::Ids { args, capture } => {
+                for a in &args {
+                    cmd.arg(a);
+                }
+                capture
+            }
+            Selection::Sweep => {
+                cmd.arg(&mirror.tests);
+                false
+            }
+        };
+        cmd.current_dir(&mirror.root);
+        with_new_process_group(&mut cmd);
+        // Editable installs (`pip install -e .`) write an absolute path
+        // into a `.pth` file pointing at the ORIGINAL source tree. Without
+        // PYTHONPATH, pytest in the mirror still resolves `import <pkg>`
+        // to the original src and never sees the mutation. Prepend the
+        // mirror's `src/` (and root) so the mirror's mutated package
+        // wins over the editable install in sys.path.
+        cmd.env("PYTHONPATH", mirror_pythonpath(mirror)?);
+        // Never let pytest write `.pyc` into the reused mirror — a stale
+        // compiled module that still validates against the patched source
+        // would mask the mutation and falsely report it survived.
+        cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+        // Per-mutant pytest output is noise on the terminal (each killed
+        // mutant would stream `FAILED … / 1 failed`, reading as breakage
+        // when it's mutants dying as intended). Discard it — except when
+        // capturing to learn the killer's node id from the `-rfE` summary.
+        // stderr is always discarded.
+        let stdout_cfg = if capture {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        };
+        cmd.stdout(stdout_cfg).stderr(Stdio::null());
+        Ok(cmd)
+    }
+
+    /// Turn a completed (or timed-out) test run into a `MutantOutcome`. On a
+    /// real kill and captured output, records the killing node id for the next
+    /// run's ordering. Anomalous exits become `error` (excluded from the score).
+    fn classify_run(
+        &self,
+        mutant: &Mutant,
+        waited: (Option<ExitStatus>, Option<String>),
+        key_file: &str,
+        key_op: &'static str,
+    ) -> MutantOutcome {
+        match waited {
+            (Some(status), output) => match classify_exit(status.code()) {
+                ExitVerdict::Survived => MutantOutcome::survived(mutant.clone()),
+                // A real kill (test failed, or a mutant that broke import so
+                // pytest couldn't collect). When capturing, learn which test
+                // did it and record it for next time's ordering.
+                ExitVerdict::Killed => {
+                    if let Some(out) = output {
+                        self.record_killer(&out, key_file, key_op);
+                    }
+                    MutantOutcome::killed(mutant.clone())
+                }
+                // Not a verdict — surface as Error, excluded from the score
+                // denominator so a stale node id can't manufacture a fake kill.
+                ExitVerdict::Anomaly(code) => {
+                    MutantOutcome::error(mutant.clone(), pytest_anomaly_message(code))
+                }
+            },
+            (None, _) => MutantOutcome::timed_out(mutant.clone()),
+        }
+    }
 }
 
 /// Whether to capture the per-mutant pytest stdout to learn the killing test.
@@ -403,104 +522,11 @@ impl Runner for PytestRunner {
     fn run(&self, mutant: &Mutant) -> Result<MutantOutcome> {
         with_worker_mirror(&self.tests, self.isolation, |mirror| {
             let _guard = apply_patch(mirror, mutant)?;
-
-            let mut cmd = self.framework_command();
-            cmd.arg("-x").arg("--tb=no").arg("-q");
-            if let Some(seed) = self.hypothesis_seed {
-                cmd.arg(format!("--hypothesis-seed={seed}"));
-            }
-            for arg in &self.extra_args {
-                cmd.arg(arg);
-            }
-            // Coverage-driven selection: when contexts are available we know
-            // exactly which tests cross the mutated line. Pass them as positional
-            // node ids and skip the default "whole tests dir" sweep. The filter
-            // chain has already dropped mutants with no recorded context, so
-            // we only get here when at least one test id exists.
-            //
-            // Smart ordering reorders those ids without changing the set, so the
-            // mutation score is identical. (Under a timeout, reaching the killer
-            // sooner can convert a would-be `timed_out` into a `killed` — but
-            // both count as detected, so the score is unmoved; ordering only
-            // ever changes speed.) Two layers: the cold-start breadth
-            // prior (`ordered_ids`) puts the most *targeted* test — fewest of the
-            // mutated file's lines — first, then [`select_args`] lifts any learned
-            // `(file, operator)` killer ahead of that. Breadth fills the no-history
-            // gap; history dominates once a killer is known.
             let (key_file, key_op) = self.kill_key(mutant);
-            let ordered: Option<Vec<String>> = self.coverage.as_ref().and_then(|ctx| {
-                ctx.tests_for_mutant(mutant).map(|ids| {
-                    self.ordered_ids(ctx, mutant, ids)
-                        .into_iter()
-                        .cloned()
-                        .collect()
-                })
-            });
-            let capture = match select_args(
-                ordered.as_deref(),
-                self.smart_order,
-                &self.kill_order,
-                &key_file,
-                key_op,
-            ) {
-                Selection::Ids { args, capture } => {
-                    for a in &args {
-                        cmd.arg(a);
-                    }
-                    capture
-                }
-                Selection::Sweep => {
-                    cmd.arg(&mirror.tests);
-                    false
-                }
-            };
-            cmd.current_dir(&mirror.root);
-            with_new_process_group(&mut cmd);
-            // Editable installs (`pip install -e .`) write an absolute path
-            // into a `.pth` file pointing at the ORIGINAL source tree. Without
-            // PYTHONPATH, pytest in the mirror still resolves `import <pkg>`
-            // to the original src and never sees the mutation. Prepend the
-            // mirror's `src/` (and root) so the mirror's mutated package
-            // wins over the editable install in sys.path.
-            cmd.env("PYTHONPATH", mirror_pythonpath(mirror)?);
-            // Never let pytest write `.pyc` into the reused mirror — a stale
-            // compiled module that still validates against the patched source
-            // would mask the mutation and falsely report it survived.
-            cmd.env("PYTHONDONTWRITEBYTECODE", "1");
-            // Per-mutant pytest output is noise on the terminal (each killed
-            // mutant would stream `FAILED … / 1 failed`, reading as breakage
-            // when it's mutants dying as intended). Discard it — except when
-            // capturing to learn the killer's node id from the `-rfE` summary.
-            // stderr is always discarded.
-            let stdout_cfg = if capture {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            };
-            cmd.stdout(stdout_cfg).stderr(Stdio::null());
+            let mut cmd = self.build_mutant_command(mirror, mutant, &key_file, key_op)?;
             let child = cmd.spawn().context("spawning test runner")?;
-
-            match wait_draining_stdout(child, self.timeout, kill_group)? {
-                (Some(status), output) => match classify_exit(status.code()) {
-                    ExitVerdict::Survived => Ok(MutantOutcome::survived(mutant.clone())),
-                    // A real kill (test failed, or a mutant that broke import so
-                    // pytest couldn't collect). When capturing, learn which test
-                    // did it and record it for next time's ordering.
-                    ExitVerdict::Killed => {
-                        if let Some(out) = output {
-                            self.record_killer(&out, &key_file, key_op);
-                        }
-                        Ok(MutantOutcome::killed(mutant.clone()))
-                    }
-                    // Not a verdict — surface as Error, excluded from the score
-                    // denominator so a stale node id can't manufacture a fake kill.
-                    ExitVerdict::Anomaly(code) => Ok(MutantOutcome::error(
-                        mutant.clone(),
-                        pytest_anomaly_message(code),
-                    )),
-                },
-                (None, _) => Ok(MutantOutcome::timed_out(mutant.clone())),
-            }
+            let waited = wait_draining_stdout(child, self.timeout, kill_group)?;
+            Ok(self.classify_run(mutant, waited, &key_file, key_op))
         })
     }
 

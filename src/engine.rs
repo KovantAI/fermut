@@ -101,27 +101,7 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
     let filters = filter::build_chain(cfg)?;
     let runner = runner::build(cfg);
 
-    // Pre-flight: confirm the unmutated suite is green before spending time
-    // mutating. A red suite makes every covered mutant exit non-zero, which
-    // the runner counts as "killed" — yielding a confidently-wrong score near
-    // 100%. Skip when there's nothing to mutate or the user opted out.
-    if cfg.verify_baseline && !mutants.is_empty() {
-        info!("verifying baseline: running the unmutated test suite");
-        match runner.baseline()? {
-            runner::BaselineStatus::Passed => info!("baseline suite is green"),
-            runner::BaselineStatus::Failed { output } => {
-                return Err(anyhow::anyhow!(
-                    "baseline test suite is not green — aborting before mutation.\n\n\
-                     A failing or erroring suite makes every covered mutant exit \
-                     non-zero, which fermut counts as \"killed\", producing a \
-                     falsely high mutation score. Fix the suite (run your tests \
-                     until they pass) or, if you accept the risk, re-run with \
-                     --no-verify-baseline.\n\n\
-                     --- test output (tail) ---\n{output}"
-                ));
-            }
-        }
-    }
+    preflight_baseline(cfg, runner.as_ref(), &mutants)?;
 
     let file_hashes = hash_unique_files(&mutants);
     let scope_maps = if matches!(cfg.cache_scope, CacheScope::Scope) {
@@ -149,12 +129,8 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
     // Testing-phase wall-clock ceiling. Computed here — after baseline
     // verification and the source-hash pass — so the budget covers the
     // per-mutant testing phase only, matching the flag's documented scope.
-    let test_deadline = cfg
-        .max_time_secs
-        .map(|secs| Instant::now() + Duration::from_secs(secs));
+    let test_deadline = compute_test_deadline(cfg);
 
-    let progress = make_progress_bar(mutants.len() as u64);
-    let pool = build_pool(cfg.jobs)?;
     let ctx = EvalCtx {
         cfg,
         filters: &filters,
@@ -167,21 +143,7 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         file_sources: &file_sources,
         deadline: test_deadline,
     };
-    let outcomes: Vec<MutantOutcome> = pool.install(|| {
-        mutants
-            .par_iter()
-            .map(|m| {
-                let outcome = evaluate(&ctx, m);
-                if let Some(pb) = &progress {
-                    pb.inc(1);
-                }
-                outcome
-            })
-            .collect()
-    });
-    if let Some(pb) = &progress {
-        pb.finish_and_clear();
-    }
+    let outcomes: Vec<MutantOutcome> = evaluate_all(cfg, &ctx, &mutants)?;
 
     // Surface the budget cutoff so a partial run reads as partial, not as a
     // clean pass over the whole catalogue. Mirrors the `--sample` floor note:
@@ -202,23 +164,7 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         }
     }
 
-    if cfg.cache {
-        let guard = lock_recover(&cache);
-        let dropped = guard.dropped_on_load();
-        let entries = guard.len();
-        if let Err(e) = guard.save(&cfg.cache_path) {
-            warn!(path = %cfg.cache_path.display(), error = %e, "failed to save cache");
-        }
-        // One-line end-of-run summary so users (and CI log scrapers) see
-        // the integrity outcome without grepping every `warn!` line. A
-        // non-zero `dropped` here is the signal that someone fed us a
-        // tampered or stale cache.
-        info!(
-            entries,
-            dropped_on_load = dropped,
-            "cache: post-run summary"
-        );
-    }
+    summarize_integrity(cfg, &cache);
 
     // Smart ordering: fold the kills learned this run into the kill-order
     // sidecar so the next run puts proven killers first. Advisory — a write
@@ -254,6 +200,84 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
     };
 
     Ok((report, entry))
+}
+
+/// Pre-flight: confirm the unmutated suite is green before spending time
+/// mutating. A red suite makes every covered mutant exit non-zero, which the
+/// runner counts as "killed" — yielding a confidently-wrong score near 100%.
+/// No-op when there's nothing to mutate or the user opted out.
+fn preflight_baseline(cfg: &Config, runner: &dyn Runner, mutants: &[Mutant]) -> Result<()> {
+    if !cfg.verify_baseline || mutants.is_empty() {
+        return Ok(());
+    }
+    info!("verifying baseline: running the unmutated test suite");
+    match runner.baseline()? {
+        runner::BaselineStatus::Passed => {
+            info!("baseline suite is green");
+            Ok(())
+        }
+        runner::BaselineStatus::Failed { output } => Err(anyhow::anyhow!(
+            "baseline test suite is not green — aborting before mutation.\n\n\
+             A failing or erroring suite makes every covered mutant exit \
+             non-zero, which fermut counts as \"killed\", producing a \
+             falsely high mutation score. Fix the suite (run your tests \
+             until they pass) or, if you accept the risk, re-run with \
+             --no-verify-baseline.\n\n\
+             --- test output (tail) ---\n{output}"
+        )),
+    }
+}
+
+/// Testing-phase wall-clock ceiling from `--max-time`. `None` when unset.
+/// Called after baseline verification and the source-hash pass so the budget
+/// covers the per-mutant testing phase only, matching the flag's scope.
+fn compute_test_deadline(cfg: &Config) -> Option<Instant> {
+    cfg.max_time_secs
+        .map(|secs| Instant::now() + Duration::from_secs(secs))
+}
+
+/// Parallel evaluate: build the worker pool and progress bar, then fan out
+/// `evaluate` over every mutant. `ctx` carries the read-only per-run state.
+fn evaluate_all(cfg: &Config, ctx: &EvalCtx, mutants: &[Mutant]) -> Result<Vec<MutantOutcome>> {
+    let progress = make_progress_bar(mutants.len() as u64);
+    let pool = build_pool(cfg.jobs)?;
+    let outcomes: Vec<MutantOutcome> = pool.install(|| {
+        mutants
+            .par_iter()
+            .map(|m| {
+                let outcome = evaluate(ctx, m);
+                if let Some(pb) = &progress {
+                    pb.inc(1);
+                }
+                outcome
+            })
+            .collect()
+    });
+    if let Some(pb) = &progress {
+        pb.finish_and_clear();
+    }
+    Ok(outcomes)
+}
+
+/// Persist the cache and log a one-line end-of-run integrity summary so users
+/// (and CI log scrapers) see the outcome without grepping every `warn!` line.
+/// A non-zero `dropped_on_load` is the signal that someone fed us a tampered
+/// or stale cache. No-op when caching is disabled.
+fn summarize_integrity(cfg: &Config, cache: &Mutex<Cache>) {
+    if !cfg.cache {
+        return;
+    }
+    let guard = lock_recover(cache);
+    let dropped = guard.dropped_on_load();
+    let entries = guard.len();
+    if let Err(e) = guard.save(&cfg.cache_path) {
+        warn!(path = %cfg.cache_path.display(), error = %e, "failed to save cache");
+    }
+    info!(
+        entries,
+        dropped_on_load = dropped,
+        "cache: post-run summary"
+    );
 }
 
 /// Read-only, per-run context shared by every `evaluate` call. Built once

@@ -114,13 +114,15 @@ fn split_radix(cleaned: &str) -> Option<(&str, u32)> {
     None
 }
 
-/// Format an `i64` back into a literal of the given radix, preserving the
-/// `0x`/`0o`/`0b` prefix (and sign) so a shifted `0xFF` reads as `0x100`.
-fn format_int(x: i64, radix: u32) -> String {
+/// Format an `i128` back into a literal of the given radix, preserving the
+/// `0x`/`0o`/`0b` prefix (and sign) so a shifted `0xFF` reads as `0x100`. Widened
+/// past `i64` so literals above `i64::MAX` (e.g. `99999999999999999999`) still
+/// produce int-typed mutants instead of being silently dropped.
+fn format_int(x: i128, radix: u32) -> String {
     let (sign, mag) = if x < 0 {
         ("-", x.unsigned_abs())
     } else {
-        ("", x as u64)
+        ("", x as u128)
     };
     match radix {
         16 => format!("{sign}0x{mag:X}"),
@@ -606,6 +608,27 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// Emit the four integer mutants (±1 shift, to-zero, negate) for a parsed
+    /// value `v` at range `r`, formatting each in the literal's original `radix`.
+    /// Shared by the `i64` and wider-`i128` parse paths in [`emit_number`]. `v`
+    /// is always ≥ 0 here (the lexeme carries no sign), so `-v` can't overflow.
+    fn push_int_mutants(&mut self, r: TextRange, v: i128, radix: u32) {
+        self.push(
+            Operator::NumberShift,
+            r,
+            &format_int(v.wrapping_add(1), radix),
+        );
+        self.push(
+            Operator::NumberShift,
+            r,
+            &format_int(v.wrapping_sub(1), radix),
+        );
+        if v != 0 {
+            self.push(Operator::NumberToZero, r, "0");
+            self.push(Operator::NumberToNeg, r, &format_int(-v, radix));
+        }
+    }
+
     fn emit_number(&mut self, n: &ast::ExprNumberLiteral) {
         let r = n.range();
         let lex = &self.source[r];
@@ -620,28 +643,34 @@ impl<'a> Collector<'a> {
         if let Some((digits, radix)) = split_radix(&cleaned) {
             // Integer literal (decimal or `0x`/`0o`/`0b`-prefixed). Preserve the
             // original base in the replacement so the mutant reads naturally.
+            // Try `i64` first, then fall through to `i128` for literals above
+            // `i64::MAX` (e.g. `99999999999999999999`) — Python ints are
+            // unbounded, so without the wider fallback those overflow
+            // `i64::from_str_radix`, push nothing, and never reach the float
+            // branch below, leaving the literal silently un-mutated. (Beyond
+            // `i128` — ~39+ digit literals — still needs bignum and is left
+            // alone.)
             if let Ok(v) = i64::from_str_radix(digits, radix) {
-                self.push(
-                    Operator::NumberShift,
-                    r,
-                    &format_int(v.wrapping_add(1), radix),
-                );
-                self.push(
-                    Operator::NumberShift,
-                    r,
-                    &format_int(v.wrapping_sub(1), radix),
-                );
-                if v != 0 {
-                    self.push(Operator::NumberToZero, r, "0");
-                    self.push(Operator::NumberToNeg, r, &format_int(-v, radix));
-                }
+                self.push_int_mutants(r, i128::from(v), radix);
+            } else if let Ok(v) = i128::from_str_radix(digits, radix) {
+                self.push_int_mutants(r, v, radix);
             }
         } else if let Ok(v) = cleaned.parse::<f64>() {
             // Float literal (incl. exponent form like `1e3`). `format_float`
             // keeps the result a float so `5.0` shifts to `6.0`, not `6`.
             if v.is_finite() {
-                self.push(Operator::NumberShift, r, &format_float(v + 1.0));
-                self.push(Operator::NumberShift, r, &format_float(v - 1.0));
+                // Past f64 integer precision (|v| ≳ 2^53, e.g. `1e16`) adding or
+                // subtracting 1.0 is a no-op: `v + 1.0 == v`. Emitting such a
+                // shift produces a value-identical mutant no test can ever kill —
+                // a guaranteed false Survived that deflates the mutation score
+                // (default runs have neither `--tce` nor `--equiv-detect` to
+                // catch it). Only push a shift that actually changes the value.
+                if v + 1.0 != v {
+                    self.push(Operator::NumberShift, r, &format_float(v + 1.0));
+                }
+                if v - 1.0 != v {
+                    self.push(Operator::NumberShift, r, &format_float(v - 1.0));
+                }
                 if v != 0.0 {
                     self.push(Operator::NumberToZero, r, "0");
                     self.push(Operator::NumberToNeg, r, &format_float(-v));
@@ -982,11 +1011,63 @@ mod operator_emission_tests {
     }
 
     #[test]
+    fn large_float_emits_no_value_identical_shift() {
+        // Regression: `1e16` is past f64 integer precision, so `v + 1.0 == v`
+        // and `v - 1.0 == v`. The old code pushed both shifts anyway → two
+        // value-identical no-op mutants, each a guaranteed false Survived that
+        // deflates the score. Both shifts must be suppressed; only the still-
+        // meaningful to-zero / negate mutants remain.
+        assert!(
+            repls_for("x = 1e16\n", Operator::NumberShift).is_empty(),
+            "a precision-saturated float must emit no shift mutants"
+        );
+        let ops = ops_for("x = 1e16\n");
+        assert!(ops.contains(&Operator::NumberToZero), "{ops:?}");
+        assert!(ops.contains(&Operator::NumberToNeg), "{ops:?}");
+    }
+
+    #[test]
     fn underscored_decimal_literal_mutates() {
         // Regression: `1_000` failed both i64 and f64 parse → zero mutants.
         let repls = repls_for("x = 1_000\n", Operator::NumberShift);
         assert!(repls.contains(&"1001".to_string()), "{repls:?}");
         assert!(repls.contains(&"999".to_string()), "{repls:?}");
+    }
+
+    #[test]
+    fn int_literal_above_i64_max_mutates() {
+        // Regression: `99999999999999999999` (> i64::MAX) overflowed
+        // `i64::from_str_radix`, pushed nothing, and the float branch was
+        // unreachable (it's the `else` of `split_radix`) → zero mutants. The
+        // i128 fallthrough must produce int-typed shifts, keeping the base.
+        let repls = repls_for("x = 99999999999999999999\n", Operator::NumberShift);
+        assert!(
+            repls.contains(&"100000000000000000000".to_string()),
+            "{repls:?}"
+        );
+        assert!(
+            repls.contains(&"99999999999999999998".to_string()),
+            "{repls:?}"
+        );
+        assert_eq!(
+            repls_for("x = 99999999999999999999\n", Operator::NumberToNeg),
+            vec!["-99999999999999999999".to_string()]
+        );
+    }
+
+    #[test]
+    fn hex_literal_above_i64_max_mutates_preserving_base() {
+        // The same overflow path for a based literal: an 0x value past i64::MAX
+        // must still shift while keeping its `0x` prefix.
+        let repls = repls_for("x = 0xFFFFFFFFFFFFFFFF\n", Operator::NumberShift);
+        assert!(
+            repls.contains(&"0x10000000000000000".to_string()),
+            "{repls:?}"
+        );
+        assert!(
+            repls.contains(&"0xFFFFFFFFFFFFFFFE".to_string()),
+            "{repls:?}"
+        );
     }
 
     #[test]

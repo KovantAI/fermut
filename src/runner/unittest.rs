@@ -1,8 +1,15 @@
 //! unittest runner.
 //!
 //! Invokes `<python> -m unittest discover -s <tests> -p <pattern>` per mutant,
-//! inside the per-worker project mirror. Exit code 0 → tests passed (mutant
-//! survived); non-zero → killed; timeout → timed out.
+//! inside the per-worker project mirror. `unittest`'s `TestProgram` exits
+//! `not wasSuccessful()`, so a *verdict* run is exit 0 (passed → mutant
+//! survived) or exit 1 (a test failed/errored, incl. a mutant that broke a
+//! test module's import → killed). Any other exit code is NOT a unittest
+//! verdict — exit 2 is an argparse *usage error*, and a stray `os._exit(n)`
+//! from code under test bypasses unittest's SystemExit handling — so it's
+//! surfaced as [`MutantOutcome::Error`], excluded from the score, instead of
+//! being miscounted as a kill. Signal death (segfault/OOM-kill) → killed, the
+//! same call the pytest runner makes. Timeout → timed out.
 //!
 //! Three parity fixes over the naive `python -m unittest` invocation, matching
 //! what the pytest runner already does:

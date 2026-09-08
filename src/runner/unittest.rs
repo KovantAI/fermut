@@ -24,6 +24,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use wait_timeout::ChildExt;
 
+use super::exit::{anomaly_message, classify_exit, ExitVerdict, TestTool};
 use super::process_group::kill_group;
 use super::{
     build_mirror, configure_mirror_cmd, mirror_pythonpath, run_baseline_with_timeout, run_patched,
@@ -126,13 +127,19 @@ impl Runner for UnittestRunner {
                 .wait_timeout(self.timeout)
                 .context("waiting on unittest")?
             {
-                Some(status) => {
-                    if status.success() {
-                        Ok(MutantOutcome::survived(mutant.clone()))
-                    } else {
-                        Ok(MutantOutcome::killed(mutant.clone()))
-                    }
-                }
+                // Share the pytest runner's exit→verdict logic: a usage error
+                // (exit 2) or "no tests ran" (exit 5 on Python 3.12+) is an
+                // infrastructure fault, not a kill — scoring it as a kill would
+                // inflate the mutation score. Only a genuine failure/error
+                // (exit 1, including a mutant that broke import) counts.
+                Some(status) => match classify_exit(TestTool::Unittest, status.code()) {
+                    ExitVerdict::Survived => Ok(MutantOutcome::survived(mutant.clone())),
+                    ExitVerdict::Killed => Ok(MutantOutcome::killed(mutant.clone())),
+                    ExitVerdict::Anomaly(code) => Ok(MutantOutcome::error(
+                        mutant.clone(),
+                        anomaly_message(TestTool::Unittest, code),
+                    )),
+                },
                 None => {
                     kill_group(&mut child);
                     let _ = child.wait();

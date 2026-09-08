@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use crate::cli::Format;
 use crate::filter::coverage::CoverageContexts;
 use crate::llm::cache::{default_cache_path, LlmCache};
 use crate::llm::client::client_from_env;
@@ -36,12 +37,6 @@ use crate::mutator::{Mutant, Operator};
 use crate::report::{MutantOutcome, Report};
 use crate::util::search::{extract_ident, grep_symbol, indent_of, DEFAULT_GREP_MATCH_LIMIT};
 
-#[derive(Copy, Clone, Debug)]
-pub enum ExplainFormat {
-    Human,
-    Json,
-}
-
 pub struct ExplainOpts {
     pub report: PathBuf,
     pub target: String,
@@ -53,7 +48,7 @@ pub struct ExplainOpts {
     pub no_cache: bool,
     pub cache_path: Option<PathBuf>,
     pub project_root: PathBuf,
-    pub format: ExplainFormat,
+    pub format: Format,
 }
 
 // ---------------------------------------------------------------------------
@@ -146,8 +141,8 @@ pub struct LlmBlock {
 pub fn explain(opts: ExplainOpts) -> Result<()> {
     let report_obj = build_explain_report(&opts)?;
     match opts.format {
-        ExplainFormat::Json => render_json(&report_obj)?,
-        ExplainFormat::Human => render_human(&report_obj),
+        Format::Json => render_json(&report_obj)?,
+        Format::Human => render_human(&report_obj),
     }
     Ok(())
 }
@@ -157,10 +152,7 @@ pub fn explain(opts: ExplainOpts) -> Result<()> {
 /// same heuristic signal (hint, source context, coverage, skeleton). The
 /// optional LLM block is included only when `opts.llm` is set.
 pub(crate) fn build_explain_report(opts: &ExplainOpts) -> Result<ExplainReport> {
-    let raw = std::fs::read_to_string(&opts.report)
-        .with_context(|| format!("reading {}", opts.report.display()))?;
-    let report: Report =
-        serde_json::from_str(&raw).with_context(|| format!("parsing {}", opts.report.display()))?;
+    let report = crate::report::load(&opts.report)?;
 
     let outcome = locate_outcome(&report, &opts.target)?;
     let m = outcome.mutant();

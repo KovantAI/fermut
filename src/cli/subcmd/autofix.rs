@@ -28,17 +28,12 @@ use serde::Serialize;
 
 use super::explain::MutantSummary;
 use super::suggest::{append_to_test_file, generate_test_code, infer_apply_target, select_targets};
+use crate::cli::Format;
 use crate::llm::cache::default_cache_path;
 use crate::llm::DEFAULT_MODEL;
 use crate::mutator::Mutant;
-use crate::report::{MutantOutcome, Report};
+use crate::report::MutantOutcome;
 use crate::runner::{self, BaselineStatus, Runner};
-
-#[derive(Copy, Clone, Debug)]
-pub enum AutofixFormat {
-    Human,
-    Json,
-}
 
 pub struct AutofixOpts {
     pub report: PathBuf,
@@ -57,7 +52,7 @@ pub struct AutofixOpts {
     /// Keep a generated test even when verification fails. Off by default —
     /// the whole point is to land only proven tests.
     pub keep_failed: bool,
-    pub format: AutofixFormat,
+    pub format: Format,
 }
 
 // ---------------------------------------------------------------------------
@@ -93,10 +88,7 @@ const OUTCOME_GENERATION_FAILED: &str = "generation-failed";
 const OUTCOME_ERROR: &str = "error";
 
 pub fn autofix(opts: AutofixOpts) -> Result<()> {
-    let raw = std::fs::read_to_string(&opts.report)
-        .with_context(|| format!("reading {}", opts.report.display()))?;
-    let report: Report =
-        serde_json::from_str(&raw).with_context(|| format!("parsing {}", opts.report.display()))?;
+    let report = crate::report::load(&opts.report)?;
     let targets = select_targets(&report, opts.target.as_deref(), opts.all_survivors)?;
     let mutants: Vec<Mutant> = targets.iter().map(|o| o.mutant().clone()).collect();
 
@@ -125,14 +117,14 @@ pub fn autofix(opts: AutofixOpts) -> Result<()> {
         context_lines: opts.context_lines,
         sample_count: opts.sample_count,
         keep_failed: opts.keep_failed,
-        log: matches!(opts.format, AutofixFormat::Human),
+        log: matches!(opts.format, Format::Human),
     };
 
     let report = run_autofix(&core, &mutants);
 
     match opts.format {
-        AutofixFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
-        AutofixFormat::Human => render_human(&report),
+        Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        Format::Human => render_human(&report),
     }
     Ok(())
 }

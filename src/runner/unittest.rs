@@ -1,8 +1,15 @@
 //! unittest runner.
 //!
 //! Invokes `<python> -m unittest discover -s <tests> -p <pattern>` per mutant,
-//! inside the per-worker project mirror. Exit code 0 → tests passed (mutant
-//! survived); non-zero → killed; timeout → timed out.
+//! inside the per-worker project mirror. `unittest`'s `TestProgram` exits
+//! `not wasSuccessful()`, so a *verdict* run is exit 0 (passed → mutant
+//! survived) or exit 1 (a test failed/errored, incl. a mutant that broke a
+//! test module's import → killed). Any other exit code is NOT a unittest
+//! verdict — exit 2 is an argparse *usage error*, and a stray `os._exit(n)`
+//! from code under test bypasses unittest's SystemExit handling — so it's
+//! surfaced as [`MutantOutcome::Error`], excluded from the score, instead of
+//! being miscounted as a kill. Signal death (segfault/OOM-kill) → killed, the
+//! same call the pytest runner makes. Timeout → timed out.
 //!
 //! Three parity fixes over the naive `python -m unittest` invocation, matching
 //! what the pytest runner already does:
@@ -110,6 +117,50 @@ impl UnittestRunner {
     }
 }
 
+/// Verdict a finished `unittest` process's exit status implies, decoupled from
+/// any I/O so the mapping is unit-tested. `code` is `status.code()`; `None`
+/// means the process was killed by a signal (segfault etc.).
+///
+/// `unittest`'s `TestProgram` self-exits `not wasSuccessful()`, so only exit 0
+/// and exit 1 are real verdicts:
+/// - exit 0 → survived (all tests passed, mutation undetected).
+/// - exit 1 → killed (a test failed or errored — including a mutant that broke
+///   a test module's import, which unittest reports as an error, exit 1).
+/// - any other exit code → anomaly, NOT a verdict: exit 2 is argparse's *usage
+///   error*, and a stray `os._exit(n)` from code under test bypasses unittest's
+///   SystemExit handling. Counting these as kills would manufacture fake kills,
+///   so they become [`MutantOutcome::Error`], excluded from the score
+///   denominator. (This differs from the pytest runner, where exit 2 is a
+///   collection/import error and IS a kill — unittest's import break is exit 1,
+///   not 2.)
+/// - a signal death (`None`) → killed, matching the pytest runner: the mutant
+///   crashed the interpreter, an observable failure the suite couldn't survive.
+enum ExitVerdict {
+    Survived,
+    Killed,
+    Anomaly(i32),
+}
+
+fn classify_exit(code: Option<i32>) -> ExitVerdict {
+    match code {
+        Some(0) => ExitVerdict::Survived,
+        Some(1) => ExitVerdict::Killed,
+        Some(c) => ExitVerdict::Anomaly(c),
+        None => ExitVerdict::Killed,
+    }
+}
+
+/// Human-readable label for a non-verdict `unittest` exit code, used to describe
+/// the [`MutantOutcome::Error`] it produces. Only [`ExitVerdict::Anomaly`] codes
+/// (anything but 0/1) reach here.
+fn unittest_anomaly_message(code: i32) -> String {
+    let what = match code {
+        2 => "usage error",
+        _ => "anomalous exit",
+    };
+    format!("unittest exit {code}: {what} (not a kill)")
+}
+
 impl Runner for UnittestRunner {
     fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
         run_patched(&self.tests, self.isolation, mutant, |mirror| {
@@ -126,13 +177,13 @@ impl Runner for UnittestRunner {
                 .wait_timeout(self.timeout)
                 .context("waiting on unittest")?
             {
-                Some(status) => {
-                    if status.success() {
-                        Ok(MutantOutcome::survived(mutant.clone()))
-                    } else {
-                        Ok(MutantOutcome::killed(mutant.clone()))
+                Some(status) => Ok(match classify_exit(status.code()) {
+                    ExitVerdict::Survived => MutantOutcome::survived(mutant.clone()),
+                    ExitVerdict::Killed => MutantOutcome::killed(mutant.clone()),
+                    ExitVerdict::Anomaly(code) => {
+                        MutantOutcome::error(mutant.clone(), unittest_anomaly_message(code))
                     }
-                }
+                }),
                 None => {
                     kill_group(&mut child);
                     let _ = child.wait();
@@ -361,6 +412,42 @@ mod tests {
             r.run(&Arc::new(m)).unwrap(),
             MutantOutcome::Survived { .. }
         ));
+    }
+
+    // --- classify_exit: unittest's exit-code → verdict mapping. Guards the
+    // Error-bucket triage so a future edit can't silently regress back to
+    // "any non-zero == kill".
+
+    #[test]
+    fn classify_exit_maps_codes_to_verdicts() {
+        use ExitVerdict::{Anomaly, Killed, Survived};
+        // exit 0/1 are unittest's only real verdicts.
+        assert!(matches!(classify_exit(Some(0)), Survived));
+        // exit 1: a test failed/errored — incl. a mutant that broke a test
+        // module's import (unittest reports it as an error, exit 1).
+        assert!(matches!(classify_exit(Some(1)), Killed));
+        // exit 2: argparse usage error — NOT a verdict, so Error, excluded from
+        // the score (the regression this locks down). Unlike pytest, where 2 is
+        // a collection/import-break kill.
+        assert!(matches!(classify_exit(Some(2)), Anomaly(2)));
+        // any other exit code (e.g. a stray os._exit) → anomaly, not a kill.
+        assert!(matches!(classify_exit(Some(7)), Anomaly(7)));
+        // signal death (segfault/OOM-kill) → killed, matching the pytest runner.
+        assert!(matches!(classify_exit(None), Killed));
+    }
+
+    #[test]
+    fn unittest_anomaly_message_names_the_code_and_disclaims_kill() {
+        let usage = unittest_anomaly_message(2);
+        assert!(usage.contains('2'), "code in {usage:?}");
+        assert!(usage.contains("usage error"), "label in {usage:?}");
+        assert!(usage.contains("not a kill"), "disclaimer in {usage:?}");
+        // A non-2 anomaly gets the generic label but still names the code.
+        let other = unittest_anomaly_message(7);
+        assert!(
+            other.contains('7') && other.contains("not a kill"),
+            "{other:?}"
+        );
     }
 
     #[test]

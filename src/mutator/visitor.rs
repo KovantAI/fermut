@@ -446,6 +446,231 @@ impl<'a> Collector<'a> {
             }
         }
     }
+
+    // --- per-expression emit helpers -------------------------------------
+    // One helper per `Expr::` variant handled by `visit_expr`. Each owns the
+    // mutation logic for its node; `visit_expr` is a thin dispatcher that
+    // matches the variant (with its guard) and delegates here.
+
+    fn emit_binop(&mut self, b: &ast::ExprBinOp) {
+        let lex = binop_lexeme(b.op);
+        if let Some(r) = self.op_range(b.range(), lex) {
+            for (orig, repl) in ARITH_SWAPS {
+                if *orig == lex {
+                    self.push(Operator::ArithOpSwap, r, repl);
+                }
+            }
+        }
+    }
+
+    fn emit_boolop(&mut self, b: &ast::ExprBoolOp) {
+        let lex = if matches!(b.op, ast::BoolOp::And) {
+            "and"
+        } else {
+            "or"
+        };
+        if let Some(r) = self.op_range(b.range(), lex) {
+            for (orig, repl) in BOOL_SWAPS {
+                if *orig == lex {
+                    self.push(Operator::BoolOpSwap, r, repl);
+                }
+            }
+        }
+    }
+
+    fn emit_unaryop(&mut self, u: &ast::ExprUnaryOp) {
+        use ast::UnaryOp::*;
+        let start = u.range().start();
+        match u.op {
+            USub | UAdd => {
+                let end = TextSize::from(u32::from(start) + 1);
+                let r = TextRange::new(start, end);
+                let lex = &self.source[r];
+                let repl = if lex == "-" { "+" } else { "-" };
+                self.push(Operator::UnaryOpSwap, r, repl);
+            }
+            Not => {
+                let r = TextRange::new(start, u.operand.range().start());
+                self.push(Operator::UnaryOpSwap, r, "");
+            }
+            Invert => {
+                let end = TextSize::from(u32::from(start) + 1);
+                let r = TextRange::new(start, end);
+                self.push(Operator::UnaryOpSwap, r, "");
+            }
+        }
+    }
+
+    fn emit_compare(&mut self, c: &ast::ExprCompare) {
+        for (i, op) in c.ops.iter().enumerate() {
+            let lex = cmpop_lexeme(*op);
+            let search_from = if i == 0 {
+                c.left.range().end()
+            } else {
+                c.comparators[i - 1].range().end()
+            };
+            let search_to = c.comparators[i].range().start();
+            let s: usize = search_from.into();
+            let e: usize = search_to.into();
+            if let Some(idx) = self.source[s..e].find(lex) {
+                let abs = s + idx;
+                let r = TextRange::new((abs as u32).into(), ((abs + lex.len()) as u32).into());
+                for (orig, repl) in COMPARE_SWAPS {
+                    if *orig == lex {
+                        self.push(Operator::CompareOpSwap, r, repl);
+                    }
+                }
+                for (orig, repl) in BOUNDARY_SWAPS {
+                    if *orig == lex {
+                        self.push(Operator::BoundaryShift, r, repl);
+                    }
+                }
+            }
+        }
+    }
+
+    fn emit_number(&mut self, n: &ast::ExprNumberLiteral) {
+        let r = n.range();
+        let lex = &self.source[r];
+        if let Ok(v) = lex.parse::<i64>() {
+            self.push(Operator::NumberShift, r, &v.wrapping_add(1).to_string());
+            self.push(Operator::NumberShift, r, &v.wrapping_sub(1).to_string());
+            if v != 0 {
+                self.push(Operator::NumberToZero, r, "0");
+                self.push(Operator::NumberToNeg, r, &format!("-{}", v));
+            }
+        } else if let Ok(v) = lex.parse::<f64>() {
+            if v.is_finite() {
+                self.push(Operator::NumberShift, r, &(v + 1.0).to_string());
+                self.push(Operator::NumberShift, r, &(v - 1.0).to_string());
+                if v != 0.0 {
+                    self.push(Operator::NumberToZero, r, "0");
+                    self.push(Operator::NumberToNeg, r, &format!("-{}", v));
+                }
+            }
+        }
+    }
+
+    fn emit_string(&mut self, s: &ast::ExprStringLiteral) {
+        let r = s.range();
+        let lex = &self.source[r];
+        for (orig, repl) in CONSTANT_SWAPS {
+            if *orig == lex {
+                self.push(Operator::ConstantReplace, r, repl);
+            }
+        }
+        if !is_empty_string_literal(lex) {
+            self.push(Operator::StringToEmpty, r, "\"\"");
+            if let Some(s) = wrap_with_sentinel(lex) {
+                self.push(Operator::StringSentinel, r, &s);
+            }
+            // Parity (opt-in): UPPER/lower-case the literal content,
+            // mirroring mutmut's string-case mutation.
+            if let Some(s) = swap_string_case(lex, true) {
+                self.push(Operator::StringCaseSwap, r, &s);
+            }
+            if let Some(s) = swap_string_case(lex, false) {
+                self.push(Operator::StringCaseSwap, r, &s);
+            }
+        }
+    }
+
+    fn emit_bytes(&mut self, b: &ast::ExprBytesLiteral) {
+        let r = b.range();
+        let lex = &self.source[r];
+        if !is_empty_bytes_literal(lex) {
+            if let Some(s) = wrap_with_sentinel(lex) {
+                self.push(Operator::BytesSentinel, r, &s);
+            }
+        }
+    }
+
+    fn emit_boolean(&mut self, b: &ast::ExprBooleanLiteral) {
+        let r = b.range();
+        let lex = &self.source[r];
+        for (orig, repl) in CONSTANT_SWAPS {
+            if *orig == lex {
+                self.push(Operator::ConstantReplace, r, repl);
+            }
+        }
+    }
+
+    fn emit_await(&mut self, a: &ast::ExprAwait) {
+        // `await X` → `X`: drop the await. The expression now evaluates
+        // to the coroutine/awaitable itself instead of its result —
+        // observable wherever the awaited value is used (comparison,
+        // attribute access, return). Range covers `await ` up to the
+        // operand start.
+        let r = TextRange::new(a.range().start(), a.value.range().start());
+        self.push(Operator::AwaitDrop, r, "");
+    }
+
+    fn emit_call(&mut self, c: &ast::ExprCall) {
+        // Parity: whole call result → None (does the return value
+        // matter where it's used?).
+        self.push(Operator::ExprToNone, c.range(), "None");
+        for kw in &*c.arguments.keywords {
+            // Skip `**kwargs` splats (kw.arg is None).
+            if kw.arg.is_none() {
+                continue;
+            }
+            let r = self.extend_to_consume_comma(kw.range(), c.arguments.range());
+            self.push(Operator::KeywordArgDrop, r, "");
+            // arg-to-none: does the callee actually use this keyword's
+            // value? Skip values already `None` (no-op).
+            if !matches!(kw.value, Expr::NoneLiteral(_)) {
+                self.push(Operator::ArgToNone, kw.value.range(), "None");
+            }
+        }
+        for arg in &*c.arguments.args {
+            // Parity: drop the positional argument entirely.
+            let dr = self.extend_to_consume_comma(arg.range(), c.arguments.range());
+            self.push(Operator::PositionalDrop, dr, "");
+            // Skip `*args` splats — `f(None)` would drop the unpack
+            // semantics — and values already `None`.
+            if matches!(arg, Expr::Starred(_) | Expr::NoneLiteral(_)) {
+                continue;
+            }
+            self.push(Operator::ArgToNone, arg.range(), "None");
+        }
+    }
+
+    /// Drop each element of a list/set/tuple literal in turn (PositionalDrop).
+    /// Shared by `Expr::List`/`Set`/`Tuple`, which differ only in node type.
+    fn emit_seq_drop(&mut self, elts: &[Expr], container: TextRange) {
+        for elt in elts {
+            let r = self.extend_to_consume_comma(elt.range(), container);
+            self.push(Operator::PositionalDrop, r, "");
+        }
+    }
+
+    fn emit_dict(&mut self, d: &ast::ExprDict) {
+        for item in &d.items {
+            // Skip `**spread` items where key is None.
+            let key = match &item.key {
+                Some(k) => k,
+                None => continue,
+            };
+            let item_range = TextRange::new(key.range().start(), item.value.range().end());
+            let r = self.extend_to_consume_comma(item_range, d.range());
+            self.push(Operator::DictItemDrop, r, "");
+        }
+    }
+
+    fn emit_slice(&mut self, s: &ast::ExprSlice) {
+        if let Some(lower) = &s.lower {
+            self.push(Operator::SliceBoundDrop, lower.range(), "");
+        }
+        if let Some(upper) = &s.upper {
+            self.push(Operator::SliceBoundDrop, upper.range(), "");
+        }
+        if let Some(step) = &s.step {
+            let r = step.range();
+            let lex = &self.source[r];
+            let repl = if lex == "1" { "2" } else { "1" };
+            self.push(Operator::SliceStepMutate, r, repl);
+        }
+    }
 }
 
 impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
@@ -509,160 +734,27 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
     }
 
     fn visit_expr(&mut self, expr: &'ast Expr) {
+        // Thin dispatcher: match the variant (with its guard) and delegate to
+        // the matching `emit_*` helper. Bodies live on `Collector` above.
         match expr {
-            Expr::BinOp(b) => {
-                let lex = binop_lexeme(b.op);
-                if let Some(r) = self.op_range(b.range(), lex) {
-                    for (orig, repl) in ARITH_SWAPS {
-                        if *orig == lex {
-                            self.push(Operator::ArithOpSwap, r, repl);
-                        }
-                    }
-                }
-            }
-            Expr::BoolOp(b) => {
-                let lex = if matches!(b.op, ast::BoolOp::And) {
-                    "and"
-                } else {
-                    "or"
-                };
-                if let Some(r) = self.op_range(b.range(), lex) {
-                    for (orig, repl) in BOOL_SWAPS {
-                        if *orig == lex {
-                            self.push(Operator::BoolOpSwap, r, repl);
-                        }
-                    }
-                }
-            }
-            Expr::UnaryOp(u) => {
-                use ast::UnaryOp::*;
-                let start = u.range().start();
-                match u.op {
-                    USub | UAdd => {
-                        let end = TextSize::from(u32::from(start) + 1);
-                        let r = TextRange::new(start, end);
-                        let lex = &self.source[r];
-                        let repl = if lex == "-" { "+" } else { "-" };
-                        self.push(Operator::UnaryOpSwap, r, repl);
-                    }
-                    Not => {
-                        let r = TextRange::new(start, u.operand.range().start());
-                        self.push(Operator::UnaryOpSwap, r, "");
-                    }
-                    Invert => {
-                        let end = TextSize::from(u32::from(start) + 1);
-                        let r = TextRange::new(start, end);
-                        self.push(Operator::UnaryOpSwap, r, "");
-                    }
-                }
-            }
-            Expr::Compare(c) => {
-                for (i, op) in c.ops.iter().enumerate() {
-                    let lex = cmpop_lexeme(*op);
-                    let search_from = if i == 0 {
-                        c.left.range().end()
-                    } else {
-                        c.comparators[i - 1].range().end()
-                    };
-                    let search_to = c.comparators[i].range().start();
-                    let s: usize = search_from.into();
-                    let e: usize = search_to.into();
-                    if let Some(idx) = self.source[s..e].find(lex) {
-                        let abs = s + idx;
-                        let r =
-                            TextRange::new((abs as u32).into(), ((abs + lex.len()) as u32).into());
-                        for (orig, repl) in COMPARE_SWAPS {
-                            if *orig == lex {
-                                self.push(Operator::CompareOpSwap, r, repl);
-                            }
-                        }
-                        for (orig, repl) in BOUNDARY_SWAPS {
-                            if *orig == lex {
-                                self.push(Operator::BoundaryShift, r, repl);
-                            }
-                        }
-                    }
-                }
-            }
-            Expr::NumberLiteral(_) => {
-                let r = expr.range();
-                let lex = &self.source[r];
-                if let Ok(v) = lex.parse::<i64>() {
-                    self.push(Operator::NumberShift, r, &v.wrapping_add(1).to_string());
-                    self.push(Operator::NumberShift, r, &v.wrapping_sub(1).to_string());
-                    if v != 0 {
-                        self.push(Operator::NumberToZero, r, "0");
-                        self.push(Operator::NumberToNeg, r, &format!("-{}", v));
-                    }
-                } else if let Ok(v) = lex.parse::<f64>() {
-                    if v.is_finite() {
-                        self.push(Operator::NumberShift, r, &(v + 1.0).to_string());
-                        self.push(Operator::NumberShift, r, &(v - 1.0).to_string());
-                        if v != 0.0 {
-                            self.push(Operator::NumberToZero, r, "0");
-                            self.push(Operator::NumberToNeg, r, &format!("-{}", v));
-                        }
-                    }
-                }
-            }
-            Expr::StringLiteral(_) if !self.docstrings.contains(&expr.range()) => {
-                let r = expr.range();
-                let lex = &self.source[r];
-                for (orig, repl) in CONSTANT_SWAPS {
-                    if *orig == lex {
-                        self.push(Operator::ConstantReplace, r, repl);
-                    }
-                }
-                if !is_empty_string_literal(lex) {
-                    self.push(Operator::StringToEmpty, r, "\"\"");
-                    if let Some(s) = wrap_with_sentinel(lex) {
-                        self.push(Operator::StringSentinel, r, &s);
-                    }
-                    // Parity (opt-in): UPPER/lower-case the literal content,
-                    // mirroring mutmut's string-case mutation.
-                    if let Some(s) = swap_string_case(lex, true) {
-                        self.push(Operator::StringCaseSwap, r, &s);
-                    }
-                    if let Some(s) = swap_string_case(lex, false) {
-                        self.push(Operator::StringCaseSwap, r, &s);
-                    }
-                }
+            Expr::BinOp(b) => self.emit_binop(b),
+            Expr::BoolOp(b) => self.emit_boolop(b),
+            Expr::UnaryOp(u) => self.emit_unaryop(u),
+            Expr::Compare(c) => self.emit_compare(c),
+            Expr::NumberLiteral(n) => self.emit_number(n),
+            Expr::StringLiteral(s) if !self.docstrings.contains(&expr.range()) => {
+                self.emit_string(s)
             }
             // f-strings (`Expr::FString`) are a distinct node from plain string
             // literals, so the catalogue used to skip them entirely. They carry
             // real logic (error messages, formatted output); collapse the whole
             // f-string to an empty string — does the formatted result matter?
             Expr::FString(_) if !self.docstrings.contains(&expr.range()) => {
-                let r = expr.range();
-                self.push(Operator::StringToEmpty, r, "\"\"");
+                self.push(Operator::StringToEmpty, expr.range(), "\"\"");
             }
-            Expr::BytesLiteral(_) => {
-                let r = expr.range();
-                let lex = &self.source[r];
-                if !is_empty_bytes_literal(lex) {
-                    if let Some(s) = wrap_with_sentinel(lex) {
-                        self.push(Operator::BytesSentinel, r, &s);
-                    }
-                }
-            }
-            Expr::BooleanLiteral(_) => {
-                let r = expr.range();
-                let lex = &self.source[r];
-                for (orig, repl) in CONSTANT_SWAPS {
-                    if *orig == lex {
-                        self.push(Operator::ConstantReplace, r, repl);
-                    }
-                }
-            }
-            Expr::Await(a) => {
-                // `await X` → `X`: drop the await. The expression now evaluates
-                // to the coroutine/awaitable itself instead of its result —
-                // observable wherever the awaited value is used (comparison,
-                // attribute access, return). Range covers `await ` up to the
-                // operand start.
-                let r = TextRange::new(a.range().start(), a.value.range().start());
-                self.push(Operator::AwaitDrop, r, "");
-            }
+            Expr::BytesLiteral(b) => self.emit_bytes(b),
+            Expr::BooleanLiteral(b) => self.emit_boolean(b),
+            Expr::Await(a) => self.emit_await(a),
             Expr::Lambda(l) if !matches!(l.body.as_ref(), Expr::NoneLiteral(_)) => {
                 self.push(Operator::LambdaBodyToNone, l.body.range(), "None");
             }
@@ -672,35 +764,7 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
                 // logic. `""` mirrors mutmut's None replacement.
                 self.push(Operator::NoneToValue, expr.range(), "\"\"");
             }
-            Expr::Call(c) => {
-                // Parity: whole call result → None (does the return value
-                // matter where it's used?).
-                self.push(Operator::ExprToNone, c.range(), "None");
-                for kw in &*c.arguments.keywords {
-                    // Skip `**kwargs` splats (kw.arg is None).
-                    if kw.arg.is_none() {
-                        continue;
-                    }
-                    let r = self.extend_to_consume_comma(kw.range(), c.arguments.range());
-                    self.push(Operator::KeywordArgDrop, r, "");
-                    // arg-to-none: does the callee actually use this keyword's
-                    // value? Skip values already `None` (no-op).
-                    if !matches!(kw.value, Expr::NoneLiteral(_)) {
-                        self.push(Operator::ArgToNone, kw.value.range(), "None");
-                    }
-                }
-                for arg in &*c.arguments.args {
-                    // Parity: drop the positional argument entirely.
-                    let dr = self.extend_to_consume_comma(arg.range(), c.arguments.range());
-                    self.push(Operator::PositionalDrop, dr, "");
-                    // Skip `*args` splats — `f(None)` would drop the unpack
-                    // semantics — and values already `None`.
-                    if matches!(arg, Expr::Starred(_) | Expr::NoneLiteral(_)) {
-                        continue;
-                    }
-                    self.push(Operator::ArgToNone, arg.range(), "None");
-                }
-            }
+            Expr::Call(c) => self.emit_call(c),
             // Parity: value-position attribute / subscript reads → None. Only
             // Load context (mutating a Store target would be a syntax error).
             Expr::Attribute(a) if matches!(a.ctx, ast::ExprContext::Load) => {
@@ -711,50 +775,11 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
             }
             // Parity: drop one element from a list/set/tuple literal (≥2 elts,
             // mirroring the dict-item-drop bound).
-            Expr::List(l) if l.elts.len() >= 2 => {
-                for elt in &l.elts {
-                    let r = self.extend_to_consume_comma(elt.range(), l.range());
-                    self.push(Operator::PositionalDrop, r, "");
-                }
-            }
-            Expr::Set(s) if s.elts.len() >= 2 => {
-                for elt in &s.elts {
-                    let r = self.extend_to_consume_comma(elt.range(), s.range());
-                    self.push(Operator::PositionalDrop, r, "");
-                }
-            }
-            Expr::Tuple(t) if t.elts.len() >= 2 => {
-                for elt in &t.elts {
-                    let r = self.extend_to_consume_comma(elt.range(), t.range());
-                    self.push(Operator::PositionalDrop, r, "");
-                }
-            }
-            Expr::Dict(d) if d.items.len() >= 2 => {
-                for item in &d.items {
-                    // Skip `**spread` items where key is None.
-                    let key = match &item.key {
-                        Some(k) => k,
-                        None => continue,
-                    };
-                    let item_range = TextRange::new(key.range().start(), item.value.range().end());
-                    let r = self.extend_to_consume_comma(item_range, d.range());
-                    self.push(Operator::DictItemDrop, r, "");
-                }
-            }
-            Expr::Slice(s) => {
-                if let Some(lower) = &s.lower {
-                    self.push(Operator::SliceBoundDrop, lower.range(), "");
-                }
-                if let Some(upper) = &s.upper {
-                    self.push(Operator::SliceBoundDrop, upper.range(), "");
-                }
-                if let Some(step) = &s.step {
-                    let r = step.range();
-                    let lex = &self.source[r];
-                    let repl = if lex == "1" { "2" } else { "1" };
-                    self.push(Operator::SliceStepMutate, r, repl);
-                }
-            }
+            Expr::List(l) if l.elts.len() >= 2 => self.emit_seq_drop(&l.elts, l.range()),
+            Expr::Set(s) if s.elts.len() >= 2 => self.emit_seq_drop(&s.elts, s.range()),
+            Expr::Tuple(t) if t.elts.len() >= 2 => self.emit_seq_drop(&t.elts, t.range()),
+            Expr::Dict(d) if d.items.len() >= 2 => self.emit_dict(d),
+            Expr::Slice(s) => self.emit_slice(s),
             _ => {}
         }
         walk_expr(self, expr);

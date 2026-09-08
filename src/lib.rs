@@ -36,4 +36,5 @@ pub mod mutator;
 pub mod report;
 pub mod runner;
 pub(crate) mod sync;
+pub(crate) mod util;
 pub mod watch;

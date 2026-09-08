@@ -33,10 +33,7 @@ use anyhow::{anyhow, Context, Result};
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use serde::Serialize;
 
-use super::explain::{
-    enclosing_symbol, grep_symbol, render_source_snippet, EnclosingSymbol, MutantSummary,
-    DEFAULT_GREP_MATCH_LIMIT,
-};
+use super::explain::{enclosing_symbol, render_source_snippet, EnclosingSymbol, MutantSummary};
 use crate::llm::cache::{default_cache_path, LlmCache};
 use crate::llm::client::client_from_env;
 use crate::llm::prompt::{
@@ -47,6 +44,7 @@ use crate::llm::{LlmCallOpts, DEFAULT_MODEL};
 use crate::mutator::Mutant;
 use crate::report::{MutantOutcome, Report};
 use crate::sync::lock_recover;
+use crate::util::search::{grep_symbol, DEFAULT_GREP_MATCH_LIMIT};
 
 #[derive(Copy, Clone, Debug)]
 pub enum SuggestFormat {

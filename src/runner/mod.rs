@@ -29,7 +29,10 @@ use crate::mutator::Mutant;
 use crate::report::MutantOutcome;
 
 pub trait Runner: Send + Sync {
-    fn run(&self, mutant: &Mutant) -> Result<MutantOutcome>;
+    /// Takes `&Arc<Mutant>` so the outcome it returns embeds the mutant by a
+    /// refcount bump, not a deep copy. Helpers that only read the mutant still
+    /// take `&Mutant` and are called via deref coercion.
+    fn run(&self, mutant: &std::sync::Arc<Mutant>) -> Result<MutantOutcome>;
 
     /// Run the *unmutated* test suite once and report whether it is green.
     ///

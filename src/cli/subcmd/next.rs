@@ -145,7 +145,7 @@ pub(crate) fn rank_report(
         .outcomes
         .iter()
         .filter_map(|o| match o {
-            MutantOutcome::Survived { mutant } => Some(mutant),
+            MutantOutcome::Survived { mutant } => Some(mutant.as_ref()),
             _ => None,
         })
         .collect();

@@ -30,7 +30,10 @@ use crate::mutator::Mutant;
 use crate::report::MutantOutcome;
 
 pub trait Runner: Send + Sync {
-    fn run(&self, mutant: &Mutant) -> Result<MutantOutcome>;
+    /// Takes `&Arc<Mutant>` so the outcome it returns embeds the mutant by a
+    /// refcount bump, not a deep copy. Helpers that only read the mutant still
+    /// take `&Mutant` and are called via deref coercion.
+    fn run(&self, mutant: &std::sync::Arc<Mutant>) -> Result<MutantOutcome>;
 
     /// Run the *unmutated* test suite once and report whether it is green.
     ///
@@ -90,6 +93,41 @@ pub(crate) fn mirror_pythonpath(mirror: &Mirror) -> Result<std::ffi::OsString> {
         paths.extend(std::env::split_paths(&existing).filter(|p| !p.as_os_str().is_empty()));
     }
     std::env::join_paths(&paths).context("joining PYTHONPATH")
+}
+
+/// Apply the environment every per-mutant framework command against a mirror
+/// needs: run from the mirror root, in a fresh process group (so a timeout kill
+/// reaches child processes), with `PYTHONPATH` pinned to the mirror (beats an
+/// editable install's `.pth` pointing at the original tree) and bytecode writes
+/// disabled (a stale `.pyc` that still validates against the patched source
+/// would mask the mutation and falsely report a survivor). Shared by the pytest
+/// and unittest runners so these correctness-critical knobs can't drift apart.
+pub(crate) fn configure_mirror_cmd(cmd: &mut std::process::Command, mirror: &Mirror) -> Result<()> {
+    cmd.current_dir(&mirror.root);
+    process_group::with_new_process_group(cmd);
+    cmd.env("PYTHONPATH", mirror_pythonpath(mirror)?);
+    cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+    Ok(())
+}
+
+/// Run `f` against this worker's mirror with `mutant`'s patch spliced in for the
+/// duration of the call: reuse (or lazily build) the thread-local mirror, apply
+/// the patch, invoke `f`, then revert the patch on scope exit via the guard.
+/// Both runners funnel through here so the mirror-reuse + patch-lifecycle wiring
+/// lives in exactly one place.
+pub(crate) fn run_patched<F>(
+    tests: &Path,
+    mode: IsolationMode,
+    mutant: &Mutant,
+    f: F,
+) -> Result<MutantOutcome>
+where
+    F: FnOnce(&Mirror) -> Result<MutantOutcome>,
+{
+    with_worker_mirror(tests, mode, |mirror| {
+        let _guard = apply_patch(mirror, mutant)?;
+        f(mirror)
+    })
 }
 
 /// Keep the last `max_lines` lines of `s`, prefixing an elision marker when

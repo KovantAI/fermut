@@ -307,8 +307,7 @@ fn load_report(path: &str) -> Result<Report> {
     {
         return Err(anyhow::anyhow!("Invalid input: {}", path_buf.display()));
     }
-    let raw = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
-    serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("parsing {path}: {e}"))
+    crate::report::load(path_buf)
 }
 
 fn tool_next(args: &Value) -> Result<Value> {
@@ -333,7 +332,8 @@ fn tool_next(args: &Value) -> Result<Value> {
 }
 
 fn tool_explain(args: &Value) -> Result<Value> {
-    use super::explain::{build_explain_report, ExplainFormat, ExplainOpts};
+    use super::explain::{build_explain_report, ExplainOpts};
+    use crate::cli::Format;
     let report = str_arg(args, "report").ok_or_else(|| anyhow::anyhow!("`report` is required"))?;
     let target = str_arg(args, "target").ok_or_else(|| anyhow::anyhow!("`target` is required"))?;
     let context_lines = args
@@ -362,7 +362,7 @@ fn tool_explain(args: &Value) -> Result<Value> {
         no_cache: false,
         cache_path: None,
         project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        format: ExplainFormat::Json,
+        format: Format::Json,
     };
     Ok(serde_json::to_value(build_explain_report(&opts)?)?)
 }
@@ -373,7 +373,8 @@ fn tool_doctor(args: &Value) -> Result<Value> {
 }
 
 fn tool_baseline(args: &Value) -> Result<Value> {
-    use super::baseline::{compute_baseline, BaselineFormat, BaselineOpts};
+    use super::baseline::{compute_baseline, BaselineOpts};
+    use crate::cli::Format;
     let path = PathBuf::from(str_arg(args, "path").unwrap_or("."));
     let full = args.get("full").and_then(Value::as_bool).unwrap_or(false);
     let sample = args.get("sample").and_then(Value::as_f64);
@@ -387,7 +388,7 @@ fn tool_baseline(args: &Value) -> Result<Value> {
         full,
         sample,
         top,
-        format: BaselineFormat::Json,
+        format: Format::Json,
         // No filter overrides over MCP — compute_baseline forces the
         // coverage filter on so the score is over covered code.
         filter: super::super::FilterArgs {

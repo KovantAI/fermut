@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 
+use crate::cli::Format;
 use crate::history::{self, HistoryEntry, StreakDir};
 
 #[derive(Debug, Clone)]
@@ -16,7 +17,7 @@ pub struct TrendOpts {
     pub history_path: Option<PathBuf>,
     pub limit: usize,
     pub all: bool,
-    pub format: TrendFormat,
+    pub format: Format,
     pub scale: TrendScale,
     /// Keep only entries whose `git_branch` exactly matches.
     pub branch: Option<String>,
@@ -46,12 +47,6 @@ pub struct TrendOpts {
     /// older binary can't read them and can't repair them, so failing on them
     /// would only wedge CI during a version rollout.
     pub strict: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum TrendFormat {
-    Human,
-    Json,
 }
 
 /// Aggregation axis for the latest-run survivor list. File grouping reads
@@ -121,11 +116,11 @@ pub fn trend(opts: TrendOpts) -> Result<()> {
 
     if filtered.is_empty() {
         match opts.format {
-            TrendFormat::Human => println!(
+            Format::Human => println!(
                 "no history matching filters at {}\n  run `fermut run …` once to populate it",
                 history_path.display()
             ),
-            TrendFormat::Json => println!("[]"),
+            Format::Json => println!("[]"),
         }
         return Ok(());
     }
@@ -138,10 +133,8 @@ pub fn trend(opts: TrendOpts) -> Result<()> {
     };
 
     match opts.format {
-        TrendFormat::Human => {
-            print_human(window, &history_path, opts.scale, opts.diff, opts.group_by)
-        }
-        TrendFormat::Json => print_json(window)?,
+        Format::Human => print_human(window, &history_path, opts.scale, opts.diff, opts.group_by),
+        Format::Json => print_json(window)?,
     }
 
     // Regression gate runs after rendering so the user still sees the table
@@ -721,7 +714,7 @@ mod tests {
             history_path: Some(history_path),
             limit: 20,
             all: true,
-            format: TrendFormat::Json,
+            format: Format::Json,
             scale: TrendScale::Auto,
             branch: None,
             since: None,
@@ -822,8 +815,8 @@ pub(crate) struct TrendArgs {
     pub(crate) by: Option<crate::cli::TrendGroupByCli>,
 
     /// stdout output format.
-    #[arg(long, value_enum, default_value_t = crate::cli::TrendFormatCli::Human)]
-    pub(crate) format: crate::cli::TrendFormatCli,
+    #[arg(long, value_enum, default_value_t = crate::cli::Format::Human)]
+    pub(crate) format: crate::cli::Format,
 
     /// Fail if the history log has any malformed (corrupt, unparseable)
     /// line instead of silently skipping it, so a `fermut trend --strict`

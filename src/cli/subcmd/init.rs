@@ -174,6 +174,16 @@ pub fn init(opts: InitOpts) -> Result<()> {
     };
     let size = RepoSize::classify(detection.py_file_count);
 
+    print_detection_summary(&detection, &opts, size);
+    write_outputs(&detection, &toml_body, &opts)?;
+    print_next_steps(&detection, wire_coverage);
+
+    Ok(())
+}
+
+/// Print the "fermut init — detected:" block: resolved roots, runner, ty,
+/// coverage, package manager, repo size, and the effective profile.
+fn print_detection_summary(detection: &Detection, opts: &InitOpts, size: RepoSize) {
     println!("fermut init — detected:");
     println!("  project root : {}", detection.project_root.display());
     println!(
@@ -211,7 +221,11 @@ pub fn init(opts: InitOpts) -> Result<()> {
         }
     );
     println!();
+}
 
+/// Write the rendered config (fermut.toml or pyproject) and, when requested,
+/// the GHA workflow — or, under `--dry-run`, just print what would be written.
+fn write_outputs(detection: &Detection, toml_body: &str, opts: &InitOpts) -> Result<()> {
     let target = if opts.pyproject {
         detection.project_root.join("pyproject.toml")
     } else {
@@ -222,7 +236,7 @@ pub fn init(opts: InitOpts) -> Result<()> {
         println!("--dry-run: would write to {}:\n", target.display());
         println!("{}", toml_body);
     } else {
-        write_config(&target, &toml_body, opts.pyproject, opts.force)?;
+        write_config(&target, toml_body, opts.pyproject, opts.force)?;
         println!("wrote {}", target.display());
     }
 
@@ -239,6 +253,12 @@ pub fn init(opts: InitOpts) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Print the actionable "next steps:" tail — missing tests/ty warnings, the
+/// coverage-generation recipe, and the smoke-test / first-run commands.
+fn print_next_steps(detection: &Detection, wire_coverage: bool) {
     println!();
     println!("next steps:");
     if detection.tests.is_none() {
@@ -271,8 +291,6 @@ pub fn init(opts: InitOpts) -> Result<()> {
         "  - first run :  fermut run {}",
         rel(&detection.source_root, &detection.project_root)
     );
-
-    Ok(())
 }
 
 fn detect(start: &Path) -> Result<Detection> {

@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -47,7 +47,7 @@ pub const TIME_BUDGET_FILTER: &str = "time-budget";
 /// uncovered. In practice uncovered mutants are cheap coverage-skips that drain
 /// fast, so the expensive budget still lands on covered mutants; the ordering
 /// makes that the common case, not a hard guarantee.
-fn order_by_value(mutants: &mut [Mutant], cfg: &Config) {
+fn order_by_value(mutants: &mut [Arc<Mutant>], cfg: &Config) {
     let Some(cov) = cfg.coverage.as_ref() else {
         return;
     };
@@ -70,8 +70,16 @@ fn order_by_value(mutants: &mut [Mutant], cfg: &Config) {
 pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
     let started = Instant::now();
     info!(path = %cfg.source_root.display(), "collecting mutations");
-    let mut mutants: Vec<Mutant> = mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)
-        .with_context(|| format!("collecting mutations under {}", cfg.source_root.display()))?;
+    // Wrap each mutant in an `Arc` once, here, so the per-mutant testing loop
+    // (and the outcomes it embeds them in) shares them by refcount instead of
+    // deep-copying the four heap fields on every outcome construction, cache
+    // insert, and cache-hit lookup. Nothing mutates a `Mutant` after collection
+    // — only the Vec is reordered — so the shared `Arc` needs no interior mut.
+    let mut mutants: Vec<Arc<Mutant>> = mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)
+        .with_context(|| format!("collecting mutations under {}", cfg.source_root.display()))?
+        .into_iter()
+        .map(Arc::new)
+        .collect();
     info!(count = mutants.len(), "mutations generated");
 
     // `--sample` scales only the TESTING phase: every mutant above was still
@@ -98,42 +106,70 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         order_by_value(&mut mutants, cfg);
     }
 
+    // Everything read-only for the testing phase: filter chain, runner, cache,
+    // per-file artifacts, equiv pipeline, deadline — plus the baseline check.
+    let state = prepare(cfg, &mutants)?;
+
+    let ctx = EvalCtx {
+        cfg,
+        filters: &state.filters,
+        runner: state.runner.as_ref(),
+        cache: &state.cache,
+        file_hashes: &state.file_hashes,
+        scope_maps: &state.scope_maps,
+        scope_prefix: &state.scope_prefix,
+        equiv: state.equiv.as_ref(),
+        file_sources: &state.file_sources,
+        deadline: state.deadline,
+    };
+    let outcomes: Vec<MutantOutcome> = evaluate_all(cfg, &ctx, &mutants)?;
+
+    Ok(persist(
+        cfg,
+        started,
+        state.runner.as_ref(),
+        &state.cache,
+        state.deadline,
+        outcomes,
+    ))
+}
+
+/// Read-only state assembled before the testing phase and borrowed by every
+/// mutant's [`evaluate`]. Owned here (not in [`run`]) so [`prepare`] can build
+/// it in one place; [`EvalCtx`] holds borrows into it.
+struct RunState {
+    filters: Vec<Box<dyn Filter>>,
+    runner: Box<dyn Runner>,
+    cache: Mutex<Cache>,
+    file_hashes: HashMap<PathBuf, String>,
+    scope_maps: HashMap<PathBuf, ScopeMap>,
+    file_sources: HashMap<PathBuf, String>,
+    equiv: Option<EquivPipeline>,
+    scope_prefix: String,
+    deadline: Option<Instant>,
+}
+
+/// Build the filter chain and runner, verify the baseline suite is green, then
+/// derive the per-file artifacts, cache, equiv pipeline, and testing-phase
+/// deadline. Everything the per-mutant loop reads, in one place.
+fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     let filters = filter::build_chain(cfg)?;
     let runner = runner::build(cfg);
 
-    // Pre-flight: confirm the unmutated suite is green before spending time
-    // mutating. A red suite makes every covered mutant exit non-zero, which
-    // the runner counts as "killed" — yielding a confidently-wrong score near
-    // 100%. Skip when there's nothing to mutate or the user opted out.
-    if cfg.verify_baseline && !mutants.is_empty() {
-        info!("verifying baseline: running the unmutated test suite");
-        match runner.baseline()? {
-            runner::BaselineStatus::Passed => info!("baseline suite is green"),
-            runner::BaselineStatus::Failed { output } => {
-                return Err(anyhow::anyhow!(
-                    "baseline test suite is not green — aborting before mutation.\n\n\
-                     A failing or erroring suite makes every covered mutant exit \
-                     non-zero, which fermut counts as \"killed\", producing a \
-                     falsely high mutation score. Fix the suite (run your tests \
-                     until they pass) or, if you accept the risk, re-run with \
-                     --no-verify-baseline.\n\n\
-                     --- test output (tail) ---\n{output}"
-                ));
-            }
-        }
-    }
+    preflight_baseline(cfg, runner.as_ref(), mutants)?;
 
-    let file_hashes = hash_unique_files(&mutants);
-    let scope_maps = if matches!(cfg.cache_scope, CacheScope::Scope) {
-        build_scope_maps(&mutants)
-    } else {
-        HashMap::new()
-    };
-    let file_sources = if cfg.equiv_detect {
-        load_unique_files(&mutants)
-    } else {
-        HashMap::new()
-    };
+    // One read + at most one parse per unique file, deriving the cache-key
+    // hash (always), the scope map (only in `scope` cache mode), and the source
+    // for the equiv detector (only when it's on).
+    let FileArtifacts {
+        hashes: file_hashes,
+        scope_maps,
+        sources: file_sources,
+    } = analyze_unique_files(
+        mutants,
+        matches!(cfg.cache_scope, CacheScope::Scope),
+        cfg.equiv_detect,
+    );
     let equiv = if cfg.equiv_detect {
         Some(EquivPipeline::default_pipeline())
     } else {
@@ -149,45 +185,37 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
     // Testing-phase wall-clock ceiling. Computed here — after baseline
     // verification and the source-hash pass — so the budget covers the
     // per-mutant testing phase only, matching the flag's documented scope.
-    let test_deadline = cfg
-        .max_time_secs
-        .map(|secs| Instant::now() + Duration::from_secs(secs));
+    let deadline = compute_test_deadline(cfg);
 
-    let progress = make_progress_bar(mutants.len() as u64);
-    let pool = build_pool(cfg.jobs)?;
-    let ctx = EvalCtx {
-        cfg,
-        filters: &filters,
-        runner: runner.as_ref(),
-        cache: &cache,
-        file_hashes: &file_hashes,
-        scope_maps: &scope_maps,
-        scope_prefix: &scope_prefix,
-        equiv: equiv.as_ref(),
-        file_sources: &file_sources,
-        deadline: test_deadline,
-    };
-    let outcomes: Vec<MutantOutcome> = pool.install(|| {
-        mutants
-            .par_iter()
-            .map(|m| {
-                let outcome = evaluate(&ctx, m);
-                if let Some(pb) = &progress {
-                    pb.inc(1);
-                }
-                outcome
-            })
-            .collect()
-    });
-    if let Some(pb) = &progress {
-        pb.finish_and_clear();
-    }
+    Ok(RunState {
+        filters,
+        runner,
+        cache,
+        file_hashes,
+        scope_maps,
+        file_sources,
+        equiv,
+        scope_prefix,
+        deadline,
+    })
+}
 
+/// Post-testing wrap-up: warn on a budget-truncated run, report cache
+/// integrity, fold learned kills into the kill-order sidecar, then build the
+/// [`Report`] and (optionally) append the history entry the trend/gate read.
+fn persist(
+    cfg: &Config,
+    started: Instant,
+    runner: &dyn Runner,
+    cache: &Mutex<Cache>,
+    deadline: Option<Instant>,
+    outcomes: Vec<MutantOutcome>,
+) -> (Report, Option<HistoryEntry>) {
     // Surface the budget cutoff so a partial run reads as partial, not as a
     // clean pass over the whole catalogue. Mirrors the `--sample` floor note:
     // the skipped mutants are excluded from the score denominator, so without
     // this line a time-boxed run looks indistinguishable from a full one.
-    if test_deadline.is_some() {
+    if deadline.is_some() {
         let budget_skipped = outcomes
             .iter()
             .filter(|o| matches!(o, MutantOutcome::Skipped { filter, .. } if filter == TIME_BUDGET_FILTER))
@@ -202,23 +230,7 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         }
     }
 
-    if cfg.cache {
-        let guard = lock_recover(&cache);
-        let dropped = guard.dropped_on_load();
-        let entries = guard.len();
-        if let Err(e) = guard.save(&cfg.cache_path) {
-            warn!(path = %cfg.cache_path.display(), error = %e, "failed to save cache");
-        }
-        // One-line end-of-run summary so users (and CI log scrapers) see
-        // the integrity outcome without grepping every `warn!` line. A
-        // non-zero `dropped` here is the signal that someone fed us a
-        // tampered or stale cache.
-        info!(
-            entries,
-            dropped_on_load = dropped,
-            "cache: post-run summary"
-        );
-    }
+    summarize_integrity(cfg, cache);
 
     // Smart ordering: fold the kills learned this run into the kill-order
     // sidecar so the next run puts proven killers first. Advisory — a write
@@ -253,7 +265,89 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         None
     };
 
-    Ok((report, entry))
+    (report, entry)
+}
+
+/// Pre-flight: confirm the unmutated suite is green before spending time
+/// mutating. A red suite makes every covered mutant exit non-zero, which the
+/// runner counts as "killed" — yielding a confidently-wrong score near 100%.
+/// No-op when there's nothing to mutate or the user opted out.
+fn preflight_baseline(cfg: &Config, runner: &dyn Runner, mutants: &[Arc<Mutant>]) -> Result<()> {
+    if !cfg.verify_baseline || mutants.is_empty() {
+        return Ok(());
+    }
+    info!("verifying baseline: running the unmutated test suite");
+    match runner.baseline()? {
+        runner::BaselineStatus::Passed => {
+            info!("baseline suite is green");
+            Ok(())
+        }
+        runner::BaselineStatus::Failed { output } => Err(anyhow::anyhow!(
+            "baseline test suite is not green — aborting before mutation.\n\n\
+             A failing or erroring suite makes every covered mutant exit \
+             non-zero, which fermut counts as \"killed\", producing a \
+             falsely high mutation score. Fix the suite (run your tests \
+             until they pass) or, if you accept the risk, re-run with \
+             --no-verify-baseline.\n\n\
+             --- test output (tail) ---\n{output}"
+        )),
+    }
+}
+
+/// Testing-phase wall-clock ceiling from `--max-time`. `None` when unset.
+/// Called after baseline verification and the source-hash pass so the budget
+/// covers the per-mutant testing phase only, matching the flag's scope.
+fn compute_test_deadline(cfg: &Config) -> Option<Instant> {
+    cfg.max_time_secs
+        .map(|secs| Instant::now() + Duration::from_secs(secs))
+}
+
+/// Parallel evaluate: build the worker pool and progress bar, then fan out
+/// `evaluate` over every mutant. `ctx` carries the read-only per-run state.
+fn evaluate_all(
+    cfg: &Config,
+    ctx: &EvalCtx,
+    mutants: &[Arc<Mutant>],
+) -> Result<Vec<MutantOutcome>> {
+    let progress = make_progress_bar(mutants.len() as u64);
+    let pool = build_pool(cfg.jobs)?;
+    let outcomes: Vec<MutantOutcome> = pool.install(|| {
+        mutants
+            .par_iter()
+            .map(|m| {
+                let outcome = evaluate(ctx, m);
+                if let Some(pb) = &progress {
+                    pb.inc(1);
+                }
+                outcome
+            })
+            .collect()
+    });
+    if let Some(pb) = &progress {
+        pb.finish_and_clear();
+    }
+    Ok(outcomes)
+}
+
+/// Persist the cache and log a one-line end-of-run integrity summary so users
+/// (and CI log scrapers) see the outcome without grepping every `warn!` line.
+/// A non-zero `dropped_on_load` is the signal that someone fed us a tampered
+/// or stale cache. No-op when caching is disabled.
+fn summarize_integrity(cfg: &Config, cache: &Mutex<Cache>) {
+    if !cfg.cache {
+        return;
+    }
+    let guard = lock_recover(cache);
+    let dropped = guard.dropped_on_load();
+    let entries = guard.len();
+    if let Err(e) = guard.save(&cfg.cache_path) {
+        warn!(path = %cfg.cache_path.display(), error = %e, "failed to save cache");
+    }
+    info!(
+        entries,
+        dropped_on_load = dropped,
+        "cache: post-run summary"
+    );
 }
 
 /// Read-only, per-run context shared by every `evaluate` call. Built once
@@ -274,7 +368,7 @@ struct EvalCtx<'a> {
     deadline: Option<Instant>,
 }
 
-fn evaluate(ctx: &EvalCtx, mutant: &Mutant) -> MutantOutcome {
+fn evaluate(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
     // Testing-phase budget check first, before the filter chain or the runner.
     // Past the deadline every remaining mutant is a cheap skip — including the
     // ty pre-filter, the dominant per-mutant cost — so the wall-clock ceiling
@@ -527,65 +621,71 @@ fn compute_mutant_scope(prefix: &str, cfg: &Config, mutant: &Mutant) -> String {
     hex::encode(h.finalize())
 }
 
-/// Read each unique source file once. Used by the equiv detector so
-/// classifications don't re-read the file per mutant.
-fn load_unique_files(mutants: &[Mutant]) -> HashMap<PathBuf, String> {
-    let mut out = HashMap::new();
-    for m in mutants {
-        if out.contains_key(&m.file) {
-            continue;
-        }
-        match std::fs::read_to_string(&m.file) {
-            Ok(s) => {
-                out.insert(m.file.clone(), s);
-            }
-            Err(e) => {
-                warn!(file = %m.file.display(), error = %e, "source read failed; equiv detector disabled for this file");
-            }
-        }
-    }
-    out
+/// Per-file artifacts for a run, keyed by source path. Built in one pass by
+/// [`analyze_unique_files`].
+struct FileArtifacts {
+    /// Cache-key AST hash for every unique file (byte fallback on parse/utf-8
+    /// failure). Always populated.
+    hashes: HashMap<PathBuf, String>,
+    /// Scope maps for the `scope` cache mode. Empty otherwise; files that fail
+    /// to parse are absent (consumers fall back to the file hash).
+    scope_maps: HashMap<PathBuf, ScopeMap>,
+    /// Source text for the equiv detector, so classification doesn't re-read
+    /// the file per mutant. Empty when equiv detection is off.
+    sources: HashMap<PathBuf, String>,
 }
 
-/// Parse every unique source file once and return its [`ScopeMap`]. Files
-/// that fail to parse or read are simply absent from the map; consumers fall
-/// back to the file-AST hash for those.
-fn build_scope_maps(mutants: &[Mutant]) -> HashMap<PathBuf, ScopeMap> {
-    let mut out = HashMap::new();
+/// Read + parse each unique mutated file exactly once, deriving every per-file
+/// artifact the run needs. Replaces three separate passes (`hash_unique_files`,
+/// `build_scope_maps`, `load_unique_files`) that each re-read and re-parsed the
+/// same files — 2–3× the IO and parse work. `want_scope`/`want_source` gate the
+/// optional artifacts so a run that needs neither pays only for the hash.
+fn analyze_unique_files(
+    mutants: &[Arc<Mutant>],
+    want_scope: bool,
+    want_source: bool,
+) -> FileArtifacts {
+    let mut hashes = HashMap::new();
+    let mut scope_maps = HashMap::new();
+    let mut sources = HashMap::new();
     for m in mutants {
-        if out.contains_key(&m.file) {
+        if hashes.contains_key(&m.file) {
             continue;
         }
-        match ast_hash::scope_map_from_file(&m.file) {
-            Ok(Some(map)) => {
-                out.insert(m.file.clone(), map);
-            }
-            Ok(None) => {
-                warn!(file = %m.file.display(), "scope-map parse failed; falling back to file hash for this file");
-            }
+        let analysis = match ast_hash::analyze_file(&m.file, want_scope, want_source) {
+            Ok(a) => a,
             Err(e) => {
-                warn!(file = %m.file.display(), error = %e, "scope-map read failed; falling back to file hash for this file");
+                warn!(file = %m.file.display(), error = %e, "source read failed; cache disabled for this file");
+                continue;
             }
-        }
-    }
-    out
-}
-
-fn hash_unique_files(mutants: &[Mutant]) -> HashMap<PathBuf, String> {
-    let mut out = HashMap::new();
-    for m in mutants {
-        if !out.contains_key(&m.file) {
-            match ast_hash::hash_file_ast(&m.file) {
-                Ok(h) => {
-                    out.insert(m.file.clone(), h);
+        };
+        hashes.insert(m.file.clone(), analysis.ast_hash);
+        if want_scope {
+            match analysis.scope_map {
+                Some(map) => {
+                    scope_maps.insert(m.file.clone(), map);
                 }
-                Err(e) => {
-                    warn!(file = %m.file.display(), error = %e, "hash failed; cache disabled for this file");
+                None => {
+                    warn!(file = %m.file.display(), "scope-map parse failed; falling back to file hash for this file");
                 }
             }
         }
+        if want_source {
+            match analysis.source {
+                Some(s) => {
+                    sources.insert(m.file.clone(), s);
+                }
+                None => {
+                    warn!(file = %m.file.display(), "source not utf-8; equiv detector disabled for this file");
+                }
+            }
+        }
     }
-    out
+    FileArtifacts {
+        hashes,
+        scope_maps,
+        sources,
+    }
 }
 
 fn make_progress_bar(total: u64) -> Option<ProgressBar> {
@@ -885,7 +985,7 @@ mod tests {
     /// before the runner in `evaluate`.
     struct PanicRunner;
     impl Runner for PanicRunner {
-        fn run(&self, _m: &Mutant) -> Result<MutantOutcome> {
+        fn run(&self, _m: &Arc<Mutant>) -> Result<MutantOutcome> {
             panic!("runner invoked past the --max-time deadline");
         }
         fn baseline(&self) -> Result<runner::BaselineStatus> {
@@ -897,7 +997,7 @@ mod tests {
     /// deadline still lets the runner execute.
     struct KillRunner;
     impl Runner for KillRunner {
-        fn run(&self, m: &Mutant) -> Result<MutantOutcome> {
+        fn run(&self, m: &Arc<Mutant>) -> Result<MutantOutcome> {
             Ok(MutantOutcome::killed(m.clone()))
         }
         fn baseline(&self) -> Result<runner::BaselineStatus> {
@@ -907,7 +1007,7 @@ mod tests {
 
     fn eval_with_deadline(runner: &dyn Runner, deadline: Option<Instant>) -> MutantOutcome {
         let cfg = base_test_config();
-        let m = arith_mutant("return x + 0", "+", "-");
+        let m = Arc::new(arith_mutant("return x + 0", "+", "-"));
         let cache = Mutex::new(Cache::default());
         let ctx = EvalCtx {
             cfg: &cfg,
@@ -964,7 +1064,7 @@ mod tests {
         let a = arith_mutant("a + 0", "+", "-");
         let mut b = arith_mutant("b + 0", "+", "-");
         b.id = "b".into();
-        let mut mutants = vec![a.clone(), b.clone()];
+        let mut mutants = vec![Arc::new(a.clone()), Arc::new(b.clone())];
         order_by_value(&mut mutants, &cfg);
         assert_eq!(mutants[0].id, a.id);
         assert_eq!(mutants[1].id, b.id);
@@ -1000,7 +1100,7 @@ mod tests {
         uncovered.stmt_line = 3;
 
         // Input order is uncovered-first; ordering must swap it.
-        let mut mutants = vec![uncovered.clone(), covered.clone()];
+        let mut mutants = vec![Arc::new(uncovered.clone()), Arc::new(covered.clone())];
         let cfg = Config {
             coverage: Some(cov),
             ..base_test_config()

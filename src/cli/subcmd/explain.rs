@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use crate::cli::Format;
 use crate::filter::coverage::CoverageContexts;
 use crate::llm::cache::{default_cache_path, LlmCache};
 use crate::llm::client::client_from_env;
@@ -34,12 +35,7 @@ use crate::llm::prompt::{
 use crate::llm::{LlmCallOpts, DEFAULT_MODEL};
 use crate::mutator::{Mutant, Operator};
 use crate::report::{MutantOutcome, Report};
-
-#[derive(Copy, Clone, Debug)]
-pub enum ExplainFormat {
-    Human,
-    Json,
-}
+use crate::util::search::{extract_ident, grep_symbol, indent_of, DEFAULT_GREP_MATCH_LIMIT};
 
 pub struct ExplainOpts {
     pub report: PathBuf,
@@ -52,7 +48,7 @@ pub struct ExplainOpts {
     pub no_cache: bool,
     pub cache_path: Option<PathBuf>,
     pub project_root: PathBuf,
-    pub format: ExplainFormat,
+    pub format: Format,
 }
 
 // ---------------------------------------------------------------------------
@@ -145,8 +141,8 @@ pub struct LlmBlock {
 pub fn explain(opts: ExplainOpts) -> Result<()> {
     let report_obj = build_explain_report(&opts)?;
     match opts.format {
-        ExplainFormat::Json => render_json(&report_obj)?,
-        ExplainFormat::Human => render_human(&report_obj),
+        Format::Json => render_json(&report_obj)?,
+        Format::Human => render_human(&report_obj),
     }
     Ok(())
 }
@@ -156,10 +152,7 @@ pub fn explain(opts: ExplainOpts) -> Result<()> {
 /// same heuristic signal (hint, source context, coverage, skeleton). The
 /// optional LLM block is included only when `opts.llm` is set.
 pub(crate) fn build_explain_report(opts: &ExplainOpts) -> Result<ExplainReport> {
-    let raw = std::fs::read_to_string(&opts.report)
-        .with_context(|| format!("reading {}", opts.report.display()))?;
-    let report: Report =
-        serde_json::from_str(&raw).with_context(|| format!("parsing {}", opts.report.display()))?;
+    let report = crate::report::load(&opts.report)?;
 
     let outcome = locate_outcome(&report, &opts.target)?;
     let m = outcome.mutant();
@@ -438,6 +431,18 @@ fn render_json(report: &ExplainReport) -> Result<()> {
 }
 
 fn render_human(r: &ExplainReport) {
+    print_header(r);
+    print_source(r);
+    print_hint(r);
+    print_coverage(r);
+    print_test_matches(r);
+    print_skeleton(r);
+    print_llm(r);
+}
+
+/// Mutant identity block: location, operator, status, id, the mutation itself,
+/// plus the filter/error lines when present.
+fn print_header(r: &ExplainReport) {
     println!("{}:{}", r.mutant.file, r.mutant.line);
     println!("operator : {}", r.mutant.operator);
     println!("status   : {}", r.status);
@@ -453,71 +458,88 @@ fn render_human(r: &ExplainReport) {
         println!("error    : {e}");
     }
     println!();
+}
 
+/// Surrounding source context with the mutant line marked (`►`), or a notice
+/// when the file was unreadable.
+fn print_source(r: &ExplainReport) {
     if r.source_context.lines.is_empty() {
         println!("(source unreadable: {})", r.mutant.file);
-    } else {
-        let max_line = r.source_context.start_line as usize + r.source_context.lines.len();
-        let width = max_line.to_string().len().max(3);
-        println!("source:");
-        for (i, line) in r.source_context.lines.iter().enumerate() {
-            let absolute = r.source_context.start_line as usize + i;
-            let marker = if absolute as u32 == r.source_context.mutant_line {
-                "►"
-            } else {
-                " "
-            };
-            println!("  {marker} {:>width$}  {}", absolute, line, width = width);
-        }
-        println!();
+        return;
     }
+    let max_line = r.source_context.start_line as usize + r.source_context.lines.len();
+    let width = max_line.to_string().len().max(3);
+    println!("source:");
+    for (i, line) in r.source_context.lines.iter().enumerate() {
+        let absolute = r.source_context.start_line as usize + i;
+        let marker = if absolute as u32 == r.source_context.mutant_line {
+            "►"
+        } else {
+            " "
+        };
+        println!("  {marker} {:>width$}  {}", absolute, line, width = width);
+    }
+    println!();
+}
 
+/// Enclosing `def`/`class` (when found) and the operator-specific hint line.
+fn print_hint(r: &ExplainReport) {
     if let Some(s) = &r.enclosing {
         println!("enclosing: {} {}", s.kind, s.name);
     }
     println!("hint     : {}", r.hint);
+}
 
-    if let Some(c) = &r.coverage {
-        if c.covered {
-            println!("\ncoverage : {} test(s) executed this line:", c.tests.len());
-            for t in c.tests.iter().take(10) {
-                println!("  - {t}");
-            }
-            if c.tests.len() > 10 {
-                println!("  ... ({} more)", c.tests.len() - 10);
-            }
-            println!("→ {}", c.note);
-        } else {
-            println!(
-                "\ncoverage : NO test executes {}:{}",
-                r.mutant.file, r.mutant.line
-            );
-            println!("→ {}", c.note);
+/// Coverage signal — which tests executed the line, or that none did.
+fn print_coverage(r: &ExplainReport) {
+    let Some(c) = &r.coverage else { return };
+    if c.covered {
+        println!("\ncoverage : {} test(s) executed this line:", c.tests.len());
+        for t in c.tests.iter().take(10) {
+            println!("  - {t}");
+        }
+        if c.tests.len() > 10 {
+            println!("  ... ({} more)", c.tests.len() - 10);
+        }
+        println!("→ {}", c.note);
+    } else {
+        println!(
+            "\ncoverage : NO test executes {}:{}",
+            r.mutant.file, r.mutant.line
+        );
+        println!("→ {}", c.note);
+    }
+}
+
+/// Tests that reference the mutant's symbol by name (grep of the tests tree).
+fn print_test_matches(r: &ExplainReport) {
+    let Some(t) = &r.test_matches else { return };
+    if t.matches.is_empty() {
+        println!(
+            "\ntests   : no test file mentions `{}`. Likely no direct test exists.",
+            t.symbol
+        );
+    } else {
+        println!("\ntests   : `{}` referenced in:", t.symbol);
+        for m in t.matches.iter().take(8) {
+            println!("  - {}:{}", m.file, m.line);
+        }
+        if t.matches.len() > 8 {
+            println!("  ... ({} more)", t.matches.len() - 8);
         }
     }
+}
 
-    if let Some(t) = &r.test_matches {
-        if t.matches.is_empty() {
-            println!(
-                "\ntests   : no test file mentions `{}`. Likely no direct test exists.",
-                t.symbol
-            );
-        } else {
-            println!("\ntests   : `{}` referenced in:", t.symbol);
-            for m in t.matches.iter().take(8) {
-                println!("  - {}:{}", m.file, m.line);
-            }
-            if t.matches.len() > 8 {
-                println!("  ... ({} more)", t.matches.len() - 8);
-            }
-        }
-    }
-
+/// The pytest skeleton the user can paste to start the kill.
+fn print_skeleton(r: &ExplainReport) {
     println!("\nsuggested test skeleton:");
     println!("```python");
     print!("{}", r.skeleton.code);
     println!("```");
+}
 
+/// Optional Anthropic-generated prose + killing test.
+fn print_llm(r: &ExplainReport) {
     if let Some(l) = &r.llm {
         let tag = if l.cached { " (cached)" } else { "" };
         println!("\nllm ({}){tag}:\n{}", l.model, l.response);
@@ -525,7 +547,8 @@ fn render_human(r: &ExplainReport) {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers retained from earlier pass (operator hint table, indent scan, grep)
+// Explain-specific helpers (enclosing-symbol scan, operator hint/slug table).
+// Generic text scanning lives in `crate::util::search`.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -570,26 +593,6 @@ pub(crate) fn enclosing_symbol(m: &Mutant) -> Option<EnclosingSymbol> {
         }
     }
     None
-}
-
-fn indent_of(line: &str) -> usize {
-    line.len() - line.trim_start().len()
-}
-
-fn extract_ident(s: &str) -> Option<String> {
-    let mut end = 0;
-    for (i, ch) in s.char_indices() {
-        if ch.is_alphanumeric() || ch == '_' {
-            end = i + ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    if end == 0 {
-        None
-    } else {
-        Some(s[..end].to_string())
-    }
 }
 
 pub(crate) fn operator_hint(op: Operator) -> &'static str {
@@ -737,92 +740,6 @@ pub(crate) fn operator_hint(op: Operator) -> &'static str {
              the concrete container type the annotation declares."
         }
     }
-}
-
-/// Default upper bound for `grep_symbol`. Picked to comfortably exceed the
-/// dedup-by-path requirements of every current caller (sample collection
-/// truncates to ≤8 unique files; the test-matches signal renders at most
-/// a few dozen) while still capping the walk on a multi-thousand-file
-/// repo.
-pub(crate) const DEFAULT_GREP_MATCH_LIMIT: usize = 64;
-
-/// Recursive walk of `root`, returning `(path, line)` pairs where `symbol`
-/// appears as a whole word inside a `*.py` file. Returns after collecting
-/// `limit` matches so a giant test tree can't stall `explain` / `suggest`.
-/// Callers that need stricter caps can pass a smaller limit; callers that
-/// genuinely want every match should not be using this function.
-pub(crate) fn grep_symbol(
-    root: &Path,
-    symbol: &str,
-    limit: usize,
-) -> Result<Vec<(PathBuf, usize)>> {
-    let mut out = Vec::new();
-    if limit == 0 {
-        return Ok(out);
-    }
-    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if out.len() >= limit {
-            break;
-        }
-        let read = match std::fs::read_dir(&dir) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        for entry in read.flatten() {
-            if out.len() >= limit {
-                break;
-            }
-            let path = entry.path();
-            let Ok(ft) = entry.file_type() else { continue };
-            if ft.is_dir() {
-                if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                    if name.starts_with('.') || name == "__pycache__" {
-                        continue;
-                    }
-                }
-                stack.push(path);
-            } else if ft.is_file() && path.extension().and_then(|s| s.to_str()) == Some("py") {
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                for (i, line) in text.lines().enumerate() {
-                    if contains_word(line, symbol) {
-                        out.push((path.clone(), i + 1));
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn contains_word(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-    let bytes = haystack.as_bytes();
-    let needle_bytes = needle.as_bytes();
-    let mut start = 0;
-    while let Some(pos) = haystack[start..].find(needle) {
-        let abs = start + pos;
-        let before_ok = abs == 0 || !is_word_byte(bytes[abs - 1]);
-        let after = abs + needle_bytes.len();
-        let after_ok = after == bytes.len() || !is_word_byte(bytes[after]);
-        if before_ok && after_ok {
-            return true;
-        }
-        start = abs + needle_bytes.len();
-        if start >= bytes.len() {
-            break;
-        }
-    }
-    false
-}
-
-fn is_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 pub(crate) fn operator_slug(op: Operator) -> &'static str {
@@ -1031,15 +948,6 @@ mod tests {
         let path = write_tmp("encl_module.py", src);
         let m = make_mutant(path, 1);
         assert!(enclosing_symbol(&m).is_none());
-    }
-
-    #[test]
-    fn contains_word_matches_whole_word_only() {
-        assert!(contains_word("foo bar baz", "bar"));
-        assert!(contains_word("(bar)", "bar"));
-        assert!(!contains_word("foobar", "bar"));
-        assert!(!contains_word("barbecue", "bar"));
-        assert!(contains_word("bar", "bar"));
     }
 
     #[test]

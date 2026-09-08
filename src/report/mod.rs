@@ -9,12 +9,25 @@ pub mod annotations;
 pub mod diff;
 pub mod writers;
 
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::mutator::Mutant;
 
 pub use diff::unified_diff_for;
 pub use writers::ReportSinks;
+
+/// Read and deserialize a JSON report (from `fermut run --json`) off disk.
+/// The one place `show`/`explain`/`next`/`suggest`/`autofix`/`dashboard`/
+/// `merge`/`mcp` load a report, so the read + parse error context stays
+/// identical everywhere instead of being copy-pasted per call site.
+pub fn load(path: &std::path::Path) -> Result<Report> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading report {}", path.display()))?;
+    serde_json::from_str(&text).with_context(|| format!("parsing report {}", path.display()))
+}
 
 #[derive(Copy, Clone, Debug)]
 #[non_exhaustive]
@@ -28,56 +41,68 @@ pub enum ReportFormat {
 #[non_exhaustive]
 pub enum MutantOutcome {
     Killed {
-        mutant: Mutant,
+        mutant: Arc<Mutant>,
     },
     Survived {
-        mutant: Mutant,
+        mutant: Arc<Mutant>,
     },
     TimedOut {
-        mutant: Mutant,
+        mutant: Arc<Mutant>,
     },
     Skipped {
-        mutant: Mutant,
+        mutant: Arc<Mutant>,
         filter: String,
     },
     Error {
-        mutant: Mutant,
+        mutant: Arc<Mutant>,
         message: String,
     },
     /// Equivalent-mutant detector proved the mutation is a no-op. Excluded
     /// from the score denominator like `Skipped`. `source` identifies which
     /// detector layer found it (e.g. `"bytecode-identity"`, `"arith-zero"`).
     Equivalent {
-        mutant: Mutant,
+        mutant: Arc<Mutant>,
         reason: String,
         source: String,
     },
 }
 
 impl MutantOutcome {
+    // Constructors take `impl Into<Arc<Mutant>>` so both an owned `Mutant`
+    // (one Arc allocation) and an existing `Arc<Mutant>` (a refcount bump) are
+    // accepted. The hot loop passes `Arc<Mutant>`, so per-outcome construction
+    // and every `MutantOutcome::clone()` (cache insert / cache-hit lookup) is a
+    // bump rather than a deep copy of the four heap fields.
     #[must_use]
-    pub fn killed(m: Mutant) -> Self {
-        Self::Killed { mutant: m }
+    pub fn killed(m: impl Into<Arc<Mutant>>) -> Self {
+        Self::Killed { mutant: m.into() }
     }
     #[must_use]
-    pub fn survived(m: Mutant) -> Self {
-        Self::Survived { mutant: m }
+    pub fn survived(m: impl Into<Arc<Mutant>>) -> Self {
+        Self::Survived { mutant: m.into() }
     }
-    pub fn timed_out(m: Mutant) -> Self {
-        Self::TimedOut { mutant: m }
+    pub fn timed_out(m: impl Into<Arc<Mutant>>) -> Self {
+        Self::TimedOut { mutant: m.into() }
     }
-    pub fn skipped(m: Mutant, filter: impl Into<String>) -> Self {
+    pub fn skipped(m: impl Into<Arc<Mutant>>, filter: impl Into<String>) -> Self {
         Self::Skipped {
-            mutant: m,
+            mutant: m.into(),
             filter: filter.into(),
         }
     }
-    pub fn error(m: Mutant, message: String) -> Self {
-        Self::Error { mutant: m, message }
+    pub fn error(m: impl Into<Arc<Mutant>>, message: String) -> Self {
+        Self::Error {
+            mutant: m.into(),
+            message,
+        }
     }
-    pub fn equivalent(m: Mutant, reason: impl Into<String>, source: impl Into<String>) -> Self {
+    pub fn equivalent(
+        m: impl Into<Arc<Mutant>>,
+        reason: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
         Self::Equivalent {
-            mutant: m,
+            mutant: m.into(),
             reason: reason.into(),
             source: source.into(),
         }

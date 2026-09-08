@@ -13,33 +13,13 @@
 //! none matches we fall back to `gh pr comment` to create a fresh one.
 
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::report::writers::markdown::STICKY_MARKER;
 
-/// Inputs for `fermut pr-comment`. Most fields default from environment
-/// variables that GitHub Actions sets automatically — keeps the CLI call
-/// in the workflow file short.
-#[derive(Debug, Clone)]
-pub struct PrCommentOpts {
-    /// Markdown file produced by a prior `fermut run … --markdown` invocation.
-    pub markdown: PathBuf,
-    /// `owner/repo`. Defaults to `$GITHUB_REPOSITORY`.
-    pub repo: Option<String>,
-    /// Pull-request number. Defaults to the PR in `$GITHUB_REF`
-    /// (`refs/pull/<N>/merge`) or `$PR_NUMBER`.
-    pub pr: Option<u64>,
-    /// Override the marker substring used to identify the previous comment.
-    /// Defaults to `<!-- fermut:report -->`.
-    pub marker: Option<String>,
-    /// Print the resolved plan and skip the network calls.
-    pub dry_run: bool,
-}
-
-pub fn pr_comment(opts: PrCommentOpts) -> Result<()> {
+pub(crate) fn pr_comment(opts: PrCommentArgs) -> Result<()> {
     let body = std::fs::read_to_string(&opts.markdown)
         .with_context(|| format!("reading markdown report {}", opts.markdown.display()))?;
     let repo = resolve_repo(opts.repo.as_deref())?;

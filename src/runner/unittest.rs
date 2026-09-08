@@ -18,15 +18,16 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use wait_timeout::ChildExt;
 
 use super::exit::{anomaly_message, classify_exit, ExitVerdict, TestTool};
-use super::process_group::{kill_group, with_new_process_group};
+use super::process_group::kill_group;
 use super::{
-    apply_patch, build_mirror, mirror_pythonpath, run_baseline_with_timeout, with_worker_mirror,
+    build_mirror, configure_mirror_cmd, mirror_pythonpath, run_baseline_with_timeout, run_patched,
     BaselineStatus, Mirror, Runner,
 };
 use crate::config::IsolationMode;
@@ -80,16 +81,8 @@ impl UnittestRunner {
             .arg("-s")
             .arg(&mirror.tests)
             .arg("-p")
-            .arg(&self.pattern)
-            .current_dir(&mirror.root);
-        with_new_process_group(&mut cmd);
-        // Beat an editable install's `.pth`: without this the mirror's mutated
-        // package loses to the original source tree on `sys.path` and every
-        // mutation is invisible — a false survivor.
-        cmd.env("PYTHONPATH", mirror_pythonpath(mirror)?);
-        // Don't write `.pyc` into the reused mirror — stale bytecode would mask
-        // the mutation and falsely report it survived.
-        cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+            .arg(&self.pattern);
+        configure_mirror_cmd(&mut cmd, mirror)?;
         Ok(cmd)
     }
 
@@ -119,10 +112,8 @@ impl UnittestRunner {
 }
 
 impl Runner for UnittestRunner {
-    fn run(&self, mutant: &Mutant) -> Result<MutantOutcome> {
-        with_worker_mirror(&self.tests, self.isolation, |mirror| {
-            let _guard = apply_patch(mirror, mutant)?;
-
+    fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
+        run_patched(&self.tests, self.isolation, mutant, |mirror| {
             let mut cmd = self.discover_command(mirror)?;
             // Discard per-mutant output — only the exit status decides
             // survived/killed. unittest writes its dots and tracebacks to
@@ -359,7 +350,10 @@ mod tests {
         let r = runner_timeout(dir.path().join("tests"), py, Duration::from_secs(30));
         // `f` returns 2 → `test_f` fails → non-zero exit → killed.
         let m = mutant(calc, "return 1", "return 2");
-        assert!(matches!(r.run(&m).unwrap(), MutantOutcome::Killed { .. }));
+        assert!(matches!(
+            r.run(&Arc::new(m)).unwrap(),
+            MutantOutcome::Killed { .. }
+        ));
     }
 
     #[test]
@@ -370,7 +364,10 @@ mod tests {
         let r = runner_timeout(dir.path().join("tests"), py, Duration::from_secs(30));
         // `g` is never called by the suite → mutation goes undetected → survived.
         let m = mutant(calc, "return 10", "return 20");
-        assert!(matches!(r.run(&m).unwrap(), MutantOutcome::Survived { .. }));
+        assert!(matches!(
+            r.run(&Arc::new(m)).unwrap(),
+            MutantOutcome::Survived { .. }
+        ));
     }
 
     #[test]
@@ -382,6 +379,9 @@ mod tests {
         let r = runner_timeout(dir.path().join("tests"), py, Duration::from_millis(500));
         // `f` now sleeps 30s when called → exceeds the cap → timed out.
         let m = mutant(calc, "return 1", "return __import__('time').sleep(30)");
-        assert!(matches!(r.run(&m).unwrap(), MutantOutcome::TimedOut { .. }));
+        assert!(matches!(
+            r.run(&Arc::new(m)).unwrap(),
+            MutantOutcome::TimedOut { .. }
+        ));
     }
 }

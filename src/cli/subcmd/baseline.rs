@@ -28,6 +28,7 @@ use serde::Serialize;
 
 use crate::cli::build_config::build_config;
 use crate::cli::FilterArgs;
+use crate::cli::Format;
 use crate::report::{MutantOutcome, Report};
 
 /// Default fraction of mutants tested in the sampled pass. Tuned for a
@@ -45,16 +46,10 @@ pub struct BaselineOpts {
     pub sample: Option<f64>,
     /// How many worst-offender files to list. Defaults to 3.
     pub top: usize,
-    pub format: BaselineFormat,
+    pub format: Format,
     /// Filter chain (coverage path, excludes, op allow/deny). Threaded
     /// through from the CLI exactly like `run`.
     pub filter: FilterArgs,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum BaselineFormat {
-    Human,
-    Json,
 }
 
 /// One grade band for the headline verdict. The thresholds are on the
@@ -144,8 +139,8 @@ pub fn baseline(opts: BaselineOpts) -> Result<()> {
     let format = opts.format;
     let out = compute_baseline(opts)?;
     match format {
-        BaselineFormat::Json => println!("{}", serde_json::to_string_pretty(&out)?),
-        BaselineFormat::Human => print_human(&out),
+        Format::Json => println!("{}", serde_json::to_string_pretty(&out)?),
+        Format::Human => print_human(&out),
     }
     Ok(())
 }
@@ -174,7 +169,7 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
     let cov_db = loaded.base_dir.join(".coverage");
 
     // 2. Build/refresh `.coverage`, then read the line-coverage headline.
-    crate::cli::subcmd::coverage::coverage(crate::cli::subcmd::coverage::CoverageOpts {
+    crate::cli::subcmd::coverage::coverage(crate::cli::subcmd::coverage::CoverageArgs {
         path: opts.path.clone(),
         source: None,
         tests: None,

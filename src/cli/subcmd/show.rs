@@ -4,15 +4,12 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::report::{unified_diff_for, MutantOutcome, Report};
 
 pub fn show(report_path: &Path, target: Option<&str>, all: bool) -> Result<()> {
-    let raw = std::fs::read_to_string(report_path)
-        .with_context(|| format!("reading {}", report_path.display()))?;
-    let report: Report =
-        serde_json::from_str(&raw).with_context(|| format!("parsing {}", report_path.display()))?;
+    let report = crate::report::load(report_path)?;
 
     match target {
         None => print_list(&report, all),

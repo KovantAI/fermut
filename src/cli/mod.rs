@@ -21,24 +21,23 @@ use crate::report::{ReportFormat, ReportSinks};
 
 use merge::merge_reports;
 use subcmd::{
-    autofix::{autofix, AutofixFormat, AutofixOpts},
-    baseline::{baseline, BaselineFormat, BaselineOpts},
+    autofix::{autofix, AutofixOpts},
+    baseline::{baseline, BaselineOpts},
     clean::clean_cache,
-    coverage::{coverage, CoverageOpts},
-    dashboard::{dashboard, DashboardOpts},
-    doctor::{doctor, DoctorOpts},
-    explain::{explain, ExplainFormat, ExplainOpts},
+    coverage::coverage,
+    dashboard::dashboard,
+    doctor::doctor,
+    explain::{explain, ExplainOpts},
     init::{init, InitOpts},
-    list::ListOpts,
     mcp::serve as mcp_serve,
     migrate::{migrate, MigrateOpts, MigrateSource},
-    next::{next, NextFormat, NextOpts},
-    pr_comment::{pr_comment, PrCommentOpts},
+    next::{next, NextOpts},
+    pr_comment::pr_comment,
     run::RunOpts,
-    score::{score, ScoreFormat, ScoreOpts},
+    score::{score, ScoreOpts},
     show::show,
-    suggest::{suggest, SuggestFormat, SuggestOpts},
-    trend::{trend, TrendFormat, TrendGroupBy, TrendOpts, TrendScale},
+    suggest::{suggest, SuggestOpts},
+    trend::{trend, TrendGroupBy, TrendOpts, TrendScale},
 };
 
 #[derive(Parser, Debug)]
@@ -461,93 +460,83 @@ pub(crate) enum Format {
     Json,
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub(crate) enum TrendFormatCli {
-    Human,
-    Json,
-}
+/// Define a clap `ValueEnum` CLI enum plus its `From` conversion to the
+/// runtime type, one arm per variant. Collapses the def+impl boilerplate that
+/// every CLI-facing enum otherwise repeats. Per-variant attrs (e.g.
+/// `#[value(alias = "…")]`) are forwarded.
+macro_rules! cli_enum {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident => $target:ty {
+            $( $(#[$vmeta:meta])* $variant:ident => $tvariant:ident ),+ $(,)?
+        }
+    ) => {
+        #[derive(Copy, Clone, Debug, ValueEnum)]
+        $(#[$meta])*
+        $vis enum $name {
+            $( $(#[$vmeta])* $variant ),+
+        }
 
-/// Generate `From` impls between two enums whose variant names match.
-///
-/// Single form maps one `$src` to one `$dst`; the fan-out form maps one `$src`
-/// to many `$dst` sharing the same variant set (used for `Format`).
-macro_rules! from_enum {
-    ($src:path => $dst:path { $($v:ident),+ $(,)? }) => {
-        impl From<$src> for $dst {
-            fn from(value: $src) -> Self {
-                match value {
-                    $(<$src>::$v => <$dst>::$v,)+
+        impl From<$name> for $target {
+            fn from(v: $name) -> Self {
+                match v {
+                    $( $name::$variant => <$target>::$tvariant ),+
                 }
             }
         }
     };
-    ($src:path => { $($dst:path),+ $(,)? } $vs:tt) => {
-        $(from_enum!($src => $dst $vs);)+
-    };
 }
 
-from_enum!(TrendFormatCli => TrendFormat { Human, Json });
-
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub(crate) enum TrendScaleCli {
-    Fixed,
-    Auto,
+/// The report layer keeps its own `ReportFormat` (used by `Report::print` and
+/// `merge`, independent of the CLI), so map the shared `Format` into it.
+impl From<Format> for ReportFormat {
+    fn from(f: Format) -> Self {
+        match f {
+            Format::Human => ReportFormat::Human,
+            Format::Json => ReportFormat::Json,
+        }
+    }
 }
 
-from_enum!(TrendScaleCli => TrendScale { Fixed, Auto });
-
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub(crate) enum TrendGroupByCli {
-    File,
+cli_enum! {
+    pub(crate) enum TrendScaleCli => TrendScale { Fixed => Fixed, Auto => Auto }
 }
 
-from_enum!(TrendGroupByCli => TrendGroupBy { File });
-
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub(crate) enum RunnerCli {
-    Pytest,
-    Rstest,
-    Unittest,
+cli_enum! {
+    pub(crate) enum TrendGroupByCli => TrendGroupBy { File => File }
 }
 
-from_enum!(RunnerCli => crate::config::RunnerKind { Pytest, Rstest, Unittest });
-
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub(crate) enum MigrateSourceCli {
-    Mutmut,
-    #[value(alias = "cosmic_ray")]
-    CosmicRay,
+cli_enum! {
+    pub(crate) enum RunnerCli => crate::config::RunnerKind {
+        Pytest => Pytest,
+        Rstest => Rstest,
+        Unittest => Unittest,
+    }
 }
 
-from_enum!(MigrateSourceCli => MigrateSource { Mutmut, CosmicRay });
-
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub(crate) enum IsolationCli {
-    Auto,
-    Copy,
-    Hardlink,
-    Reflink,
+cli_enum! {
+    pub(crate) enum MigrateSourceCli => MigrateSource {
+        Mutmut => Mutmut,
+        #[value(alias = "cosmic_ray")]
+        CosmicRay => CosmicRay,
+    }
 }
 
-from_enum!(IsolationCli => crate::config::IsolationMode { Auto, Copy, Hardlink, Reflink });
-
-#[derive(Copy, Clone, Debug, ValueEnum)]
-pub(crate) enum CacheScopeCli {
-    File,
-    Scope,
+cli_enum! {
+    pub(crate) enum IsolationCli => crate::config::IsolationMode {
+        Auto => Auto,
+        Copy => Copy,
+        Hardlink => Hardlink,
+        Reflink => Reflink,
+    }
 }
 
-from_enum!(CacheScopeCli => crate::config::CacheScope { File, Scope });
-
-from_enum!(Format => {
-    ReportFormat,
-    ExplainFormat,
-    SuggestFormat,
-    ScoreFormat,
-    NextFormat,
-    BaselineFormat,
-    AutofixFormat,
-} { Human, Json });
+cli_enum! {
+    pub(crate) enum CacheScopeCli => crate::config::CacheScope {
+        File => File,
+        Scope => Scope,
+    }
+}
 
 fn print_profile_catalogue() {
     println!("Available profiles (pass with --profile <name>):\n");
@@ -625,7 +614,7 @@ mod from_args {
                 report,
                 limit: if all { None } else { Some(limit) },
                 max_tokens,
-                format: format.into(),
+                format,
             }
         }
     }
@@ -655,7 +644,7 @@ mod from_args {
                 no_cache,
                 cache_path,
                 project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                format: format.into(),
+                format,
             }
         }
     }
@@ -694,7 +683,7 @@ mod from_args {
                 no_cache,
                 cache_path,
                 keep_failed,
-                format: format.into(),
+                format,
             }
         }
     }
@@ -729,7 +718,7 @@ mod from_args {
                 no_cache,
                 cache_path,
                 project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                format: format.into(),
+                format,
                 parallel,
             }
         }
@@ -764,7 +753,7 @@ mod from_args {
                 scale: scale.into(),
                 diff,
                 group_by: by.map(Into::into),
-                format: format.into(),
+                format,
                 strict,
             }
         }
@@ -786,36 +775,8 @@ mod from_args {
                 baseline,
                 branch,
                 fail_on_regression,
-                format: format.into(),
+                format,
             }
-        }
-    }
-
-    impl From<subcmd::dashboard::DashboardArgs> for DashboardOpts {
-        fn from(a: subcmd::dashboard::DashboardArgs) -> Self {
-            let subcmd::dashboard::DashboardArgs {
-                path,
-                history_path,
-                output,
-                report,
-                limit,
-                open,
-            } = a;
-            DashboardOpts {
-                path,
-                history_path,
-                output,
-                report,
-                limit,
-                open,
-            }
-        }
-    }
-
-    impl From<subcmd::doctor::DoctorArgs> for DoctorOpts {
-        fn from(a: subcmd::doctor::DoctorArgs) -> Self {
-            let subcmd::doctor::DoctorArgs { path, strict } = a;
-            DoctorOpts { path, strict }
         }
     }
 
@@ -834,27 +795,8 @@ mod from_args {
                 full,
                 sample,
                 top,
-                format: format.into(),
+                format,
                 filter,
-            }
-        }
-    }
-
-    impl From<subcmd::pr_comment::PrCommentArgs> for PrCommentOpts {
-        fn from(a: subcmd::pr_comment::PrCommentArgs) -> Self {
-            let subcmd::pr_comment::PrCommentArgs {
-                markdown,
-                repo,
-                pr,
-                marker,
-                dry_run,
-            } = a;
-            PrCommentOpts {
-                markdown,
-                repo,
-                pr,
-                marker,
-                dry_run,
             }
         }
     }
@@ -878,48 +820,6 @@ mod from_args {
                 force,
                 dry_run,
                 no_pragma_rewrite,
-            }
-        }
-    }
-
-    impl From<subcmd::coverage::CoverageArgs> for CoverageOpts {
-        fn from(a: subcmd::coverage::CoverageArgs) -> Self {
-            let subcmd::coverage::CoverageArgs {
-                path,
-                source,
-                tests,
-                full,
-                output,
-                python,
-                pytest_args,
-            } = a;
-            CoverageOpts {
-                path,
-                source,
-                tests,
-                full,
-                output,
-                python,
-                pytest_args,
-            }
-        }
-    }
-
-    impl From<subcmd::list::ListArgs> for ListOpts {
-        fn from(a: subcmd::list::ListArgs) -> Self {
-            let subcmd::list::ListArgs {
-                path,
-                no_ty_filter,
-                ruff_filter,
-                tce,
-                filter,
-            } = a;
-            ListOpts {
-                path,
-                no_ty_filter,
-                ruff_filter,
-                tce,
-                filter,
             }
         }
     }
@@ -952,10 +852,10 @@ impl Cli {
             }
             Cmd::Trend(args) => trend(args.into()),
             Cmd::Score(args) => score(args.into()),
-            Cmd::Dashboard(args) => dashboard(args.into()),
-            Cmd::Doctor(args) => doctor(args.into()),
+            Cmd::Dashboard(args) => dashboard(args),
+            Cmd::Doctor(args) => doctor(args),
             Cmd::Baseline(args) => baseline(args.into()),
-            Cmd::PrComment(args) => pr_comment(args.into()),
+            Cmd::PrComment(args) => pr_comment(args),
             Cmd::Init(args) => {
                 let subcmd::init::InitArgs {
                     path,
@@ -994,7 +894,7 @@ impl Cli {
                 }
             }
             Cmd::Migrate(args) => migrate(args.into()),
-            Cmd::Coverage(args) => coverage(args.into()),
+            Cmd::Coverage(args) => coverage(args),
             Cmd::Clean(args) => {
                 let subcmd::clean::CleanArgs { path, history_path } = args;
                 {
@@ -1026,7 +926,7 @@ impl Cli {
                     &project,
                 )
             }
-            Cmd::List(args) => subcmd::list::run(args.into()),
+            Cmd::List(args) => subcmd::list::run(args),
         }
     }
 }

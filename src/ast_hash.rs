@@ -40,28 +40,82 @@ use std::path::Path;
 /// fall back to byte hashing.
 pub fn hash_ast_source(source: &str) -> Option<String> {
     let parsed = parse_module(source).ok()?;
-    let dbg = format!("{:#?}", parsed.syntax());
+    Some(hash_module(parsed.syntax()))
+}
+
+/// AST-structural hash of an already-parsed module. The single place the
+/// canonical `{:#?}` + range-strip + `ast:v1` hashing lives, so
+/// [`hash_ast_source`], [`analyze_file`], and [`compute_scope_map`] share one
+/// parse instead of each re-parsing the same source.
+fn hash_module(module: &ast::ModModule) -> String {
+    let dbg = format!("{:#?}", module);
     let canon = strip_ranges(&dbg);
     let mut h = Sha256::new();
     h.update(b"ast:v1\n");
     h.update(canon.as_bytes());
-    Some(hex::encode(h.finalize()))
+    hex::encode(h.finalize())
+}
+
+/// Byte-hash fallback (prefixed `bytes:`) for a file that doesn't parse or
+/// isn't utf-8, so every file still gets a stable, distinct cache key.
+fn byte_fallback_hash(bytes: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(b"bytes:v1\n");
+    h.update(bytes);
+    hex::encode(h.finalize())
 }
 
 /// AST-structural hash of the file at `path`. Falls back to a byte hash
 /// (prefixed `bytes:`) on parse failure or non-utf8 contents so every file
 /// still gets a stable, distinct cache key.
 pub fn hash_file_ast(path: &Path) -> Result<String> {
+    Ok(analyze_file(path, false, false)?.ast_hash)
+}
+
+/// Everything the engine needs to know about one unique source file, produced
+/// in a **single** read and at most one parse. Replaces the three separate
+/// per-file passes (hash / scope-map / source-for-equiv) that each re-read and
+/// re-parsed the same files.
+pub struct FileAnalysis {
+    /// Cache key: AST-structural hash, or the byte fallback when the file
+    /// doesn't parse / isn't utf-8. Always present.
+    pub ast_hash: String,
+    /// `Some` only when `want_scope` and the file parsed. `None` means "not
+    /// requested" *or* "parse/utf-8 failed"; the caller distinguishes via its
+    /// own `want_scope` flag to decide whether to warn.
+    pub scope_map: Option<ScopeMap>,
+    /// Decoded source, `Some` only when `want_source` and the file is utf-8.
+    pub source: Option<String>,
+}
+
+/// Read `path` once, parse it at most once, and derive the requested
+/// artifacts. `want_scope`/`want_source` gate the extra work so a run that
+/// needs neither pays only for the hash. Errors only on read failure.
+pub fn analyze_file(path: &Path, want_scope: bool, want_source: bool) -> Result<FileAnalysis> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    if let Ok(source) = std::str::from_utf8(&bytes) {
-        if let Some(h) = hash_ast_source(source) {
-            return Ok(h);
-        }
-    }
-    let mut h = Sha256::new();
-    h.update(b"bytes:v1\n");
-    h.update(&bytes);
-    Ok(hex::encode(h.finalize()))
+    let source = std::str::from_utf8(&bytes).ok();
+    let parsed = source.and_then(|s| parse_module(s).ok());
+    let ast_hash = match parsed.as_ref() {
+        Some(p) => hash_module(p.syntax()),
+        None => byte_fallback_hash(&bytes),
+    };
+    let scope_map = if want_scope {
+        parsed
+            .as_ref()
+            .map(|p| compute_scope_map_parsed(p.syntax()))
+    } else {
+        None
+    };
+    let source = if want_source {
+        source.map(str::to_owned)
+    } else {
+        None
+    };
+    Ok(FileAnalysis {
+        ast_hash,
+        scope_map,
+        source,
+    })
 }
 
 /// Replace every `<int>..<int>` substring (ruff's `TextRange` Debug format)
@@ -214,9 +268,14 @@ impl ScopeMap {
 /// so the caller can fall back to file-level hashing.
 pub fn compute_scope_map(source: &str) -> Option<ScopeMap> {
     let parsed = parse_module(source).ok()?;
-    let module = parsed.syntax();
+    Some(compute_scope_map_parsed(parsed.syntax()))
+}
 
-    let module_hash = hash_ast_source(source)?;
+/// [`compute_scope_map`] on an already-parsed module — reuses the caller's
+/// single parse (and hashes that same module, instead of re-parsing `source`
+/// via `hash_ast_source` as before).
+fn compute_scope_map_parsed(module: &ast::ModModule) -> ScopeMap {
+    let module_hash = hash_module(module);
 
     let mut prelude = Sha256::new();
     prelude.update(b"prelude:v1\n");
@@ -259,21 +318,11 @@ pub fn compute_scope_map(source: &str) -> Option<ScopeMap> {
     }
 
     let prelude_hash = hex::encode(prelude.finalize());
-    Some(ScopeMap {
+    ScopeMap {
         prelude_hash,
         module_hash,
         scopes,
-    })
-}
-
-/// Read `path`, parse it, and return its [`ScopeMap`]. Returns `None` on read
-/// failure, non-utf8, or parse failure — caller falls back to file hashing.
-pub fn scope_map_from_file(path: &Path) -> Result<Option<ScopeMap>> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let Ok(source) = std::str::from_utf8(&bytes) else {
-        return Ok(None);
-    };
-    Ok(compute_scope_map(source))
+    }
 }
 
 fn function_signature_fingerprint(f: &ast::StmtFunctionDef) -> String {

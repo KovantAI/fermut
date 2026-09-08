@@ -39,6 +39,7 @@ pub fn collect(path: &Path, source: &str) -> Result<Vec<Mutant>> {
     let mut collector = Collector {
         file: path.to_path_buf(),
         source,
+        line_starts: line_start_offsets(source),
         out: Vec::new(),
         docstrings,
         ignores,
@@ -68,9 +69,84 @@ fn collect_docstring_ranges(body: &[Stmt], out: &mut HashSet<TextRange>) {
     }
 }
 
+/// Byte offset of the first character of each line (0-based). `line_starts[0]`
+/// is always 0; entry `i` is the offset just past the `i`-th `\n`. Precomputed
+/// once so `line_of` is a binary search instead of an O(n) rescan per lookup.
+fn line_start_offsets(source: &str) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    starts.extend(
+        source
+            .bytes()
+            .enumerate()
+            .filter(|&(_, b)| b == b'\n')
+            .map(|(i, _)| i + 1),
+    );
+    starts
+}
+
+/// Classify an underscore-stripped Python integer lexeme as `(digits, radix)`
+/// for [`i64::from_str_radix`]. Returns `None` for anything that isn't a plain
+/// integer — floats, exponents (`1e3`), or lexemes with stray characters — so
+/// the caller falls through to float parsing.
+fn split_radix(cleaned: &str) -> Option<(&str, u32)> {
+    if let Some(rest) = cleaned
+        .strip_prefix("0x")
+        .or_else(|| cleaned.strip_prefix("0X"))
+    {
+        return Some((rest, 16));
+    }
+    if let Some(rest) = cleaned
+        .strip_prefix("0o")
+        .or_else(|| cleaned.strip_prefix("0O"))
+    {
+        return Some((rest, 8));
+    }
+    if let Some(rest) = cleaned
+        .strip_prefix("0b")
+        .or_else(|| cleaned.strip_prefix("0B"))
+    {
+        return Some((rest, 2));
+    }
+    // Plain decimal only if every char is a digit; `1.5` / `1e3` fall through.
+    if !cleaned.is_empty() && cleaned.bytes().all(|b| b.is_ascii_digit()) {
+        return Some((cleaned, 10));
+    }
+    None
+}
+
+/// Format an `i64` back into a literal of the given radix, preserving the
+/// `0x`/`0o`/`0b` prefix (and sign) so a shifted `0xFF` reads as `0x100`.
+fn format_int(x: i64, radix: u32) -> String {
+    let (sign, mag) = if x < 0 {
+        ("-", x.unsigned_abs())
+    } else {
+        ("", x as u64)
+    };
+    match radix {
+        16 => format!("{sign}0x{mag:X}"),
+        8 => format!("{sign}0o{mag:o}"),
+        2 => format!("{sign}0b{mag:b}"),
+        _ => x.to_string(),
+    }
+}
+
+/// Format an `f64` as a Python float literal, ensuring a decimal point survives
+/// so integer-valued results (`6.0`) don't collapse to `int` syntax (`6`) and
+/// silently change the literal's type.
+fn format_float(x: f64) -> String {
+    let s = x.to_string();
+    if s.contains('.') || s.contains('e') {
+        s
+    } else {
+        format!("{s}.0")
+    }
+}
+
 struct Collector<'a> {
     file: PathBuf,
     source: &'a str,
+    /// See [`line_start_offsets`].
+    line_starts: Vec<usize>,
     out: Vec<Mutant>,
     docstrings: HashSet<TextRange>,
     ignores: IgnoreMap,
@@ -89,8 +165,9 @@ struct Collector<'a> {
 impl<'a> Collector<'a> {
     fn line_of(&self, range: TextRange) -> u32 {
         let start: usize = range.start().into();
-        let line = self.source[..start].bytes().filter(|&b| b == b'\n').count() + 1;
-        line as u32
+        // Number of line-starts at or before `start` == 1-based line number.
+        // `partition_point` returns the count of entries `<= start`.
+        self.line_starts.partition_point(|&off| off <= start) as u32
     }
 
     fn push(&mut self, op: Operator, range: TextRange, replacement: &str) {
@@ -446,6 +523,253 @@ impl<'a> Collector<'a> {
             }
         }
     }
+
+    // --- per-expression emit helpers -------------------------------------
+    // One helper per `Expr::` variant handled by `visit_expr`. Each owns the
+    // mutation logic for its node; `visit_expr` is a thin dispatcher that
+    // matches the variant (with its guard) and delegates here.
+
+    fn emit_binop(&mut self, b: &ast::ExprBinOp) {
+        let lex = binop_lexeme(b.op);
+        if let Some(r) = self.op_range(b.range(), lex) {
+            for (orig, repl) in ARITH_SWAPS {
+                if *orig == lex {
+                    self.push(Operator::ArithOpSwap, r, repl);
+                }
+            }
+        }
+    }
+
+    fn emit_boolop(&mut self, b: &ast::ExprBoolOp) {
+        let lex = if matches!(b.op, ast::BoolOp::And) {
+            "and"
+        } else {
+            "or"
+        };
+        if let Some(r) = self.op_range(b.range(), lex) {
+            for (orig, repl) in BOOL_SWAPS {
+                if *orig == lex {
+                    self.push(Operator::BoolOpSwap, r, repl);
+                }
+            }
+        }
+    }
+
+    fn emit_unaryop(&mut self, u: &ast::ExprUnaryOp) {
+        use ast::UnaryOp::*;
+        let start = u.range().start();
+        match u.op {
+            USub | UAdd => {
+                let end = TextSize::from(u32::from(start) + 1);
+                let r = TextRange::new(start, end);
+                let lex = &self.source[r];
+                let repl = if lex == "-" { "+" } else { "-" };
+                self.push(Operator::UnaryOpSwap, r, repl);
+            }
+            Not => {
+                let r = TextRange::new(start, u.operand.range().start());
+                self.push(Operator::UnaryOpSwap, r, "");
+            }
+            Invert => {
+                let end = TextSize::from(u32::from(start) + 1);
+                let r = TextRange::new(start, end);
+                self.push(Operator::UnaryOpSwap, r, "");
+            }
+        }
+    }
+
+    fn emit_compare(&mut self, c: &ast::ExprCompare) {
+        for (i, op) in c.ops.iter().enumerate() {
+            let lex = cmpop_lexeme(*op);
+            let search_from = if i == 0 {
+                c.left.range().end()
+            } else {
+                c.comparators[i - 1].range().end()
+            };
+            let search_to = c.comparators[i].range().start();
+            let s: usize = search_from.into();
+            let e: usize = search_to.into();
+            if let Some(idx) = self.source[s..e].find(lex) {
+                let abs = s + idx;
+                let r = TextRange::new((abs as u32).into(), ((abs + lex.len()) as u32).into());
+                for (orig, repl) in COMPARE_SWAPS {
+                    if *orig == lex {
+                        self.push(Operator::CompareOpSwap, r, repl);
+                    }
+                }
+                for (orig, repl) in BOUNDARY_SWAPS {
+                    if *orig == lex {
+                        self.push(Operator::BoundaryShift, r, repl);
+                    }
+                }
+            }
+        }
+    }
+
+    fn emit_number(&mut self, n: &ast::ExprNumberLiteral) {
+        let r = n.range();
+        let lex = &self.source[r];
+        // Imaginary literals (`1j`, `2.5J`) are complex; shifting to a real
+        // literal would change the type. Leave them alone.
+        if lex.ends_with('j') || lex.ends_with('J') {
+            return;
+        }
+        // Python allows `_` digit separators (`1_000`) that Rust's parsers
+        // reject; strip them before parsing.
+        let cleaned = lex.replace('_', "");
+        if let Some((digits, radix)) = split_radix(&cleaned) {
+            // Integer literal (decimal or `0x`/`0o`/`0b`-prefixed). Preserve the
+            // original base in the replacement so the mutant reads naturally.
+            if let Ok(v) = i64::from_str_radix(digits, radix) {
+                self.push(
+                    Operator::NumberShift,
+                    r,
+                    &format_int(v.wrapping_add(1), radix),
+                );
+                self.push(
+                    Operator::NumberShift,
+                    r,
+                    &format_int(v.wrapping_sub(1), radix),
+                );
+                if v != 0 {
+                    self.push(Operator::NumberToZero, r, "0");
+                    self.push(Operator::NumberToNeg, r, &format_int(-v, radix));
+                }
+            }
+        } else if let Ok(v) = cleaned.parse::<f64>() {
+            // Float literal (incl. exponent form like `1e3`). `format_float`
+            // keeps the result a float so `5.0` shifts to `6.0`, not `6`.
+            if v.is_finite() {
+                self.push(Operator::NumberShift, r, &format_float(v + 1.0));
+                self.push(Operator::NumberShift, r, &format_float(v - 1.0));
+                if v != 0.0 {
+                    self.push(Operator::NumberToZero, r, "0");
+                    self.push(Operator::NumberToNeg, r, &format_float(-v));
+                }
+            }
+        }
+    }
+
+    fn emit_string(&mut self, s: &ast::ExprStringLiteral) {
+        let r = s.range();
+        let lex = &self.source[r];
+        for (orig, repl) in CONSTANT_SWAPS {
+            if *orig == lex {
+                self.push(Operator::ConstantReplace, r, repl);
+            }
+        }
+        if !is_empty_string_literal(lex) {
+            self.push(Operator::StringToEmpty, r, "\"\"");
+            if let Some(s) = wrap_with_sentinel(lex) {
+                self.push(Operator::StringSentinel, r, &s);
+            }
+            // Parity (opt-in): UPPER/lower-case the literal content,
+            // mirroring mutmut's string-case mutation.
+            if let Some(s) = swap_string_case(lex, true) {
+                self.push(Operator::StringCaseSwap, r, &s);
+            }
+            if let Some(s) = swap_string_case(lex, false) {
+                self.push(Operator::StringCaseSwap, r, &s);
+            }
+        }
+    }
+
+    fn emit_bytes(&mut self, b: &ast::ExprBytesLiteral) {
+        let r = b.range();
+        let lex = &self.source[r];
+        if !is_empty_bytes_literal(lex) {
+            if let Some(s) = wrap_with_sentinel(lex) {
+                self.push(Operator::BytesSentinel, r, &s);
+            }
+        }
+    }
+
+    fn emit_boolean(&mut self, b: &ast::ExprBooleanLiteral) {
+        let r = b.range();
+        let lex = &self.source[r];
+        for (orig, repl) in CONSTANT_SWAPS {
+            if *orig == lex {
+                self.push(Operator::ConstantReplace, r, repl);
+            }
+        }
+    }
+
+    fn emit_await(&mut self, a: &ast::ExprAwait) {
+        // `await X` → `X`: drop the await. The expression now evaluates
+        // to the coroutine/awaitable itself instead of its result —
+        // observable wherever the awaited value is used (comparison,
+        // attribute access, return). Range covers `await ` up to the
+        // operand start.
+        let r = TextRange::new(a.range().start(), a.value.range().start());
+        self.push(Operator::AwaitDrop, r, "");
+    }
+
+    fn emit_call(&mut self, c: &ast::ExprCall) {
+        // Parity: whole call result → None (does the return value
+        // matter where it's used?).
+        self.push(Operator::ExprToNone, c.range(), "None");
+        for kw in &*c.arguments.keywords {
+            // Skip `**kwargs` splats (kw.arg is None).
+            if kw.arg.is_none() {
+                continue;
+            }
+            let r = self.extend_to_consume_comma(kw.range(), c.arguments.range());
+            self.push(Operator::KeywordArgDrop, r, "");
+            // arg-to-none: does the callee actually use this keyword's
+            // value? Skip values already `None` (no-op).
+            if !matches!(kw.value, Expr::NoneLiteral(_)) {
+                self.push(Operator::ArgToNone, kw.value.range(), "None");
+            }
+        }
+        for arg in &*c.arguments.args {
+            // Parity: drop the positional argument entirely.
+            let dr = self.extend_to_consume_comma(arg.range(), c.arguments.range());
+            self.push(Operator::PositionalDrop, dr, "");
+            // Skip `*args` splats — `f(None)` would drop the unpack
+            // semantics — and values already `None`.
+            if matches!(arg, Expr::Starred(_) | Expr::NoneLiteral(_)) {
+                continue;
+            }
+            self.push(Operator::ArgToNone, arg.range(), "None");
+        }
+    }
+
+    /// Drop each element of a list/set/tuple literal in turn (PositionalDrop).
+    /// Shared by `Expr::List`/`Set`/`Tuple`, which differ only in node type.
+    fn emit_seq_drop(&mut self, elts: &[Expr], container: TextRange) {
+        for elt in elts {
+            let r = self.extend_to_consume_comma(elt.range(), container);
+            self.push(Operator::PositionalDrop, r, "");
+        }
+    }
+
+    fn emit_dict(&mut self, d: &ast::ExprDict) {
+        for item in &d.items {
+            // Skip `**spread` items where key is None.
+            let key = match &item.key {
+                Some(k) => k,
+                None => continue,
+            };
+            let item_range = TextRange::new(key.range().start(), item.value.range().end());
+            let r = self.extend_to_consume_comma(item_range, d.range());
+            self.push(Operator::DictItemDrop, r, "");
+        }
+    }
+
+    fn emit_slice(&mut self, s: &ast::ExprSlice) {
+        if let Some(lower) = &s.lower {
+            self.push(Operator::SliceBoundDrop, lower.range(), "");
+        }
+        if let Some(upper) = &s.upper {
+            self.push(Operator::SliceBoundDrop, upper.range(), "");
+        }
+        if let Some(step) = &s.step {
+            let r = step.range();
+            let lex = &self.source[r];
+            let repl = if lex == "1" { "2" } else { "1" };
+            self.push(Operator::SliceStepMutate, r, repl);
+        }
+    }
 }
 
 impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
@@ -509,160 +833,27 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
     }
 
     fn visit_expr(&mut self, expr: &'ast Expr) {
+        // Thin dispatcher: match the variant (with its guard) and delegate to
+        // the matching `emit_*` helper. Bodies live on `Collector` above.
         match expr {
-            Expr::BinOp(b) => {
-                let lex = binop_lexeme(b.op);
-                if let Some(r) = self.op_range(b.range(), lex) {
-                    for (orig, repl) in ARITH_SWAPS {
-                        if *orig == lex {
-                            self.push(Operator::ArithOpSwap, r, repl);
-                        }
-                    }
-                }
-            }
-            Expr::BoolOp(b) => {
-                let lex = if matches!(b.op, ast::BoolOp::And) {
-                    "and"
-                } else {
-                    "or"
-                };
-                if let Some(r) = self.op_range(b.range(), lex) {
-                    for (orig, repl) in BOOL_SWAPS {
-                        if *orig == lex {
-                            self.push(Operator::BoolOpSwap, r, repl);
-                        }
-                    }
-                }
-            }
-            Expr::UnaryOp(u) => {
-                use ast::UnaryOp::*;
-                let start = u.range().start();
-                match u.op {
-                    USub | UAdd => {
-                        let end = TextSize::from(u32::from(start) + 1);
-                        let r = TextRange::new(start, end);
-                        let lex = &self.source[r];
-                        let repl = if lex == "-" { "+" } else { "-" };
-                        self.push(Operator::UnaryOpSwap, r, repl);
-                    }
-                    Not => {
-                        let r = TextRange::new(start, u.operand.range().start());
-                        self.push(Operator::UnaryOpSwap, r, "");
-                    }
-                    Invert => {
-                        let end = TextSize::from(u32::from(start) + 1);
-                        let r = TextRange::new(start, end);
-                        self.push(Operator::UnaryOpSwap, r, "");
-                    }
-                }
-            }
-            Expr::Compare(c) => {
-                for (i, op) in c.ops.iter().enumerate() {
-                    let lex = cmpop_lexeme(*op);
-                    let search_from = if i == 0 {
-                        c.left.range().end()
-                    } else {
-                        c.comparators[i - 1].range().end()
-                    };
-                    let search_to = c.comparators[i].range().start();
-                    let s: usize = search_from.into();
-                    let e: usize = search_to.into();
-                    if let Some(idx) = self.source[s..e].find(lex) {
-                        let abs = s + idx;
-                        let r =
-                            TextRange::new((abs as u32).into(), ((abs + lex.len()) as u32).into());
-                        for (orig, repl) in COMPARE_SWAPS {
-                            if *orig == lex {
-                                self.push(Operator::CompareOpSwap, r, repl);
-                            }
-                        }
-                        for (orig, repl) in BOUNDARY_SWAPS {
-                            if *orig == lex {
-                                self.push(Operator::BoundaryShift, r, repl);
-                            }
-                        }
-                    }
-                }
-            }
-            Expr::NumberLiteral(_) => {
-                let r = expr.range();
-                let lex = &self.source[r];
-                if let Ok(v) = lex.parse::<i64>() {
-                    self.push(Operator::NumberShift, r, &v.wrapping_add(1).to_string());
-                    self.push(Operator::NumberShift, r, &v.wrapping_sub(1).to_string());
-                    if v != 0 {
-                        self.push(Operator::NumberToZero, r, "0");
-                        self.push(Operator::NumberToNeg, r, &format!("-{}", v));
-                    }
-                } else if let Ok(v) = lex.parse::<f64>() {
-                    if v.is_finite() {
-                        self.push(Operator::NumberShift, r, &(v + 1.0).to_string());
-                        self.push(Operator::NumberShift, r, &(v - 1.0).to_string());
-                        if v != 0.0 {
-                            self.push(Operator::NumberToZero, r, "0");
-                            self.push(Operator::NumberToNeg, r, &format!("-{}", v));
-                        }
-                    }
-                }
-            }
-            Expr::StringLiteral(_) if !self.docstrings.contains(&expr.range()) => {
-                let r = expr.range();
-                let lex = &self.source[r];
-                for (orig, repl) in CONSTANT_SWAPS {
-                    if *orig == lex {
-                        self.push(Operator::ConstantReplace, r, repl);
-                    }
-                }
-                if !is_empty_string_literal(lex) {
-                    self.push(Operator::StringToEmpty, r, "\"\"");
-                    if let Some(s) = wrap_with_sentinel(lex) {
-                        self.push(Operator::StringSentinel, r, &s);
-                    }
-                    // Parity (opt-in): UPPER/lower-case the literal content,
-                    // mirroring mutmut's string-case mutation.
-                    if let Some(s) = swap_string_case(lex, true) {
-                        self.push(Operator::StringCaseSwap, r, &s);
-                    }
-                    if let Some(s) = swap_string_case(lex, false) {
-                        self.push(Operator::StringCaseSwap, r, &s);
-                    }
-                }
+            Expr::BinOp(b) => self.emit_binop(b),
+            Expr::BoolOp(b) => self.emit_boolop(b),
+            Expr::UnaryOp(u) => self.emit_unaryop(u),
+            Expr::Compare(c) => self.emit_compare(c),
+            Expr::NumberLiteral(n) => self.emit_number(n),
+            Expr::StringLiteral(s) if !self.docstrings.contains(&expr.range()) => {
+                self.emit_string(s)
             }
             // f-strings (`Expr::FString`) are a distinct node from plain string
             // literals, so the catalogue used to skip them entirely. They carry
             // real logic (error messages, formatted output); collapse the whole
             // f-string to an empty string — does the formatted result matter?
             Expr::FString(_) if !self.docstrings.contains(&expr.range()) => {
-                let r = expr.range();
-                self.push(Operator::StringToEmpty, r, "\"\"");
+                self.push(Operator::StringToEmpty, expr.range(), "\"\"");
             }
-            Expr::BytesLiteral(_) => {
-                let r = expr.range();
-                let lex = &self.source[r];
-                if !is_empty_bytes_literal(lex) {
-                    if let Some(s) = wrap_with_sentinel(lex) {
-                        self.push(Operator::BytesSentinel, r, &s);
-                    }
-                }
-            }
-            Expr::BooleanLiteral(_) => {
-                let r = expr.range();
-                let lex = &self.source[r];
-                for (orig, repl) in CONSTANT_SWAPS {
-                    if *orig == lex {
-                        self.push(Operator::ConstantReplace, r, repl);
-                    }
-                }
-            }
-            Expr::Await(a) => {
-                // `await X` → `X`: drop the await. The expression now evaluates
-                // to the coroutine/awaitable itself instead of its result —
-                // observable wherever the awaited value is used (comparison,
-                // attribute access, return). Range covers `await ` up to the
-                // operand start.
-                let r = TextRange::new(a.range().start(), a.value.range().start());
-                self.push(Operator::AwaitDrop, r, "");
-            }
+            Expr::BytesLiteral(b) => self.emit_bytes(b),
+            Expr::BooleanLiteral(b) => self.emit_boolean(b),
+            Expr::Await(a) => self.emit_await(a),
             Expr::Lambda(l) if !matches!(l.body.as_ref(), Expr::NoneLiteral(_)) => {
                 self.push(Operator::LambdaBodyToNone, l.body.range(), "None");
             }
@@ -672,35 +863,7 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
                 // logic. `""` mirrors mutmut's None replacement.
                 self.push(Operator::NoneToValue, expr.range(), "\"\"");
             }
-            Expr::Call(c) => {
-                // Parity: whole call result → None (does the return value
-                // matter where it's used?).
-                self.push(Operator::ExprToNone, c.range(), "None");
-                for kw in &*c.arguments.keywords {
-                    // Skip `**kwargs` splats (kw.arg is None).
-                    if kw.arg.is_none() {
-                        continue;
-                    }
-                    let r = self.extend_to_consume_comma(kw.range(), c.arguments.range());
-                    self.push(Operator::KeywordArgDrop, r, "");
-                    // arg-to-none: does the callee actually use this keyword's
-                    // value? Skip values already `None` (no-op).
-                    if !matches!(kw.value, Expr::NoneLiteral(_)) {
-                        self.push(Operator::ArgToNone, kw.value.range(), "None");
-                    }
-                }
-                for arg in &*c.arguments.args {
-                    // Parity: drop the positional argument entirely.
-                    let dr = self.extend_to_consume_comma(arg.range(), c.arguments.range());
-                    self.push(Operator::PositionalDrop, dr, "");
-                    // Skip `*args` splats — `f(None)` would drop the unpack
-                    // semantics — and values already `None`.
-                    if matches!(arg, Expr::Starred(_) | Expr::NoneLiteral(_)) {
-                        continue;
-                    }
-                    self.push(Operator::ArgToNone, arg.range(), "None");
-                }
-            }
+            Expr::Call(c) => self.emit_call(c),
             // Parity: value-position attribute / subscript reads → None. Only
             // Load context (mutating a Store target would be a syntax error).
             Expr::Attribute(a) if matches!(a.ctx, ast::ExprContext::Load) => {
@@ -711,50 +874,11 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
             }
             // Parity: drop one element from a list/set/tuple literal (≥2 elts,
             // mirroring the dict-item-drop bound).
-            Expr::List(l) if l.elts.len() >= 2 => {
-                for elt in &l.elts {
-                    let r = self.extend_to_consume_comma(elt.range(), l.range());
-                    self.push(Operator::PositionalDrop, r, "");
-                }
-            }
-            Expr::Set(s) if s.elts.len() >= 2 => {
-                for elt in &s.elts {
-                    let r = self.extend_to_consume_comma(elt.range(), s.range());
-                    self.push(Operator::PositionalDrop, r, "");
-                }
-            }
-            Expr::Tuple(t) if t.elts.len() >= 2 => {
-                for elt in &t.elts {
-                    let r = self.extend_to_consume_comma(elt.range(), t.range());
-                    self.push(Operator::PositionalDrop, r, "");
-                }
-            }
-            Expr::Dict(d) if d.items.len() >= 2 => {
-                for item in &d.items {
-                    // Skip `**spread` items where key is None.
-                    let key = match &item.key {
-                        Some(k) => k,
-                        None => continue,
-                    };
-                    let item_range = TextRange::new(key.range().start(), item.value.range().end());
-                    let r = self.extend_to_consume_comma(item_range, d.range());
-                    self.push(Operator::DictItemDrop, r, "");
-                }
-            }
-            Expr::Slice(s) => {
-                if let Some(lower) = &s.lower {
-                    self.push(Operator::SliceBoundDrop, lower.range(), "");
-                }
-                if let Some(upper) = &s.upper {
-                    self.push(Operator::SliceBoundDrop, upper.range(), "");
-                }
-                if let Some(step) = &s.step {
-                    let r = step.range();
-                    let lex = &self.source[r];
-                    let repl = if lex == "1" { "2" } else { "1" };
-                    self.push(Operator::SliceStepMutate, r, repl);
-                }
-            }
+            Expr::List(l) if l.elts.len() >= 2 => self.emit_seq_drop(&l.elts, l.range()),
+            Expr::Set(s) if s.elts.len() >= 2 => self.emit_seq_drop(&s.elts, s.range()),
+            Expr::Tuple(t) if t.elts.len() >= 2 => self.emit_seq_drop(&t.elts, t.range()),
+            Expr::Dict(d) if d.items.len() >= 2 => self.emit_dict(d),
+            Expr::Slice(s) => self.emit_slice(s),
             _ => {}
         }
         walk_expr(self, expr);
@@ -826,6 +950,96 @@ mod operator_emission_tests {
         assert!(ops.contains(&Operator::NumberShift));
         assert!(!ops.contains(&Operator::NumberToZero));
         assert!(!ops.contains(&Operator::NumberToNeg));
+    }
+
+    fn repls_for(source: &str, op: Operator) -> Vec<String> {
+        collect(Path::new("test.py"), source)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.operator == op)
+            .map(|m| m.replacement)
+            .collect()
+    }
+
+    #[test]
+    fn float_shift_stays_a_float() {
+        // Regression: `5.0 + 1.0` stringified to `6`, changing the literal from
+        // float to int. Shifts must keep the decimal point.
+        let repls = repls_for("x = 5.0\n", Operator::NumberShift);
+        assert!(repls.contains(&"6.0".to_string()), "{repls:?}");
+        assert!(repls.contains(&"4.0".to_string()), "{repls:?}");
+        assert_eq!(
+            repls_for("x = 5.0\n", Operator::NumberToNeg),
+            vec!["-5.0".to_string()]
+        );
+    }
+
+    #[test]
+    fn non_integer_float_shift_is_unchanged() {
+        let repls = repls_for("x = 1.5\n", Operator::NumberShift);
+        assert!(repls.contains(&"2.5".to_string()), "{repls:?}");
+        assert!(repls.contains(&"0.5".to_string()), "{repls:?}");
+    }
+
+    #[test]
+    fn underscored_decimal_literal_mutates() {
+        // Regression: `1_000` failed both i64 and f64 parse → zero mutants.
+        let repls = repls_for("x = 1_000\n", Operator::NumberShift);
+        assert!(repls.contains(&"1001".to_string()), "{repls:?}");
+        assert!(repls.contains(&"999".to_string()), "{repls:?}");
+    }
+
+    #[test]
+    fn hex_literal_mutates_preserving_base() {
+        let repls = repls_for("x = 0xFF\n", Operator::NumberShift);
+        assert!(repls.contains(&"0x100".to_string()), "{repls:?}");
+        assert!(repls.contains(&"0xFE".to_string()), "{repls:?}");
+    }
+
+    #[test]
+    fn binary_literal_mutates_preserving_base() {
+        let repls = repls_for("x = 0b1\n", Operator::NumberShift);
+        assert!(repls.contains(&"0b10".to_string()), "{repls:?}");
+        assert!(repls.contains(&"0b0".to_string()), "{repls:?}");
+    }
+
+    #[test]
+    fn octal_literal_mutates_preserving_base() {
+        let repls = repls_for("x = 0o17\n", Operator::NumberShift);
+        assert!(repls.contains(&"0o20".to_string()), "{repls:?}");
+        assert!(repls.contains(&"0o16".to_string()), "{repls:?}");
+    }
+
+    #[test]
+    fn exponent_literal_mutates_as_float() {
+        let repls = repls_for("x = 1e3\n", Operator::NumberShift);
+        assert!(repls.contains(&"1001.0".to_string()), "{repls:?}");
+        assert!(repls.contains(&"999.0".to_string()), "{repls:?}");
+    }
+
+    #[test]
+    fn imaginary_literal_is_skipped() {
+        assert!(!ops_for("x = 1j\n").contains(&Operator::NumberShift));
+    }
+
+    #[test]
+    fn line_of_maps_each_statement_to_its_own_line() {
+        // Regression: `line_of` was an O(n) rescan of the source per call and
+        // was rewritten to a binary search over precomputed line-start offsets.
+        // Verify the line mapping stays exact across multiple lines, including
+        // a blank line and an indented body (offsets past several newlines).
+        let src = "a = 1\n\nb = 2\nif a:\n    c = 3\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+        let line_of = |lit: &str| {
+            mutants
+                .iter()
+                .find(|m| m.original == lit && m.operator == Operator::NumberShift)
+                .unwrap_or_else(|| panic!("no NumberShift for {lit}"))
+                .line
+        };
+        assert_eq!(line_of("1"), 1);
+        assert_eq!(line_of("2"), 3);
+        assert_eq!(line_of("3"), 5);
     }
 
     #[test]

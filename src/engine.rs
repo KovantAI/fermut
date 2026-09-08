@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -47,7 +47,7 @@ pub const TIME_BUDGET_FILTER: &str = "time-budget";
 /// uncovered. In practice uncovered mutants are cheap coverage-skips that drain
 /// fast, so the expensive budget still lands on covered mutants; the ordering
 /// makes that the common case, not a hard guarantee.
-fn order_by_value(mutants: &mut [Mutant], cfg: &Config) {
+fn order_by_value(mutants: &mut [Arc<Mutant>], cfg: &Config) {
     let Some(cov) = cfg.coverage.as_ref() else {
         return;
     };
@@ -70,8 +70,16 @@ fn order_by_value(mutants: &mut [Mutant], cfg: &Config) {
 pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
     let started = Instant::now();
     info!(path = %cfg.source_root.display(), "collecting mutations");
-    let mut mutants: Vec<Mutant> = mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)
-        .with_context(|| format!("collecting mutations under {}", cfg.source_root.display()))?;
+    // Wrap each mutant in an `Arc` once, here, so the per-mutant testing loop
+    // (and the outcomes it embeds them in) shares them by refcount instead of
+    // deep-copying the four heap fields on every outcome construction, cache
+    // insert, and cache-hit lookup. Nothing mutates a `Mutant` after collection
+    // — only the Vec is reordered — so the shared `Arc` needs no interior mut.
+    let mut mutants: Vec<Arc<Mutant>> = mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)
+        .with_context(|| format!("collecting mutations under {}", cfg.source_root.display()))?
+        .into_iter()
+        .map(Arc::new)
+        .collect();
     info!(count = mutants.len(), "mutations generated");
 
     // `--sample` scales only the TESTING phase: every mutant above was still
@@ -144,7 +152,7 @@ struct RunState {
 /// Build the filter chain and runner, verify the baseline suite is green, then
 /// derive the per-file artifacts, cache, equiv pipeline, and testing-phase
 /// deadline. Everything the per-mutant loop reads, in one place.
-fn prepare(cfg: &Config, mutants: &[Mutant]) -> Result<RunState> {
+fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     let filters = filter::build_chain(cfg)?;
     let runner = runner::build(cfg);
 
@@ -264,7 +272,7 @@ fn persist(
 /// mutating. A red suite makes every covered mutant exit non-zero, which the
 /// runner counts as "killed" — yielding a confidently-wrong score near 100%.
 /// No-op when there's nothing to mutate or the user opted out.
-fn preflight_baseline(cfg: &Config, runner: &dyn Runner, mutants: &[Mutant]) -> Result<()> {
+fn preflight_baseline(cfg: &Config, runner: &dyn Runner, mutants: &[Arc<Mutant>]) -> Result<()> {
     if !cfg.verify_baseline || mutants.is_empty() {
         return Ok(());
     }
@@ -296,7 +304,11 @@ fn compute_test_deadline(cfg: &Config) -> Option<Instant> {
 
 /// Parallel evaluate: build the worker pool and progress bar, then fan out
 /// `evaluate` over every mutant. `ctx` carries the read-only per-run state.
-fn evaluate_all(cfg: &Config, ctx: &EvalCtx, mutants: &[Mutant]) -> Result<Vec<MutantOutcome>> {
+fn evaluate_all(
+    cfg: &Config,
+    ctx: &EvalCtx,
+    mutants: &[Arc<Mutant>],
+) -> Result<Vec<MutantOutcome>> {
     let progress = make_progress_bar(mutants.len() as u64);
     let pool = build_pool(cfg.jobs)?;
     let outcomes: Vec<MutantOutcome> = pool.install(|| {
@@ -356,7 +368,7 @@ struct EvalCtx<'a> {
     deadline: Option<Instant>,
 }
 
-fn evaluate(ctx: &EvalCtx, mutant: &Mutant) -> MutantOutcome {
+fn evaluate(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
     // Testing-phase budget check first, before the filter chain or the runner.
     // Past the deadline every remaining mutant is a cheap skip — including the
     // ty pre-filter, the dominant per-mutant cost — so the wall-clock ceiling
@@ -628,7 +640,11 @@ struct FileArtifacts {
 /// `build_scope_maps`, `load_unique_files`) that each re-read and re-parsed the
 /// same files — 2–3× the IO and parse work. `want_scope`/`want_source` gate the
 /// optional artifacts so a run that needs neither pays only for the hash.
-fn analyze_unique_files(mutants: &[Mutant], want_scope: bool, want_source: bool) -> FileArtifacts {
+fn analyze_unique_files(
+    mutants: &[Arc<Mutant>],
+    want_scope: bool,
+    want_source: bool,
+) -> FileArtifacts {
     let mut hashes = HashMap::new();
     let mut scope_maps = HashMap::new();
     let mut sources = HashMap::new();
@@ -969,7 +985,7 @@ mod tests {
     /// before the runner in `evaluate`.
     struct PanicRunner;
     impl Runner for PanicRunner {
-        fn run(&self, _m: &Mutant) -> Result<MutantOutcome> {
+        fn run(&self, _m: &Arc<Mutant>) -> Result<MutantOutcome> {
             panic!("runner invoked past the --max-time deadline");
         }
         fn baseline(&self) -> Result<runner::BaselineStatus> {
@@ -981,7 +997,7 @@ mod tests {
     /// deadline still lets the runner execute.
     struct KillRunner;
     impl Runner for KillRunner {
-        fn run(&self, m: &Mutant) -> Result<MutantOutcome> {
+        fn run(&self, m: &Arc<Mutant>) -> Result<MutantOutcome> {
             Ok(MutantOutcome::killed(m.clone()))
         }
         fn baseline(&self) -> Result<runner::BaselineStatus> {
@@ -991,7 +1007,7 @@ mod tests {
 
     fn eval_with_deadline(runner: &dyn Runner, deadline: Option<Instant>) -> MutantOutcome {
         let cfg = base_test_config();
-        let m = arith_mutant("return x + 0", "+", "-");
+        let m = Arc::new(arith_mutant("return x + 0", "+", "-"));
         let cache = Mutex::new(Cache::default());
         let ctx = EvalCtx {
             cfg: &cfg,
@@ -1048,7 +1064,7 @@ mod tests {
         let a = arith_mutant("a + 0", "+", "-");
         let mut b = arith_mutant("b + 0", "+", "-");
         b.id = "b".into();
-        let mut mutants = vec![a.clone(), b.clone()];
+        let mut mutants = vec![Arc::new(a.clone()), Arc::new(b.clone())];
         order_by_value(&mut mutants, &cfg);
         assert_eq!(mutants[0].id, a.id);
         assert_eq!(mutants[1].id, b.id);
@@ -1084,7 +1100,7 @@ mod tests {
         uncovered.stmt_line = 3;
 
         // Input order is uncovered-first; ordering must swap it.
-        let mut mutants = vec![uncovered.clone(), covered.clone()];
+        let mut mutants = vec![Arc::new(uncovered.clone()), Arc::new(covered.clone())];
         let cfg = Config {
             coverage: Some(cov),
             ..base_test_config()

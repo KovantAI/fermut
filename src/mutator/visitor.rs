@@ -39,6 +39,7 @@ pub fn collect(path: &Path, source: &str) -> Result<Vec<Mutant>> {
     let mut collector = Collector {
         file: path.to_path_buf(),
         source,
+        line_starts: line_start_offsets(source),
         out: Vec::new(),
         docstrings,
         ignores,
@@ -68,9 +69,84 @@ fn collect_docstring_ranges(body: &[Stmt], out: &mut HashSet<TextRange>) {
     }
 }
 
+/// Byte offset of the first character of each line (0-based). `line_starts[0]`
+/// is always 0; entry `i` is the offset just past the `i`-th `\n`. Precomputed
+/// once so `line_of` is a binary search instead of an O(n) rescan per lookup.
+fn line_start_offsets(source: &str) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    starts.extend(
+        source
+            .bytes()
+            .enumerate()
+            .filter(|&(_, b)| b == b'\n')
+            .map(|(i, _)| i + 1),
+    );
+    starts
+}
+
+/// Classify an underscore-stripped Python integer lexeme as `(digits, radix)`
+/// for [`i64::from_str_radix`]. Returns `None` for anything that isn't a plain
+/// integer — floats, exponents (`1e3`), or lexemes with stray characters — so
+/// the caller falls through to float parsing.
+fn split_radix(cleaned: &str) -> Option<(&str, u32)> {
+    if let Some(rest) = cleaned
+        .strip_prefix("0x")
+        .or_else(|| cleaned.strip_prefix("0X"))
+    {
+        return Some((rest, 16));
+    }
+    if let Some(rest) = cleaned
+        .strip_prefix("0o")
+        .or_else(|| cleaned.strip_prefix("0O"))
+    {
+        return Some((rest, 8));
+    }
+    if let Some(rest) = cleaned
+        .strip_prefix("0b")
+        .or_else(|| cleaned.strip_prefix("0B"))
+    {
+        return Some((rest, 2));
+    }
+    // Plain decimal only if every char is a digit; `1.5` / `1e3` fall through.
+    if !cleaned.is_empty() && cleaned.bytes().all(|b| b.is_ascii_digit()) {
+        return Some((cleaned, 10));
+    }
+    None
+}
+
+/// Format an `i64` back into a literal of the given radix, preserving the
+/// `0x`/`0o`/`0b` prefix (and sign) so a shifted `0xFF` reads as `0x100`.
+fn format_int(x: i64, radix: u32) -> String {
+    let (sign, mag) = if x < 0 {
+        ("-", x.unsigned_abs())
+    } else {
+        ("", x as u64)
+    };
+    match radix {
+        16 => format!("{sign}0x{mag:X}"),
+        8 => format!("{sign}0o{mag:o}"),
+        2 => format!("{sign}0b{mag:b}"),
+        _ => x.to_string(),
+    }
+}
+
+/// Format an `f64` as a Python float literal, ensuring a decimal point survives
+/// so integer-valued results (`6.0`) don't collapse to `int` syntax (`6`) and
+/// silently change the literal's type.
+fn format_float(x: f64) -> String {
+    let s = x.to_string();
+    if s.contains('.') || s.contains('e') {
+        s
+    } else {
+        format!("{s}.0")
+    }
+}
+
 struct Collector<'a> {
     file: PathBuf,
     source: &'a str,
+    /// See [`line_start_offsets`].
+    line_starts: Vec<usize>,
     out: Vec<Mutant>,
     docstrings: HashSet<TextRange>,
     ignores: IgnoreMap,
@@ -89,8 +165,9 @@ struct Collector<'a> {
 impl<'a> Collector<'a> {
     fn line_of(&self, range: TextRange) -> u32 {
         let start: usize = range.start().into();
-        let line = self.source[..start].bytes().filter(|&b| b == b'\n').count() + 1;
-        line as u32
+        // Number of line-starts at or before `start` == 1-based line number.
+        // `partition_point` returns the count of entries `<= start`.
+        self.line_starts.partition_point(|&off| off <= start) as u32
     }
 
     fn push(&mut self, op: Operator, range: TextRange, replacement: &str) {
@@ -532,20 +609,42 @@ impl<'a> Collector<'a> {
     fn emit_number(&mut self, n: &ast::ExprNumberLiteral) {
         let r = n.range();
         let lex = &self.source[r];
-        if let Ok(v) = lex.parse::<i64>() {
-            self.push(Operator::NumberShift, r, &v.wrapping_add(1).to_string());
-            self.push(Operator::NumberShift, r, &v.wrapping_sub(1).to_string());
-            if v != 0 {
-                self.push(Operator::NumberToZero, r, "0");
-                self.push(Operator::NumberToNeg, r, &format!("-{}", v));
+        // Imaginary literals (`1j`, `2.5J`) are complex; shifting to a real
+        // literal would change the type. Leave them alone.
+        if lex.ends_with('j') || lex.ends_with('J') {
+            return;
+        }
+        // Python allows `_` digit separators (`1_000`) that Rust's parsers
+        // reject; strip them before parsing.
+        let cleaned = lex.replace('_', "");
+        if let Some((digits, radix)) = split_radix(&cleaned) {
+            // Integer literal (decimal or `0x`/`0o`/`0b`-prefixed). Preserve the
+            // original base in the replacement so the mutant reads naturally.
+            if let Ok(v) = i64::from_str_radix(digits, radix) {
+                self.push(
+                    Operator::NumberShift,
+                    r,
+                    &format_int(v.wrapping_add(1), radix),
+                );
+                self.push(
+                    Operator::NumberShift,
+                    r,
+                    &format_int(v.wrapping_sub(1), radix),
+                );
+                if v != 0 {
+                    self.push(Operator::NumberToZero, r, "0");
+                    self.push(Operator::NumberToNeg, r, &format_int(-v, radix));
+                }
             }
-        } else if let Ok(v) = lex.parse::<f64>() {
+        } else if let Ok(v) = cleaned.parse::<f64>() {
+            // Float literal (incl. exponent form like `1e3`). `format_float`
+            // keeps the result a float so `5.0` shifts to `6.0`, not `6`.
             if v.is_finite() {
-                self.push(Operator::NumberShift, r, &(v + 1.0).to_string());
-                self.push(Operator::NumberShift, r, &(v - 1.0).to_string());
+                self.push(Operator::NumberShift, r, &format_float(v + 1.0));
+                self.push(Operator::NumberShift, r, &format_float(v - 1.0));
                 if v != 0.0 {
                     self.push(Operator::NumberToZero, r, "0");
-                    self.push(Operator::NumberToNeg, r, &format!("-{}", v));
+                    self.push(Operator::NumberToNeg, r, &format_float(-v));
                 }
             }
         }
@@ -851,6 +950,96 @@ mod operator_emission_tests {
         assert!(ops.contains(&Operator::NumberShift));
         assert!(!ops.contains(&Operator::NumberToZero));
         assert!(!ops.contains(&Operator::NumberToNeg));
+    }
+
+    fn repls_for(source: &str, op: Operator) -> Vec<String> {
+        collect(Path::new("test.py"), source)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.operator == op)
+            .map(|m| m.replacement)
+            .collect()
+    }
+
+    #[test]
+    fn float_shift_stays_a_float() {
+        // Regression: `5.0 + 1.0` stringified to `6`, changing the literal from
+        // float to int. Shifts must keep the decimal point.
+        let repls = repls_for("x = 5.0\n", Operator::NumberShift);
+        assert!(repls.contains(&"6.0".to_string()), "{repls:?}");
+        assert!(repls.contains(&"4.0".to_string()), "{repls:?}");
+        assert_eq!(
+            repls_for("x = 5.0\n", Operator::NumberToNeg),
+            vec!["-5.0".to_string()]
+        );
+    }
+
+    #[test]
+    fn non_integer_float_shift_is_unchanged() {
+        let repls = repls_for("x = 1.5\n", Operator::NumberShift);
+        assert!(repls.contains(&"2.5".to_string()), "{repls:?}");
+        assert!(repls.contains(&"0.5".to_string()), "{repls:?}");
+    }
+
+    #[test]
+    fn underscored_decimal_literal_mutates() {
+        // Regression: `1_000` failed both i64 and f64 parse → zero mutants.
+        let repls = repls_for("x = 1_000\n", Operator::NumberShift);
+        assert!(repls.contains(&"1001".to_string()), "{repls:?}");
+        assert!(repls.contains(&"999".to_string()), "{repls:?}");
+    }
+
+    #[test]
+    fn hex_literal_mutates_preserving_base() {
+        let repls = repls_for("x = 0xFF\n", Operator::NumberShift);
+        assert!(repls.contains(&"0x100".to_string()), "{repls:?}");
+        assert!(repls.contains(&"0xFE".to_string()), "{repls:?}");
+    }
+
+    #[test]
+    fn binary_literal_mutates_preserving_base() {
+        let repls = repls_for("x = 0b1\n", Operator::NumberShift);
+        assert!(repls.contains(&"0b10".to_string()), "{repls:?}");
+        assert!(repls.contains(&"0b0".to_string()), "{repls:?}");
+    }
+
+    #[test]
+    fn octal_literal_mutates_preserving_base() {
+        let repls = repls_for("x = 0o17\n", Operator::NumberShift);
+        assert!(repls.contains(&"0o20".to_string()), "{repls:?}");
+        assert!(repls.contains(&"0o16".to_string()), "{repls:?}");
+    }
+
+    #[test]
+    fn exponent_literal_mutates_as_float() {
+        let repls = repls_for("x = 1e3\n", Operator::NumberShift);
+        assert!(repls.contains(&"1001.0".to_string()), "{repls:?}");
+        assert!(repls.contains(&"999.0".to_string()), "{repls:?}");
+    }
+
+    #[test]
+    fn imaginary_literal_is_skipped() {
+        assert!(!ops_for("x = 1j\n").contains(&Operator::NumberShift));
+    }
+
+    #[test]
+    fn line_of_maps_each_statement_to_its_own_line() {
+        // Regression: `line_of` was an O(n) rescan of the source per call and
+        // was rewritten to a binary search over precomputed line-start offsets.
+        // Verify the line mapping stays exact across multiple lines, including
+        // a blank line and an indented body (offsets past several newlines).
+        let src = "a = 1\n\nb = 2\nif a:\n    c = 3\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+        let line_of = |lit: &str| {
+            mutants
+                .iter()
+                .find(|m| m.original == lit && m.operator == Operator::NumberShift)
+                .unwrap_or_else(|| panic!("no NumberShift for {lit}"))
+                .line
+        };
+        assert_eq!(line_of("1"), 1);
+        assert_eq!(line_of("2"), 3);
+        assert_eq!(line_of("3"), 5);
     }
 
     #[test]

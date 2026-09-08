@@ -252,7 +252,7 @@ impl PytestRunner {
     /// run's ordering. Anomalous exits become `error` (excluded from the score).
     fn classify_run(
         &self,
-        mutant: &Mutant,
+        mutant: &Arc<Mutant>,
         waited: (Option<ExitStatus>, Option<String>),
         key_file: &str,
         key_op: &'static str,
@@ -507,7 +507,7 @@ impl Runner for PytestRunner {
         std::mem::take(&mut *lock_recover(&self.kill_sink))
     }
 
-    fn run(&self, mutant: &Mutant) -> Result<MutantOutcome> {
+    fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
         run_patched(&self.tests, self.isolation, mutant, |mirror| {
             let (key_file, key_op) = self.kill_key(mutant);
             let mut cmd = self.build_mutant_command(mirror, mutant, &key_file, key_op)?;

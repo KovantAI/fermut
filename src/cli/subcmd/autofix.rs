@@ -394,8 +394,12 @@ fn verify(runner: &dyn Runner, m: &Mutant) -> Result<Verdict> {
 /// Evaluate one mutant on a dedicated thread so `with_worker_mirror`'s
 /// thread-local cache starts empty and rebuilds against the current tests.
 fn run_on_fresh_thread(runner: &dyn Runner, m: &Mutant) -> Result<MutantOutcome> {
+    // Not the hot loop — one survivor verified at a time, each running the full
+    // suite — so wrapping in a fresh `Arc` here (one clone) is negligible and
+    // keeps `verify`'s public `&Mutant` signature.
+    let m = std::sync::Arc::new(m.clone());
     std::thread::scope(|s| {
-        s.spawn(|| runner.run(m))
+        s.spawn(|| runner.run(&m))
             .join()
             .map_err(|_| anyhow::anyhow!("verification thread panicked"))?
     })
@@ -469,7 +473,7 @@ mod tests {
     }
 
     impl Runner for MockRunner {
-        fn run(&self, m: &Mutant) -> Result<MutantOutcome> {
+        fn run(&self, m: &std::sync::Arc<Mutant>) -> Result<MutantOutcome> {
             Ok(if self.run_kills {
                 MutantOutcome::killed(m.clone())
             } else {

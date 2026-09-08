@@ -18,12 +18,6 @@ use anyhow::Result;
 
 use crate::config::loader::{ConfigSource, LoadedConfig};
 
-#[derive(Debug, Clone)]
-pub struct DoctorOpts {
-    pub path: PathBuf,
-    pub strict: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
     Ok,
@@ -97,7 +91,7 @@ impl Check {
     }
 }
 
-pub fn doctor(opts: DoctorOpts) -> Result<()> {
+pub(crate) fn doctor(opts: DoctorArgs) -> Result<()> {
     let checks = collect_checks(&opts.path);
     print_checks(&checks);
     let counts = tally(&checks);

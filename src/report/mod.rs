@@ -9,12 +9,23 @@ pub mod annotations;
 pub mod diff;
 pub mod writers;
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::mutator::Mutant;
 
 pub use diff::unified_diff_for;
 pub use writers::ReportSinks;
+
+/// Read and deserialize a JSON report (from `fermut run --json`) off disk.
+/// The one place `show`/`explain`/`next`/`suggest`/`autofix`/`dashboard`/
+/// `merge`/`mcp` load a report, so the read + parse error context stays
+/// identical everywhere instead of being copy-pasted per call site.
+pub fn load(path: &std::path::Path) -> Result<Report> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading report {}", path.display()))?;
+    serde_json::from_str(&text).with_context(|| format!("parsing report {}", path.display()))
+}
 
 #[derive(Copy, Clone, Debug)]
 #[non_exhaustive]

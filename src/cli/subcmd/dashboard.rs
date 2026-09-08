@@ -12,7 +12,7 @@
 //!   inline diffs (since history doesn't store source bytes).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 
@@ -21,27 +21,14 @@ use crate::report::diff::unified_diff_for;
 use crate::report::writers::html_escape;
 use crate::report::{MutantOutcome, Report};
 
-#[derive(Debug, Clone)]
-pub struct DashboardOpts {
-    pub path: PathBuf,
-    pub history_path: Option<PathBuf>,
-    pub output: PathBuf,
-    pub report: Option<PathBuf>,
-    pub limit: usize,
-    /// After writing the HTML, hand it off to the OS so the user's default
-    /// browser pops it up. Best-effort: a failure to launch the helper
-    /// process degrades to a printed hint, never an error exit.
-    pub open: bool,
-}
-
-pub fn dashboard(opts: DashboardOpts) -> Result<()> {
+pub(crate) fn dashboard(opts: DashboardArgs) -> Result<()> {
     let history_path = opts
         .history_path
         .clone()
         .unwrap_or_else(|| history::default_history_path(&history::resolve_root(&opts.path)));
     let entries = history::load(&history_path)?;
     let report = match &opts.report {
-        Some(p) => Some(load_report(p)?),
+        Some(p) => Some(crate::report::load(p)?),
         None => None,
     };
 
@@ -99,14 +86,6 @@ fn open_in_browser(path: &Path) {
             target.display()
         ),
     }
-}
-
-fn load_report(path: &Path) -> Result<Report> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading report {}", path.display()))?;
-    let report: Report = serde_json::from_str(&text)
-        .with_context(|| format!("parsing report {}", path.display()))?;
-    Ok(report)
 }
 
 fn render_dashboard(
@@ -769,7 +748,7 @@ mod tests {
         let e = entry("2026-01-01T00:00:00Z", 90.0, Some(&["x"]));
         history::append(&hist, &e).unwrap();
         let out = tmp.path().join("out").join("dash.html");
-        dashboard(DashboardOpts {
+        dashboard(DashboardArgs {
             path: tmp.path().to_path_buf(),
             history_path: Some(hist),
             output: out.clone(),

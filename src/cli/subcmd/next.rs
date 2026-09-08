@@ -41,10 +41,11 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Serialize;
 
 use crate::cli::subcmd::explain::operator_hint;
+use crate::cli::Format;
 use crate::mutator::{Mutant, Operator};
 use crate::report::{MutantOutcome, Report};
 
@@ -59,13 +60,7 @@ pub struct NextOpts {
     /// entry is always included even if it alone exceeds the budget — a
     /// budget should never starve the agent of its single best target.
     pub max_tokens: Option<usize>,
-    pub format: NextFormat,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum NextFormat {
-    Human,
-    Json,
+    pub format: Format,
 }
 
 /// Kill-ease tier for an operator. Higher = easier to write a killing test.
@@ -192,22 +187,19 @@ pub fn next(opts: NextOpts) -> Result<()> {
     // "fit N of M ... tokens" stderr — are meaningless for `--format human`.
     // Reject the combo rather than emit a number that doesn't describe the
     // output.
-    if opts.max_tokens.is_some() && matches!(opts.format, NextFormat::Human) {
+    if opts.max_tokens.is_some() && matches!(opts.format, Format::Human) {
         anyhow::bail!(
             "--max-tokens applies to JSON output only; drop --format human or --max-tokens"
         );
     }
-    let raw = std::fs::read_to_string(&opts.report)
-        .with_context(|| format!("reading {}", opts.report.display()))?;
-    let report: Report =
-        serde_json::from_str(&raw).with_context(|| format!("parsing {}", opts.report.display()))?;
+    let report = crate::report::load(&opts.report)?;
 
     let (shown, total) = rank_report(&report, opts.limit, opts.max_tokens);
     let coverage_selected = shown.first().map(|e| e.coverage_selected).unwrap_or(true);
 
     match opts.format {
-        NextFormat::Json => println!("{}", serde_json::to_string_pretty(&shown)?),
-        NextFormat::Human => print_human(&shown, coverage_selected),
+        Format::Json => println!("{}", serde_json::to_string_pretty(&shown)?),
+        Format::Human => print_human(&shown, coverage_selected),
     }
 
     // Never truncate silently: when a budget dropped clusters, say so on

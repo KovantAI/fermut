@@ -86,29 +86,7 @@ struct Fingerprints {
     sources: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct CoverageOpts {
-    pub path: PathBuf,
-    /// Override the measured source root (`--cov=<this>`). Defaults to the
-    /// configured `source_root`, else the project root.
-    pub source: Option<PathBuf>,
-    /// Override the tests location. Defaults to configured `tests`, else
-    /// `<source>/tests`.
-    pub tests: Option<PathBuf>,
-    /// Force a full-suite run even when an up-to-date `.coverage` exists.
-    pub full: bool,
-    /// Where to write the database. Defaults to `<project>/.coverage`.
-    pub output: Option<PathBuf>,
-    /// Interpreter (path) or virtualenv (dir) to run pytest with — same as
-    /// `fermut run --python`. When set, fermut invokes `<python> -m pytest`,
-    /// so coverage generation needs no `pytest` on PATH (restricted
-    /// sandboxes/CI). Auto-discovers a venv when omitted.
-    pub python: Option<PathBuf>,
-    /// Extra args forwarded to pytest (repeatable).
-    pub pytest_args: Vec<String>,
-}
-
-pub fn coverage(opts: CoverageOpts) -> Result<()> {
+pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
     let loaded = LoadedConfig::load(&opts.path)?;
     let base_dir = loaded.base_dir.clone();
 

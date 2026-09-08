@@ -79,13 +79,9 @@ pub(super) fn merge_reports(
     // Read + parse lazily so `combine_outcomes` holds only one report's
     // outcomes plus the running map at a time. A sharded report is the whole
     // mutant universe, so eagerly collecting all N would be an N× blow-up.
-    let reports = inputs.iter().map(|path| -> Result<Vec<MutantOutcome>> {
-        let raw =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let report: Report =
-            serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-        Ok(report.outcomes)
-    });
+    let reports = inputs
+        .iter()
+        .map(|path| -> Result<Vec<MutantOutcome>> { Ok(crate::report::load(path)?.outcomes) });
     let outcomes = combine_outcomes(reports)?;
     let merged = Report::new(outcomes);
 

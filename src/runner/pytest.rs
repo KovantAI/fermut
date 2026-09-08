@@ -20,7 +20,7 @@ use wait_timeout::ChildExt;
 
 use super::process_group::{kill_group, with_new_process_group};
 use super::{
-    apply_patch, build_mirror, mirror_pythonpath, run_baseline_with_timeout, with_worker_mirror,
+    build_mirror, configure_mirror_cmd, mirror_pythonpath, run_baseline_with_timeout, run_patched,
     BaselineStatus, Runner,
 };
 use crate::config::IsolationMode;
@@ -232,19 +232,7 @@ impl PytestRunner {
                 false
             }
         };
-        cmd.current_dir(&mirror.root);
-        with_new_process_group(&mut cmd);
-        // Editable installs (`pip install -e .`) write an absolute path
-        // into a `.pth` file pointing at the ORIGINAL source tree. Without
-        // PYTHONPATH, pytest in the mirror still resolves `import <pkg>`
-        // to the original src and never sees the mutation. Prepend the
-        // mirror's `src/` (and root) so the mirror's mutated package
-        // wins over the editable install in sys.path.
-        cmd.env("PYTHONPATH", mirror_pythonpath(mirror)?);
-        // Never let pytest write `.pyc` into the reused mirror — a stale
-        // compiled module that still validates against the patched source
-        // would mask the mutation and falsely report it survived.
-        cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+        configure_mirror_cmd(&mut cmd, mirror)?;
         // Per-mutant pytest output is noise on the terminal (each killed
         // mutant would stream `FAILED … / 1 failed`, reading as breakage
         // when it's mutants dying as intended). Discard it — except when
@@ -520,8 +508,7 @@ impl Runner for PytestRunner {
     }
 
     fn run(&self, mutant: &Mutant) -> Result<MutantOutcome> {
-        with_worker_mirror(&self.tests, self.isolation, |mirror| {
-            let _guard = apply_patch(mirror, mutant)?;
+        run_patched(&self.tests, self.isolation, mutant, |mirror| {
             let (key_file, key_op) = self.kill_key(mutant);
             let mut cmd = self.build_mutant_command(mirror, mutant, &key_file, key_op)?;
             let child = cmd.spawn().context("spawning test runner")?;

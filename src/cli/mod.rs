@@ -21,24 +21,23 @@ use crate::report::{ReportFormat, ReportSinks};
 
 use merge::merge_reports;
 use subcmd::{
-    autofix::{autofix, AutofixFormat, AutofixOpts},
-    baseline::{baseline, BaselineFormat, BaselineOpts},
+    autofix::{autofix, AutofixOpts},
+    baseline::{baseline, BaselineOpts},
     clean::clean_cache,
-    coverage::{coverage, CoverageOpts},
-    dashboard::{dashboard, DashboardOpts},
-    doctor::{doctor, DoctorOpts},
-    explain::{explain, ExplainFormat, ExplainOpts},
+    coverage::coverage,
+    dashboard::dashboard,
+    doctor::doctor,
+    explain::{explain, ExplainOpts},
     init::{init, InitOpts},
-    list::ListOpts,
     mcp::serve as mcp_serve,
     migrate::{migrate, MigrateOpts, MigrateSource},
-    next::{next, NextFormat, NextOpts},
-    pr_comment::{pr_comment, PrCommentOpts},
+    next::{next, NextOpts},
+    pr_comment::pr_comment,
     run::RunOpts,
-    score::{score, ScoreFormat, ScoreOpts},
+    score::{score, ScoreOpts},
     show::show,
-    suggest::{suggest, SuggestFormat, SuggestOpts},
-    trend::{trend, TrendFormat, TrendGroupBy, TrendOpts, TrendScale},
+    suggest::{suggest, SuggestOpts},
+    trend::{trend, TrendGroupBy, TrendOpts, TrendScale},
 };
 
 #[derive(Parser, Debug)]
@@ -488,23 +487,15 @@ macro_rules! cli_enum {
     };
 }
 
-/// Convert the shared `Format` CLI enum into each subcommand's own
-/// `Human`/`Json` report-format type — every target has the same two variants.
-macro_rules! impl_format_from {
-    ($($target:ty),+ $(,)?) => {$(
-        impl From<Format> for $target {
-            fn from(f: Format) -> Self {
-                match f {
-                    Format::Human => <$target>::Human,
-                    Format::Json => <$target>::Json,
-                }
-            }
+/// The report layer keeps its own `ReportFormat` (used by `Report::print` and
+/// `merge`, independent of the CLI), so map the shared `Format` into it.
+impl From<Format> for ReportFormat {
+    fn from(f: Format) -> Self {
+        match f {
+            Format::Human => ReportFormat::Human,
+            Format::Json => ReportFormat::Json,
         }
-    )+};
-}
-
-cli_enum! {
-    pub(crate) enum TrendFormatCli => TrendFormat { Human => Human, Json => Json }
+    }
 }
 
 cli_enum! {
@@ -546,16 +537,6 @@ cli_enum! {
         Scope => Scope,
     }
 }
-
-impl_format_from!(
-    ReportFormat,
-    ExplainFormat,
-    SuggestFormat,
-    ScoreFormat,
-    NextFormat,
-    BaselineFormat,
-    AutofixFormat,
-);
 
 fn print_profile_catalogue() {
     println!("Available profiles (pass with --profile <name>):\n");
@@ -633,7 +614,7 @@ mod from_args {
                 report,
                 limit: if all { None } else { Some(limit) },
                 max_tokens,
-                format: format.into(),
+                format,
             }
         }
     }
@@ -663,7 +644,7 @@ mod from_args {
                 no_cache,
                 cache_path,
                 project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                format: format.into(),
+                format,
             }
         }
     }
@@ -702,7 +683,7 @@ mod from_args {
                 no_cache,
                 cache_path,
                 keep_failed,
-                format: format.into(),
+                format,
             }
         }
     }
@@ -737,7 +718,7 @@ mod from_args {
                 no_cache,
                 cache_path,
                 project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                format: format.into(),
+                format,
                 parallel,
             }
         }
@@ -772,7 +753,7 @@ mod from_args {
                 scale: scale.into(),
                 diff,
                 group_by: by.map(Into::into),
-                format: format.into(),
+                format,
                 strict,
             }
         }
@@ -794,36 +775,8 @@ mod from_args {
                 baseline,
                 branch,
                 fail_on_regression,
-                format: format.into(),
+                format,
             }
-        }
-    }
-
-    impl From<subcmd::dashboard::DashboardArgs> for DashboardOpts {
-        fn from(a: subcmd::dashboard::DashboardArgs) -> Self {
-            let subcmd::dashboard::DashboardArgs {
-                path,
-                history_path,
-                output,
-                report,
-                limit,
-                open,
-            } = a;
-            DashboardOpts {
-                path,
-                history_path,
-                output,
-                report,
-                limit,
-                open,
-            }
-        }
-    }
-
-    impl From<subcmd::doctor::DoctorArgs> for DoctorOpts {
-        fn from(a: subcmd::doctor::DoctorArgs) -> Self {
-            let subcmd::doctor::DoctorArgs { path, strict } = a;
-            DoctorOpts { path, strict }
         }
     }
 
@@ -842,27 +795,8 @@ mod from_args {
                 full,
                 sample,
                 top,
-                format: format.into(),
+                format,
                 filter,
-            }
-        }
-    }
-
-    impl From<subcmd::pr_comment::PrCommentArgs> for PrCommentOpts {
-        fn from(a: subcmd::pr_comment::PrCommentArgs) -> Self {
-            let subcmd::pr_comment::PrCommentArgs {
-                markdown,
-                repo,
-                pr,
-                marker,
-                dry_run,
-            } = a;
-            PrCommentOpts {
-                markdown,
-                repo,
-                pr,
-                marker,
-                dry_run,
             }
         }
     }
@@ -886,48 +820,6 @@ mod from_args {
                 force,
                 dry_run,
                 no_pragma_rewrite,
-            }
-        }
-    }
-
-    impl From<subcmd::coverage::CoverageArgs> for CoverageOpts {
-        fn from(a: subcmd::coverage::CoverageArgs) -> Self {
-            let subcmd::coverage::CoverageArgs {
-                path,
-                source,
-                tests,
-                full,
-                output,
-                python,
-                pytest_args,
-            } = a;
-            CoverageOpts {
-                path,
-                source,
-                tests,
-                full,
-                output,
-                python,
-                pytest_args,
-            }
-        }
-    }
-
-    impl From<subcmd::list::ListArgs> for ListOpts {
-        fn from(a: subcmd::list::ListArgs) -> Self {
-            let subcmd::list::ListArgs {
-                path,
-                no_ty_filter,
-                ruff_filter,
-                tce,
-                filter,
-            } = a;
-            ListOpts {
-                path,
-                no_ty_filter,
-                ruff_filter,
-                tce,
-                filter,
             }
         }
     }
@@ -960,10 +852,10 @@ impl Cli {
             }
             Cmd::Trend(args) => trend(args.into()),
             Cmd::Score(args) => score(args.into()),
-            Cmd::Dashboard(args) => dashboard(args.into()),
-            Cmd::Doctor(args) => doctor(args.into()),
+            Cmd::Dashboard(args) => dashboard(args),
+            Cmd::Doctor(args) => doctor(args),
             Cmd::Baseline(args) => baseline(args.into()),
-            Cmd::PrComment(args) => pr_comment(args.into()),
+            Cmd::PrComment(args) => pr_comment(args),
             Cmd::Init(args) => {
                 let subcmd::init::InitArgs {
                     path,
@@ -1002,7 +894,7 @@ impl Cli {
                 }
             }
             Cmd::Migrate(args) => migrate(args.into()),
-            Cmd::Coverage(args) => coverage(args.into()),
+            Cmd::Coverage(args) => coverage(args),
             Cmd::Clean(args) => {
                 let subcmd::clean::CleanArgs { path, history_path } = args;
                 {
@@ -1034,7 +926,7 @@ impl Cli {
                     &project,
                 )
             }
-            Cmd::List(args) => subcmd::list::run(args.into()),
+            Cmd::List(args) => subcmd::list::run(args),
         }
     }
 }

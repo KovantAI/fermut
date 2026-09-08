@@ -98,22 +98,70 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         order_by_value(&mut mutants, cfg);
     }
 
+    // Everything read-only for the testing phase: filter chain, runner, cache,
+    // per-file artifacts, equiv pipeline, deadline — plus the baseline check.
+    let state = prepare(cfg, &mutants)?;
+
+    let ctx = EvalCtx {
+        cfg,
+        filters: &state.filters,
+        runner: state.runner.as_ref(),
+        cache: &state.cache,
+        file_hashes: &state.file_hashes,
+        scope_maps: &state.scope_maps,
+        scope_prefix: &state.scope_prefix,
+        equiv: state.equiv.as_ref(),
+        file_sources: &state.file_sources,
+        deadline: state.deadline,
+    };
+    let outcomes: Vec<MutantOutcome> = evaluate_all(cfg, &ctx, &mutants)?;
+
+    Ok(persist(
+        cfg,
+        started,
+        state.runner.as_ref(),
+        &state.cache,
+        state.deadline,
+        outcomes,
+    ))
+}
+
+/// Read-only state assembled before the testing phase and borrowed by every
+/// mutant's [`evaluate`]. Owned here (not in [`run`]) so [`prepare`] can build
+/// it in one place; [`EvalCtx`] holds borrows into it.
+struct RunState {
+    filters: Vec<Box<dyn Filter>>,
+    runner: Box<dyn Runner>,
+    cache: Mutex<Cache>,
+    file_hashes: HashMap<PathBuf, String>,
+    scope_maps: HashMap<PathBuf, ScopeMap>,
+    file_sources: HashMap<PathBuf, String>,
+    equiv: Option<EquivPipeline>,
+    scope_prefix: String,
+    deadline: Option<Instant>,
+}
+
+/// Build the filter chain and runner, verify the baseline suite is green, then
+/// derive the per-file artifacts, cache, equiv pipeline, and testing-phase
+/// deadline. Everything the per-mutant loop reads, in one place.
+fn prepare(cfg: &Config, mutants: &[Mutant]) -> Result<RunState> {
     let filters = filter::build_chain(cfg)?;
     let runner = runner::build(cfg);
 
-    preflight_baseline(cfg, runner.as_ref(), &mutants)?;
+    preflight_baseline(cfg, runner.as_ref(), mutants)?;
 
-    let file_hashes = hash_unique_files(&mutants);
-    let scope_maps = if matches!(cfg.cache_scope, CacheScope::Scope) {
-        build_scope_maps(&mutants)
-    } else {
-        HashMap::new()
-    };
-    let file_sources = if cfg.equiv_detect {
-        load_unique_files(&mutants)
-    } else {
-        HashMap::new()
-    };
+    // One read + at most one parse per unique file, deriving the cache-key
+    // hash (always), the scope map (only in `scope` cache mode), and the source
+    // for the equiv detector (only when it's on).
+    let FileArtifacts {
+        hashes: file_hashes,
+        scope_maps,
+        sources: file_sources,
+    } = analyze_unique_files(
+        mutants,
+        matches!(cfg.cache_scope, CacheScope::Scope),
+        cfg.equiv_detect,
+    );
     let equiv = if cfg.equiv_detect {
         Some(EquivPipeline::default_pipeline())
     } else {
@@ -129,27 +177,37 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
     // Testing-phase wall-clock ceiling. Computed here — after baseline
     // verification and the source-hash pass — so the budget covers the
     // per-mutant testing phase only, matching the flag's documented scope.
-    let test_deadline = compute_test_deadline(cfg);
+    let deadline = compute_test_deadline(cfg);
 
-    let ctx = EvalCtx {
-        cfg,
-        filters: &filters,
-        runner: runner.as_ref(),
-        cache: &cache,
-        file_hashes: &file_hashes,
-        scope_maps: &scope_maps,
-        scope_prefix: &scope_prefix,
-        equiv: equiv.as_ref(),
-        file_sources: &file_sources,
-        deadline: test_deadline,
-    };
-    let outcomes: Vec<MutantOutcome> = evaluate_all(cfg, &ctx, &mutants)?;
+    Ok(RunState {
+        filters,
+        runner,
+        cache,
+        file_hashes,
+        scope_maps,
+        file_sources,
+        equiv,
+        scope_prefix,
+        deadline,
+    })
+}
 
+/// Post-testing wrap-up: warn on a budget-truncated run, report cache
+/// integrity, fold learned kills into the kill-order sidecar, then build the
+/// [`Report`] and (optionally) append the history entry the trend/gate read.
+fn persist(
+    cfg: &Config,
+    started: Instant,
+    runner: &dyn Runner,
+    cache: &Mutex<Cache>,
+    deadline: Option<Instant>,
+    outcomes: Vec<MutantOutcome>,
+) -> (Report, Option<HistoryEntry>) {
     // Surface the budget cutoff so a partial run reads as partial, not as a
     // clean pass over the whole catalogue. Mirrors the `--sample` floor note:
     // the skipped mutants are excluded from the score denominator, so without
     // this line a time-boxed run looks indistinguishable from a full one.
-    if test_deadline.is_some() {
+    if deadline.is_some() {
         let budget_skipped = outcomes
             .iter()
             .filter(|o| matches!(o, MutantOutcome::Skipped { filter, .. } if filter == TIME_BUDGET_FILTER))
@@ -164,7 +222,7 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         }
     }
 
-    summarize_integrity(cfg, &cache);
+    summarize_integrity(cfg, cache);
 
     // Smart ordering: fold the kills learned this run into the kill-order
     // sidecar so the next run puts proven killers first. Advisory — a write
@@ -199,7 +257,7 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         None
     };
 
-    Ok((report, entry))
+    (report, entry)
 }
 
 /// Pre-flight: confirm the unmutated suite is green before spending time
@@ -551,65 +609,67 @@ fn compute_mutant_scope(prefix: &str, cfg: &Config, mutant: &Mutant) -> String {
     hex::encode(h.finalize())
 }
 
-/// Read each unique source file once. Used by the equiv detector so
-/// classifications don't re-read the file per mutant.
-fn load_unique_files(mutants: &[Mutant]) -> HashMap<PathBuf, String> {
-    let mut out = HashMap::new();
-    for m in mutants {
-        if out.contains_key(&m.file) {
-            continue;
-        }
-        match std::fs::read_to_string(&m.file) {
-            Ok(s) => {
-                out.insert(m.file.clone(), s);
-            }
-            Err(e) => {
-                warn!(file = %m.file.display(), error = %e, "source read failed; equiv detector disabled for this file");
-            }
-        }
-    }
-    out
+/// Per-file artifacts for a run, keyed by source path. Built in one pass by
+/// [`analyze_unique_files`].
+struct FileArtifacts {
+    /// Cache-key AST hash for every unique file (byte fallback on parse/utf-8
+    /// failure). Always populated.
+    hashes: HashMap<PathBuf, String>,
+    /// Scope maps for the `scope` cache mode. Empty otherwise; files that fail
+    /// to parse are absent (consumers fall back to the file hash).
+    scope_maps: HashMap<PathBuf, ScopeMap>,
+    /// Source text for the equiv detector, so classification doesn't re-read
+    /// the file per mutant. Empty when equiv detection is off.
+    sources: HashMap<PathBuf, String>,
 }
 
-/// Parse every unique source file once and return its [`ScopeMap`]. Files
-/// that fail to parse or read are simply absent from the map; consumers fall
-/// back to the file-AST hash for those.
-fn build_scope_maps(mutants: &[Mutant]) -> HashMap<PathBuf, ScopeMap> {
-    let mut out = HashMap::new();
+/// Read + parse each unique mutated file exactly once, deriving every per-file
+/// artifact the run needs. Replaces three separate passes (`hash_unique_files`,
+/// `build_scope_maps`, `load_unique_files`) that each re-read and re-parsed the
+/// same files — 2–3× the IO and parse work. `want_scope`/`want_source` gate the
+/// optional artifacts so a run that needs neither pays only for the hash.
+fn analyze_unique_files(mutants: &[Mutant], want_scope: bool, want_source: bool) -> FileArtifacts {
+    let mut hashes = HashMap::new();
+    let mut scope_maps = HashMap::new();
+    let mut sources = HashMap::new();
     for m in mutants {
-        if out.contains_key(&m.file) {
+        if hashes.contains_key(&m.file) {
             continue;
         }
-        match ast_hash::scope_map_from_file(&m.file) {
-            Ok(Some(map)) => {
-                out.insert(m.file.clone(), map);
-            }
-            Ok(None) => {
-                warn!(file = %m.file.display(), "scope-map parse failed; falling back to file hash for this file");
-            }
+        let analysis = match ast_hash::analyze_file(&m.file, want_scope, want_source) {
+            Ok(a) => a,
             Err(e) => {
-                warn!(file = %m.file.display(), error = %e, "scope-map read failed; falling back to file hash for this file");
+                warn!(file = %m.file.display(), error = %e, "source read failed; cache disabled for this file");
+                continue;
             }
-        }
-    }
-    out
-}
-
-fn hash_unique_files(mutants: &[Mutant]) -> HashMap<PathBuf, String> {
-    let mut out = HashMap::new();
-    for m in mutants {
-        if !out.contains_key(&m.file) {
-            match ast_hash::hash_file_ast(&m.file) {
-                Ok(h) => {
-                    out.insert(m.file.clone(), h);
+        };
+        hashes.insert(m.file.clone(), analysis.ast_hash);
+        if want_scope {
+            match analysis.scope_map {
+                Some(map) => {
+                    scope_maps.insert(m.file.clone(), map);
                 }
-                Err(e) => {
-                    warn!(file = %m.file.display(), error = %e, "hash failed; cache disabled for this file");
+                None => {
+                    warn!(file = %m.file.display(), "scope-map parse failed; falling back to file hash for this file");
+                }
+            }
+        }
+        if want_source {
+            match analysis.source {
+                Some(s) => {
+                    sources.insert(m.file.clone(), s);
+                }
+                None => {
+                    warn!(file = %m.file.display(), "source not utf-8; equiv detector disabled for this file");
                 }
             }
         }
     }
-    out
+    FileArtifacts {
+        hashes,
+        scope_maps,
+        sources,
+    }
 }
 
 fn make_progress_bar(total: u64) -> Option<ProgressBar> {

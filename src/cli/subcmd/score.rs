@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 
+use crate::cli::Format;
 use crate::history::{self, HistoryEntry};
 
 /// Float-noise floor for score comparisons. A delta inside `±SCORE_NOISE`
@@ -41,13 +42,7 @@ pub struct ScoreOpts {
     /// If set and the score dropped more than this many points vs the
     /// baseline, exit non-zero after printing. CI / agent rollback gate.
     pub fail_on_regression: Option<f64>,
-    pub format: ScoreFormat,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum ScoreFormat {
-    Human,
-    Json,
+    pub format: Format,
 }
 
 /// The reward signal. Optional baseline fields are `null` when there is no
@@ -142,8 +137,8 @@ pub fn score(opts: ScoreOpts) -> Result<()> {
     };
 
     match opts.format {
-        ScoreFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
-        ScoreFormat::Human => print_human(&report),
+        Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        Format::Human => print_human(&report),
     }
 
     // Gate fires only when the report already counts as a regression, so a
@@ -529,7 +524,7 @@ mod tests {
             baseline: 1,
             branch: None,
             fail_on_regression: None,
-            format: ScoreFormat::Json,
+            format: Format::Json,
         }
     }
 

@@ -34,6 +34,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 use serde::Serialize;
 
 use super::explain::{enclosing_symbol, render_source_snippet, EnclosingSymbol, MutantSummary};
+use crate::cli::Format;
 use crate::llm::cache::{default_cache_path, LlmCache};
 use crate::llm::client::client_from_env;
 use crate::llm::prompt::{
@@ -45,12 +46,6 @@ use crate::mutator::Mutant;
 use crate::report::{MutantOutcome, Report};
 use crate::sync::lock_recover;
 use crate::util::search::{grep_symbol, DEFAULT_GREP_MATCH_LIMIT};
-
-#[derive(Copy, Clone, Debug)]
-pub enum SuggestFormat {
-    Human,
-    Json,
-}
 
 pub struct SuggestOpts {
     pub report: PathBuf,
@@ -65,7 +60,7 @@ pub struct SuggestOpts {
     pub no_cache: bool,
     pub cache_path: Option<PathBuf>,
     pub project_root: PathBuf,
-    pub format: SuggestFormat,
+    pub format: Format,
     pub parallel: usize,
 }
 
@@ -98,22 +93,19 @@ pub struct SuggestEntry {
 // ---------------------------------------------------------------------------
 
 pub fn suggest(opts: SuggestOpts) -> Result<()> {
-    let raw = std::fs::read_to_string(&opts.report)
-        .with_context(|| format!("reading {}", opts.report.display()))?;
-    let report: Report =
-        serde_json::from_str(&raw).with_context(|| format!("parsing {}", opts.report.display()))?;
+    let report = crate::report::load(&opts.report)?;
 
     let targets = select_targets(&report, opts.target.as_deref(), opts.all_survivors)?;
     if targets.is_empty() {
         match opts.format {
-            SuggestFormat::Json => {
+            Format::Json => {
                 let out = SuggestReport {
                     model: opts.model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
                     entries: Vec::new(),
                 };
                 println!("{}", serde_json::to_string_pretty(&out)?);
             }
-            SuggestFormat::Human => {
+            Format::Human => {
                 eprintln!("no mutants matched the selector / no survivors in the report");
             }
         }
@@ -153,7 +145,7 @@ pub fn suggest(opts: SuggestOpts) -> Result<()> {
         })
         .collect();
 
-    let log_progress = matches!(opts.format, SuggestFormat::Human);
+    let log_progress = matches!(opts.format, Format::Human);
 
     // Loop-invariant LLM knobs, resolved once and shared by every worker.
     let llm_opts = LlmCallOpts {
@@ -194,12 +186,12 @@ pub fn suggest(opts: SuggestOpts) -> Result<()> {
 
     let suggest_report = SuggestReport { model, entries };
     match opts.format {
-        SuggestFormat::Json => {
+        Format::Json => {
             let s = serde_json::to_string_pretty(&suggest_report)
                 .context("serializing suggest report")?;
             println!("{s}");
         }
-        SuggestFormat::Human => render_human(&suggest_report, opts.apply, opts.out.as_deref()),
+        Format::Human => render_human(&suggest_report, opts.apply, opts.out.as_deref()),
     }
     Ok(())
 }
@@ -743,7 +735,7 @@ mod tests {
         out_path: Option<PathBuf>,
         all_survivors: bool,
         parallel: usize,
-        format: SuggestFormat,
+        format: Format,
         project_root: PathBuf,
     ) -> Result<()> {
         std::env::set_var("FERMUT_LLM_MOCK", "1");
@@ -802,7 +794,7 @@ mod tests {
             Some(out_path.clone()),
             true,
             1,
-            SuggestFormat::Human,
+            Format::Human,
             dir.path().to_path_buf(),
         )
         .unwrap();
@@ -825,7 +817,7 @@ mod tests {
             Some(out_path.clone()),
             true,
             4,
-            SuggestFormat::Human,
+            Format::Human,
             dir.path().to_path_buf(),
         )
         .unwrap();

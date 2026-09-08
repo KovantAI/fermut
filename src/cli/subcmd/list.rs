@@ -35,18 +35,8 @@ pub(crate) struct ListArgs {
     pub(crate) filter: FilterArgs,
 }
 
-/// `fermut list` flags, mirrored from the `Cmd::List` clap variant.
-#[derive(Debug)]
-pub struct ListOpts {
-    pub path: PathBuf,
-    pub no_ty_filter: bool,
-    pub ruff_filter: bool,
-    pub tce: bool,
-    pub filter: FilterArgs,
-}
-
-pub fn run(opts: ListOpts) -> Result<()> {
-    let ListOpts {
+pub(crate) fn run(opts: ListArgs) -> Result<()> {
+    let ListArgs {
         path,
         no_ty_filter,
         ruff_filter,

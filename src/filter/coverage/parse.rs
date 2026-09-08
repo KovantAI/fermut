@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::CoverageContexts;
 
@@ -203,7 +203,7 @@ impl CoverageContexts {
         // roots (e.g., `/tmp` → `/private/tmp` on macOS). Without this,
         // rebase_node_id strips against `/private/var/...` while abs paths
         // carry `/var/...` and every id falls outside project_root.
-        let coverage_cwd = coverage_cwd.canonicalize().unwrap_or(coverage_cwd);
+        let coverage_cwd = canon_or_log(coverage_cwd, "coverage_cwd");
         let canonical_project = project_root
             .canonicalize()
             .unwrap_or_else(|_| project_root.to_path_buf());
@@ -215,7 +215,7 @@ impl CoverageContexts {
 
         for (file, lines) in records {
             let p = coverage_cwd.join(&file);
-            let p = p.canonicalize().unwrap_or(p);
+            let p = canon_or_log(p, "coverage_file_key");
             let mut per_line: HashMap<u32, Vec<String>> = HashMap::new();
             for (line, raw_tests) in lines {
                 let cleaned = clean_test_ids(&raw_tests);
@@ -422,6 +422,26 @@ pub(super) fn detect_coverage_cwd(
 /// `coverage_cwd`, then strip the canonicalized `project_root` prefix.
 /// Returns `None` if the resolved path lies outside `project_root` — those
 /// tests can't run from the mirror, so the caller drops them.
+/// Canonicalize `p`, falling back to `p` unchanged on failure. A failure means
+/// prefix stripping later runs against a possibly-different path form (symlink
+/// unresolved, `/var` vs `/private/var`), which can silently drop a mutant as
+/// uncovered. Log at debug so that drift is diagnosable when it happens.
+fn canon_or_log(p: PathBuf, what: &str) -> PathBuf {
+    match p.canonicalize() {
+        Ok(c) => c,
+        Err(e) => {
+            debug!(
+                path = %p.display(),
+                what,
+                error = %e,
+                "canonicalize failed; using path as-is — coverage key may drift \
+                 and drop a mutant as uncovered"
+            );
+            p
+        }
+    }
+}
+
 fn rebase_node_id(
     id: &str,
     coverage_cwd: &Path,
@@ -440,7 +460,7 @@ fn rebase_node_id(
         } else {
             coverage_cwd.join(path_part)
         };
-        let abs = abs.canonicalize().unwrap_or(abs);
+        let abs = canon_or_log(abs, "node_id_path");
         let computed = abs
             .strip_prefix(canonical_project)
             .ok()

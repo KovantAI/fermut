@@ -53,13 +53,8 @@ impl KillOrder {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
         let raw = serde_json::to_string_pretty(self).context("serializing kill-order")?;
-        std::fs::write(path, raw).with_context(|| format!("writing {}", path.display()))?;
-        Ok(())
+        crate::cache::atomic_write(path, raw)
     }
 
     /// Increment the kill count for `(file, operator, nodeid)`.

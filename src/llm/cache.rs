@@ -26,28 +26,12 @@ impl LlmCache {
         load_or_quarantine(path)
     }
 
-    /// Atomic save: write to a sibling tmp file, then rename onto `path`.
-    /// A crash between write and rename leaves the previous cache intact —
-    /// `std::fs::write` would have truncated first, so an interrupted save
-    /// could leave a half-written / empty file that `load` then parses as
-    /// "no entries", silently re-billing every cached prompt on the next
-    /// run. The tmp name includes the PID so concurrent invocations against
-    /// the same cache don't clobber each other's in-flight writes.
+    /// Atomic save — see [`crate::cache::atomic_write`]. A crash mid-write
+    /// leaves the previous cache intact instead of a truncated file that
+    /// `load` reads as "no entries", silently re-billing every cached prompt.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
         let raw = serde_json::to_string_pretty(self).context("serializing llm cache")?;
-        let tmp = tmp_sibling(path);
-        std::fs::write(&tmp, raw).with_context(|| format!("writing {}", tmp.display()))?;
-        if let Err(e) = std::fs::rename(&tmp, path) {
-            // Best-effort cleanup so a failed rename doesn't leave debris.
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e)
-                .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()));
-        }
-        Ok(())
+        crate::cache::atomic_write(path, raw)
     }
 
     pub fn lookup(&self, key: &str) -> Option<&str> {
@@ -71,22 +55,6 @@ impl LlmCache {
 /// existing result cache under `.fermut/`.
 pub fn default_cache_path(project_root: &Path) -> PathBuf {
     project_root.join(".fermut").join("llm-cache.json")
-}
-
-/// Build the tmp sibling name for an atomic save. Kept in the same parent
-/// directory as `path` so `rename` stays on one filesystem (POSIX rename
-/// across mount points fails with `EXDEV`). PID-scoped suffix avoids
-/// collisions when multiple `fermut` processes race on the same cache.
-fn tmp_sibling(path: &Path) -> PathBuf {
-    let mut name = path
-        .file_name()
-        .map(|n| n.to_os_string())
-        .unwrap_or_else(|| std::ffi::OsString::from("cache"));
-    name.push(format!(".tmp.{}", std::process::id()));
-    match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.join(name),
-        _ => PathBuf::from(name),
-    }
 }
 
 #[cfg(test)]
@@ -147,18 +115,6 @@ mod tests {
     fn default_cache_path_sits_under_dot_fermut() {
         let p = default_cache_path(Path::new("/tmp/proj"));
         assert!(p.ends_with(".fermut/llm-cache.json"));
-    }
-
-    #[test]
-    fn tmp_sibling_lives_next_to_target() {
-        let p = Path::new("/tmp/proj/.fermut/llm-cache.json");
-        let tmp = tmp_sibling(p);
-        assert_eq!(tmp.parent(), p.parent());
-        let name = tmp.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(
-            name.starts_with("llm-cache.json.tmp."),
-            "unexpected tmp name `{name}`"
-        );
     }
 
     /// Regression: a crash between `truncate` and `write` in `std::fs::write`

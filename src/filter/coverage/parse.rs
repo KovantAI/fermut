@@ -154,9 +154,13 @@ impl CoverageContexts {
 
     /// Parse a `coverage.json` with contexts.
     pub fn from_json(path: &Path, source_root: &Path, project_root: &Path) -> Result<Arc<Self>> {
-        let raw = std::fs::read_to_string(path)
+        // Stream from a buffered reader instead of slurping the whole file into
+        // a String first — coverage.json runs to multiple GB on large suites,
+        // and `read_to_string` + `from_str` would hold the raw bytes and the
+        // parsed doc in memory at once, doubling peak.
+        let file = std::fs::File::open(path)
             .with_context(|| format!("reading coverage file {}", path.display()))?;
-        let doc: CoverageDoc = serde_json::from_str(&raw)
+        let doc: CoverageDoc = serde_json::from_reader(std::io::BufReader::new(file))
             .with_context(|| format!("parsing coverage JSON {}", path.display()))?;
 
         let records: CoverageRecords = doc

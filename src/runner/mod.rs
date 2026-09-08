@@ -10,6 +10,7 @@
 //! That turns N copies of the project (one per mutant) into N_jobs copies
 //! (one per rayon worker).
 
+pub(crate) mod exit;
 pub(crate) mod process_group;
 pub mod pytest;
 pub mod python;

@@ -251,11 +251,6 @@ pub fn first_rejector<'a>(
     Ok(None)
 }
 
-/// Re-export for callers that need a default working directory.
-pub fn default_cwd() -> &'static Path {
-    Path::new(".")
-}
-
 /// Canonical filter order, cheap-to-expensive. `build_chain` may include any
 /// subset of these depending on config flags, but their relative order must
 /// match this list — otherwise an expensive filter can run before a cheap one

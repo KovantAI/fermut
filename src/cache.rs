@@ -12,9 +12,8 @@
 //! editing a test re-evaluates the mutants it might now kill instead of
 //! serving the pre-edit verdict.
 //!
-//! The legacy raw-byte hash is still exported as [`hash_file`] for callers
-//! that want byte identity (and for the test suite). Pipeline code paths
-//! should use [`crate::ast_hash::hash_file_ast`] instead.
+//! Pipeline code paths hash the AST via [`crate::ast_hash::hash_file_ast`].
+//! A legacy raw-byte hash survives as the test-only [`hash_file`].
 //!
 //! Stored at `.fermut/cache.json` under the source root by default; one JSON
 //! file, atomic write on save.
@@ -30,7 +29,7 @@ use anyhow::{Context, Result};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tracing::warn;
 
@@ -54,6 +53,46 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> Result<[u8; 32]> {
     let mut mac = HmacSha256::new_from_slice(key).context("hmac key init")?;
     mac.update(msg);
     Ok(mac.finalize().into_bytes().into())
+}
+
+/// Atomically write `bytes` to `path`: create the parent dir, write to a
+/// sibling tmp file, then rename onto `path`.
+///
+/// A crash between write and rename leaves the previous file intact — a bare
+/// `std::fs::write` truncates first, so an interrupted save can leave a
+/// half-written / empty file that the next `load` parses as "no entries",
+/// silently discarding a warm cache and re-doing all the work it held. The
+/// rename is atomic on the same filesystem; the tmp lives next to the target
+/// (not `$TMPDIR`, where a cross-mount rename fails with `EXDEV`). The tmp
+/// name includes the PID so concurrent `fermut` processes racing on the same
+/// file don't clobber each other's in-flight writes.
+pub(crate) fn atomic_write(path: &Path, bytes: impl AsRef<[u8]>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let tmp = tmp_sibling(path);
+    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        // Best-effort cleanup so a failed rename doesn't leave debris.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()));
+    }
+    Ok(())
+}
+
+/// Tmp path next to `path`, PID-suffixed. Kept a sibling so the follow-up
+/// rename stays on one filesystem.
+fn tmp_sibling(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from("cache"));
+    name.push(format!(".tmp.{}", std::process::id()));
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.join(name),
+        _ => PathBuf::from(name),
+    }
 }
 
 /// Load a JSON cache file, returning `T::default()` on any failure.
@@ -243,13 +282,8 @@ impl Cache {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
         let raw = serde_json::to_string_pretty(self).context("serializing cache")?;
-        std::fs::write(path, raw).with_context(|| format!("writing {}", path.display()))?;
-        Ok(())
+        atomic_write(path, raw)
     }
 
     pub fn lookup(&self, mutant_id: &str, file_hash: &str, scope: &str) -> Option<MutantOutcome> {
@@ -294,8 +328,12 @@ impl Cache {
     }
 }
 
-/// Hex-encoded sha256 of the file's bytes.
+/// Hex-encoded sha256 of the file's bytes. Test-only: the pipeline hashes the
+/// AST via [`crate::ast_hash::hash_file_ast`]; this byte-identity hash is kept
+/// only to exercise that path in the suite.
+#[cfg(test)]
 pub fn hash_file(path: &Path) -> Result<String> {
+    use sha2::Digest;
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
@@ -327,6 +365,42 @@ mod tests {
             line: 1,
             stmt_line: 1,
         }
+    }
+
+    #[test]
+    fn tmp_sibling_lives_next_to_target() {
+        let p = Path::new("/tmp/proj/.fermut/cache.json");
+        let tmp = tmp_sibling(p);
+        assert_eq!(tmp.parent(), p.parent());
+        let name = tmp.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("cache.json.tmp."),
+            "unexpected tmp name `{name}`"
+        );
+    }
+
+    #[test]
+    fn atomic_write_creates_parent_and_no_tmp_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".fermut").join("out.json");
+        atomic_write(&path, b"hello").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "stray tmp file: {leftovers:?}");
+    }
+
+    #[test]
+    fn atomic_write_preserves_prior_file_when_tmp_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+        atomic_write(&path, b"first").unwrap();
+        // Stray tmp from a hypothetical interrupted save must not corrupt reads.
+        std::fs::write(path.with_file_name("out.json.tmp.99999"), "half").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
     }
 
     #[test]

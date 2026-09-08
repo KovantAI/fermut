@@ -574,43 +574,369 @@ fn print_profile_catalogue() {
     }
 }
 
-impl Cli {
-    pub fn run(self) -> Result<()> {
-        match self.cmd {
-            Cmd::Run(args) => {
-                let subcmd::run::RunArgs {
-                    path,
-                    cfg_args,
-                    annotate,
-                    watch,
-                    format,
+/// `From<XArgs> for XOpts` for every subcommand whose CLI struct maps to its
+/// options struct by a straight field copy plus trivial per-field transforms
+/// (`.into()`, renames, sink nesting, `cwd` lookup). This keeps [`Cli::run`]'s
+/// dispatch arms down to a single `x(args.into())` call each. Subcommands with
+/// real control flow in their arm (`init`, `clean`, `merge`, `completions`,
+/// `show`) are converted inline instead.
+mod from_args {
+    use super::*;
+
+    impl From<subcmd::run::RunArgs> for RunOpts {
+        fn from(a: subcmd::run::RunArgs) -> Self {
+            let subcmd::run::RunArgs {
+                path,
+                cfg_args,
+                annotate,
+                watch,
+                format,
+                json,
+                junit,
+                html,
+                markdown,
+                trend,
+                trend_branch,
+                fail_on_regression,
+                no_fail,
+            } = a;
+            RunOpts {
+                path,
+                cfg_args,
+                annotate,
+                watch,
+                format,
+                sinks: ReportSinks {
                     json,
                     junit,
                     html,
                     markdown,
-                    trend,
-                    trend_branch,
-                    fail_on_regression,
-                    no_fail,
-                } = args;
-                subcmd::run::run(RunOpts {
-                    path,
-                    cfg_args,
-                    annotate,
-                    watch,
-                    format,
-                    sinks: ReportSinks {
-                        json,
-                        junit,
-                        html,
-                        markdown,
-                    },
-                    trend,
-                    trend_branch,
-                    fail_on_regression,
-                    no_fail,
-                })
+                },
+                trend,
+                trend_branch,
+                fail_on_regression,
+                no_fail,
             }
+        }
+    }
+
+    impl From<subcmd::next::NextArgs> for NextOpts {
+        fn from(a: subcmd::next::NextArgs) -> Self {
+            let subcmd::next::NextArgs {
+                report,
+                limit,
+                all,
+                max_tokens,
+                format,
+            } = a;
+            NextOpts {
+                report,
+                limit: if all { None } else { Some(limit) },
+                max_tokens,
+                format: format.into(),
+            }
+        }
+    }
+
+    impl From<subcmd::explain::ExplainArgs> for ExplainOpts {
+        fn from(a: subcmd::explain::ExplainArgs) -> Self {
+            let subcmd::explain::ExplainArgs {
+                report,
+                target,
+                context,
+                tests,
+                coverage,
+                llm,
+                model,
+                no_cache,
+                cache_path,
+                format,
+            } = a;
+            ExplainOpts {
+                report,
+                target,
+                context_lines: context,
+                tests,
+                coverage,
+                llm,
+                model,
+                no_cache,
+                cache_path,
+                project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                format: format.into(),
+            }
+        }
+    }
+
+    impl From<subcmd::autofix::AutofixArgs> for AutofixOpts {
+        fn from(a: subcmd::autofix::AutofixArgs) -> Self {
+            let subcmd::autofix::AutofixArgs {
+                report,
+                target,
+                all_survivors,
+                path,
+                tests,
+                python,
+                out,
+                model,
+                context,
+                sample_count,
+                timeout,
+                no_cache,
+                cache_path,
+                keep_failed,
+                format,
+            } = a;
+            AutofixOpts {
+                report,
+                target,
+                all_survivors,
+                path,
+                tests,
+                python,
+                out,
+                model,
+                context_lines: context,
+                sample_count,
+                timeout,
+                no_cache,
+                cache_path,
+                keep_failed,
+                format: format.into(),
+            }
+        }
+    }
+
+    impl From<subcmd::suggest::SuggestArgs> for SuggestOpts {
+        fn from(a: subcmd::suggest::SuggestArgs) -> Self {
+            let subcmd::suggest::SuggestArgs {
+                report,
+                target,
+                all_survivors,
+                apply,
+                out,
+                model,
+                tests,
+                context,
+                sample_count,
+                no_cache,
+                cache_path,
+                format,
+                parallel,
+            } = a;
+            SuggestOpts {
+                report,
+                target,
+                all_survivors,
+                apply,
+                out,
+                model,
+                tests,
+                context_lines: context,
+                sample_count,
+                no_cache,
+                cache_path,
+                project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                format: format.into(),
+                parallel,
+            }
+        }
+    }
+
+    impl From<subcmd::trend::TrendArgs> for TrendOpts {
+        fn from(a: subcmd::trend::TrendArgs) -> Self {
+            let subcmd::trend::TrendArgs {
+                path,
+                history_path,
+                limit,
+                all,
+                branch,
+                since,
+                until,
+                fail_on_regression,
+                scale,
+                diff,
+                by,
+                format,
+                strict,
+            } = a;
+            TrendOpts {
+                path,
+                history_path,
+                limit,
+                all,
+                branch,
+                since,
+                until,
+                fail_on_regression,
+                scale: scale.into(),
+                diff,
+                group_by: by.map(Into::into),
+                format: format.into(),
+                strict,
+            }
+        }
+    }
+
+    impl From<subcmd::score::ScoreArgs> for ScoreOpts {
+        fn from(a: subcmd::score::ScoreArgs) -> Self {
+            let subcmd::score::ScoreArgs {
+                path,
+                history_path,
+                baseline,
+                branch,
+                fail_on_regression,
+                format,
+            } = a;
+            ScoreOpts {
+                path,
+                history_path,
+                baseline,
+                branch,
+                fail_on_regression,
+                format: format.into(),
+            }
+        }
+    }
+
+    impl From<subcmd::dashboard::DashboardArgs> for DashboardOpts {
+        fn from(a: subcmd::dashboard::DashboardArgs) -> Self {
+            let subcmd::dashboard::DashboardArgs {
+                path,
+                history_path,
+                output,
+                report,
+                limit,
+                open,
+            } = a;
+            DashboardOpts {
+                path,
+                history_path,
+                output,
+                report,
+                limit,
+                open,
+            }
+        }
+    }
+
+    impl From<subcmd::doctor::DoctorArgs> for DoctorOpts {
+        fn from(a: subcmd::doctor::DoctorArgs) -> Self {
+            let subcmd::doctor::DoctorArgs { path, strict } = a;
+            DoctorOpts { path, strict }
+        }
+    }
+
+    impl From<subcmd::baseline::BaselineArgs> for BaselineOpts {
+        fn from(a: subcmd::baseline::BaselineArgs) -> Self {
+            let subcmd::baseline::BaselineArgs {
+                path,
+                full,
+                sample,
+                top,
+                format,
+                filter,
+            } = a;
+            BaselineOpts {
+                path,
+                full,
+                sample,
+                top,
+                format: format.into(),
+                filter,
+            }
+        }
+    }
+
+    impl From<subcmd::pr_comment::PrCommentArgs> for PrCommentOpts {
+        fn from(a: subcmd::pr_comment::PrCommentArgs) -> Self {
+            let subcmd::pr_comment::PrCommentArgs {
+                markdown,
+                repo,
+                pr,
+                marker,
+                dry_run,
+            } = a;
+            PrCommentOpts {
+                markdown,
+                repo,
+                pr,
+                marker,
+                dry_run,
+            }
+        }
+    }
+
+    impl From<subcmd::migrate::MigrateArgs> for MigrateOpts {
+        fn from(a: subcmd::migrate::MigrateArgs) -> Self {
+            let subcmd::migrate::MigrateArgs {
+                from,
+                path,
+                config,
+                pyproject,
+                force,
+                dry_run,
+                no_pragma_rewrite,
+            } = a;
+            MigrateOpts {
+                source: from.into(),
+                path,
+                config,
+                pyproject,
+                force,
+                dry_run,
+                no_pragma_rewrite,
+            }
+        }
+    }
+
+    impl From<subcmd::coverage::CoverageArgs> for CoverageOpts {
+        fn from(a: subcmd::coverage::CoverageArgs) -> Self {
+            let subcmd::coverage::CoverageArgs {
+                path,
+                source,
+                tests,
+                full,
+                output,
+                python,
+                pytest_args,
+            } = a;
+            CoverageOpts {
+                path,
+                source,
+                tests,
+                full,
+                output,
+                python,
+                pytest_args,
+            }
+        }
+    }
+
+    impl From<subcmd::list::ListArgs> for ListOpts {
+        fn from(a: subcmd::list::ListArgs) -> Self {
+            let subcmd::list::ListArgs {
+                path,
+                no_ty_filter,
+                ruff_filter,
+                tce,
+                filter,
+            } = a;
+            ListOpts {
+                path,
+                no_ty_filter,
+                ruff_filter,
+                tce,
+                filter,
+            }
+        }
+    }
+}
+
+impl Cli {
+    pub fn run(self) -> Result<()> {
+        match self.cmd {
+            Cmd::Run(args) => subcmd::run::run(args.into()),
             Cmd::Show(args) => {
                 let subcmd::show::ShowArgs {
                     report,
@@ -619,125 +945,10 @@ impl Cli {
                 } = args;
                 show(&report, target.as_deref(), all)
             }
-            Cmd::Next(args) => {
-                let subcmd::next::NextArgs {
-                    report,
-                    limit,
-                    all,
-                    max_tokens,
-                    format,
-                } = args;
-                next(NextOpts {
-                    report,
-                    limit: if all { None } else { Some(limit) },
-                    max_tokens,
-                    format: format.into(),
-                })
-            }
-            Cmd::Explain(args) => {
-                let subcmd::explain::ExplainArgs {
-                    report,
-                    target,
-                    context,
-                    tests,
-                    coverage,
-                    llm,
-                    model,
-                    no_cache,
-                    cache_path,
-                    format,
-                } = args;
-                {
-                    let project_root =
-                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                    explain(ExplainOpts {
-                        report,
-                        target,
-                        context_lines: context,
-                        tests,
-                        coverage,
-                        llm,
-                        model,
-                        no_cache,
-                        cache_path,
-                        project_root,
-                        format: format.into(),
-                    })
-                }
-            }
-            Cmd::Autofix(args) => {
-                let subcmd::autofix::AutofixArgs {
-                    report,
-                    target,
-                    all_survivors,
-                    path,
-                    tests,
-                    python,
-                    out,
-                    model,
-                    context,
-                    sample_count,
-                    timeout,
-                    no_cache,
-                    cache_path,
-                    keep_failed,
-                    format,
-                } = args;
-                autofix(AutofixOpts {
-                    report,
-                    target,
-                    all_survivors,
-                    path,
-                    tests,
-                    python,
-                    out,
-                    model,
-                    context_lines: context,
-                    sample_count,
-                    timeout,
-                    no_cache,
-                    cache_path,
-                    keep_failed,
-                    format: format.into(),
-                })
-            }
-            Cmd::Suggest(args) => {
-                let subcmd::suggest::SuggestArgs {
-                    report,
-                    target,
-                    all_survivors,
-                    apply,
-                    out,
-                    model,
-                    tests,
-                    context,
-                    sample_count,
-                    no_cache,
-                    cache_path,
-                    format,
-                    parallel,
-                } = args;
-                {
-                    let project_root =
-                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                    suggest(SuggestOpts {
-                        report,
-                        target,
-                        all_survivors,
-                        apply,
-                        out,
-                        model,
-                        tests,
-                        context_lines: context,
-                        sample_count,
-                        no_cache,
-                        cache_path,
-                        project_root,
-                        format: format.into(),
-                        parallel,
-                    })
-                }
-            }
+            Cmd::Next(args) => next(args.into()),
+            Cmd::Explain(args) => explain(args.into()),
+            Cmd::Autofix(args) => autofix(args.into()),
+            Cmd::Suggest(args) => suggest(args.into()),
             Cmd::Mcp => mcp_serve(),
             Cmd::Completions(args) => {
                 let subcmd::completions::CompletionsArgs { shell } = args;
@@ -747,112 +958,12 @@ impl Cli {
                     Ok(())
                 }
             }
-            Cmd::Trend(args) => {
-                let subcmd::trend::TrendArgs {
-                    path,
-                    history_path,
-                    limit,
-                    all,
-                    branch,
-                    since,
-                    until,
-                    fail_on_regression,
-                    scale,
-                    diff,
-                    by,
-                    format,
-                    strict,
-                } = args;
-                trend(TrendOpts {
-                    path,
-                    history_path,
-                    limit,
-                    all,
-                    branch,
-                    since,
-                    until,
-                    fail_on_regression,
-                    scale: scale.into(),
-                    diff,
-                    group_by: by.map(Into::into),
-                    format: format.into(),
-                    strict,
-                })
-            }
-            Cmd::Score(args) => {
-                let subcmd::score::ScoreArgs {
-                    path,
-                    history_path,
-                    baseline,
-                    branch,
-                    fail_on_regression,
-                    format,
-                } = args;
-                score(ScoreOpts {
-                    path,
-                    history_path,
-                    baseline,
-                    branch,
-                    fail_on_regression,
-                    format: format.into(),
-                })
-            }
-            Cmd::Dashboard(args) => {
-                let subcmd::dashboard::DashboardArgs {
-                    path,
-                    history_path,
-                    output,
-                    report,
-                    limit,
-                    open,
-                } = args;
-                dashboard(DashboardOpts {
-                    path,
-                    history_path,
-                    output,
-                    report,
-                    limit,
-                    open,
-                })
-            }
-            Cmd::Doctor(args) => {
-                let subcmd::doctor::DoctorArgs { path, strict } = args;
-                doctor(DoctorOpts { path, strict })
-            }
-            Cmd::Baseline(args) => {
-                let subcmd::baseline::BaselineArgs {
-                    path,
-                    full,
-                    sample,
-                    top,
-                    format,
-                    filter: f,
-                } = args;
-                baseline(BaselineOpts {
-                    path,
-                    full,
-                    sample,
-                    top,
-                    format: format.into(),
-                    filter: f,
-                })
-            }
-            Cmd::PrComment(args) => {
-                let subcmd::pr_comment::PrCommentArgs {
-                    markdown,
-                    repo,
-                    pr,
-                    marker,
-                    dry_run,
-                } = args;
-                pr_comment(PrCommentOpts {
-                    markdown,
-                    repo,
-                    pr,
-                    marker,
-                    dry_run,
-                })
-            }
+            Cmd::Trend(args) => trend(args.into()),
+            Cmd::Score(args) => score(args.into()),
+            Cmd::Dashboard(args) => dashboard(args.into()),
+            Cmd::Doctor(args) => doctor(args.into()),
+            Cmd::Baseline(args) => baseline(args.into()),
+            Cmd::PrComment(args) => pr_comment(args.into()),
             Cmd::Init(args) => {
                 let subcmd::init::InitArgs {
                     path,
@@ -890,46 +1001,8 @@ impl Cli {
                     })
                 }
             }
-            Cmd::Migrate(args) => {
-                let subcmd::migrate::MigrateArgs {
-                    from,
-                    path,
-                    config,
-                    pyproject,
-                    force,
-                    dry_run,
-                    no_pragma_rewrite,
-                } = args;
-                migrate(MigrateOpts {
-                    source: from.into(),
-                    path,
-                    config,
-                    pyproject,
-                    force,
-                    dry_run,
-                    no_pragma_rewrite,
-                })
-            }
-            Cmd::Coverage(args) => {
-                let subcmd::coverage::CoverageArgs {
-                    path,
-                    source,
-                    tests,
-                    full,
-                    output,
-                    python,
-                    pytest_args,
-                } = args;
-                coverage(CoverageOpts {
-                    path,
-                    source,
-                    tests,
-                    full,
-                    output,
-                    python,
-                    pytest_args,
-                })
-            }
+            Cmd::Migrate(args) => migrate(args.into()),
+            Cmd::Coverage(args) => coverage(args.into()),
             Cmd::Clean(args) => {
                 let subcmd::clean::CleanArgs { path, history_path } = args;
                 {
@@ -961,22 +1034,7 @@ impl Cli {
                     &project,
                 )
             }
-            Cmd::List(args) => {
-                let subcmd::list::ListArgs {
-                    path,
-                    no_ty_filter,
-                    ruff_filter,
-                    tce,
-                    filter,
-                } = args;
-                subcmd::list::run(ListOpts {
-                    path,
-                    no_ty_filter,
-                    ruff_filter,
-                    tce,
-                    filter,
-                })
-            }
+            Cmd::List(args) => subcmd::list::run(args.into()),
         }
     }
 }

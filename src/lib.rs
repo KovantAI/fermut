@@ -4,7 +4,7 @@
 //!
 //! | Module | Responsibility |
 //! |--------|----------------|
-//! | [`cli`] | clap parser + subcommand dispatch (`run`, `list`, `show`, `clean`, `completions`) |
+//! | [`cli`] | clap parser + subcommand dispatch (`run`, `list`, `show`, `clean`, `completions`, `migrate`, `explain`, `init`, `coverage`, `suggest`, `dashboard`, `trend`, `doctor`, `mcp`, `autofix`, `score`, `next`, `baseline`, `pr_comment`, …) |
 //! | [`config`] | Runtime `Config`, TOML schema, walk-up loader |
 //! | [`mutator`] | Python AST visitor + operator catalog → `Mutant` candidates |
 //! | [`emit`] | Splice a `Mutant`'s replacement into the source byte range |
@@ -15,6 +15,10 @@
 //! | [`cache`] | Per-mutant result cache keyed on `(mutant.id, ast_hash(file), scope)` |
 //! | [`ast_hash`] | Structural AST hash of a Python source file (whitespace/comment-insensitive) |
 //! | [`report`] | Outcome types + writers (json/junit/html/markdown) + GHA annotations |
+//! | [`history`] | Per-run history log (`.fermut/history.jsonl`) powering `trend`/`score` |
+//! | [`kill_order`] | Smart test ordering — historical "which test killed this mutant kind" first |
+//! | [`llm`] | LLM integration: Anthropic Messages API client + prompt builders + cache |
+//! | `sync` | Internal sync helpers (e.g. `lock_recover` for poisoned `Mutex`es) |
 //! | [`watch`] | File-system watch loop for `--watch` mode |
 
 pub mod ast_hash;

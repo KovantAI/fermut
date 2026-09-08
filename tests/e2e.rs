@@ -393,3 +393,368 @@ fn next_ranks_cluster_from_report() {
         // no coverage-skip outcome in the report → flag false in JSON
         .stdout(contains("\"coverage_selected\": false"));
 }
+
+// ---------------------------------------------------------------------------
+// Per-subcommand smoke tests.
+//
+// The inline unit tests exercise each subcommand's internals; the tests above
+// cover the two example trees and `next`'s ranking. What was missing was a
+// thin, PATH-free smoke over the *surface* of the CLI: that every subcommand
+// parses and dispatches, that the report/history readers emit the JSON schema
+// their agent consumers depend on, and that the regression gate flips the exit
+// code. These need neither pytest nor ty (they read fixtures on disk), so they
+// run in plain `cargo test` with no `#[ignore]`.
+// ---------------------------------------------------------------------------
+
+/// Every subcommand name accepted by the top-level parser. Guards against a
+/// variant that compiles but panics on dispatch, and — because the list is
+/// spelled out — a subcommand removed or renamed without updating this test.
+const SUBCOMMANDS: &[&str] = &[
+    "run",
+    "list",
+    "mcp",
+    "completions",
+    "init",
+    "trend",
+    "score",
+    "dashboard",
+    "doctor",
+    "baseline",
+    "clean",
+    "coverage",
+    "merge",
+    "pr-comment",
+    "migrate",
+    "show",
+    "next",
+    "explain",
+    "autofix",
+    "suggest",
+];
+
+#[test]
+fn every_subcommand_prints_help() {
+    for cmd in SUBCOMMANDS {
+        Command::cargo_bin("fermut")
+            .unwrap()
+            .arg(cmd)
+            .arg("--help")
+            .assert()
+            .success()
+            .stdout(contains("Usage: fermut"))
+            .stdout(contains(*cmd));
+    }
+}
+
+#[test]
+fn unknown_subcommand_is_rejected() {
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("frobnicate")
+        .assert()
+        .failure()
+        .stderr(contains("unrecognized subcommand"));
+}
+
+#[test]
+fn completions_emit_scripts_for_each_shell() {
+    // Each shell backend must produce a non-empty script with its signature
+    // marker, so a broken clap_complete wiring can't ship a blank file.
+    for (shell, marker) in [
+        ("zsh", "#compdef fermut"),
+        ("bash", "_fermut"),
+        ("fish", "complete"),
+    ] {
+        Command::cargo_bin("fermut")
+            .unwrap()
+            .arg("completions")
+            .arg(shell)
+            .assert()
+            .success()
+            .stdout(contains(marker));
+    }
+}
+
+#[test]
+fn show_lists_survivors_and_score() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = dir.path().join("report.json");
+    std::fs::write(&report, NEXT_REPORT).unwrap();
+
+    // Default view: survivors only, plus the summary/score footer.
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("show")
+        .arg(&report)
+        .assert()
+        .success()
+        .stdout(contains("SURVIVED"))
+        .stdout(contains("score:"));
+}
+
+#[test]
+fn explain_requires_a_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = dir.path().join("report.json");
+    std::fs::write(&report, NEXT_REPORT).unwrap();
+
+    // `explain` needs a mutant id to explain; omitting it is a parse error,
+    // caught before the report is read.
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("explain")
+        .arg(&report)
+        .assert()
+        .failure()
+        .stderr(contains("required arguments"));
+}
+
+#[test]
+fn explain_emits_hint_and_skeleton_for_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = dir.path().join("report.json");
+    std::fs::write(&report, NEXT_REPORT).unwrap();
+
+    // Source file `a.py` doesn't exist beside the report, so context is
+    // degraded — but the operator hint and pytest skeleton are derived from
+    // the mutant alone and must still render.
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("explain")
+        .arg(&report)
+        .arg("a.py@40:boundary-shift:s1")
+        .assert()
+        .success()
+        .stdout(contains("boundary-shift"))
+        .stdout(contains("hint"))
+        .stdout(contains("suggested test skeleton"));
+}
+
+#[test]
+fn merge_combines_reports() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = dir.path().join("report.json");
+    std::fs::write(&report, NEXT_REPORT).unwrap();
+
+    // Merging a report with itself doubles the outcome count; the merged JSON
+    // carries a `summary` with the combined total.
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("merge")
+        .arg(&report)
+        .arg(&report)
+        .assert()
+        .success()
+        .stdout(contains("\"summary\""))
+        .stdout(contains("\"total\""));
+}
+
+/// Two comparable history entries (same `config_hash`, same branch) where the
+/// score drops 80% → 60%. The regression is real, not a config/scope artifact,
+/// so `score` and the gate must both see it.
+const HISTORY_REGRESSION: &str = concat!(
+    r#"{"v":1,"timestamp":"2026-09-01T00:00:00Z","mutation_score":80.0,"killed":8,"survived":2,"timed_out":0,"skipped":0,"errored":0,"total":10,"config_hash":"abc","git_branch":"main","survivor_ids":["a.py@1:x:s"]}"#,
+    "\n",
+    r#"{"v":1,"timestamp":"2026-09-02T00:00:00Z","mutation_score":60.0,"killed":6,"survived":4,"timed_out":0,"skipped":0,"errored":0,"total":10,"config_hash":"abc","git_branch":"main","survivor_ids":["a.py@1:x:s","a.py@2:x:s","b.py@3:x:s"]}"#,
+    "\n",
+);
+
+/// Write `HISTORY_REGRESSION` into a fresh project tree's `.fermut/history.jsonl`
+/// and return the tempdir (kept alive by the caller) plus the project path.
+fn history_regression_project() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("proj");
+    std::fs::create_dir_all(project.join(".fermut")).unwrap();
+    std::fs::write(
+        project.join(".fermut").join("history.jsonl"),
+        HISTORY_REGRESSION,
+    )
+    .unwrap();
+    (dir, project)
+}
+
+#[test]
+fn score_json_reports_regression_signal() {
+    let (_tmp, project) = history_regression_project();
+
+    // JSON is the default; the agent reward signal must expose the delta, the
+    // new-survivor set, and the `regressed` flag. `score` reports without
+    // gating, so exit 0 even on a drop.
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("score")
+        .arg(&project)
+        .assert()
+        .success()
+        .stdout(contains("\"delta\": -20.0"))
+        .stdout(contains("\"regressed\": true"))
+        .stdout(contains("\"new_survivors\""))
+        .stdout(contains("b.py@3:x:s"));
+}
+
+#[test]
+fn score_gate_fails_on_regression() {
+    let (_tmp, project) = history_regression_project();
+
+    // The 20-pt drop exceeds a 5-pt tolerance → the gate flips the exit code.
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("score")
+        .arg(&project)
+        .arg("--fail-on-regression")
+        .arg("5")
+        .assert()
+        .failure();
+}
+
+#[test]
+fn score_gate_passes_within_tolerance() {
+    let (_tmp, project) = history_regression_project();
+
+    // A 25-pt tolerance absorbs the 20-pt drop → gate stays green.
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("score")
+        .arg(&project)
+        .arg("--fail-on-regression")
+        .arg("25")
+        .assert()
+        .success();
+}
+
+#[test]
+fn trend_renders_history_table() {
+    let (_tmp, project) = history_regression_project();
+
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("trend")
+        .arg(&project)
+        .assert()
+        .success()
+        .stdout(contains("2 entries"))
+        .stdout(contains("80.0%"))
+        .stdout(contains("60.0%"))
+        .stdout(contains("-20.0"));
+}
+
+#[test]
+fn clean_removes_cache_but_keeps_history() {
+    let (_tmp, project) = history_regression_project();
+    let cache = project.join(".fermut").join("cache.json");
+    std::fs::write(&cache, "{}").unwrap();
+
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("clean")
+        .arg(&project)
+        .assert()
+        .success()
+        .stdout(contains("removed"));
+
+    assert!(!cache.exists(), "clean must remove the result cache");
+    assert!(
+        project.join(".fermut").join("history.jsonl").exists(),
+        "clean must preserve the history log"
+    );
+}
+
+#[test]
+fn init_writes_config_for_detected_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+    std::fs::write(
+        project.join("pyproject.toml"),
+        "[project]\nname = \"demo\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::create_dir_all(project.join("tests")).unwrap();
+
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("init")
+        .arg(project)
+        .assert()
+        .success()
+        .stdout(contains("wrote"));
+
+    assert!(
+        project.join("fermut.toml").exists(),
+        "init must write fermut.toml"
+    );
+}
+
+#[test]
+fn migrate_translates_mutmut_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+    std::fs::write(
+        project.join("pyproject.toml"),
+        "[project]\nname = \"demo\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("setup.cfg"),
+        "[mutmut]\npaths_to_mutate=src/\n",
+    )
+    .unwrap();
+
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("migrate")
+        .arg("mutmut")
+        .arg(project)
+        .assert()
+        .success()
+        .stdout(contains("source: mutmut"));
+
+    assert!(
+        project.join("fermut.toml").exists(),
+        "migrate must write a starter fermut.toml"
+    );
+}
+
+#[test]
+fn doctor_reports_a_summary() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+    std::fs::write(
+        project.join("pyproject.toml"),
+        "[project]\nname = \"demo\"\n",
+    )
+    .unwrap();
+
+    // Doctor's exit code depends on which tools happen to be on PATH in the
+    // test environment, so assert only on the stable diagnostic surface: it
+    // runs the checks and prints a summary line.
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("doctor")
+        .arg(project)
+        .assert()
+        .stdout(contains("summary:"));
+}
+
+#[test]
+fn dashboard_writes_self_contained_html() {
+    let (_tmp, project) = history_regression_project();
+    let out = project.join("dash.html");
+
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("dashboard")
+        .arg(&project)
+        .arg("--output")
+        .arg(&out)
+        .assert()
+        .success();
+
+    let html = std::fs::read_to_string(&out).expect("dashboard HTML written");
+    assert!(html.contains("<html"), "output must be an HTML document");
+    // Self-contained: no external asset references.
+    assert!(
+        !html.contains("<script src="),
+        "dashboard must not pull external scripts"
+    );
+}

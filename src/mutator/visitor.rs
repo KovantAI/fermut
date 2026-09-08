@@ -659,8 +659,18 @@ impl<'a> Collector<'a> {
             // Float literal (incl. exponent form like `1e3`). `format_float`
             // keeps the result a float so `5.0` shifts to `6.0`, not `6`.
             if v.is_finite() {
-                self.push(Operator::NumberShift, r, &format_float(v + 1.0));
-                self.push(Operator::NumberShift, r, &format_float(v - 1.0));
+                // Past f64 integer precision (|v| ≳ 2^53, e.g. `1e16`) adding or
+                // subtracting 1.0 is a no-op: `v + 1.0 == v`. Emitting such a
+                // shift produces a value-identical mutant no test can ever kill —
+                // a guaranteed false Survived that deflates the mutation score
+                // (default runs have neither `--tce` nor `--equiv-detect` to
+                // catch it). Only push a shift that actually changes the value.
+                if v + 1.0 != v {
+                    self.push(Operator::NumberShift, r, &format_float(v + 1.0));
+                }
+                if v - 1.0 != v {
+                    self.push(Operator::NumberShift, r, &format_float(v - 1.0));
+                }
                 if v != 0.0 {
                     self.push(Operator::NumberToZero, r, "0");
                     self.push(Operator::NumberToNeg, r, &format_float(-v));
@@ -998,6 +1008,22 @@ mod operator_emission_tests {
         let repls = repls_for("x = 1.5\n", Operator::NumberShift);
         assert!(repls.contains(&"2.5".to_string()), "{repls:?}");
         assert!(repls.contains(&"0.5".to_string()), "{repls:?}");
+    }
+
+    #[test]
+    fn large_float_emits_no_value_identical_shift() {
+        // Regression: `1e16` is past f64 integer precision, so `v + 1.0 == v`
+        // and `v - 1.0 == v`. The old code pushed both shifts anyway → two
+        // value-identical no-op mutants, each a guaranteed false Survived that
+        // deflates the score. Both shifts must be suppressed; only the still-
+        // meaningful to-zero / negate mutants remain.
+        assert!(
+            repls_for("x = 1e16\n", Operator::NumberShift).is_empty(),
+            "a precision-saturated float must emit no shift mutants"
+        );
+        let ops = ops_for("x = 1e16\n");
+        assert!(ops.contains(&Operator::NumberToZero), "{ops:?}");
+        assert!(ops.contains(&Operator::NumberToNeg), "{ops:?}");
     }
 
     #[test]

@@ -13,8 +13,6 @@
 //! id sets, and a `regressed` flag. JSON is the default format — this
 //! command exists for machine consumers.
 
-use std::path::PathBuf;
-
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 
@@ -25,25 +23,6 @@ use crate::history::{self, HistoryEntry};
 /// is treated as flat — not a regression. Shared by the `regressed` flag
 /// and the `--fail-on-regression` gate so the two never disagree.
 const SCORE_NOISE: f64 = 0.05;
-
-#[derive(Debug, Clone)]
-pub struct ScoreOpts {
-    pub path: PathBuf,
-    pub history_path: Option<PathBuf>,
-    /// Compare the latest run against the entry this many branch-comparable
-    /// runs back. `1` (default) is the immediately prior run — the reward
-    /// signal for a single inner-loop iteration.
-    pub baseline: usize,
-    /// Restrict both current and baseline selection to entries recorded on
-    /// this git branch. Without it, the baseline is the most recent prior
-    /// run on the same branch as the latest entry (detached-HEAD / untagged
-    /// entries are treated as comparable, matching the regression gate).
-    pub branch: Option<String>,
-    /// If set and the score dropped more than this many points vs the
-    /// baseline, exit non-zero after printing. CI / agent rollback gate.
-    pub fail_on_regression: Option<f64>,
-    pub format: Format,
-}
 
 /// The reward signal. Optional baseline fields are `null` when there is no
 /// comparable prior run (first recorded run on the branch).
@@ -110,18 +89,25 @@ pub(crate) fn compute_score(
     Ok(Some(build_report(current, base)))
 }
 
-pub fn score(opts: ScoreOpts) -> Result<()> {
-    let history_path = opts
-        .history_path
-        .clone()
-        .unwrap_or_else(|| history::default_history_path(&history::resolve_root(&opts.path)));
+pub(crate) fn score(args: ScoreArgs) -> Result<()> {
+    let ScoreArgs {
+        path,
+        history_path,
+        baseline,
+        branch,
+        fail_on_regression,
+        format,
+    } = args;
 
-    let Some(report) = compute_score(&history_path, opts.baseline, opts.branch.as_deref())? else {
+    let history_path = history_path
+        .unwrap_or_else(|| history::default_history_path(&history::resolve_root(&path)));
+
+    let Some(report) = compute_score(&history_path, baseline, branch.as_deref())? else {
         // Empty window: either the log is empty, or a `--branch` filter
         // excluded every entry. Distinguish so the user isn't told to
         // populate a log that already has runs.
         let entries = history::load(&history_path)?;
-        return match (entries.is_empty(), opts.branch.as_deref()) {
+        return match (entries.is_empty(), branch.as_deref()) {
             (false, Some(b)) => Err(anyhow!(
                 "no runs on branch '{b}' in {} ({} entr{} on other branches) — \
                  drop --branch or run `fermut run` on '{b}'",
@@ -136,7 +122,7 @@ pub fn score(opts: ScoreOpts) -> Result<()> {
         };
     };
 
-    match opts.format {
+    match format {
         Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
         Format::Human => print_human(&report),
     }
@@ -145,7 +131,7 @@ pub fn score(opts: ScoreOpts) -> Result<()> {
     // non-zero exit always implies `regressed: true` — the flag and the gate
     // can't disagree. On top of that the drop must exceed the caller's
     // points threshold (a magnitude filter).
-    if let (Some(threshold), Some(delta)) = (opts.fail_on_regression, report.delta) {
+    if let (Some(threshold), Some(delta)) = (fail_on_regression, report.delta) {
         let drop = -delta;
         if report.regressed && drop > threshold {
             eprintln!("mutation score regressed by {drop:.1} pts (threshold {threshold:.1})");
@@ -293,6 +279,7 @@ fn print_human(r: &ScoreReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn entry(ts: &str, score: f64, branch: Option<&str>, survivors: &[&str]) -> HistoryEntry {
         HistoryEntry {
@@ -517,8 +504,8 @@ mod tests {
         (dir, path)
     }
 
-    fn opts(history_path: PathBuf) -> ScoreOpts {
-        ScoreOpts {
+    fn opts(history_path: PathBuf) -> ScoreArgs {
+        ScoreArgs {
             path: ".".into(),
             history_path: Some(history_path),
             baseline: 1,

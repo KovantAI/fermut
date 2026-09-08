@@ -63,6 +63,24 @@ pub struct NextOpts {
     pub format: Format,
 }
 
+impl From<NextArgs> for NextOpts {
+    fn from(a: NextArgs) -> Self {
+        let NextArgs {
+            report,
+            limit,
+            all,
+            max_tokens,
+            format,
+        } = a;
+        NextOpts {
+            report,
+            limit: if all { None } else { Some(limit) },
+            max_tokens,
+            format,
+        }
+    }
+}
+
 /// Kill-ease tier for an operator. Higher = easier to write a killing test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]

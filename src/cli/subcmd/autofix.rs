@@ -55,6 +55,45 @@ pub struct AutofixOpts {
     pub format: Format,
 }
 
+impl From<AutofixArgs> for AutofixOpts {
+    fn from(a: AutofixArgs) -> Self {
+        let AutofixArgs {
+            report,
+            target,
+            all_survivors,
+            path,
+            tests,
+            python,
+            out,
+            model,
+            context,
+            sample_count,
+            timeout,
+            no_cache,
+            cache_path,
+            keep_failed,
+            format,
+        } = a;
+        AutofixOpts {
+            report,
+            target,
+            all_survivors,
+            path,
+            tests,
+            python,
+            out,
+            model,
+            context_lines: context,
+            sample_count,
+            timeout,
+            no_cache,
+            cache_path,
+            keep_failed,
+            format,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Report shape — stable JSON contract for agent consumers.
 // ---------------------------------------------------------------------------

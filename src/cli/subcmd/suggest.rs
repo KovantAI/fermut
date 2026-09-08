@@ -64,6 +64,45 @@ pub struct SuggestOpts {
     pub parallel: usize,
 }
 
+/// Built with a caller-resolved `project_root` (via
+/// [`crate::cli::current_project_root`]) rather than reading the cwd here, so
+/// the conversion is pure and unit-testable.
+impl From<(SuggestArgs, PathBuf)> for SuggestOpts {
+    fn from((a, project_root): (SuggestArgs, PathBuf)) -> Self {
+        let SuggestArgs {
+            report,
+            target,
+            all_survivors,
+            apply,
+            out,
+            model,
+            tests,
+            context,
+            sample_count,
+            no_cache,
+            cache_path,
+            format,
+            parallel,
+        } = a;
+        SuggestOpts {
+            report,
+            target,
+            all_survivors,
+            apply,
+            out,
+            model,
+            tests,
+            context_lines: context,
+            sample_count,
+            no_cache,
+            cache_path,
+            project_root,
+            format,
+            parallel,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Report shape — stable JSON contract for agent consumers.
 // ---------------------------------------------------------------------------

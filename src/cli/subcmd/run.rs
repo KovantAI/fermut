@@ -109,6 +109,43 @@ pub struct RunOpts {
     pub no_fail: bool,
 }
 
+impl From<RunArgs> for RunOpts {
+    fn from(a: RunArgs) -> Self {
+        let RunArgs {
+            path,
+            cfg_args,
+            annotate,
+            watch,
+            format,
+            json,
+            junit,
+            html,
+            markdown,
+            trend,
+            trend_branch,
+            fail_on_regression,
+            no_fail,
+        } = a;
+        RunOpts {
+            path,
+            cfg_args,
+            annotate,
+            watch,
+            format,
+            sinks: ReportSinks {
+                json,
+                junit,
+                html,
+                markdown,
+            },
+            trend,
+            trend_branch,
+            fail_on_regression,
+            no_fail,
+        }
+    }
+}
+
 pub fn run(opts: RunOpts) -> Result<()> {
     let RunOpts {
         path,

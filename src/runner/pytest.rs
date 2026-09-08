@@ -12,6 +12,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -388,11 +389,24 @@ fn wait_draining_stdout_with_grace(
     grace: Duration,
     mut on_timeout: impl FnMut(&mut Child),
 ) -> Result<(Option<ExitStatus>, Option<String>)> {
+    // `eof_reached` is flipped by the reader thread the instant `read_to_end`
+    // returns — which happens only when *every* write end of the pipe is
+    // closed. It is the provable "pipe is closed" signal the success arm needs:
+    // an atomic load can't lag the way an `mpsc` delivery can under a loaded
+    // scheduler, so `!eof_reached` after the settle means a write end is still
+    // open (a grandchild inherited it), not merely that the drained string is
+    // slow to arrive over the channel.
+    let eof_reached = Arc::new(AtomicBool::new(false));
     let mut reader = child.stdout.take().map(|mut out| {
         let (tx, rx) = std::sync::mpsc::channel();
+        let eof_reached = Arc::clone(&eof_reached);
         std::thread::spawn(move || {
             let mut buf = Vec::new();
             let _ = out.read_to_end(&mut buf);
+            // Record EOF before the (potentially large) lossy decode + send, so
+            // the flag reflects "pipe closed" the moment it is true, regardless
+            // of how long delivery takes.
+            eof_reached.store(true, Ordering::Release);
             let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
         });
         rx
@@ -419,28 +433,38 @@ fn wait_draining_stdout_with_grace(
     {
         Some(status) => {
             // Only the short settle here — an exited leader's own output drains
-            // in microseconds, so overrunning `settle` means a grandchild holds
-            // the write end (group still alive), not a slow normal read.
+            // in microseconds, so an *un-EOF'd* pipe past the settle means a
+            // grandchild holds the write end (group still alive), not a slow
+            // normal read.
             let mut output = collect(&mut reader, settle);
-            // Drain overran the grace → a grandchild still holds the pipe's write
-            // end. Kill the process group to release it (also reaping the stray
-            // subprocess), then make one final bounded collect — this closes the
-            // reader's EOF so its thread exits instead of leaking, and usually
-            // recovers the datapoint the child already wrote.
+            // Two distinct reasons the collect can come back `None`:
             //
-            // Note: on this path `wait_timeout` already reaped the direct child
-            // (the group *leader*), so `on_timeout`/`kill_group` signals
-            // `-child.id()` for a leader that has exited. This is safe only
-            // because the surviving grandchild keeps the process group alive, and
-            // Linux/BSD reserve the leader's pid as the pgid while the group has
-            // members — so `kill(-pgid)` still targets the grandchild and can't
-            // hit an unrelated, pid-recycled process. (Contrast the timeout arm
-            // below, which kills *before* the child is reaped.) If a future
-            // change reaps the leader without a live group member, revisit this.
+            //   1. A grandchild inherited the write end, so `read_to_end` is
+            //      still blocked and `eof_reached` is false. The group is alive:
+            //      kill it to release the pipe (also reaping the stray
+            //      subprocess), then make one final bounded collect — this closes
+            //      the reader's EOF so its thread exits instead of leaking, and
+            //      usually recovers the datapoint the child already wrote.
+            //   2. The pipe already EOF'd (`eof_reached` true) but the drained
+            //      string is merely lagging over the channel on a loaded box.
+            //      Here there is NO live group member, so `kill(-pgid)` MUST NOT
+            //      fire: `wait_timeout` already reaped the leader, freeing its
+            //      pid, and with no member keeping the pgid reserved the id can be
+            //      recycled — the kill would land on an unrelated group. Just
+            //      wait out the grace for the lagging bytes; no signal.
+            //
+            // The `eof_reached` load is what makes case 2 *provable* rather than
+            // inferred from timing — an atomic can't lag like the mpsc delivery.
+            // (Contrast the timeout arm below, which kills *before* the child is
+            // reaped, so recycling is impossible there.)
             if output.is_none() && had_pipe {
-                on_timeout(&mut child);
-                let _ = child.wait();
-                output = collect(&mut reader, grace);
+                if eof_reached.load(Ordering::Acquire) {
+                    output = collect(&mut reader, grace);
+                } else {
+                    on_timeout(&mut child);
+                    let _ = child.wait();
+                    output = collect(&mut reader, grace);
+                }
             }
             Ok((Some(status), output))
         }
@@ -713,6 +737,49 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "leaked-subprocess drain must be bounded by settle ({settle:?}), not grace \
              ({grace:?}); took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn wait_draining_lagging_drain_without_grandchild_does_not_group_kill() {
+        // The drain-overrun-race fix. The direct child writes a large flood and
+        // exits with NO grandchild, so the pipe's write end is already closed —
+        // but the reader's lossy-decode of ~30 MiB takes longer than a tiny
+        // `settle`, so the first collect times out. The OLD code read that
+        // timeout as "a grandchild holds the pipe" and fired the group-kill;
+        // since `wait_timeout` had already reaped the leader (freeing its pid),
+        // that `kill(-pgid)` could land on a recycled process group. The fix
+        // gates the kill on `eof_reached`: `read_to_end` has already returned
+        // (EOF observed, flag set before the slow decode), so the kill MUST NOT
+        // fire — the lagging bytes are simply collected over the grace.
+        //
+        // `settle` is tiny (decode outlasts it → first collect misses) but the
+        // residual read after the leader exits is only a pipe-buffer's worth
+        // (~microseconds), so `eof_reached` is reliably true by the time the
+        // branch is reached.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("head -c 31457280 /dev/zero | tr '\\0' a") // 30 MiB of 'a', no grandchild
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        with_new_process_group(&mut cmd); // group exists, but nothing survives the leader
+        let child = cmd.spawn().expect("spawn sh flooder");
+
+        let settle = Duration::from_millis(2);
+        let grace = Duration::from_secs(10);
+        let (status, output) =
+            wait_draining_stdout_with_grace(child, Duration::from_secs(30), settle, grace, |_| {
+                panic!("group-kill must not fire when the pipe is already EOF'd (no grandchild)");
+            })
+            .unwrap();
+
+        assert!(status.expect("child exited, not timed out").success());
+        let out = output.expect("lagging drain must still be recovered over the grace");
+        assert_eq!(
+            out.len(),
+            31_457_280,
+            "the full flood must be captured without a group-kill"
         );
     }
 

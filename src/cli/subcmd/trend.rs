@@ -49,6 +49,41 @@ pub struct TrendOpts {
     pub strict: bool,
 }
 
+impl From<TrendArgs> for TrendOpts {
+    fn from(a: TrendArgs) -> Self {
+        let TrendArgs {
+            path,
+            history_path,
+            limit,
+            all,
+            branch,
+            since,
+            until,
+            fail_on_regression,
+            scale,
+            diff,
+            by,
+            format,
+            strict,
+        } = a;
+        TrendOpts {
+            path,
+            history_path,
+            limit,
+            all,
+            branch,
+            since,
+            until,
+            fail_on_regression,
+            scale: scale.into(),
+            diff,
+            group_by: by.map(Into::into),
+            format,
+            strict,
+        }
+    }
+}
+
 /// Aggregation axis for the latest-run survivor list. File grouping reads
 /// only the survivor ID prefixes already stored in `history.jsonl`, so it
 /// works without re-running mutmut and without loading a JSON report.

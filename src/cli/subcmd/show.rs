@@ -101,3 +101,13 @@ pub(crate) struct ShowArgs {
     #[arg(long)]
     pub(crate) all: bool,
 }
+
+/// Dispatch handler: unpacks [`ShowArgs`] and runs the inspector.
+pub(crate) fn run(args: ShowArgs) -> Result<()> {
+    let ShowArgs {
+        report,
+        target,
+        all,
+    } = args;
+    show(&report, target.as_deref(), all)
+}

@@ -51,6 +51,39 @@ pub struct ExplainOpts {
     pub format: Format,
 }
 
+/// Built with a caller-resolved `project_root` (via
+/// [`crate::cli::current_project_root`]) rather than reading the cwd here, so
+/// the conversion is pure and unit-testable.
+impl From<(ExplainArgs, PathBuf)> for ExplainOpts {
+    fn from((a, project_root): (ExplainArgs, PathBuf)) -> Self {
+        let ExplainArgs {
+            report,
+            target,
+            context,
+            tests,
+            coverage,
+            llm,
+            model,
+            no_cache,
+            cache_path,
+            format,
+        } = a;
+        ExplainOpts {
+            report,
+            target,
+            context_lines: context,
+            tests,
+            coverage,
+            llm,
+            model,
+            no_cache,
+            cache_path,
+            project_root,
+            format,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Report shape — stable JSON contract for agent consumers. Add fields with
 // care; agents pin on these names.
@@ -832,6 +865,34 @@ pub(crate) fn locate_outcome_impl<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explain_args_conversion_is_pure_and_threads_project_root() {
+        // Regression for the impure-From fix: the conversion must NOT read the
+        // cwd. It takes the project root as an argument and copies it verbatim,
+        // so the caller controls it and the mapping is deterministic — including
+        // the `context` → `context_lines` rename.
+        let args = ExplainArgs {
+            report: PathBuf::from("r.json"),
+            target: "3".into(),
+            context: 7,
+            tests: None,
+            coverage: None,
+            llm: false,
+            model: None,
+            no_cache: false,
+            cache_path: None,
+            format: Format::Json,
+        };
+        let root = PathBuf::from("/nowhere/project");
+        let opts: ExplainOpts = (args, root.clone()).into();
+        assert_eq!(
+            opts.project_root, root,
+            "project root must be threaded, not cwd"
+        );
+        assert_eq!(opts.context_lines, 7, "context maps to context_lines");
+        assert_eq!(opts.report, PathBuf::from("r.json"));
+    }
     use crate::mutator::Operator;
     use ruff_text_size::TextRange;
     use std::path::PathBuf;

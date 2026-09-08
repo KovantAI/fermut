@@ -454,3 +454,30 @@ pub(crate) struct MergeArgs {
     #[arg(long, value_name = "DIR", default_value = ".")]
     pub(crate) project: std::path::PathBuf,
 }
+
+/// Dispatch handler: nests the output-path flags into a [`ReportSinks`] and
+/// runs the shard merge.
+pub(crate) fn run(args: MergeArgs) -> Result<()> {
+    let MergeArgs {
+        inputs,
+        json,
+        junit,
+        html,
+        markdown,
+        history,
+        config_hash,
+        project,
+    } = args;
+    merge_reports(
+        &inputs,
+        &ReportSinks {
+            json,
+            junit,
+            html,
+            markdown,
+        },
+        history.as_ref(),
+        config_hash,
+        &project,
+    )
+}

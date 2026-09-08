@@ -19,7 +19,6 @@
 //! anchors the `trend`/`score` graph at run zero.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 
@@ -27,7 +26,6 @@ use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 
 use crate::cli::build_config::build_config;
-use crate::cli::FilterArgs;
 use crate::cli::Format;
 use crate::report::{MutantOutcome, Report};
 
@@ -36,21 +34,6 @@ use crate::report::{MutantOutcome, Report};
 const DEFAULT_SAMPLE: f64 = 0.1;
 /// Fixed seed so two baselines on the same tree report the same number.
 const SAMPLE_SEED: u64 = 0;
-
-#[derive(Debug, Clone)]
-pub struct BaselineOpts {
-    pub path: PathBuf,
-    /// Skip sampling — mutate every covered mutant for an exact score.
-    pub full: bool,
-    /// Sampling fraction when not `--full`. Defaults to `DEFAULT_SAMPLE`.
-    pub sample: Option<f64>,
-    /// How many worst-offender files to list. Defaults to 3.
-    pub top: usize,
-    pub format: Format,
-    /// Filter chain (coverage path, excludes, op allow/deny). Threaded
-    /// through from the CLI exactly like `run`.
-    pub filter: FilterArgs,
-}
 
 /// One grade band for the headline verdict. The thresholds are on the
 /// mutation score *of covered code* — line coverage can't earn a grade
@@ -135,9 +118,9 @@ struct FileSurvivors {
     survivors: usize,
 }
 
-pub fn baseline(opts: BaselineOpts) -> Result<()> {
-    let format = opts.format;
-    let out = compute_baseline(opts)?;
+pub(crate) fn baseline(args: BaselineArgs) -> Result<()> {
+    let format = args.format;
+    let out = compute_baseline(args)?;
     match format {
         Format::Json => println!("{}", serde_json::to_string_pretty(&out)?),
         Format::Human => print_human(&out),
@@ -148,10 +131,10 @@ pub fn baseline(opts: BaselineOpts) -> Result<()> {
 /// Run the baseline pipeline and return the structured report without
 /// printing. Shared by the `baseline` subcommand and the MCP
 /// `fermut_baseline` tool so both surface identical numbers.
-pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
+pub(crate) fn compute_baseline(args: BaselineArgs) -> Result<BaselineReport> {
     // 1. Gate on environment health. A broken toolchain produces a
     //    confidently-wrong score, which is worse than no score on day one.
-    let diag = crate::cli::subcmd::doctor::diagnose(&opts.path);
+    let diag = crate::cli::subcmd::doctor::diagnose(&args.path);
     if diag.get("healthy").and_then(|v| v.as_bool()) == Some(false) {
         return Err(anyhow!(
             "environment not ready — run `fermut doctor` and fix the failing \
@@ -164,13 +147,13 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
     // relative path against the process cwd, not the project dir, so a bare
     // `.coverage` breaks whenever `baseline` is invoked from elsewhere (e.g.
     // `fermut baseline path/to/project` from a repo root).
-    let loaded = crate::config::loader::LoadedConfig::load(&opts.path)
+    let loaded = crate::config::loader::LoadedConfig::load(&args.path)
         .context("loading project config for baseline")?;
     let cov_db = loaded.base_dir.join(".coverage");
 
     // 2. Build/refresh `.coverage`, then read the line-coverage headline.
     crate::cli::subcmd::coverage::coverage(crate::cli::subcmd::coverage::CoverageArgs {
-        path: opts.path.clone(),
+        path: args.path.clone(),
         source: None,
         tests: None,
         full: false,
@@ -192,19 +175,19 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
     //    full `build_config` path so the filter chain (coverage, excludes,
     //    op allow/deny) matches what `run` would do — only the sample knob
     //    differs.
-    let sample = if opts.full {
+    let sample = if args.full {
         None
     } else {
-        Some(opts.sample.unwrap_or(DEFAULT_SAMPLE))
+        Some(args.sample.unwrap_or(DEFAULT_SAMPLE))
     };
-    let mut filter = opts.filter.clone();
+    let mut filter = args.filter.clone();
     // Force the coverage filter on if the user didn't pick a path — the
     // whole point is "score on covered code".
     if filter.coverage.is_none() && !filter.no_coverage {
         filter.coverage = Some(cov_db.clone());
     }
     let cfg = build_config(
-        opts.path.clone(),
+        args.path.clone(),
         crate::cli::RunConfigArgs {
             // engine must NOT append history; we write our own entry below
             // marked `baseline: true`, else the anchor would be an ordinary,
@@ -239,7 +222,7 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
     }
 
     let summary = report.summary();
-    let worst_files = top_survivor_files(&report, opts.top);
+    let worst_files = top_survivor_files(&report, args.top);
     // A scoreless run (nothing killed/survived/timed out) carries the vacuous
     // 100.0 floor, not a measurement — grade it N/A rather than a perfect
     // "Strong", which would read as an A for a run that scored nothing.

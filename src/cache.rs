@@ -164,6 +164,16 @@ struct CacheEntry {
     #[serde(default)]
     scope: String,
     outcome: MutantOutcome,
+    /// Whether this outcome has already been run through the equivalence
+    /// pipeline. A cached `Survived` written by a detector-*off* run is
+    /// `false` — it was never classified, so a later detector-*on* run must
+    /// classify it once (and rewrite the entry `true`). A `Survived` written
+    /// by a detector-*on* run is `true`: the pipeline already cleared it, so
+    /// warm runs report it directly instead of re-spawning the CPython
+    /// bytecode probe every time. `false` for older fermut versions (default),
+    /// which simply forces a one-time reclassify on the next detector-on run.
+    #[serde(default)]
+    equiv_checked: bool,
     /// Hex-encoded HMAC-SHA256 over `(mutant_id, file_hash, scope, outcome)`
     /// keyed by `FERMUT_CACHE_KEY`. Present only when the key was set at
     /// insert time. Verified at load time when the key is set; ignored when
@@ -217,6 +227,15 @@ fn compute_mac(key: &[u8], mutant_id: &str, entry: &CacheEntry) -> Result<String
     msg.extend_from_slice(entry.scope.as_bytes());
     msg.push(0);
     msg.extend_from_slice(outcome_json.as_bytes());
+    // Fold `equiv_checked` in only when true, so entries with the default
+    // (`false`) — including every entry signed by a fermut version that
+    // predates this field — hash identically to before and still verify on
+    // load. A flip in either direction changes the recomputed MAC and is
+    // detected: true→false drops the suffix, false→true adds one.
+    if entry.equiv_checked {
+        msg.push(0);
+        msg.push(1);
+    }
     Ok(hex::encode(hmac_sha256(key, &msg)?))
 }
 
@@ -287,9 +306,23 @@ impl Cache {
     }
 
     pub fn lookup(&self, mutant_id: &str, file_hash: &str, scope: &str) -> Option<MutantOutcome> {
+        self.lookup_entry(mutant_id, file_hash, scope)
+            .map(|(outcome, _)| outcome)
+    }
+
+    /// Like [`lookup`], but also returns the entry's `equiv_checked` flag so
+    /// the engine can tell an already-classified cached `Survived` (skip the
+    /// pipeline, pure flip) from one written by a detector-off run (classify
+    /// once, then rewrite).
+    pub fn lookup_entry(
+        &self,
+        mutant_id: &str,
+        file_hash: &str,
+        scope: &str,
+    ) -> Option<(MutantOutcome, bool)> {
         let entry = self.entries.get(mutant_id)?;
         if entry.file_hash == file_hash && entry.scope == scope {
-            Some(entry.outcome.clone())
+            Some((entry.outcome.clone(), entry.equiv_checked))
         } else {
             None
         }
@@ -301,6 +334,20 @@ impl Cache {
         file_hash: String,
         scope: String,
         outcome: MutantOutcome,
+    ) {
+        self.insert_checked(mutant_id, file_hash, scope, outcome, false);
+    }
+
+    /// Insert with an explicit `equiv_checked` marker. `insert` is the
+    /// `equiv_checked == false` shorthand; the engine calls this directly so
+    /// a detector-on outcome is stored pre-classified.
+    pub fn insert_checked(
+        &mut self,
+        mutant_id: String,
+        file_hash: String,
+        scope: String,
+        outcome: MutantOutcome,
+        equiv_checked: bool,
     ) {
         // Only cache deterministic outcomes — never skipped (filter-dependent)
         // and never errored (transient infra issue).
@@ -314,6 +361,7 @@ impl Cache {
             file_hash,
             scope,
             outcome,
+            equiv_checked,
             mac: None,
         };
         if let Some(key) = self.key.as_deref() {
@@ -664,6 +712,135 @@ mod tests {
         assert!(
             loaded.lookup("id-1", "hashA", "scope-x").is_none(),
             "tampered entry must be dropped, not silently trusted"
+        );
+    }
+
+    #[test]
+    fn equiv_checked_marker_roundtrips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+        let mut c = Cache::default();
+        c.insert_checked(
+            "checked".into(),
+            "hashA".into(),
+            "scope-x".into(),
+            MutantOutcome::survived(make_mutant("checked")),
+            true,
+        );
+        c.insert_checked(
+            "unchecked".into(),
+            "hashA".into(),
+            "scope-x".into(),
+            MutantOutcome::survived(make_mutant("unchecked")),
+            false,
+        );
+        c.save(&path).unwrap();
+
+        let loaded = Cache::load(&path);
+        let (_, checked) = loaded.lookup_entry("checked", "hashA", "scope-x").unwrap();
+        assert!(checked, "checked marker must persist");
+        let (_, unchecked) = loaded
+            .lookup_entry("unchecked", "hashA", "scope-x")
+            .unwrap();
+        assert!(!unchecked, "unchecked marker must persist");
+        assert!(loaded.lookup("checked", "hashA", "scope-x").is_some());
+    }
+
+    #[test]
+    fn legacy_entry_missing_marker_defaults_unchecked() {
+        // An on-disk entry written before `equiv_checked` existed has no such
+        // field; serde default must load it as unchecked (forcing a one-time
+        // reclassify on the next detector-on run) rather than failing to parse.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+        let mut c = Cache::default();
+        c.insert_checked(
+            "id-1".into(),
+            "hashA".into(),
+            "scope-x".into(),
+            MutantOutcome::survived(make_mutant("id-1")),
+            true,
+        );
+        c.save(&path).unwrap();
+        // Simulate a pre-marker on-disk shape by dropping the field entirely.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let mut val: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let entry = &mut val["entries"]["id-1"];
+        assert!(
+            entry
+                .as_object_mut()
+                .unwrap()
+                .remove("equiv_checked")
+                .is_some(),
+            "fixture should drop the field"
+        );
+        std::fs::write(&path, serde_json::to_string(&val).unwrap()).unwrap();
+        let loaded = Cache::load(&path);
+        let (_, checked) = loaded.lookup_entry("id-1", "hashA", "scope-x").unwrap();
+        assert!(!checked, "legacy entry must default to unchecked");
+    }
+
+    #[test]
+    fn signed_checked_entry_verifies_and_flag_tamper_is_detected() {
+        let key = b"test-cache-key-with-enough-entropy".to_vec();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+
+        let mut c = keyed_cache(&key);
+        c.insert_checked(
+            "id-1".into(),
+            "hashA".into(),
+            "scope-x".into(),
+            MutantOutcome::survived(make_mutant("id-1")),
+            true,
+        );
+        c.save(&path).unwrap();
+
+        // Untampered: the checked flag is folded into the MAC, so it verifies.
+        let loaded = Cache::load_with_key(&path, Some(key.clone()));
+        assert!(
+            loaded.lookup("id-1", "hashA", "scope-x").is_some(),
+            "signed checked entry should verify"
+        );
+
+        // Flip equiv_checked true→false on disk: MAC dropped its suffix so
+        // recomputation no longer matches, and the entry is dropped.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let tampered = raw.replace("\"equiv_checked\": true", "\"equiv_checked\": false");
+        assert_ne!(raw, tampered, "fixture should differ post-tamper");
+        std::fs::write(&path, tampered).unwrap();
+        let loaded = Cache::load_with_key(&path, Some(key));
+        assert!(
+            loaded.lookup("id-1", "hashA", "scope-x").is_none(),
+            "flipping equiv_checked must invalidate the MAC"
+        );
+    }
+
+    #[test]
+    fn legacy_signed_entry_still_verifies_with_default_marker() {
+        // A MAC computed the pre-marker way (no equiv_checked suffix) must
+        // still verify once the field defaults to false — otherwise upgrading
+        // fermut would silently drop every signed warm-cache entry. Simulate
+        // by signing an entry whose equiv_checked is false: the suffix is
+        // omitted, matching the legacy byte layout exactly.
+        let key = b"test-cache-key-with-enough-entropy".to_vec();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+
+        let mut c = keyed_cache(&key);
+        c.insert_checked(
+            "id-1".into(),
+            "hashA".into(),
+            "scope-x".into(),
+            MutantOutcome::killed(make_mutant("id-1")),
+            false,
+        );
+        c.save(&path).unwrap();
+
+        let loaded = Cache::load_with_key(&path, Some(key));
+        assert!(
+            loaded.lookup("id-1", "hashA", "scope-x").is_some(),
+            "unchecked signed entry must verify like a legacy entry"
         );
     }
 

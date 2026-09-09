@@ -152,8 +152,14 @@ Per-test selection — narrow which tests run per mutant. See the
 dedicated **[Coverage guide](coverage.md)**.
 
 ```sh
-fermut run src/ --coverage coverage.json
+fermut run src/ --coverage .coverage
 ```
+
+fermut reads coverage.py's native `.coverage` SQLite database directly
+and sniffs the file's format, so a legacy `coverage.json` export works
+here too. With a `.coverage` at the project root the flag is optional —
+fermut auto-discovers it (precedence: `--coverage` > config
+`coverage = "…"` > auto-discovered `.coverage` > none).
 
 ## `--sample`
 
@@ -252,7 +258,7 @@ The PR-gate sweet spot is the full stack:
 ```sh
 fermut run src/ --tests tests/ \
     --diff-only origin/main \
-    --coverage coverage.json \
+    --coverage .coverage \
     --ops arith-op-swap,compare-op-swap,boundary-shift,return-value-to-none \
     --timeout 15
 ```

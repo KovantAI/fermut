@@ -30,8 +30,8 @@ fermut migrate <FROM> [PATH] [--config PATH] [--pyproject] [--force]
 | `[tool.mutmut].pytest_add_cli_args_test_selection` (3.x)   | `tests`                                     |
 | `[tool.mutmut].runner` (1.x/2.x)                           | `runner` + `pytest_args`                    |
 | `[tool.mutmut].pytest_add_cli_args` (3.x)                  | `pytest_args`                               |
-| `[tool.mutmut].use_coverage = true` (1.x/2.x)              | `coverage = "coverage.json"`                |
-| `[tool.mutmut].mutate_only_covered_lines = true` (3.x)     | `coverage = "coverage.json"`                |
+| `[tool.mutmut].use_coverage = true` (1.x/2.x)              | `coverage = ".coverage"`                    |
+| `[tool.mutmut].mutate_only_covered_lines = true` (3.x)     | `coverage = ".coverage"`                    |
 | `# pragma: no mutate` in `.py`                             | `# fermut: ignore`                          |
 | `[cosmic-ray].module-path`                                 | `source_root`                               |
 | `[cosmic-ray].timeout` (float)                             | `timeout` (rounded up to whole seconds)     |

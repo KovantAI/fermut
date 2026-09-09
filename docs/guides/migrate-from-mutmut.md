@@ -40,7 +40,7 @@ to the same fermut output.
 | Source root(s) to mutate     | `paths_to_mutate`        | `source_paths`                          | `source_root`                |
 | Test directory               | `tests_dir`              | `pytest_add_cli_args_test_selection`    | `tests`                      |
 | Extra pytest flags           | (folded into `runner`)   | `pytest_add_cli_args`                   | `pytest_args`                |
-| Restrict to covered lines    | `use_coverage = true`    | `mutate_only_covered_lines = true`      | `coverage = "coverage.json"` |
+| Restrict to covered lines    | `use_coverage = true`    | `mutate_only_covered_lines = true`      | `coverage = ".coverage"`     |
 | Type-check filter            | `--mypy` CLI flag        | `type_check_command = [...]`            | built-in `ty` filter         |
 
 ### Shape differences worth knowing
@@ -129,8 +129,8 @@ Common-key mapping:
 | `also_copy`                         | n/a — worker mirror copies the source tree by default            |
 | `pre_mutation`                      | n/a — see *What doesn't translate*                                |
 | `post_mutation`                     | n/a — see *What doesn't translate*                                |
-| `use_coverage` (1.x/2.x) / `--use-coverage` | `coverage = "coverage.json"` + `--coverage`              |
-| `mutate_only_covered_lines` (3.x)   | `coverage = "coverage.json"`                                     |
+| `use_coverage` (1.x/2.x) / `--use-coverage` | `coverage = ".coverage"` + `--coverage` (or `coverage.json`) |
+| `mutate_only_covered_lines` (3.x)   | `coverage = ".coverage"` (or a manual `coverage.json` export)   |
 | `simple_output`                     | `--format json` (machine) or default human                       |
 | `--mypy` (1.x/2.x) / `type_check_command` (3.x) | replaced by built-in `ty` filter (on by default)     |
 
@@ -167,7 +167,7 @@ A side-by-side example:
     tests = "tests"
     runner = "pytest"
     pytest_args = ["-x", "-q"]
-    coverage = "coverage.json"
+    coverage = ".coverage"   # or "coverage.json" for a manual JSON export
     ```
 
 ## CLI
@@ -176,7 +176,7 @@ A side-by-side example:
 |-------------------------------------|-------------------------------------------------|
 | `mutmut run`                        | `fermut run src/ --tests tests/`                |
 | `mutmut run --paths-to-mutate src/` | `fermut run src/`                               |
-| `mutmut run --use-coverage`         | `fermut run --coverage coverage.json`           |
+| `mutmut run --use-coverage`         | `fermut run --coverage .coverage` (or a manual `--coverage coverage.json`) |
 | `mutmut run --mypy`                 | (default: `ty` pre-filter on; `--no-ty-filter` to disable) |
 | `mutmut results`                    | `fermut run --json report.json` then `fermut show report.json` |
 | `mutmut show <id>`                  | `fermut show report.json <id>`                  |

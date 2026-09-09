@@ -52,9 +52,11 @@ jobs:
 Key points:
 
 - `fermut coverage` runs the suite and writes the `.coverage`
-  database fermut reads directly (no `coverage json` export step). Or,
-  manually: `pytest --cov=src --cov-context=test && coverage json -o
-  coverage.json --show-contexts`, passed as `--coverage coverage.json`.
+  database fermut reads directly (no `coverage json` export step). The
+  workflow passes `--coverage .coverage` explicitly; at the project root
+  fermut also auto-discovers it. Or, manually: `pytest --cov=src
+  --cov-context=test && coverage json -o coverage.json --show-contexts`,
+  passed as `--coverage coverage.json` (the legacy JSON path).
 - `fetch-depth: 0` is required so `--diff-only` can compute the
   merge base.
 - `actions/cache` keyed on lockfile + sources persists the result

@@ -54,6 +54,8 @@ use crate::mutator::Mutant;
 mod order;
 mod parse;
 
+pub(crate) use parse::is_sqlite;
+
 /// Per-file, per-line index of test node ids that touched the line.
 #[derive(Debug, Default)]
 pub struct CoverageContexts {

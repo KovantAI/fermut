@@ -44,7 +44,7 @@ pub enum Profile {
     /// generous timeout, no diff filter — catches drift between gates.
     Nightly,
     /// Local dev loop. Sub-samples mutants for fast feedback, short timeout,
-    /// no coverage so it works before you've generated `coverage.json`.
+    /// no coverage so it works before you've generated `.coverage`.
     Local,
     /// Library-author workflow. Every stable op, no experimental noise,
     /// pinned Hypothesis seed for reproducibility.
@@ -130,7 +130,7 @@ struct Detection {
 enum CoverageDetection {
     /// `coverage` or `pytest-cov` is declared in project deps, or the
     /// `coverage` binary is on PATH, or a `.coveragerc` / `[tool.coverage.*]`
-    /// table exists. Safe to wire `coverage = "coverage.json"` into config.
+    /// table exists. Safe to wire `coverage = ".coverage"` into config.
     Present,
     Absent,
 }
@@ -161,7 +161,7 @@ impl PackageManager {
 
 pub fn init(opts: InitOpts) -> Result<()> {
     let detection = detect(&opts.path)?;
-    // Wire `coverage = "coverage.json"` when coverage is already part of
+    // Wire `coverage = ".coverage"` when coverage is already part of
     // the project, OR when the user explicitly asked for it. The latter
     // assumes they'll install coverage themselves — we print the command.
     let wire_coverage_base = detection.coverage == CoverageDetection::Present || opts.with_coverage;
@@ -269,7 +269,7 @@ fn print_next_steps(detection: &Detection, wire_coverage: bool) {
     }
     if wire_coverage {
         println!(
-            "  - generate coverage with per-test contexts before each run:\n      pytest --cov=src --cov-context=test\n      coverage json -o coverage.json --show-contexts\n    (requires pytest-cov; `coverage run --context=LABEL` won't produce per-test contexts)"
+            "  - generate coverage with per-test contexts before each run:\n      pytest --cov=src --cov-context=test\n    (writes `.coverage`, which fermut reads directly — no `coverage json` export needed;\n     requires pytest-cov; `coverage run --context=LABEL` won't produce per-test contexts)"
         );
         if detection.coverage == CoverageDetection::Absent {
             println!(
@@ -494,7 +494,11 @@ fn render_config(d: &Detection, wire_coverage: bool, profile: Option<Profile>) -
         _ => wire_coverage,
     };
     if coverage_on {
-        out.push_str("coverage = \"coverage.json\"\n");
+        // fermut reads coverage.py's native `.coverage` SQLite DB directly, so
+        // no separate `coverage json` export step is needed. `.coverage` at the
+        // project root is also the auto-discovery default, so this line is
+        // strictly a make-it-explicit; it stays for documentation value.
+        out.push_str("coverage = \".coverage\"\n");
     }
 
     if let Some(p) = profile {
@@ -845,7 +849,7 @@ mod tests {
 
     fn render_config_wires_coverage_when_requested() {
         let body = render_config(&fake_detection(), true, None);
-        assert!(body.contains("coverage = \"coverage.json\""));
+        assert!(body.contains("coverage = \".coverage\""));
     }
 
     #[test]
@@ -865,7 +869,7 @@ mod tests {
         let body = render_config(&fake_detection(), false, Some(Profile::PrGate));
         assert!(body.contains("# fermut profile: pr-gate"));
         assert!(body.contains("diff_only = \"main\""));
-        assert!(body.contains("coverage = \"coverage.json\""));
+        assert!(body.contains("coverage = \".coverage\""));
         assert!(body.contains("hypothesis_seed = 12345"));
         assert!(body.contains("timeout = 15"));
         assert!(body.contains("ops = [\"arith-op-swap\""));
@@ -905,7 +909,7 @@ mod tests {
         let mut d = fake_detection();
         d.coverage = CoverageDetection::Absent;
         let body = render_config(&d, false, Some(Profile::PrGate));
-        assert!(body.contains("coverage = \"coverage.json\""));
+        assert!(body.contains("coverage = \".coverage\""));
     }
 
     #[test]

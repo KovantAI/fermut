@@ -90,7 +90,7 @@ See its `README.md`. In brief, per repo with an existing mutmut run:
 # 1. extract mutmut's per-mutant verdicts + diffs
 python extract_mutmut.py <mutmut-worktree> <mutmut-venv>/bin mutmut-<repo>.json
 # 2. generate fermut's mutants (catalogue view: --parity + tiny --sample is enough)
-fermut run <src> --tests tests --coverage coverage.json --parity \
+fermut run <src> --tests tests --coverage .coverage --parity \
     --sample 0.003 --json gen-<repo>.json
 # 3. detection comparison + survivor diff
 python compare.py gen-<repo>.json mutmut-<repo>.json report.md

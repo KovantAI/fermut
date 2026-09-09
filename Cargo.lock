@@ -697,6 +697,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "clap_complete",
+ "filetime",
  "fs2",
  "globset",
  "hex",

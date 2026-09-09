@@ -338,7 +338,7 @@ pub(super) fn numbits_to_lines(blob: &[u8]) -> Vec<u32> {
 /// (`SQLite format 3\0`). coverage.py's `.coverage` is SQLite; the
 /// `coverage json` export is JSON. We check the header rather than the
 /// extension because the DB has no canonical name.
-pub(super) fn is_sqlite(path: &Path) -> Result<bool> {
+pub(crate) fn is_sqlite(path: &Path) -> Result<bool> {
     use std::io::Read;
     let mut f = std::fs::File::open(path)
         .with_context(|| format!("opening coverage file {}", path.display()))?;

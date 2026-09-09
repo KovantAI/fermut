@@ -93,6 +93,9 @@ windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Fou
 assert_cmd = "2"
 predicates = "3"
 serde_json = "1"
+# Deterministic mtime control for the coverage-freshness guard tests (avoids
+# sleep-based ordering, which is flaky on coarse-resolution filesystems).
+filetime = "0.2"
 # Only to construct a `ureq::Error::Rustls` in the transport-retry test; must
 # track the rustls major ureq 3 links (0.23).
 rustls = "0.23"

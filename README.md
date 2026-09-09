@@ -56,8 +56,8 @@ fermut init                     # detect source/tests/runner, write fermut.toml
 
 # fermut init wires per-test coverage when pytest-cov is present;
 # generate it before the first run (skip if your config has no `coverage` key):
-pytest --cov=src --cov-context=test
-coverage json -o coverage.json --show-contexts
+pytest --cov=src --cov-context=test    # writes .coverage; fermut auto-discovers it at the project root
+# (or, manually: coverage json -o coverage.json --show-contexts, then --coverage coverage.json)
 
 fermut run src/ --tests tests/  # first mutation report (add -q to silence progress logs)
 ```
@@ -66,7 +66,7 @@ For a CI gate, generate the opinionated profile instead — diff-only +
 coverage + a narrow operator set, tuned to fail fast on pull requests:
 
 ```sh
-fermut init --profile pr-gate   # writes a CI-shaped fermut.toml (needs git + coverage.json)
+fermut init --profile pr-gate   # writes a CI-shaped fermut.toml (needs git + .coverage)
 ```
 
 It scopes mutation to lines changed vs `main`, so run it inside a git

@@ -41,8 +41,9 @@ guide or reference page.
 
 - **`--diff-only`.** Restrict to lines changed vs. a base ref. Right
   default for PR-time gates.
-- **`--coverage`.** Per-mutant test selection from
-  `coverage.json` per-test contexts. Big wall-clock win.
+- **`--coverage`.** Per-mutant test selection from coverage.py's native
+  `.coverage` SQLite DB (auto-discovered at the project root, or a JSON
+  export) via its per-test contexts. Big wall-clock win.
 - **Sticky PR comments.** `fermut pr-comment` posts a Markdown report
   and updates the **same comment** across re-runs instead of stacking.
 - **JUnit / JSON / HTML / Markdown reports.** Stable JSON shapes, GHA

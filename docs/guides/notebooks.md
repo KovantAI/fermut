@@ -124,7 +124,7 @@ mutant, exactly as it would for any hand-written module.
 
 ## CI
 
-Regenerate the `.py` and `coverage.json` at the start of the run so
+Regenerate the `.py` and `.coverage` at the start of the run so
 neither goes stale against the notebook:
 
 ```sh

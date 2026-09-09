@@ -23,7 +23,9 @@ What each flag does:
   Pair with your editor's save-on-blur for true continuous feedback.
 - **`--coverage .coverage`** — keeps per-mutant test selection
   on. Same database [First steps step 2](../getting-started/first-steps.md#2-get-an-honest-baseline)
-  generates via `fermut coverage`. Per-mutant cost stays low.
+  generates via `fermut coverage`. Per-mutant cost stays low. If the
+  `.coverage` sits at the project root, fermut auto-discovers it and
+  you can drop the flag; pass it explicitly to be unambiguous.
 
 Together: sub-second feedback on whether the test you just wrote
 actually kills the mutant you intended.

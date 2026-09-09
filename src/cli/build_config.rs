@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::RunConfigArgs;
 use crate::config::{CacheScope, Config, ConfigSource, IsolationMode, LoadedConfig, RunnerKind};
@@ -153,22 +153,69 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         (diff_base, since)
     };
 
-    let coverage_path = if f.no_coverage {
-        None
+    let project_root =
+        crate::runner::find_project_root(&source_root).unwrap_or_else(|| source_root.clone());
+    // Resolve the coverage file and remember whether it was *explicitly* wired
+    // (CLI/config) or *auto-discovered*. The provenance decides how we react to
+    // a stale file below: an explicit path is the user's choice (warn, obey),
+    // an auto-discovered one is opportunistic (decline rather than silently
+    // narrow test sets with outdated data).
+    let explicit_coverage = f
+        .coverage
+        .or_else(|| file.coverage.clone().map(|p| loaded.resolve_path(p)));
+    let (mut coverage_path, coverage_auto) = if f.no_coverage {
+        (None, false)
+    } else if let Some(p) = explicit_coverage {
+        (Some(p), false)
     } else {
-        f.coverage
-            .or_else(|| file.coverage.clone().map(|p| loaded.resolve_path(p)))
-    };
-    let coverage = match &coverage_path {
-        Some(p) => {
-            let project_root = crate::runner::find_project_root(&source_root)
-                .unwrap_or_else(|| source_root.clone());
-            Some(crate::filter::coverage::CoverageContexts::from_path(
-                p,
-                &source_root,
-                &project_root,
-            )?)
+        // Nothing wired explicitly: fall back to coverage.py's canonical
+        // `.coverage` SQLite DB at the project root if one is present. fermut
+        // reads it directly, so a plain `pytest --cov-context=test` is enough —
+        // no config edit and no `coverage json` export needed.
+        match discover_coverage_db(&project_root) {
+            Some(p) => (Some(p), true),
+            None => (None, false),
         }
+    };
+
+    // Freshness guard: a `.coverage` older than the source/tests it claims to
+    // describe narrows each mutant's test set from stale data — mutants on
+    // newly-added or edited lines get wrongly skipped (false survivors / vacuous
+    // 100%). Detect it by mtime and act on provenance.
+    if let Some(p) = &coverage_path {
+        if let Some(newer) = newer_source_than_coverage(p, &source_root, tests.as_deref()) {
+            if coverage_auto {
+                warn!(
+                    "ignoring auto-discovered coverage {} — it is older than {} \
+                     (and possibly other sources/tests). Using stale coverage would \
+                     wrongly skip mutants on changed lines, so this run proceeds \
+                     without coverage selection. Refresh it with \
+                     `pytest --cov={src} --cov-context=test` (or `fermut coverage`).",
+                    p.display(),
+                    newer.display(),
+                    src = source_root.display(),
+                );
+                coverage_path = None;
+            } else {
+                warn!(
+                    "coverage {} looks stale — it is older than {} (and possibly \
+                     other sources/tests). Survivors on changed lines may be false; \
+                     regenerate before trusting results: \
+                     `pytest --cov={src} --cov-context=test` (or `fermut coverage`).",
+                    p.display(),
+                    newer.display(),
+                    src = source_root.display(),
+                );
+            }
+        }
+    }
+
+    let coverage = match &coverage_path {
+        Some(p) => Some(crate::filter::coverage::CoverageContexts::from_path(
+            p,
+            &source_root,
+            &project_root,
+        )?),
         None => None,
     };
 
@@ -329,6 +376,67 @@ fn absolutize(p: PathBuf) -> PathBuf {
     std::env::current_dir().map(|d| d.join(&p)).unwrap_or(p)
 }
 
+/// Auto-discover coverage.py's canonical `.coverage` SQLite DB at the project
+/// root when no coverage path was wired. Returns it only when the file exists
+/// *and* sniffs as a real SQLite DB — guarding against a stray/empty `.coverage`
+/// that isn't a coverage database. Verifying it actually carries per-test
+/// contexts is left to `from_path`, which errors with the regeneration recipe.
+fn discover_coverage_db(project_root: &Path) -> Option<PathBuf> {
+    let candidate = project_root.join(".coverage");
+    if !candidate.is_file() {
+        return None;
+    }
+    match filter::coverage::is_sqlite(&candidate) {
+        Ok(true) => {
+            info!(
+                "auto-discovered coverage DB at {} (no `coverage` key set)",
+                candidate.display()
+            );
+            Some(candidate)
+        }
+        _ => None,
+    }
+}
+
+/// Freshness check for a coverage file: return the first `.py` under
+/// `source_root` (or `tests`) whose mtime is newer than the coverage file's,
+/// i.e. code that changed after the coverage was recorded and would therefore
+/// be described by stale test-context data. `None` means the coverage is at
+/// least as new as every source/test file (fresh), or that mtimes couldn't be
+/// read (be permissive — never block a run on a stat failure).
+fn newer_source_than_coverage(
+    coverage: &Path,
+    source_root: &Path,
+    tests: Option<&Path>,
+) -> Option<PathBuf> {
+    let cov_mtime = std::fs::metadata(coverage).ok()?.modified().ok()?;
+    let mut roots = vec![source_root];
+    if let Some(t) = tests {
+        // Skip a tests dir nested under source_root — walking source_root
+        // already covers it, and double-walking is wasted stats.
+        if !t.starts_with(source_root) {
+            roots.push(t);
+        }
+    }
+    for root in roots {
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "py") {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            let Ok(mtime) = meta.modified() else { continue };
+            if mtime > cov_mtime {
+                return Some(path.to_path_buf());
+            }
+        }
+    }
+    None
+}
+
 fn parse_isolation_env(s: String) -> Option<IsolationMode> {
     match s.trim().to_ascii_lowercase().as_str() {
         "auto" => Some(IsolationMode::Auto),
@@ -382,6 +490,109 @@ mod tests {
             parity: false,
             exclude: Vec::new(),
         }
+    }
+
+    #[test]
+    fn discover_coverage_db_finds_sqlite_at_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join(".coverage");
+        // Minimal real SQLite DB (rusqlite writes the magic header on create).
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("CREATE TABLE coverage_schema (version integer)", [])
+            .unwrap();
+        drop(conn);
+        assert_eq!(discover_coverage_db(tmp.path()), Some(db));
+    }
+
+    #[test]
+    fn discover_coverage_db_ignores_non_sqlite_file() {
+        // A stray `.coverage` that isn't a SQLite DB must not be picked up.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".coverage"), "not a database").unwrap();
+        assert_eq!(discover_coverage_db(tmp.path()), None);
+    }
+
+    #[test]
+    fn discover_coverage_db_none_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(discover_coverage_db(tmp.path()), None);
+    }
+
+    /// Stamp `path`'s mtime to `epoch_secs` so freshness tests are deterministic
+    /// regardless of filesystem timestamp resolution.
+    fn set_mtime(path: &Path, epoch_secs: i64) {
+        filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(epoch_secs, 0)).unwrap();
+    }
+
+    #[test]
+    fn freshness_none_when_coverage_newer_than_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let py = src.join("a.py");
+        std::fs::write(&py, "x = 1\n").unwrap();
+        let cov = tmp.path().join(".coverage");
+        std::fs::write(&cov, "db").unwrap();
+        set_mtime(&py, 1000);
+        set_mtime(&cov, 2000); // coverage recorded after the source → fresh
+        assert_eq!(newer_source_than_coverage(&cov, &src, None), None);
+    }
+
+    #[test]
+    fn freshness_flags_source_edited_after_coverage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let py = src.join("a.py");
+        std::fs::write(&py, "x = 1\n").unwrap();
+        let cov = tmp.path().join(".coverage");
+        std::fs::write(&cov, "db").unwrap();
+        set_mtime(&cov, 1000);
+        set_mtime(&py, 2000); // source edited after coverage → stale
+        assert_eq!(newer_source_than_coverage(&cov, &src, None), Some(py));
+    }
+
+    #[test]
+    fn freshness_flags_new_test_after_coverage() {
+        // A test added after coverage was recorded isn't reflected in the
+        // contexts → its would-be kills become false survivors. Detected via
+        // the separate tests dir.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let tests = tmp.path().join("tests");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::create_dir(&tests).unwrap();
+        let s = src.join("a.py");
+        std::fs::write(&s, "x = 1\n").unwrap();
+        let cov = tmp.path().join(".coverage");
+        std::fs::write(&cov, "db").unwrap();
+        set_mtime(&s, 500);
+        set_mtime(&cov, 1000);
+        let t = tests.join("test_a.py");
+        std::fs::write(&t, "def test(): pass\n").unwrap();
+        set_mtime(&t, 2000); // new test after coverage → stale
+        assert_eq!(
+            newer_source_than_coverage(&cov, &src, Some(&tests)),
+            Some(t)
+        );
+    }
+
+    #[test]
+    fn freshness_ignores_non_python_files() {
+        // A newer README/data file must not trip the guard — only `.py` counts.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let py = src.join("a.py");
+        std::fs::write(&py, "x = 1\n").unwrap();
+        let cov = tmp.path().join(".coverage");
+        std::fs::write(&cov, "db").unwrap();
+        set_mtime(&py, 500);
+        set_mtime(&cov, 1000);
+        let readme = src.join("notes.md");
+        std::fs::write(&readme, "hi\n").unwrap();
+        set_mtime(&readme, 2000); // newer, but not .py → ignored
+        assert_eq!(newer_source_than_coverage(&cov, &src, None), None);
     }
 
     /// A `RunConfigArgs` with every flag defaulted off/none, carrying the

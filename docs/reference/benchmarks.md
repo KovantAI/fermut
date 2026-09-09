@@ -73,7 +73,7 @@ The picture is **mixed but competitive**:
   fast tests, where fermut's ty + coverage overhead doesn't pay for
   itself as it does on the heavier suites.
 
-Because `coverage_prep` is a **one-time** cost (the `coverage.json` is
+Because `coverage_prep` is a **one-time** cost (the `.coverage` DB is
 reused on every subsequent run), the *steady-state* mutation cost is
 the `mutation` column alone — e.g. typer ~74s vs mutmut ~298s (~4×).
 The cold totals above are the conservative first-contact figure.
@@ -117,20 +117,21 @@ within ~1.3 pts run-to-run.
 
 ### The coverage filter is what makes fermut fast
 
-fermut consumes a `coverage.json` with per-test contexts and runs
-**only the tests that touch a mutated line** per mutant. Without it,
-every mutant runs the full suite — the difference is large (figures
-from an earlier session; the cold table above is canonical for the
-coverage-on absolutes):
+fermut reads coverage.py's native `.coverage` SQLite DB (written by
+`pytest --cov=src --cov-context=test`, and auto-discovered at the
+project root) with per-test contexts, and runs **only the tests that
+touch a mutated line** per mutant. Without it, every mutant runs the
+full suite — the difference is large (figures from an earlier session;
+the cold table above is canonical for the coverage-on absolutes):
 
 - **pyjwt:** ~392s → **~47s** with coverage (~8×), and the score
   rises (68.0 → 81.9) because mutants on lines *no test covers* are
   now correctly **skipped** rather than counted as survivors.
 - **typer:** ~2174s → **~214s** (~10×).
 
-Coverage is **opt-in** (`--coverage coverage.json`, or wire it via
-`fermut init`); the benchmark harness now generates it automatically
-for fermut. Mutmut has no equivalent, so its per-mutant cost is the
+Coverage is **opt-in** (auto-discovered from `.coverage` at the project
+root, or pass `--coverage .coverage`, or wire it via `fermut init`); the
+benchmark harness now generates it automatically for fermut. Mutmut has no equivalent, so its per-mutant cost is the
 full suite — which is also why it wins on a tiny-suite repo like
 more-itertools where the full suite is already cheap.
 
@@ -180,7 +181,7 @@ re-run, no edits. `loop` = 5 iterations of (touch source → re-run →
 revert), averaged.
 
 `Cold total` = coverage_prep + mutation_run (first-contact cost).
-`Warm` / `Loop` reuse the populated cache + existing `coverage.json`,
+`Warm` / `Loop` reuse the populated cache + existing `.coverage` DB,
 so the coverage_prep split doesn't apply to them.
 
 | Repo (fermut)          | Cold total | Warm   | Loop (avg/iter) |
@@ -299,10 +300,13 @@ and `benchmarks/configs/tools.toml`. Results land in
   --fixtures`. One genuine fermut runtime bug was also fixed: a
   single-file target (`fermut run path/to/file.py`) anchored its
   `.fermut/` cache under the file and silently disabled caching.
-- **Coverage-file size.** `coverage json --show-contexts` on a large
-  suite is huge (typer's `coverage.json` came out ~3.9 GB). It works
-  but won't scale; scoping coverage to the package (excluding test
-  files / big fixtures) is a follow-up.
+- **Coverage-file size.** The legacy `coverage json --show-contexts`
+  export on a large suite is huge (typer's `coverage.json` came out
+  ~3.9 GB). It works but won't scale. This is a large part of why the
+  happy path now reads coverage.py's native `.coverage` SQLite DB
+  directly — it is far smaller (typer's is a fraction of the JSON, no
+  denormalized text blob) and needs no export step. Scoping coverage to
+  the package (excluding test files / big fixtures) shrinks it further.
 - **Comparison coverage.** fermut is measured coverage-on across all
   ten repos. mutmut cold+warm covers markupsafe, pyjwt, typer,
   more-itertools (click/starlette fail, trio bails after ~3.8h).

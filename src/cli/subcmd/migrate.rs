@@ -32,6 +32,29 @@ pub struct MigrateOpts {
     pub no_pragma_rewrite: bool,
 }
 
+impl From<MigrateArgs> for MigrateOpts {
+    fn from(a: MigrateArgs) -> Self {
+        let MigrateArgs {
+            from,
+            path,
+            config,
+            pyproject,
+            force,
+            dry_run,
+            no_pragma_rewrite,
+        } = a;
+        MigrateOpts {
+            source: from.into(),
+            path,
+            config,
+            pyproject,
+            force,
+            dry_run,
+            no_pragma_rewrite,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum MigrateSource {
     Mutmut,

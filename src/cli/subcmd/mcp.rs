@@ -361,7 +361,7 @@ fn tool_explain(args: &Value) -> Result<Value> {
         model: None,
         no_cache: false,
         cache_path: None,
-        project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        project_root: crate::cli::current_project_root(),
         format: Format::Json,
     };
     Ok(serde_json::to_value(build_explain_report(&opts)?)?)
@@ -373,7 +373,7 @@ fn tool_doctor(args: &Value) -> Result<Value> {
 }
 
 fn tool_baseline(args: &Value) -> Result<Value> {
-    use super::baseline::{compute_baseline, BaselineOpts};
+    use super::baseline::{compute_baseline, BaselineArgs};
     use crate::cli::Format;
     let path = PathBuf::from(str_arg(args, "path").unwrap_or("."));
     let full = args.get("full").and_then(Value::as_bool).unwrap_or(false);
@@ -383,7 +383,7 @@ fn tool_baseline(args: &Value) -> Result<Value> {
         .and_then(Value::as_u64)
         .map(|n| n as usize)
         .unwrap_or(3);
-    let opts = BaselineOpts {
+    let opts = BaselineArgs {
         path,
         full,
         sample,

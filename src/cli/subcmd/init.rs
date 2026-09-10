@@ -1173,3 +1173,61 @@ pub(crate) struct InitArgs {
     #[arg(long)]
     pub(crate) dry_run: bool,
 }
+
+/// Dispatch handler: resolves `--list-profiles` / `--profile <name>` and
+/// runs the config wizard. Owns the profile-parsing that used to sit in the
+/// `cli/mod.rs` match arm so dispatch stays a thin delegation.
+pub(crate) fn run(args: InitArgs) -> Result<()> {
+    let InitArgs {
+        path,
+        pyproject,
+        force,
+        with_gha,
+        with_coverage,
+        profile,
+        list_profiles,
+        dry_run,
+    } = args;
+
+    if list_profiles {
+        print_profile_catalogue();
+        return Ok(());
+    }
+
+    let profile = match profile {
+        Some(name) => Some(Profile::parse(&name).ok_or_else(|| {
+            anyhow!(
+                "unknown profile `{name}`. Run `fermut init --list-profiles` to see the catalogue."
+            )
+        })?),
+        None => None,
+    };
+
+    init(InitOpts {
+        path,
+        pyproject,
+        force,
+        with_gha,
+        with_coverage,
+        profile,
+        dry_run,
+    })
+}
+
+/// Print the curated-profile catalogue (name + description), aligned.
+fn print_profile_catalogue() {
+    println!("Available profiles (pass with --profile <name>):\n");
+    let name_width = Profile::ALL
+        .iter()
+        .map(|p| p.name().len())
+        .max()
+        .unwrap_or(0);
+    for p in Profile::ALL {
+        println!(
+            "  {:<width$}  {}",
+            p.name(),
+            p.description(),
+            width = name_width
+        );
+    }
+}

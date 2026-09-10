@@ -150,3 +150,33 @@ pub(crate) struct CleanArgs {
     #[arg(long)]
     pub(crate) history_path: Option<std::path::PathBuf>,
 }
+
+/// Dispatch handler: resolves the configured history-log path (so a custom
+/// `history_path` is preserved, not clobbered) and wipes the cache.
+pub(crate) fn run(args: CleanArgs) -> Result<()> {
+    let CleanArgs { path, history_path } = args;
+    let resolved = resolve_history_path(&path, history_path)?;
+    clean_cache(&path, &resolved)
+}
+
+/// Resolve the run-history log path the same way `build_config` does, but
+/// without requiring the full runtime `Config`. Preserves the user's
+/// configured history file (which may live under `.fermut/` with a custom
+/// name) instead of only the default `history.jsonl`.
+fn resolve_history_path(
+    path: &Path,
+    cli_history_path: Option<std::path::PathBuf>,
+) -> Result<std::path::PathBuf> {
+    if let Some(p) = cli_history_path {
+        return Ok(p);
+    }
+    let loaded = crate::config::LoadedConfig::load(path)?;
+    Ok(loaded
+        .file
+        .history_path
+        .clone()
+        .map(|p| loaded.resolve_path(p))
+        .unwrap_or_else(|| {
+            crate::history::default_history_path(&crate::history::resolve_root(path))
+        }))
+}

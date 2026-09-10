@@ -3,8 +3,11 @@
 //! - `build_config` — merges CLI args with the loaded config file into a
 //!   runtime [`Config`](crate::config::Config). Pure function, easy to test.
 //! - `subcmd` — one handler per `Cmd` variant. `Cli::run` is a thin dispatch
-//!   match: each arm destructures its variant and delegates to the matching
-//!   `subcmd::<name>` handler (e.g. `subcmd::run::run`, `subcmd::list::run`).
+//!   match: every arm is a single delegation to the variant's handler, either
+//!   directly (`subcmd::show::run(args)`) or through the pure `Args → Opts`
+//!   conversion (`run(args.into())`). No arm carries command logic itself —
+//!   destructuring, path resolution, and profile parsing live in the handlers
+//!   (e.g. `subcmd::init::run`, `subcmd::clean::run`, `merge::run`).
 
 pub(crate) mod build_config;
 mod merge;
@@ -14,30 +17,24 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
-use clap_complete::generate;
 use tracing_subscriber::EnvFilter;
 
-use crate::report::{ReportFormat, ReportSinks};
+use crate::report::ReportFormat;
 
-use merge::merge_reports;
 use subcmd::{
-    autofix::{autofix, AutofixOpts},
-    baseline::{baseline, BaselineOpts},
-    clean::clean_cache,
+    autofix::autofix,
+    baseline::baseline,
     coverage::coverage,
     dashboard::dashboard,
     doctor::doctor,
-    explain::{explain, ExplainOpts},
-    init::{init, InitOpts},
+    explain::explain,
     mcp::serve as mcp_serve,
-    migrate::{migrate, MigrateOpts, MigrateSource},
-    next::{next, NextOpts},
+    migrate::{migrate, MigrateSource},
+    next::next,
     pr_comment::pr_comment,
-    run::RunOpts,
-    score::{score, ScoreOpts},
-    show::show,
-    suggest::{suggest, SuggestOpts},
-    trend::{trend, TrendGroupBy, TrendOpts, TrendScale},
+    score::score,
+    suggest::suggest,
+    trend::{trend, TrendGroupBy, TrendScale},
 };
 
 #[derive(Parser, Debug)]
@@ -538,420 +535,40 @@ cli_enum! {
     }
 }
 
-fn print_profile_catalogue() {
-    println!("Available profiles (pass with --profile <name>):\n");
-    let name_width = subcmd::init::Profile::ALL
-        .iter()
-        .map(|p| p.name().len())
-        .max()
-        .unwrap_or(0);
-    for p in subcmd::init::Profile::ALL {
-        println!(
-            "  {:<width$}  {}",
-            p.name(),
-            p.description(),
-            width = name_width
-        );
-    }
-}
-
-/// `From<XArgs> for XOpts` for every subcommand whose CLI struct maps to its
-/// options struct by a straight field copy plus trivial per-field transforms
-/// (`.into()`, renames, sink nesting, `cwd` lookup). This keeps [`Cli::run`]'s
-/// dispatch arms down to a single `x(args.into())` call each. Subcommands with
-/// real control flow in their arm (`init`, `clean`, `merge`, `completions`,
-/// `show`) are converted inline instead.
-mod from_args {
-    use super::*;
-
-    impl From<subcmd::run::RunArgs> for RunOpts {
-        fn from(a: subcmd::run::RunArgs) -> Self {
-            let subcmd::run::RunArgs {
-                path,
-                cfg_args,
-                annotate,
-                watch,
-                format,
-                json,
-                junit,
-                html,
-                markdown,
-                trend,
-                trend_branch,
-                fail_on_regression,
-                no_fail,
-            } = a;
-            RunOpts {
-                path,
-                cfg_args,
-                annotate,
-                watch,
-                format,
-                sinks: ReportSinks {
-                    json,
-                    junit,
-                    html,
-                    markdown,
-                },
-                trend,
-                trend_branch,
-                fail_on_regression,
-                no_fail,
-            }
-        }
-    }
-
-    impl From<subcmd::next::NextArgs> for NextOpts {
-        fn from(a: subcmd::next::NextArgs) -> Self {
-            let subcmd::next::NextArgs {
-                report,
-                limit,
-                all,
-                max_tokens,
-                format,
-            } = a;
-            NextOpts {
-                report,
-                limit: if all { None } else { Some(limit) },
-                max_tokens,
-                format,
-            }
-        }
-    }
-
-    impl From<subcmd::explain::ExplainArgs> for ExplainOpts {
-        fn from(a: subcmd::explain::ExplainArgs) -> Self {
-            let subcmd::explain::ExplainArgs {
-                report,
-                target,
-                context,
-                tests,
-                coverage,
-                llm,
-                model,
-                no_cache,
-                cache_path,
-                format,
-            } = a;
-            ExplainOpts {
-                report,
-                target,
-                context_lines: context,
-                tests,
-                coverage,
-                llm,
-                model,
-                no_cache,
-                cache_path,
-                project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                format,
-            }
-        }
-    }
-
-    impl From<subcmd::autofix::AutofixArgs> for AutofixOpts {
-        fn from(a: subcmd::autofix::AutofixArgs) -> Self {
-            let subcmd::autofix::AutofixArgs {
-                report,
-                target,
-                all_survivors,
-                path,
-                tests,
-                python,
-                out,
-                model,
-                context,
-                sample_count,
-                timeout,
-                no_cache,
-                cache_path,
-                keep_failed,
-                format,
-            } = a;
-            AutofixOpts {
-                report,
-                target,
-                all_survivors,
-                path,
-                tests,
-                python,
-                out,
-                model,
-                context_lines: context,
-                sample_count,
-                timeout,
-                no_cache,
-                cache_path,
-                keep_failed,
-                format,
-            }
-        }
-    }
-
-    impl From<subcmd::suggest::SuggestArgs> for SuggestOpts {
-        fn from(a: subcmd::suggest::SuggestArgs) -> Self {
-            let subcmd::suggest::SuggestArgs {
-                report,
-                target,
-                all_survivors,
-                apply,
-                out,
-                model,
-                tests,
-                context,
-                sample_count,
-                no_cache,
-                cache_path,
-                format,
-                parallel,
-            } = a;
-            SuggestOpts {
-                report,
-                target,
-                all_survivors,
-                apply,
-                out,
-                model,
-                tests,
-                context_lines: context,
-                sample_count,
-                no_cache,
-                cache_path,
-                project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                format,
-                parallel,
-            }
-        }
-    }
-
-    impl From<subcmd::trend::TrendArgs> for TrendOpts {
-        fn from(a: subcmd::trend::TrendArgs) -> Self {
-            let subcmd::trend::TrendArgs {
-                path,
-                history_path,
-                limit,
-                all,
-                branch,
-                since,
-                until,
-                fail_on_regression,
-                scale,
-                diff,
-                by,
-                format,
-                strict,
-            } = a;
-            TrendOpts {
-                path,
-                history_path,
-                limit,
-                all,
-                branch,
-                since,
-                until,
-                fail_on_regression,
-                scale: scale.into(),
-                diff,
-                group_by: by.map(Into::into),
-                format,
-                strict,
-            }
-        }
-    }
-
-    impl From<subcmd::score::ScoreArgs> for ScoreOpts {
-        fn from(a: subcmd::score::ScoreArgs) -> Self {
-            let subcmd::score::ScoreArgs {
-                path,
-                history_path,
-                baseline,
-                branch,
-                fail_on_regression,
-                format,
-            } = a;
-            ScoreOpts {
-                path,
-                history_path,
-                baseline,
-                branch,
-                fail_on_regression,
-                format,
-            }
-        }
-    }
-
-    impl From<subcmd::baseline::BaselineArgs> for BaselineOpts {
-        fn from(a: subcmd::baseline::BaselineArgs) -> Self {
-            let subcmd::baseline::BaselineArgs {
-                path,
-                full,
-                sample,
-                top,
-                format,
-                filter,
-            } = a;
-            BaselineOpts {
-                path,
-                full,
-                sample,
-                top,
-                format,
-                filter,
-            }
-        }
-    }
-
-    impl From<subcmd::migrate::MigrateArgs> for MigrateOpts {
-        fn from(a: subcmd::migrate::MigrateArgs) -> Self {
-            let subcmd::migrate::MigrateArgs {
-                from,
-                path,
-                config,
-                pyproject,
-                force,
-                dry_run,
-                no_pragma_rewrite,
-            } = a;
-            MigrateOpts {
-                source: from.into(),
-                path,
-                config,
-                pyproject,
-                force,
-                dry_run,
-                no_pragma_rewrite,
-            }
-        }
-    }
+/// The current working directory as the project root, falling back to `.`
+/// when the process has no readable cwd. The one place this I/O lives: handlers
+/// call it and pass the result into the (pure) `Args → Opts` conversion, so the
+/// conversion stays deterministic and unit-testable. Do not inline
+/// `std::env::current_dir()` at a call site — thread it through here.
+pub(crate) fn current_project_root() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 impl Cli {
     pub fn run(self) -> Result<()> {
         match self.cmd {
             Cmd::Run(args) => subcmd::run::run(args.into()),
-            Cmd::Show(args) => {
-                let subcmd::show::ShowArgs {
-                    report,
-                    target,
-                    all,
-                } = args;
-                show(&report, target.as_deref(), all)
-            }
+            Cmd::Show(args) => subcmd::show::run(args),
             Cmd::Next(args) => next(args.into()),
-            Cmd::Explain(args) => explain(args.into()),
+            Cmd::Explain(args) => explain((args, current_project_root()).into()),
             Cmd::Autofix(args) => autofix(args.into()),
-            Cmd::Suggest(args) => suggest(args.into()),
+            Cmd::Suggest(args) => suggest((args, current_project_root()).into()),
             Cmd::Mcp => mcp_serve(),
-            Cmd::Completions(args) => {
-                let subcmd::completions::CompletionsArgs { shell } = args;
-                {
-                    let mut cmd = Cli::command();
-                    generate(shell, &mut cmd, "fermut", &mut std::io::stdout());
-                    Ok(())
-                }
-            }
+            Cmd::Completions(args) => subcmd::completions::run(args, Cli::command()),
             Cmd::Trend(args) => trend(args.into()),
-            Cmd::Score(args) => score(args.into()),
+            Cmd::Score(args) => score(args),
             Cmd::Dashboard(args) => dashboard(args),
             Cmd::Doctor(args) => doctor(args),
-            Cmd::Baseline(args) => baseline(args.into()),
+            Cmd::Baseline(args) => baseline(args),
             Cmd::PrComment(args) => pr_comment(args),
-            Cmd::Init(args) => {
-                let subcmd::init::InitArgs {
-                    path,
-                    pyproject,
-                    force,
-                    with_gha,
-                    with_coverage,
-                    profile,
-                    list_profiles,
-                    dry_run,
-                } = args;
-                {
-                    if list_profiles {
-                        print_profile_catalogue();
-                        return Ok(());
-                    }
-                    let profile = match profile {
-                    Some(name) => Some(
-                        subcmd::init::Profile::parse(&name).ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "unknown profile `{name}`. Run `fermut init --list-profiles` to see the catalogue."
-                            )
-                        })?,
-                    ),
-                    None => None,
-                };
-                    init(InitOpts {
-                        path,
-                        pyproject,
-                        force,
-                        with_gha,
-                        with_coverage,
-                        profile,
-                        dry_run,
-                    })
-                }
-            }
+            Cmd::Init(args) => subcmd::init::run(args),
             Cmd::Migrate(args) => migrate(args.into()),
             Cmd::Coverage(args) => coverage(args),
-            Cmd::Clean(args) => {
-                let subcmd::clean::CleanArgs { path, history_path } = args;
-                {
-                    let resolved = resolve_history_path(&path, history_path)?;
-                    clean_cache(&path, &resolved)
-                }
-            }
-            Cmd::Merge(args) => {
-                let merge::MergeArgs {
-                    inputs,
-                    json,
-                    junit,
-                    html,
-                    markdown,
-                    history,
-                    config_hash,
-                    project,
-                } = args;
-                merge_reports(
-                    &inputs,
-                    &ReportSinks {
-                        json,
-                        junit,
-                        html,
-                        markdown,
-                    },
-                    history.as_ref(),
-                    config_hash,
-                    &project,
-                )
-            }
+            Cmd::Clean(args) => subcmd::clean::run(args),
+            Cmd::Merge(args) => merge::run(args),
             Cmd::List(args) => subcmd::list::run(args),
         }
     }
-}
-
-/// Resolve the run-history log path the same way `build_config` does, but
-/// without requiring the full runtime `Config`. Used by `fermut clean` so
-/// it preserves the user's configured history file (which may live under
-/// `.fermut/` with a custom name) instead of only the default
-/// `history.jsonl`.
-fn resolve_history_path(
-    path: &std::path::Path,
-    cli_history_path: Option<PathBuf>,
-) -> Result<PathBuf> {
-    if let Some(p) = cli_history_path {
-        return Ok(p);
-    }
-    let loaded = crate::config::LoadedConfig::load(path)?;
-    Ok(loaded
-        .file
-        .history_path
-        .clone()
-        .map(|p| loaded.resolve_path(p))
-        .unwrap_or_else(|| {
-            crate::history::default_history_path(&crate::history::resolve_root(path))
-        }))
 }
 
 #[cfg(test)]

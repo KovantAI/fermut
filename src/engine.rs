@@ -396,15 +396,31 @@ fn evaluate(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
     let identity_hash = mutant_identity_hash(ctx.cfg, mutant, ctx.file_hashes, ctx.scope_maps);
 
     if let Some(hash) = &identity_hash {
-        if let Some(cached) = lock_recover(ctx.cache).lookup(&mutant.id, hash, &scope) {
+        if let Some((cached, checked)) =
+            lock_recover(ctx.cache).lookup_entry(&mutant.id, hash, &scope)
+        {
             // Translate the cached verdict against the current detector
             // setting before returning. The cache stores the post-equiv
-            // outcome, but `maybe_remap_equivalent` is invertible:
-            // Survived↔Equivalent flip based on whether `equiv` is Some/None.
-            // Lets `--no-equiv-detect` toggle take effect without busting
-            // the cache. Detector rule changes are *not* covered — those
-            // need a scope-prefix bump.
-            return maybe_remap_equivalent(cached, ctx.equiv, ctx.file_sources);
+            // outcome and an `equiv_checked` marker, so the common warm path
+            // is a pure Survived↔Equivalent flip (no pipeline, no CPython
+            // subprocess). `remap_cached_outcome` only pays the classify cost
+            // once — for a `Survived` cached by a detector-off run — and
+            // rewrites the entry so the next warm run skips it. Lets
+            // `--no-equiv-detect` toggle take effect without busting the
+            // cache. Detector rule changes are *not* covered — those need a
+            // scope-prefix bump.
+            let (outcome, rewrite) =
+                remap_cached_outcome(cached, checked, ctx.equiv, ctx.file_sources);
+            if let Some(new_checked) = rewrite {
+                lock_recover(ctx.cache).insert_checked(
+                    mutant.id.clone(),
+                    hash.clone(),
+                    scope.clone(),
+                    outcome.clone(),
+                    new_checked,
+                );
+            }
+            return outcome;
         }
     }
 
@@ -416,7 +432,16 @@ fn evaluate(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
     let outcome = maybe_remap_equivalent(outcome, ctx.equiv, ctx.file_sources);
 
     if let Some(hash) = identity_hash {
-        lock_recover(ctx.cache).insert(mutant.id.clone(), hash, scope, outcome.clone());
+        // A detector-on run classified any surviving mutant just above, so
+        // the stored outcome is already post-equiv — mark it checked so warm
+        // runs never re-classify it. A detector-off run leaves it unchecked.
+        lock_recover(ctx.cache).insert_checked(
+            mutant.id.clone(),
+            hash,
+            scope,
+            outcome.clone(),
+            ctx.equiv.is_some(),
+        );
     }
 
     outcome
@@ -462,6 +487,21 @@ fn maybe_remap_equivalent(
         }
         return outcome;
     };
+    classify_survivor(pipeline, outcome, file_sources)
+}
+
+/// Run the equivalence pipeline on a `Survived` outcome, promoting it to
+/// `Equivalent` only on a `ProvablyEquivalent` verdict. Non-`Survived`
+/// outcomes pass through untouched. This is the one place that calls
+/// `pipeline.classify` — and thus the only place that can spawn the CPython
+/// bytecode probe — so keeping its callers on the cold path (fresh run, or a
+/// one-time reclassify of a detector-off cache entry) is what makes the warm
+/// cache free of subprocess churn.
+fn classify_survivor(
+    pipeline: &EquivPipeline,
+    outcome: MutantOutcome,
+    file_sources: &HashMap<PathBuf, String>,
+) -> MutantOutcome {
     let MutantOutcome::Survived { mutant } = outcome else {
         return outcome;
     };
@@ -475,6 +515,42 @@ fn maybe_remap_equivalent(
         } => MutantOutcome::equivalent(mutant, reason, src),
         _ => MutantOutcome::Survived { mutant },
     }
+}
+
+/// Translate a *cached* outcome against the current detector setting, using
+/// the entry's `equiv_checked` marker to avoid re-running the pipeline.
+///
+/// Returns the outcome to report, plus `Some(new_equiv_checked)` when the
+/// cache entry should be rewritten (and `None` when it should be left as-is).
+///
+/// - Detector off: demote a cached `Equivalent` back to `Survived`, pass
+///   everything else. Never rewrites — the stored verdict stays valid for the
+///   next detector-on run.
+/// - Detector on, entry already `equiv_checked`: pure flip. A cached
+///   `Survived` stays `Survived`, a cached `Equivalent` stays `Equivalent`.
+///   No `classify` call, no subprocess — this is the hot warm-cache path.
+/// - Detector on, cached `Survived` *not* yet checked (written by a
+///   detector-off run, or a pre-marker fermut version): classify once, then
+///   rewrite the entry marked checked so subsequent warm runs skip the probe.
+fn remap_cached_outcome(
+    outcome: MutantOutcome,
+    equiv_checked: bool,
+    equiv: Option<&EquivPipeline>,
+    file_sources: &HashMap<PathBuf, String>,
+) -> (MutantOutcome, Option<bool>) {
+    let Some(pipeline) = equiv else {
+        if let MutantOutcome::Equivalent { mutant, .. } = outcome {
+            return (MutantOutcome::Survived { mutant }, None);
+        }
+        return (outcome, None);
+    };
+    if equiv_checked || !matches!(outcome, MutantOutcome::Survived { .. }) {
+        return (outcome, None);
+    }
+    (
+        classify_survivor(pipeline, outcome, file_sources),
+        Some(true),
+    )
 }
 
 /// Hash run-wide settings that affect outcomes without changing source bytes.
@@ -787,6 +863,105 @@ mod tests {
         let pipeline = EquivPipeline::default_pipeline();
         let result = maybe_remap_equivalent(out, Some(&pipeline), &HashMap::new());
         assert!(matches!(result, MutantOutcome::Survived { .. }));
+    }
+
+    #[test]
+    fn cached_checked_survivor_is_pure_flip_no_reclassify() {
+        // The warm-cache fix: a `Survived` cached by a detector-on run
+        // (equiv_checked = true) is returned as-is with NO rewrite — proving
+        // the pipeline (and its CPython bytecode subprocess) is never touched.
+        // The source map is empty on purpose: if `classify` ran it would have
+        // to consult it; skipping classification is the whole point.
+        let m = arith_mutant("return x + 0", "+", "-");
+        let cached = MutantOutcome::survived(m.clone());
+        let pipeline = EquivPipeline::default_pipeline();
+        let (result, rewrite) =
+            remap_cached_outcome(cached, true, Some(&pipeline), &HashMap::new());
+        assert!(matches!(result, MutantOutcome::Survived { .. }));
+        assert_eq!(rewrite, None, "checked entry must not be rewritten");
+    }
+
+    #[test]
+    fn cached_checked_equivalent_stays_equivalent_no_rewrite() {
+        // A cached `Equivalent` (inherently classified) under detector-on is a
+        // pure pass-through: no reclassify, no rewrite.
+        let m = arith_mutant("return x + 0", "+", "-");
+        let cached = MutantOutcome::equivalent(m, "reason", "bytecode-identity");
+        let pipeline = EquivPipeline::default_pipeline();
+        let (result, rewrite) =
+            remap_cached_outcome(cached, true, Some(&pipeline), &HashMap::new());
+        assert!(matches!(result, MutantOutcome::Equivalent { .. }));
+        assert_eq!(rewrite, None);
+    }
+
+    #[test]
+    fn cached_unchecked_survivor_reclassifies_once_and_requests_rewrite() {
+        // A `Survived` cached by a detector-off run (equiv_checked = false):
+        // detector-on now classifies it and asks the caller to rewrite the
+        // entry `checked = true`, so the probe runs at most once across warm
+        // runs. `return None` → `return` is bytecode-identical under CPython,
+        // so classification promotes to Equivalent. Skips without python3 so
+        // the test isn't environment-fragile.
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let source = "def f():\n    return None\n";
+        let start = source.find("return None").unwrap();
+        let m = Mutant {
+            id: "t".into(),
+            file: PathBuf::from("t.py"),
+            operator: Operator::ReturnValueToNone,
+            range: TextRange::new(
+                TextSize::from(start as u32),
+                TextSize::from((start + "return None".len()) as u32),
+            ),
+            original: "return None".into(),
+            replacement: "return".into(),
+            line: 2,
+            stmt_line: 2,
+        };
+        let cached = MutantOutcome::survived(m.clone());
+        let pipeline = EquivPipeline::default_pipeline();
+        let mut sources = HashMap::new();
+        sources.insert(m.file.clone(), source.to_string());
+        let (result, rewrite) = remap_cached_outcome(cached, false, Some(&pipeline), &sources);
+        assert_eq!(rewrite, Some(true), "must rewrite entry as checked");
+        match result {
+            MutantOutcome::Equivalent { source: src, .. } => assert_eq!(src, "bytecode-identity"),
+            other => panic!("expected Equivalent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cached_unchecked_non_survivor_is_untouched_no_rewrite() {
+        // Detector-on, unchecked, but the cached outcome isn't a `Survived`
+        // candidate — pass through with no classify and no rewrite.
+        let m = arith_mutant("return x + 0", "+", "-");
+        let cached = MutantOutcome::killed(m);
+        let pipeline = EquivPipeline::default_pipeline();
+        let (result, rewrite) =
+            remap_cached_outcome(cached, false, Some(&pipeline), &HashMap::new());
+        assert!(matches!(result, MutantOutcome::Killed { .. }));
+        assert_eq!(rewrite, None);
+    }
+
+    #[test]
+    fn cached_detector_off_demotes_equivalent_no_rewrite() {
+        // Detector off: a cached `Equivalent` demotes to `Survived` without a
+        // rewrite (the stored verdict stays valid for the next detector-on run).
+        let m = arith_mutant("return x + 0", "+", "-");
+        let cached = MutantOutcome::equivalent(m, "reason", "bytecode-identity");
+        let (result, rewrite) = remap_cached_outcome(cached, true, None, &HashMap::new());
+        assert!(matches!(result, MutantOutcome::Survived { .. }));
+        assert_eq!(rewrite, None);
     }
 
     #[test]

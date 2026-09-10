@@ -447,11 +447,20 @@ fn wait_draining_stdout_with_grace(
             //      usually recovers the datapoint the child already wrote.
             //   2. The pipe already EOF'd (`eof_reached` true) but the drained
             //      string is merely lagging over the channel on a loaded box.
-            //      Here there is NO live group member, so `kill(-pgid)` MUST NOT
-            //      fire: `wait_timeout` already reaped the leader, freeing its
-            //      pid, and with no member keeping the pgid reserved the id can be
-            //      recycled — the kill would land on an unrelated group. Just
-            //      wait out the grace for the lagging bytes; no signal.
+            //      `kill(-pgid)` MUST NOT fire: `wait_timeout` already reaped the
+            //      leader, freeing its pid, and if no member keeps the pgid
+            //      reserved the id can be recycled — the kill would land on an
+            //      unrelated group. Just wait out the grace for the lagging
+            //      bytes; no signal.
+            //
+            //      Accepted cost: EOF means every write end is *closed*, but a
+            //      grandchild that closed its stdout copy could still be running
+            //      (and would keep the pgid reserved, making a kill technically
+            //      safe *here*). We still don't kill: we can't distinguish that
+            //      from the recycled-pgid case without a `kill(-pgid, 0)` probe
+            //      that carries the identical TOCTOU race. Such a grandchild is
+            //      left to run to completion rather than risk signalling a
+            //      recycled group. Do NOT add a kill back on this branch.
             //
             // The `eof_reached` load is what makes case 2 *provable* rather than
             // inferred from timing — an atomic can't lag like the mpsc delivery.

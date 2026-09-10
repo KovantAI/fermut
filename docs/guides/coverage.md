@@ -270,6 +270,14 @@ This is what the `pr-gate` profile sets. See
 **[Integrations → GitHub Actions](integrations.md#github-actions)**
 for the full workflow.
 
+To stop CI rebuilding coverage full-suite every run, and to shrink the
+index to just the changed files, see
+**[Integrations → Shrinking the coverage index per PR](integrations.md#coverage-scoping)**
+— cache the `.coverage` DB so the refresh stays incremental (Recipe A),
+scope `--cov` to the changed subtree (Recipe B), or build one
+authoritative baseline on `main` that every PR restores read-only
+(Recipe C).
+
 ## Pitfalls
 
 - **Not enough contexts.** Some pytest plugins (e.g. `pytest-xdist`

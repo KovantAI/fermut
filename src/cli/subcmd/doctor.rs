@@ -238,7 +238,12 @@ fn collect_checks(start: &Path) -> Vec<Check> {
     out.push(check_coverage_binary(vbin));
     out.push(check_pytest_cov(vbin));
 
-    // ---- coverage.json (only meaningful when wired in config) ----
+    // ---- coverage data ----
+    // Prefer the explicitly wired path; otherwise validate the same `.coverage`
+    // SQLite DB that `run` auto-discovers at the project root. Without this,
+    // doctor would stay silent while a real run silently picks up (or stale-
+    // rejects) an auto-discovered DB — the exact divergence doctor exists to
+    // surface.
     let coverage_wired = loaded.as_ref().and_then(|c| c.file.coverage.clone());
     if let Some(rel_path) = coverage_wired {
         let base = loaded
@@ -246,6 +251,16 @@ fn collect_checks(start: &Path) -> Vec<Check> {
             .map(|c| c.base_dir.as_path())
             .unwrap_or(start);
         out.push(check_coverage_file(base, &rel_path));
+    } else {
+        // Mirror `run`'s auto-discovery, which only picks up a real SQLite DB.
+        // A stray non-SQLite `.coverage` that run would ignore shouldn't make
+        // doctor cry wolf, so gate on the same sniff.
+        let root = crate::runner::find_project_root(&scope).unwrap_or_else(|| scope.clone());
+        let candidate = root.join(".coverage");
+        if candidate.is_file() && matches!(crate::filter::coverage::is_sqlite(&candidate), Ok(true))
+        {
+            out.push(check_coverage_file(&root, Path::new(".coverage")));
+        }
     }
 
     // ---- ty (required by default; only skipped if explicitly disabled) ----
@@ -429,30 +444,93 @@ fn check_coverage_file(base: &Path, rel: &Path) -> Check {
     };
     if !path.is_file() {
         return Check::warn(
-            "coverage.json",
+            "coverage-data",
             format!("{} not found", path.display()),
-            "produce it before each run:  pytest --cov=src --cov-context=test && coverage json -o coverage.json --show-contexts",
+            "produce it before each run:  pytest --cov=src --cov-context=test  (fermut reads the `.coverage` SQLite DB directly, or a `coverage json --show-contexts` export)",
         );
     }
-    match std::fs::read_to_string(&path) {
+    // fermut ingests either format: coverage.py's native `.coverage` SQLite DB
+    // or a `coverage json` export. Sniff the format and validate per-test
+    // contexts accordingly — the old JSON-only text scan false-failed on a
+    // SQLite DB, which fermut now reads directly.
+    match crate::filter::coverage::is_sqlite(&path) {
+        Ok(true) => check_coverage_sqlite(&path),
+        Ok(false) => check_coverage_json(&path),
+        Err(e) => Check::fail(
+            "coverage-data",
+            format!("{}: {e}", path.display()),
+            "regenerate the coverage report",
+        ),
+    }
+}
+
+/// Validate a `coverage json` export has per-test contexts.
+fn check_coverage_json(path: &Path) -> Check {
+    match std::fs::read_to_string(path) {
         Ok(text) => {
             if text.contains("\"contexts\"") {
                 Check::ok(
-                    "coverage.json",
-                    format!("{} (has per-test contexts)", path.display()),
+                    "coverage-data",
+                    format!("{} (JSON export, has per-test contexts)", path.display()),
                 )
             } else {
                 Check::fail(
-                    "coverage.json",
-                    format!("{} has no per-test contexts", path.display()),
+                    "coverage-data",
+                    format!("{} (JSON export) has no per-test contexts", path.display()),
                     "regenerate with `pytest --cov=src --cov-context=test` and `coverage json --show-contexts` (requires pytest-cov)",
                 )
             }
         }
         Err(e) => Check::fail(
-            "coverage.json",
+            "coverage-data",
             format!("{}: {e}", path.display()),
             "regenerate the coverage report",
+        ),
+    }
+}
+
+/// Validate a coverage.py `.coverage` SQLite DB has recorded per-test contexts
+/// (a `context` table with pytest-nodeid rows, not just the empty default or a
+/// single static label).
+fn check_coverage_sqlite(path: &Path) -> Check {
+    let conn = match rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            return Check::fail(
+                "coverage-data",
+                format!("{}: {e}", path.display()),
+                "regenerate the coverage report",
+            );
+        }
+    };
+    // coverage.py always stores one empty-string context (the default, no
+    // `--cov-context`). A single *static* label (`coverage run --context=LABEL`)
+    // is also non-empty but is NOT per-test — counting `context != ''` would
+    // green-light it. Per-test contexts are pytest nodeids, which always contain
+    // `::` (e.g. `tests/test_x.py::test_foo`); require that marker so a static
+    // label can't masquerade as per-test data.
+    let named: rusqlite::Result<i64> = conn.query_row(
+        "SELECT count(*) FROM context WHERE context LIKE '%::%'",
+        [],
+        |r| r.get(0),
+    );
+    match named {
+        Ok(n) if n > 0 => Check::ok(
+            "coverage-data",
+            format!("{} (SQLite DB, {n} per-test contexts)", path.display()),
+        ),
+        Ok(_) => Check::fail(
+            "coverage-data",
+            format!("{} (SQLite DB) has no per-test contexts", path.display()),
+            "regenerate with `pytest --cov=src --cov-context=test` (requires pytest-cov; a bare `coverage run --context=LABEL` is not per-test)",
+        ),
+        Err(e) => Check::fail(
+            "coverage-data",
+            format!("{}: reading `context` table: {e}", path.display()),
+            "regenerate the coverage report (needs a coverage.py `.coverage` DB)",
         ),
     }
 }
@@ -689,6 +767,61 @@ mod tests {
         std::fs::write(&p, "{\"files\": {\"x.py\": {\"contexts\": {}}}}").unwrap();
         let c = check_coverage_file(tmp.path(), Path::new("coverage.json"));
         assert_eq!(c.status, Status::Ok);
+    }
+
+    #[test]
+    fn check_coverage_file_accepts_sqlite_with_contexts() {
+        // A coverage.py `.coverage` DB with per-test contexts must pass — the
+        // old JSON text scan false-failed on the SQLite magic header.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join(".coverage");
+        let conn = rusqlite::Connection::open(&p).unwrap();
+        conn.execute("CREATE TABLE context (id integer, context text)", [])
+            .unwrap();
+        // The empty default context plus one real per-test context.
+        conn.execute("INSERT INTO context VALUES (0, '')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO context VALUES (1, 'tests/test_x.py::test_foo|run')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let c = check_coverage_file(tmp.path(), Path::new(".coverage"));
+        assert_eq!(c.status, Status::Ok, "detail: {}", c.detail);
+    }
+
+    #[test]
+    fn check_coverage_file_flags_sqlite_without_contexts() {
+        // A DB with only the empty default context has no per-test data.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join(".coverage");
+        let conn = rusqlite::Connection::open(&p).unwrap();
+        conn.execute("CREATE TABLE context (id integer, context text)", [])
+            .unwrap();
+        conn.execute("INSERT INTO context VALUES (0, '')", [])
+            .unwrap();
+        drop(conn);
+        let c = check_coverage_file(tmp.path(), Path::new(".coverage"));
+        assert_eq!(c.status, Status::Fail, "detail: {}", c.detail);
+    }
+
+    #[test]
+    fn check_coverage_file_flags_sqlite_static_label_only() {
+        // A single non-empty *static* label (`coverage run --context=LABEL`) is
+        // not per-test data — it lacks a pytest `::` nodeid marker and must fail.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join(".coverage");
+        let conn = rusqlite::Connection::open(&p).unwrap();
+        conn.execute("CREATE TABLE context (id integer, context text)", [])
+            .unwrap();
+        conn.execute("INSERT INTO context VALUES (0, '')", [])
+            .unwrap();
+        conn.execute("INSERT INTO context VALUES (1, 'mylabel')", [])
+            .unwrap();
+        drop(conn);
+        let c = check_coverage_file(tmp.path(), Path::new(".coverage"));
+        assert_eq!(c.status, Status::Fail, "detail: {}", c.detail);
     }
 
     #[test]

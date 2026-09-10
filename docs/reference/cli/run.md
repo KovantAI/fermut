@@ -41,7 +41,7 @@ fermut run [PATH] [flags...]
 | `--diff-only [base]`        | off                              | Restrict to lines changed vs base ref (default `main`).               |
 | `--since <SPEC>`            | off                              | Restrict to lines touched since commit or date. See [Incremental runs](#incremental-runs-since). |
 | `--no-diff-only`            | off                              | Override `diff_only`/`since` from config — force full sweep. Mutually exclusive with `--diff-only` and `--since`. |
-| `--coverage [path]`         | off                              | Per-mutant test selection from coverage contexts. See [Coverage](#coverage-integration). |
+| `--coverage [path]`         | auto-discover `.coverage`        | Per-mutant test selection from coverage contexts. Accepts a `.coverage` SQLite DB or a `coverage.json` export (format sniffed). When unset, fermut auto-discovers `.coverage` at the project root. See [Coverage](#coverage-integration). |
 | `--no-coverage`             | off                              | Override `coverage` from config — disable coverage filtering for this run. Mutually exclusive with `--coverage`. |
 | `--exclude <GLOB>`          | none, repeatable                 | Glob patterns excluding paths from mutation collection (relative to source root). Example: `--exclude 'alembic/**' --exclude 'tests/integration/**'`. When passed at least once, replaces config `exclude` (no merge). |
 | `--no-equiv-detect`         | detector on                      | Skip the equivalent-mutant detector (AST patterns + CPython bytecode). Survivors are not post-processed; equivalents stay counted. |
@@ -186,15 +186,42 @@ both work. Prefer the database on large suites (the JSON export repeats
 every node id per covered line and can reach multiple GB; the SQLite
 form stores it once).
 
-The easy way to produce it is [`fermut coverage`](coverage.md), which
-also refreshes incrementally when tests change:
+**Auto-discovery.** When neither `--coverage` nor the `coverage` config
+key is set, fermut looks for a `.coverage` SQLite DB at the project root
+and uses it automatically (only if the file sniffs as a real SQLite DB).
+So on the common path you set nothing — just generate `.coverage` and
+run fermut. Precedence is:
+
+**`--coverage <path>` (CLI) > `coverage = "…"` (config) > auto-discovered
+`.coverage` at the project root > none.**
+
+`--no-coverage` disables coverage selection entirely, overriding config
+and auto-discovery.
+
+**Freshness guard.** fermut compares the coverage file's mtime against
+your `.py` sources and tests. A stale **auto-discovered** `.coverage`
+(older than code you've since edited) is *ignored* — the run proceeds
+without coverage selection rather than silently skipping mutants on
+changed lines. A stale **explicitly wired** file is still used, but with
+a warning. Either way, regenerate with `pytest --cov=src
+--cov-context=test` (or `fermut coverage`) to clear it. See
+[Coverage → Freshness guard](../../guides/coverage.md#freshness-guard).
+
+The easy way to produce `.coverage` is [`fermut coverage`](coverage.md),
+which also refreshes incrementally when tests change:
 
 ```sh
 fermut coverage
-fermut run src/ --tests tests/ --coverage .coverage
+fermut run src/ --tests tests/            # auto-discovers .coverage
 ```
 
-Or generate a JSON export manually (per-test contexts are mandatory):
+or pass it explicitly (`--coverage .coverage`). Under the hood
+`fermut coverage` runs `pytest --cov=src --cov-context=test`, which
+writes `.coverage`; you can run that yourself instead. The
+`--cov-context=test` is mandatory — it records per-test contexts.
+
+Or, manually, generate a JSON export instead (the legacy path; per-test
+contexts via `--show-contexts` are mandatory):
 
 ```sh
 pytest --cov=src --cov-context=test

@@ -71,8 +71,10 @@ See [Integrations / GitHub Actions](integrations.md#github-actions)
 for the full YAML and a line-by-line explanation. Key points:
 
 - Triggers on `pull_request` for `**/*.py` changes only.
-- Installs deps, runs coverage with `--show-contexts` (per-test
-  coverage contexts power the per-mutant test selection).
+- Installs deps, runs coverage with per-test contexts
+  (`pytest --cov=src --cov-context=test`, which writes `.coverage`;
+  fermut reads it directly). The contexts power the per-mutant test
+  selection.
 - Caches `.fermut/cache.json` keyed on lockfile + sources, so re-runs
   on the same PR skip already-killed mutants.
 - Posts a sticky PR comment via `fermut pr-comment`. The comment
@@ -126,7 +128,7 @@ earlier. To skip the second full-suite run on the critical path, pass
 
 ```sh
 fermut run src/ --tests tests/ --diff-only <base-ref> \
-    --coverage coverage.json --no-verify-baseline --markdown report.md --trend
+    --coverage .coverage --no-verify-baseline --markdown report.md --trend
 ```
 
 Only do this when the coverage step and the fermut step run in the **same job**

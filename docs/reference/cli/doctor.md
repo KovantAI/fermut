@@ -24,7 +24,7 @@ a preflight.
 | `pytest`       | required | Pytest binary on `PATH` (when configured runner is pytest).                                       |
 | `coverage`     | required | `coverage` binary on `PATH`.                                                                      |
 | `pytest-cov`   | required | `pytest_cov` importable from the `python3` on `PATH`. Required to produce per-test contexts.      |
-| `coverage.json`| info     | When `coverage = "…"` is wired in config: file present and has `"contexts"` field.                |
+| `coverage-data`| info     | When `coverage = "…"` is wired in config: the file is present and valid for either format — a `.coverage` SQLite DB with a populated `context` table, or a JSON export with a `"contexts"` field.                |
 | `ty`           | required | `ty` binary on `PATH`. Hard requirement unless `ty_filter = false` in `fermut.toml`.              |
 | `ruff`         | required | Only when `ruff_filter = true` in config.                                                         |
 | `gh`           | optional | Only needed for `fermut pr-comment`.                                                              |

@@ -43,9 +43,9 @@ fermut init — detected:
 wrote /work/project/fermut.toml
 ```
 
-`coverage: wired` means `init` wrote `coverage = "coverage.json"` into the
-config (it detected `pytest-cov` / a coverage setup) — the JSON itself is
-produced by the next step. If no coverage dependency were found you'd see
+`coverage: wired` means `init` wrote `coverage = ".coverage"` into the
+config (it detected `pytest-cov` / a coverage setup) — the `.coverage`
+database itself is produced by the next step. If no coverage dependency were found you'd see
 `coverage: off (no coverage dependency found)` here and `init` would skip
 the key (and `fermut doctor` would surface a `[fail]` for the missing
 `pytest-cov`).
@@ -67,29 +67,26 @@ You'll need `coverage` and `pytest-cov` installed (see
 **[Installation prerequisites](installation.md#prerequisites)** if you
 skipped it). Quick sanity check: `coverage --version`.
 
-Generate per-test coverage the easy way:
-
-```sh
-fermut coverage
-```
-
-This discovers your source and tests from the config, runs the suite
-under coverage, and writes a `.coverage` database fermut reads
-directly (it also refreshes incrementally as you add tests). Or,
-generate a `coverage.json` manually:
+Generate per-test coverage:
 
 ```sh
 pytest --cov=src --cov-context=test
-coverage json -o coverage.json --show-contexts
 ```
+
+This writes coverage.py's native `.coverage` SQLite database, which
+fermut reads directly and auto-discovers at the project root — no
+`coverage json` export step. (`fermut coverage` is a convenience wrapper
+that does the same discovery-from-config and also refreshes
+incrementally as you add tests. Or, manually: `coverage json -o
+coverage.json --show-contexts`, then pass `--coverage coverage.json`.)
 
 `--cov-context=test` is what tags each covered line with the pytest
 nodeID of the test that touched it. Without it, fermut knows the line
 is covered but not by *which* test, so it falls back to running every
 test against every mutant. See
 **[Coverage](../guides/coverage.md)** for the full setup (and the
-one common footgun if your `coverage.json` ends up with a single
-static label instead of per-test contexts).
+one common footgun if your coverage ends up with a single static label
+instead of per-test contexts).
 
 Then baseline. No `--diff-only`, no CI — just an absolute number to
 anchor everything else.
@@ -181,8 +178,8 @@ The most common surprises, in roughly the order people hit them:
   suite that has never been mutation-tested" note above the
   "What can go wrong" header.
 - **Run is much slower than the wall-clock table.** Check that
-  `ty` is installed and on `$PATH`, and that `--coverage` is being
-  honored (the JSON has per-test contexts).
+  `ty` is installed and on `$PATH`, and that coverage is being
+  honored (the `.coverage` DB has per-test contexts).
 - **`pytest` fails to collect before fermut even starts.** A previous
   mutation tool may have left a top-level `mutants/` (mutmut) or
   similar directory containing duplicate test-module basenames. The
@@ -192,7 +189,7 @@ The most common surprises, in roughly the order people hit them:
   generating coverage. `fermut doctor` flags this under
   `legacy-artifacts` when it detects the dir.
 - **Score is 100% with thousands of `skipped` and no tests actually
-  running.** `coverage.json` was produced with `coverage run
+  running.** Coverage was produced with `coverage run
   --context=test` (a static label, not per-test contexts) or with
   `dynamic_context = test_function` (dotted Python names, not pytest
   nodeIDs). Regenerate with `pytest --cov=src --cov-context=test`.

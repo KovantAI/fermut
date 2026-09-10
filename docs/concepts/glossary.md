@@ -9,12 +9,15 @@ explained in depth.
 ## Coverage filter
 
 Filter stage that drops mutants on lines no test executes. Requires a
-per-test-context coverage database, most easily built with `fermut
-coverage` (writes `.coverage`; or manually `pytest --cov=src
---cov-context=test` then `coverage json -o coverage.json
---show-contexts`), so fermut knows **which** tests reach each line.
-Without per-test contexts, the filter still drops uncovered mutants but
-cannot pick a narrow test subset for the survivors. See [coverage
+per-test-context coverage database — run `pytest --cov=src
+--cov-context=test`, which writes coverage.py's native `.coverage`
+SQLite DB. fermut reads that DB directly (auto-discovering `.coverage`
+at the project root, or via `--coverage .coverage`), so it knows
+**which** tests reach each line — no `coverage json` export step is
+needed. (fermut also accepts a manual `coverage json -o coverage.json
+--show-contexts` export; it sniffs the file format.) Without per-test
+contexts, the filter still drops uncovered mutants but cannot pick a
+narrow test subset for the survivors. See [coverage
 guide](../guides/coverage.md).
 
 ## cosmic-ray

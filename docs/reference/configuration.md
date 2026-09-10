@@ -47,7 +47,7 @@ TOML primitives: `string`, `bool`, `int`, `float`, `array<string>`.
 | `skip_ops`         | `array<string>` | `[]`                                            | Denylist operator names. Wins over `ops`.                                                          |
 | `diff_only`        | `string`        | none                                            | Restrict to lines changed vs base ref. Mutually exclusive with `since`.                            |
 | `since`            | `string`        | none                                            | Restrict to lines touched since commit or date. Mutually exclusive with `diff_only`.               |
-| `coverage`         | `string` (path) | none                                            | Path to a `coverage.json` with per-test contexts. Enables coverage-based test selection.           |
+| `coverage`         | `string` (path) | auto-discovered `.coverage`                     | Path to a per-test-context coverage database. Enables coverage-based test selection. fermut sniffs the format — a coverage.py `.coverage` SQLite DB (e.g. `".coverage"`) or a legacy `coverage.json` export both work. When unset, fermut auto-discovers a `.coverage` SQLite DB at the project root; `--no-coverage` disables selection entirely. |
 | `hypothesis_seed`  | `int`           | none                                            | Pin Hypothesis seed across mutants (passes `--hypothesis-seed=<N>` to pytest).                     |
 | `pytest_args`      | `array<string>` | `[]`                                            | Extra args forwarded to pytest. Ignored by the unittest runner.                                    |
 | `cache`            | `bool`          | `true`                                          | Enable the per-mutant result cache. **Critical for fast iteration.**                              |
@@ -82,7 +82,7 @@ experimental = false
 ops = ["arith-op-swap", "boundary-shift", "return-value-to-none"]
 skip_ops = ["number-shift"]
 diff_only = "main"
-coverage = "coverage.json"
+coverage = ".coverage"
 isolation = "auto"
 hypothesis_seed = 12345
 fail_under = 80.0
@@ -100,7 +100,7 @@ the whole codebase:
 source_root = "src"
 tests = "tests"
 diff_only = "main"
-coverage = "coverage.json"
+coverage = ".coverage"
 fail_under = 75.0
 ```
 
@@ -114,7 +114,7 @@ against the prior run instead of an absolute floor, use
 [tool.fermut]
 ops = ["arith-op-swap", "compare-op-swap", "boundary-shift"]
 diff_only = "main"
-coverage = "coverage.json"
+coverage = ".coverage"
 ```
 
 ### Per-profile starter configs
@@ -130,7 +130,7 @@ elided):
     runner = "pytest"
     ty_filter = true
     timeout = 15
-    coverage = "coverage.json"
+    coverage = ".coverage"
     diff_only = "main"
     hypothesis_seed = 12345
     ops = ["arith-op-swap", "compare-op-swap", "boundary-shift", "return-value-to-none"]

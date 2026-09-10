@@ -58,7 +58,7 @@ Prefer the debug build over release — `target/release/fermut` may be stale dur
 
 ### 2. Optional dependencies installed
 
-Many Python projects gate test modules behind `[project.optional-dependencies]`. Without them, `pytest --collect-only` errors on missing imports and `coverage.json` comes back empty.
+Many Python projects gate test modules behind `[project.optional-dependencies]`. Without them, `pytest --collect-only` errors on missing imports and `.coverage` comes back empty.
 
 === "uv"
 
@@ -73,7 +73,7 @@ Many Python projects gate test modules behind `[project.optional-dependencies]`.
     ```
 
 !!! warning "Symptom if you skip this step"
-    `pytest --collect-only -q` reports `N errors during collection` with `ModuleNotFoundError` for things like `msgraph`, `azure.ai.projects`, etc. coverage.json will not have the contexts fermut needs.
+    `pytest --collect-only -q` reports `N errors during collection` with `ModuleNotFoundError` for things like `msgraph`, `azure.ai.projects`, etc. `.coverage` will not have the contexts fermut needs.
 
 ### 3. Tooling on PATH
 
@@ -94,7 +94,7 @@ Locate `.venv/bin/pytest`. fermut spawns `pytest` directly, so the venv must be 
 
 ## Coverage setup
 
-fermut reads `coverage.json` to know which tests touch which lines and re-runs only the relevant ones per mutant. Get this wrong and either every mutant is skipped (no coverage filter signal) or fermut can't pass the right test selection back to pytest.
+fermut reads coverage.py's native `.coverage` SQLite database directly to know which tests touch which lines and re-runs only the relevant ones per mutant. Running `pytest --cov=src --cov-context=test` writes `.coverage`; fermut auto-discovers it at the project root (or pass `--coverage .coverage`). Get this wrong and either every mutant is skipped (no coverage filter signal) or fermut can't pass the right test selection back to pytest.
 
 ### `.coveragerc`
 
@@ -124,19 +124,23 @@ the test files whose content changed.
 fermut coverage --source <src-dir> --tests "$PWD/tests"
 ```
 
-Then pass `--coverage "$PWD/.coverage"` in place of
-`--coverage "$PWD/coverage.json"` on every `run`/`explain` below.
+The `run`/`explain` commands below all pass `--coverage "$PWD/.coverage"`
+(explicit and absolute because these are agent scripts where cwd is
+unstable — auto-discovery is the convenience for interactive use, not
+these scripts).
 
-Or, manually — the `coverage.json` export the rest of this page's
-commands assume (the `.coveragerc` and context-format notes below apply
-to this path):
+Or, manually — a `coverage json --show-contexts` export. fermut sniffs
+the file format, so a JSON export still works as a legacy alternative
+(the `.coveragerc` and context-format notes below apply to this path).
+If you take this path, pass `--coverage "$PWD/coverage.json"` in place of
+`--coverage "$PWD/.coverage"` on every `run`/`explain` below:
 
 ```bash
 uv run pytest --cov=<src-dir> --cov-context=test --cov-report= -q
 uv run coverage json --rcfile=.coveragerc --show-contexts -o coverage.json
 ```
 
-`--show-contexts` is **mandatory** on the manual path. Without it:
+`--show-contexts` is **mandatory** on this manual JSON path. Without it:
 
 ```
 coverage.json at coverage.json has no per-test contexts.
@@ -172,7 +176,7 @@ If you see `['foo_test.test_bar']` (no `tests/` prefix, no `::` separator), `dyn
 ```bash
 PATH="$PWD/.venv/bin:$PATH" <fermut> run "$PWD" \
     --tests "$PWD/tests" \
-    --coverage "$PWD/coverage.json" \
+    --coverage "$PWD/.coverage" \
     --json .fermut/last.json --no-history -q
 ```
 
@@ -185,7 +189,7 @@ PATH="$PWD/.venv/bin:$PATH" <fermut> run "$PWD" \
 
 ```bash
 PATH="$PWD/.venv/bin:$PATH" <fermut> run "$PWD" \
-    --tests "$PWD/tests" --coverage "$PWD/coverage.json" \
+    --tests "$PWD/tests" --coverage "$PWD/.coverage" \
     --sample 0.005 --json .fermut/sample.json --no-history -q
 ```
 
@@ -199,7 +203,7 @@ Should complete in &lt;30s. Verify:
 
 ```bash
 PATH="$PWD/.venv/bin:$PATH" <fermut> run "$PWD" \
-    --tests "$PWD/tests" --coverage "$PWD/coverage.json" \
+    --tests "$PWD/tests" --coverage "$PWD/.coverage" \
     --json .fermut/last.json --no-history -q
 ```
 
@@ -282,7 +286,7 @@ For each survivor in a high-value file:
 
 ```bash
 <fermut> explain .fermut/last.json <idx-or-id> \
-    --tests "$PWD/tests" --coverage "$PWD/coverage.json" \
+    --tests "$PWD/tests" --coverage "$PWD/.coverage" \
     --format json
 ```
 
@@ -353,7 +357,7 @@ jq -r '.outcomes | to_entries[] | select(.value.status=="survived") | (.key + 1)
 : > .fermut/explain-all.jsonl
 while IFS= read -r idx; do
   <fermut> explain .fermut/last.json "$idx" \
-    --tests "$PWD/tests" --coverage "$PWD/coverage.json" \
+    --tests "$PWD/tests" --coverage "$PWD/.coverage" \
     --format json 2>/dev/null | jq -c '.' >> .fermut/explain-all.jsonl
 done < .fermut/survivor_indices.txt
 ```
@@ -375,7 +379,7 @@ Per-file batch: 6–15 tests typically kill 10–30 mutants. Keyword-dispatch (`
 
 | Phase | Small/med backend | Large backend |
 |---|---|---|
-| Coverage gen (full pytest + json export) | ~40–60s | ~90s |
+| Coverage gen (`fermut coverage` / full pytest with `--cov-context=test`) | ~40–60s | ~90s |
 | Full baseline fermut run | 10–25 min | 60–90 min |
 | Per-iteration rerun (cache hits) | 30–60s | 5–15 min |
 | Per-iteration rerun (cache-reset miss) | 5–15 min | 30–60 min |
@@ -385,7 +389,7 @@ Per-file batch: 6–15 tests typically kill 10–30 mutants. Keyword-dispatch (`
 ## Common pitfalls
 
 1. **Release binary stale** — `explain`/`suggest` may be missing. Use debug.
-2. **Optional deps not installed** — pytest collection errors, empty coverage.json. Run `uv sync --all-extras` first.
+2. **Optional deps not installed** — pytest collection errors, empty `.coverage`. Run `uv sync --all-extras` first.
 3. **`--fail-under` is for CI score gates, not this loop** — it exists (score threshold instead of the default exit-nonzero-on-any-survivor), but the skill reads outcomes from JSON, so don't pass it here.
 4. **Relative paths** — auto-absolutized now (fixed); `$PWD/...` optional, not required.
 5. **`dynamic_context = test_function` produces wrong nodeid format** — use `pytest --cov-context=test`.
@@ -403,7 +407,7 @@ Per-file batch: 6–15 tests typically kill 10–30 mutants. Keyword-dispatch (`
 ```bash
 PATH="$PWD/.venv/bin:$PATH" <fermut> run "$PWD" \
     --tests "$PWD/tests" \
-    --coverage "$PWD/coverage.json" \
+    --coverage "$PWD/.coverage" \
     --skip-ops keyword-arg-drop,constant-replace \
     --json .fermut/last.json \
     --no-history -q

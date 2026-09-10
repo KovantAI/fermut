@@ -44,17 +44,24 @@ editing any test in a file re-measures that whole file.
 
 ## Wiring it into `fermut run`
 
-`fermut coverage` prints the exact next step. Either pass the path:
+`fermut coverage` writes `.coverage` at the project root, where
+`fermut run` **auto-discovers it** — so with the default output path you
+can just run `fermut run` and it picks the database up, no flag or config
+needed. To be explicit, either pass the path:
 
 ```sh
 fermut run --coverage .coverage
 ```
 
-or set it once in your config so it's automatic:
+or set it once in your config:
 
 ```toml
 coverage = ".coverage"
 ```
+
+An explicit `--coverage` wins over the config key, which wins over the
+auto-discovered `.coverage`. Use one of these if you write the database
+somewhere other than the project root (via `--output`).
 
 ## Requirements
 

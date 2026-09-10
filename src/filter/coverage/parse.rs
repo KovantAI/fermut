@@ -42,22 +42,23 @@ impl CoverageContexts {
     /// read-whole-file-into-a-String peak.
     pub fn from_path(path: &Path, source_root: &Path, project_root: &Path) -> Result<Arc<Self>> {
         // A missing coverage file is the #1 first-run faceplant: `fermut init`
-        // wires `coverage = "coverage.json"` when pytest-cov is detected, but
-        // the file doesn't exist until the user generates it. Catch it here
-        // with the exact two commands to run instead of leaking a bare
-        // `No such file or directory (os error 2)` from the open below.
+        // wires `coverage = ".coverage"` when pytest-cov is detected, but the
+        // file doesn't exist until the user generates it. Catch it here with the
+        // exact command to run instead of leaking a bare `No such file or
+        // directory (os error 2)` from the open below.
         if !path.exists() {
             anyhow::bail!(
                 "coverage file `{}` not found.\n\n\
                  fermut uses per-test coverage to pick which tests to run for each \
                  mutant. Generate it first (needs pytest-cov):\n  \
-                 pytest --cov={src} --cov-context=test\n  \
-                 coverage json -o {cov} --show-contexts\n\n\
+                 pytest --cov={src} --cov-context=test\n\n\
+                 That writes coverage.py's `.coverage` SQLite DB, which fermut reads \
+                 directly — no `coverage json` export needed (though a \
+                 `coverage json --show-contexts` export works too).\n\n\
                  Or run without coverage selection: pass `--no-coverage`, or remove \
                  the `coverage` key from fermut.toml.",
                 path.display(),
                 src = source_root.display(),
-                cov = path.display(),
             );
         }
         if is_sqlite(path)? {
@@ -338,7 +339,7 @@ pub(super) fn numbits_to_lines(blob: &[u8]) -> Vec<u32> {
 /// (`SQLite format 3\0`). coverage.py's `.coverage` is SQLite; the
 /// `coverage json` export is JSON. We check the header rather than the
 /// extension because the DB has no canonical name.
-pub(super) fn is_sqlite(path: &Path) -> Result<bool> {
+pub(crate) fn is_sqlite(path: &Path) -> Result<bool> {
     use std::io::Read;
     let mut f = std::fs::File::open(path)
         .with_context(|| format!("opening coverage file {}", path.display()))?;

@@ -83,14 +83,18 @@ profile based on project size:
 cd path/to/your/project
 fermut init
 # build coverage first — fermut uses it to skip irrelevant tests per mutant
-fermut coverage
-fermut run src/ --tests tests/ --coverage .coverage
+pytest --cov=src --cov-context=test
+fermut run src/ --tests tests/
 ```
 
-`fermut coverage` writes a `.coverage` SQLite database and refreshes it
-incrementally as your tests change — no `coverage json` export step.
-(Or, manually: `pytest --cov=src --cov-context=test && coverage json -o
-coverage.json --show-contexts`, then `--coverage coverage.json`.)
+`pytest --cov=src --cov-context=test` writes coverage.py's native
+`.coverage` SQLite database, which fermut reads directly and
+auto-discovers at the project root — no `--coverage` flag and no
+`coverage json` export step needed (pass `--coverage .coverage` to point
+at a non-default location). `fermut coverage` is a convenience wrapper
+that generates the same `.coverage` and refreshes it incrementally as
+your tests change. (Or, manually: `coverage json -o coverage.json
+--show-contexts`, then `--coverage coverage.json`.)
 
 Expected output — a line per survivor/timeout, then a one-line summary:
 

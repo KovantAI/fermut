@@ -1,16 +1,22 @@
 # Coverage rejected: no per-test contexts
 
-**Symptom.** Two error wordings, same root cause:
+**Symptom.** Two error wordings, same root cause. The check is
+format-agnostic — it rejects either a `.coverage` SQLite DB or a
+`coverage.json` export that carries no per-test contexts:
 
-- From `fermut run --coverage coverage.json` (runtime path):
-  `coverage.json at <path> has no per-test contexts. Regenerate with
+- From `fermut run` (runtime path, whether the coverage file was
+  auto-discovered, set via `coverage = "…"`, or passed with
+  `--coverage`): `<path> has no per-test contexts. Regenerate with
   `pytest --cov=src --cov-context=test` …`.
-- From `fermut doctor` (pre-flight check on the configured
-  `coverage` file): `<path> has no per-test contexts` — surfaced as
-  a `[fail]` line alongside the other tooling checks.
+- From `fermut doctor` (the `coverage-data` pre-flight check on the
+  configured coverage file): `<path> has no per-test
+  contexts` — surfaced as a `[fail]` line alongside the other tooling
+  checks.
 
 **Cause.** Coverage was generated without per-test contexts, so the
-file only knows which lines ran — not which tests ran them. Two
+database only knows which lines ran — not which tests ran them. This
+applies equally to a `.coverage` SQLite DB (empty/undifferentiated
+`context` table) and a JSON export (no per-test `"contexts"`). Two
 common ways to hit this:
 
 - You ran `coverage run` with no context flag at all.
@@ -22,26 +28,36 @@ common ways to hit this:
 
 ## Fix
 
-Fastest: let fermut generate it correctly.
+Regenerate coverage with per-test contexts. The `--cov-context=test`
+flag is the part that matters — it writes coverage.py's native
+`.coverage` SQLite DB with the per-test resolution fermut needs:
+
+```sh
+pytest --cov=src --cov-context=test
+fermut run          # auto-discovers .coverage at the project root
+```
+
+fermut picks up `.coverage` from the project root automatically; pass
+`--coverage .coverage` if it lives elsewhere.
+
+Even simpler, [`fermut coverage`](../cli/coverage.md) always passes
+`--cov-context=test` for you (and refreshes incrementally when tests
+change):
 
 ```sh
 fermut coverage
 fermut run --coverage .coverage
 ```
 
-[`fermut coverage`](../cli/coverage.md) always passes
-`--cov-context=test`, so the resulting `.coverage` carries the per-test
-contexts this error is about — and refreshes incrementally when tests
-change.
-
-Or generate a JSON export by hand:
+Or, manually, produce a legacy JSON export instead:
 
 ```sh
 pytest --cov=src --cov-context=test
 coverage json -o coverage.json --show-contexts
+fermut run --coverage coverage.json
 ```
 
-Either way requires `pytest-cov`: `uv add --dev pytest-cov` (or
+Every path requires `pytest-cov`: `uv add --dev pytest-cov` (or
 `pipx`/`pip` equivalent).
 
 See the **[Coverage guide](../../guides/coverage.md)** for the full

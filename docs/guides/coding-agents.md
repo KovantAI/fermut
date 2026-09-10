@@ -19,7 +19,7 @@ specifically to make those loops fast and reliable.
 | Knowing *which test to write next*                                          | `fermut next` ranks survivors by cluster leverage + kill-ease and names the single best target; survivor JSON lines carry file:line, operator, original → replacement for the concrete assertion. |
 | Knowing *if my work is helping*                                             | `.fermut/history.jsonl` + `fermut trend`. Score delta vs the previous iteration is the agent's reward signal.                                       |
 | Targeting only the code the agent just touched                              | `--diff-only` for branch-relative diffs (three-dot, **committed** only), `--since <SPEC>` for "since I last ran" (two-dot, **includes uncommitted** edits). |
-| Narrowing tests per mutant so each iteration runs in seconds, not minutes  | `--coverage coverage.json` (with per-test contexts).                                                                                                |
+| Narrowing tests per mutant so each iteration runs in seconds, not minutes  | Coverage-driven test selection from `.coverage` (per-test contexts). fermut reads coverage.py's native `.coverage` SQLite DB directly and auto-discovers it at the project root; `pytest --cov=src --cov-context=test` is all it takes. |
 | Failing loud when the environment is broken                                 | `fermut doctor` returns exit code 1 with a remediation hint per failed check.                                                                       |
 
 ## One concrete cycle
@@ -35,7 +35,7 @@ just-edited files; cache reuses verdicts for everything else.
 ```sh
 fermut run src/ --tests tests/ \
     --since HEAD \
-    --coverage coverage.json \
+    --coverage .coverage \
     --json .fermut/last.json \
     --no-history --quiet
 ```
@@ -281,7 +281,7 @@ The recommended invocation for an agent inner loop:
 fermut run src/ \
     --tests tests/ \
     --since HEAD                     # only mutants in just-edited files
-    --coverage coverage.json         # narrow tests per mutant
+    --coverage .coverage             # narrow tests per mutant (auto-discovered at root if omitted)
     --json   .fermut/last.json       # parse this
     --no-history                     # iterations are noisy; gate the gate, not the loop
     --quiet                          # one line of progress in stderr at most
@@ -294,7 +294,7 @@ report:
 ```sh
 fermut run src/ --tests tests/ \
     --diff-only origin/main \
-    --coverage coverage.json \
+    --coverage .coverage \
     --markdown report.md \
     --trend \
     --json    .fermut/last.json
@@ -443,7 +443,7 @@ fermut run src/ --tests tests/ --json out.json --no-history --quiet
 # pick a survivor
 fermut explain out.json <id> \
     --tests tests \
-    --coverage coverage.json \
+    --coverage .coverage \
     --format json
 # agent reads stdout, writes the killing test in its own session
 ```
@@ -511,7 +511,9 @@ fermut doctor --strict
 ```
 
 This fails loud (exit 1) when the environment is misconfigured —
-missing pytest, Python < 3.10, `coverage.json` lacks per-test contexts,
+missing pytest, Python < 3.10, the coverage file lacks per-test contexts
+(the format-aware `coverage-data` check validates either a `.coverage` SQLite
+DB with a populated `context` table or a JSON export with `"contexts"`),
 etc. — and prints a one-line remediation hint per failure. Better than
 discovering the same problem ten mutants into a run.
 
@@ -568,8 +570,10 @@ ops = ["arith-op-swap", "compare-op-swap", "boundary-shift", "return-value-to-no
 # ty filter drops type-invalid mutants before they cost a pytest run.
 ty_filter = true
 
-# Per-mutant test selection. Big speedup once coverage.json exists.
-coverage = "coverage.json"
+# Per-mutant test selection. Big speedup once .coverage exists.
+# fermut reads the native .coverage SQLite DB directly and auto-discovers
+# it at the project root, so this line is optional — set it to pin the path.
+coverage = ".coverage"
 
 # Keep timeouts tight in the inner loop — slow mutants slow the agent.
 timeout = 15

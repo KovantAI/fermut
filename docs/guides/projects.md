@@ -160,12 +160,14 @@ jobs:
           uv sync
           uv tool install fermut
       - run: |
-          uv run coverage run -m pytest
-          uv run coverage json -o coverage.json
+          # writes .coverage with per-test contexts; fermut reads it directly.
+          # (Or, manually: coverage run -m pytest && coverage json -o
+          # coverage.json --show-contexts, then pass --coverage coverage.json.)
+          uv run pytest --cov=src --cov-context=test
       - run: |
           uv tool run fermut run src/ \
               --tests tests/ \
-              --coverage coverage.json \
+              --coverage .coverage \
               --markdown fermut-report.md \
               --trend
       - if: always() && hashFiles('fermut-report.md') != ''
@@ -199,7 +201,7 @@ survivors don't suddenly block PRs that didn't introduce them.
            uv tool run fermut run src/ \
                --tests tests/ \
 +              --diff-only origin/${{ github.base_ref }} \
-               --coverage coverage.json \
+               --coverage .coverage \
                --markdown fermut-report.md \
                --trend
 ```
@@ -230,7 +232,7 @@ CLI reference. The most common shapes:
 
 | Job                | Trigger        | Profile (config)    | CLI overrides                                                                 |
 |--------------------|----------------|---------------------|------------------------------------------------------------------------------|
-| PR gate            | every PR       | `pr-gate`           | `--coverage coverage.json --markdown report.md --trend`                       |
+| PR gate            | every PR       | `pr-gate`           | `--coverage .coverage --markdown report.md --trend`                           |
 | Nightly sweep      | cron / manual  | `pr-gate` (default) | `--experimental --ops "" --timeout 60` (overrides the narrow op set)          |
 | Sharded full sweep | push to main   | `pr-gate`           | `--shard <i>/<n> --json shard-<i>.json` per matrix entry, plus a merge job   |
 

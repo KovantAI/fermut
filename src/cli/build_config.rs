@@ -183,10 +183,12 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     // newly-added or edited lines get wrongly skipped (false survivors / vacuous
     // 100%). Detect it by mtime and act on provenance.
     if let Some(p) = &coverage_path {
-        if let Some(newer) = newer_source_than_coverage(p, &source_root, tests.as_deref()) {
+        if let Some(newer) =
+            newer_source_than_coverage(p, &source_root, tests.as_deref(), &project_root)
+        {
             if coverage_auto {
                 warn!(
-                    "ignoring auto-discovered coverage {} — it is older than {} \
+                    "ignoring auto-discovered coverage {} — it is older than e.g. {} \
                      (and possibly other sources/tests). Using stale coverage would \
                      wrongly skip mutants on changed lines, so this run proceeds \
                      without coverage selection. Refresh it with \
@@ -198,7 +200,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
                 coverage_path = None;
             } else {
                 warn!(
-                    "coverage {} looks stale — it is older than {} (and possibly \
+                    "coverage {} looks stale — it is older than e.g. {} (and possibly \
                      other sources/tests). Survivors on changed lines may be false; \
                      regenerate before trusting results: \
                      `pytest --cov={src} --cov-context=test` (or `fermut coverage`).",
@@ -398,29 +400,48 @@ fn discover_coverage_db(project_root: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Freshness check for a coverage file: return the first `.py` under
-/// `source_root` (or `tests`) whose mtime is newer than the coverage file's,
-/// i.e. code that changed after the coverage was recorded and would therefore
-/// be described by stale test-context data. `None` means the coverage is at
-/// least as new as every source/test file (fresh), or that mtimes couldn't be
-/// read (be permissive — never block a run on a stat failure).
+/// Freshness check for a coverage file: return the first `.py` whose mtime is
+/// newer than the coverage file's, i.e. code that changed after the coverage
+/// was recorded and would therefore be described by stale test-context data.
+/// `None` means the coverage is at least as new as every source/test file
+/// (fresh), or that mtimes couldn't be read (be permissive — never block a run
+/// on a stat failure).
+///
+/// Which trees are scanned depends on whether a `tests` dir is known:
+///  - `tests` given → `source_root` plus `tests` (a nested tests dir is folded
+///    into the `source_root` walk to avoid double-stating).
+///  - `tests` unknown → the whole `project_root`, so a newly-added test
+///    *anywhere* (the primary staleness case) is still caught rather than
+///    silently missed. Vendored/cache dirs are pruned so this stays a cheap
+///    stat walk instead of a venv/site-packages crawl.
+///
+/// The returned path is just *an* offending file for the warning message, not
+/// necessarily the newest — the walk short-circuits on the first one found.
 fn newer_source_than_coverage(
     coverage: &Path,
     source_root: &Path,
     tests: Option<&Path>,
+    project_root: &Path,
 ) -> Option<PathBuf> {
     let cov_mtime = std::fs::metadata(coverage).ok()?.modified().ok()?;
-    let mut roots = vec![source_root];
-    if let Some(t) = tests {
-        // Skip a tests dir nested under source_root — walking source_root
-        // already covers it, and double-walking is wasted stats.
-        if !t.starts_with(source_root) {
-            roots.push(t);
+    let mut roots: Vec<&Path> = Vec::new();
+    match tests {
+        Some(t) => {
+            roots.push(source_root);
+            // Skip a tests dir nested under source_root — walking source_root
+            // already covers it, and double-walking is wasted stats.
+            if !t.starts_with(source_root) {
+                roots.push(t);
+            }
         }
+        // No configured tests dir: scan the whole project so a new test file
+        // located outside source_root still trips the guard.
+        None => roots.push(project_root),
     }
     for root in roots {
         for entry in walkdir::WalkDir::new(root)
             .into_iter()
+            .filter_entry(|e| !is_pruned_dir(e))
             .filter_map(Result::ok)
         {
             let path = entry.path();
@@ -435,6 +456,35 @@ fn newer_source_than_coverage(
         }
     }
     None
+}
+
+/// Directories never worth scanning for freshness: version control, virtual
+/// envs, vendored deps, and tool caches. Pruning them keeps the project-root
+/// walk cheap and stops a stale dependency `.py` from spuriously tripping the
+/// guard. Only prunes directories — files always pass through.
+fn is_pruned_dir(entry: &walkdir::DirEntry) -> bool {
+    if !entry.file_type().is_dir() {
+        return false;
+    }
+    matches!(
+        entry.file_name().to_str(),
+        Some(
+            ".git"
+                | ".hg"
+                | ".svn"
+                | ".venv"
+                | "venv"
+                | "node_modules"
+                | "__pycache__"
+                | "site-packages"
+                | ".fermut"
+                | ".tox"
+                | ".nox"
+                | ".mypy_cache"
+                | ".pytest_cache"
+                | ".ruff_cache"
+        )
+    )
 }
 
 fn parse_isolation_env(s: String) -> Option<IsolationMode> {
@@ -535,7 +585,7 @@ mod tests {
         std::fs::write(&cov, "db").unwrap();
         set_mtime(&py, 1000);
         set_mtime(&cov, 2000); // coverage recorded after the source → fresh
-        assert_eq!(newer_source_than_coverage(&cov, &src, None), None);
+        assert_eq!(newer_source_than_coverage(&cov, &src, None, &src), None);
     }
 
     #[test]
@@ -549,7 +599,7 @@ mod tests {
         std::fs::write(&cov, "db").unwrap();
         set_mtime(&cov, 1000);
         set_mtime(&py, 2000); // source edited after coverage → stale
-        assert_eq!(newer_source_than_coverage(&cov, &src, None), Some(py));
+        assert_eq!(newer_source_than_coverage(&cov, &src, None, &src), Some(py));
     }
 
     #[test]
@@ -572,8 +622,56 @@ mod tests {
         std::fs::write(&t, "def test(): pass\n").unwrap();
         set_mtime(&t, 2000); // new test after coverage → stale
         assert_eq!(
-            newer_source_than_coverage(&cov, &src, Some(&tests)),
+            newer_source_than_coverage(&cov, &src, Some(&tests), &src),
             Some(t)
+        );
+    }
+
+    #[test]
+    fn freshness_flags_new_test_via_project_root_when_tests_unset() {
+        // No configured tests dir: a test added anywhere under the project after
+        // coverage was recorded must still be caught by walking project_root.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let tests = tmp.path().join("tests");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::create_dir(&tests).unwrap();
+        let s = src.join("a.py");
+        std::fs::write(&s, "x = 1\n").unwrap();
+        let cov = tmp.path().join(".coverage");
+        std::fs::write(&cov, "db").unwrap();
+        set_mtime(&s, 500);
+        set_mtime(&cov, 1000);
+        let t = tests.join("test_a.py");
+        std::fs::write(&t, "def test(): pass\n").unwrap();
+        set_mtime(&t, 2000); // new test after coverage, tests dir unknown → stale
+        assert_eq!(
+            newer_source_than_coverage(&cov, &src, None, tmp.path()),
+            Some(t)
+        );
+    }
+
+    #[test]
+    fn freshness_prunes_vendored_dirs() {
+        // A newer `.py` inside a pruned dir (e.g. .venv/site-packages) must not
+        // trip the guard — those are dependencies, not the code under test.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let venv = tmp.path().join(".venv");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::create_dir(&venv).unwrap();
+        let s = src.join("a.py");
+        std::fs::write(&s, "x = 1\n").unwrap();
+        let cov = tmp.path().join(".coverage");
+        std::fs::write(&cov, "db").unwrap();
+        set_mtime(&s, 500);
+        set_mtime(&cov, 1000);
+        let dep = venv.join("dep.py");
+        std::fs::write(&dep, "y = 2\n").unwrap();
+        set_mtime(&dep, 2000); // newer, but vendored → pruned
+        assert_eq!(
+            newer_source_than_coverage(&cov, &src, None, tmp.path()),
+            None
         );
     }
 
@@ -592,7 +690,7 @@ mod tests {
         let readme = src.join("notes.md");
         std::fs::write(&readme, "hi\n").unwrap();
         set_mtime(&readme, 2000); // newer, but not .py → ignored
-        assert_eq!(newer_source_than_coverage(&cov, &src, None), None);
+        assert_eq!(newer_source_than_coverage(&cov, &src, None, &src), None);
     }
 
     /// A `RunConfigArgs` with every flag defaulted off/none, carrying the

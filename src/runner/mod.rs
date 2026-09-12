@@ -11,6 +11,7 @@
 //! (one per rayon worker).
 
 pub(crate) mod exit;
+pub mod kill_sets;
 pub(crate) mod process_group;
 pub mod pytest;
 pub mod python;
@@ -48,6 +49,13 @@ pub trait Runner: Send + Sync {
     /// sidecar. Default empty — only the pytest runner learns them, and only
     /// when smart ordering is on.
     fn take_kill_records(&self) -> Vec<crate::kill_order::KillRecord> {
+        Vec::new()
+    }
+
+    /// Drain the per-mutant kill-sets recorded this run, for the engine to write
+    /// out when `--record-kill-sets` is set. Default empty — only the pytest
+    /// runner records them, and only when the flag is on.
+    fn take_kill_sets(&self) -> Vec<kill_sets::KillSetRecord> {
         Vec::new()
     }
 }
@@ -240,6 +248,11 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
         crate::kill_order::KillOrder::default()
     });
     let kill_sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    // Kill-set recording (the higher-order-mutant experiment): a shared sink the
+    // runner appends per-mutant kill-sets to, drained by the engine afterward.
+    // Empty and unused unless `--record-kill-sets` is set.
+    let record_kill_sets = cfg.record_kill_sets.is_some();
+    let kill_set_sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let key_base = cfg.source_root.clone();
     // `rstest` is a pytest-CLI-compatible drop-in, so it reuses the pytest
     // runner wholesale — only the framework executable name differs.
@@ -257,6 +270,8 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
             smart_order: cfg.smart_order,
             kill_order: kill_order.clone(),
             kill_sink: kill_sink.clone(),
+            record_kill_sets,
+            kill_set_sink: kill_set_sink.clone(),
             key_base: key_base.clone(),
         }))
     };

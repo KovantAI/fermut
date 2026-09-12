@@ -332,6 +332,7 @@ mod chain_order_tests {
             verify_baseline: false,
             baseline_timeout_secs: 300,
             max_time_secs: None,
+            record_kill_sets: None,
         }
     }
 

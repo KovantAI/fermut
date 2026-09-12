@@ -298,6 +298,16 @@ pub(crate) struct RunConfigArgs {
     #[arg(long, value_name = "SECS")]
     pub max_time: Option<u64>,
 
+    /// Experiment: record each mutant's full kill-set (the covering tests that
+    /// fail) to <PATH> as JSONL. Drops pytest's `-x`, so a killed mutant runs
+    /// every selected test instead of stopping at the first — markedly slower.
+    /// Captures the kill-set containment structure that fermut's normal
+    /// Killed/Survived verdict discards, needed to study subsuming / higher-order
+    /// mutants. Pytest/rstest runner only. Pair with `--no-cache`, or a cache hit
+    /// skips the run and records nothing for that mutant.
+    #[arg(long, value_name = "PATH")]
+    pub record_kill_sets: Option<PathBuf>,
+
     #[command(flatten)]
     pub filter: FilterArgs,
 }

@@ -141,6 +141,35 @@ pub fn parse_first_failed(stdout: &str) -> Option<String> {
     })
 }
 
+/// Every failing/erroring test nodeid in a pytest `-rfE` summary, in order.
+///
+/// The kill-set analogue of [`parse_first_failed`]: where that returns only the
+/// first killer (all `-x` ever reveals), this collects the complete set a
+/// no-`-x` run surfaces — the mutant's kill-set `K(m)`. Same `short test summary
+/// info` anchoring and same `::`-required guard (a bare `ERROR <file>`
+/// collection error carries no `::` and is skipped, not counted as a killing
+/// test). Duplicates are preserved in encounter order; the caller dedupes if it
+/// wants set semantics.
+pub fn parse_all_failed(stdout: &str) -> Vec<String> {
+    let skip = stdout
+        .lines()
+        .position(|l| l.contains("short test summary info"))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    stdout
+        .lines()
+        .skip(skip)
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let rest = trimmed
+                .strip_prefix("FAILED ")
+                .or_else(|| trimmed.strip_prefix("ERROR "))?;
+            let nodeid = split_nodeid_reason(rest).trim();
+            (nodeid.contains("::")).then(|| nodeid.to_string())
+        })
+        .collect()
+}
+
 /// Return the nodeid portion of a pytest `-rfE` summary tail (`<nodeid> - <reason>`),
 /// cutting at the first ` - ` that sits **outside** any `[...]` param bracket.
 /// A ` - ` inside brackets is part of a parametrized id's value, not the reason
@@ -259,6 +288,35 @@ FAILED tests/real.py::test_kills - AssertionError: 3 != 4\n";
             Some("tests/real.py::test_kills"),
             "must skip the decoy line before the summary header"
         );
+    }
+
+    #[test]
+    fn parse_all_failed_collects_every_failure_and_error_after_the_header() {
+        // Kill-set recording drops `-x`, so the summary lists all failures. We
+        // must collect the full set (both FAILED and ERROR), skip a pre-header
+        // decoy, and skip a bare collection ERROR that carries no `::`.
+        let out = "\
+FAILED tests/decoy.py::spoofed - printed by the test itself\n\
+=========== short test summary info ============\n\
+FAILED tests/a.py::test_one - AssertionError\n\
+ERROR tests/b.py::test_two - RuntimeError\n\
+ERROR tests/collection_broken.py - import error\n\
+FAILED tests/a.py::test_three[1 - 2] - AssertionError: reason\n";
+        assert_eq!(
+            parse_all_failed(out),
+            vec![
+                "tests/a.py::test_one".to_string(),
+                "tests/b.py::test_two".to_string(),
+                // bare `ERROR <file>` (no `::`) is a collection error, not a test
+                "tests/a.py::test_three[1 - 2]".to_string(),
+            ],
+            "collect all FAILED/ERROR nodeids in the summary, skip decoy + bare-file error"
+        );
+    }
+
+    #[test]
+    fn parse_all_failed_empty_when_no_failures() {
+        assert!(parse_all_failed("2 passed in 0.1s\n").is_empty());
     }
 
     #[test]

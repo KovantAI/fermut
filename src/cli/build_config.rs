@@ -79,6 +79,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         no_smart_order: cli_no_smart_order,
         smart_order: cli_smart_order,
         max_time: cli_max_time,
+        record_kill_sets: cli_record_kill_sets,
         filter: f,
     } = args;
     let cli_runner: Option<RunnerKind> = cli_runner.map(Into::into);
@@ -363,6 +364,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         verify_baseline,
         baseline_timeout_secs,
         max_time_secs,
+        record_kill_sets: cli_record_kill_sets.map(absolutize),
     })
 }
 
@@ -723,6 +725,7 @@ mod tests {
             no_smart_order: false,
             smart_order: false,
             max_time: None,
+            record_kill_sets: None,
             filter,
         }
     }

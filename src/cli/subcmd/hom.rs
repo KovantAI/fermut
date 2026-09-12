@@ -31,6 +31,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 use serde::Deserialize;
 
 use crate::cli::build_config::build_config;
@@ -39,7 +40,7 @@ use crate::config::RunnerKind;
 use crate::mutator::{self, Mutant};
 use crate::runner::process_group::kill_group;
 use crate::runner::pytest::wait_draining_stdout;
-use crate::runner::{apply_patch, build_mirror, configure_mirror_cmd, Mirror};
+use crate::runner::{apply_patch, configure_mirror_cmd, Mirror};
 
 /// `fermut hom` arguments.
 #[derive(clap::Args, Debug)]
@@ -95,7 +96,6 @@ struct HomResult {
     k_f1: usize,
     k_f2: usize,
     intersection: usize,
-    k_h: Vec<String>,
 }
 
 pub(crate) fn run(args: HomArgs) -> Result<()> {
@@ -145,10 +145,28 @@ pub(crate) fn run(args: HomArgs) -> Result<()> {
             covering,
         });
     }
+    // Dedup FOMs that are the *same textual edit* under different operator tags
+    // (e.g. number-shift vs number-to-zero both emitting `1->0`). Identical edits
+    // produce identical higher-order mutants, so keeping one representative is
+    // lossless for HOM pairing — unlike kill-set dedup, which is NOT safe here:
+    // two FOMs with the same K(f) can still combine differently with a third
+    // edit, so their second-order behavior can diverge.
+    let before_dedup = killed.len();
+    let mut seen_edits = std::collections::HashSet::new();
+    killed.retain(|k| {
+        let m = &k.mutant;
+        seen_edits.insert((
+            m.file.clone(),
+            u32::from(m.range.start()),
+            u32::from(m.range.end()),
+            m.replacement.clone(),
+        ))
+    });
     tracing::info!(
         killed_foms = killed.len(),
         from_records = killed_ids,
-        "joined killed FOMs to the catalogue"
+        identical_edits_collapsed = before_dedup - killed.len(),
+        "joined killed FOMs to the catalogue (after identical-edit dedup)"
     );
 
     // 3. Candidate pairs: same file, non-overlapping ranges, non-empty kill
@@ -186,59 +204,104 @@ pub(crate) fn run(args: HomArgs) -> Result<()> {
         candidates.truncate(max_pairs);
     }
 
-    // 4. Build + run each HOM in a single reused mirror.
+    // 4. Build + run each HOM. Parallel across rayon workers, each reusing its
+    //    own thread-local mirror (via `with_worker_mirror`) — the same
+    //    per-worker-mirror reuse the engine relies on, so a HOM's two-edit patch
+    //    and revert stay isolated to one worker. A single pair's failure (spawn
+    //    error, unreadable mirror file) drops that pair rather than the run.
+    //
+    //    Results stream to the output file as they complete (locked writer) so a
+    //    long run is watchable and survives an interrupt with partial data; a
+    //    progress counter logs every 1000 pairs.
     let tests = cfg.tests_path();
-    let mirror = build_mirror(&tests, cfg.isolation).context("building mirror for HOM runs")?;
     let timeout = Duration::from_secs(cfg.timeout_secs);
+    let python = cfg.python.as_deref();
+    let source_root = &cfg.source_root;
 
-    let mut results: Vec<HomResult> = Vec::with_capacity(candidates.len());
-    for (i, j, _overlap) in &candidates {
-        let a = &killed[*i];
-        let b = &killed[*j];
-        let inter: BTreeSet<String> = a.kills.intersection(&b.kills).cloned().collect();
-        let union_tests: Vec<String> = a.covering.union(&b.covering).cloned().collect();
-        if union_tests.is_empty() {
-            continue; // no tests to run — cannot classify
-        }
-        let k_h = run_hom(
-            &mirror,
-            cfg.python.as_deref(),
-            exe,
-            timeout,
-            &a.mutant,
-            &b.mutant,
-            &union_tests,
-        )?;
-        let k_h_set: BTreeSet<String> = k_h.iter().cloned().collect();
-        let class = classify(&k_h_set, &inter);
-        results.push(HomResult {
-            f1_id: a.mutant.id.clone(),
-            f2_id: b.mutant.id.clone(),
-            file: rel_file(&a.mutant.file, &cfg.source_root),
-            line1: a.mutant.line,
-            line2: b.mutant.line,
-            class,
-            k_f1: a.kills.len(),
-            k_f2: b.kills.len(),
-            intersection: inter.len(),
-            k_h,
-        });
+    let writer = std::sync::Mutex::new(open_writer(&out)?);
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let total = candidates.len();
+    tracing::info!(pairs = total, "running HOM candidates");
+
+    let results: Vec<HomResult> = candidates
+        .par_iter()
+        .filter_map(|(i, j, _overlap)| {
+            let a = &killed[*i];
+            let b = &killed[*j];
+            let inter: BTreeSet<String> = a.kills.intersection(&b.kills).cloned().collect();
+            // Tests outside the intersection decide sshom vs non-subsuming; the
+            // intersection alone decides sshom vs decoupled. Both stages use `-x`
+            // (we only need "any killer?" per stage), so most pairs short-circuit
+            // instead of running the full union without `-x`.
+            let outside: Vec<String> = a
+                .covering
+                .union(&b.covering)
+                .filter(|t| !inter.contains(*t))
+                .cloned()
+                .collect();
+            let inter_vec: Vec<String> = inter.iter().cloned().collect();
+            if inter_vec.is_empty() && outside.is_empty() {
+                return None; // no tests to run — cannot classify
+            }
+            let staged = crate::runner::with_worker_mirror(&tests, cfg.isolation, |mirror| {
+                run_hom_staged(
+                    mirror, python, exe, timeout, &a.mutant, &b.mutant, &inter_vec, &outside,
+                )
+            });
+            let (inter_kill, outside_kill) = match staged {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(f1 = %a.mutant.id, f2 = %b.mutant.id, error = %e, "HOM run failed; skipping pair");
+                    return None;
+                }
+            };
+            let class = classify(inter_kill, outside_kill);
+            let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if n % 1000 == 0 {
+                tracing::info!(done = n, total, "HOM progress");
+            }
+            let result = HomResult {
+                f1_id: a.mutant.id.clone(),
+                f2_id: b.mutant.id.clone(),
+                file: rel_file(&a.mutant.file, source_root),
+                line1: a.mutant.line,
+                line2: b.mutant.line,
+                class,
+                k_f1: a.kills.len(),
+                k_f2: b.kills.len(),
+                intersection: inter.len(),
+            };
+            if let Ok(mut w) = writer.lock() {
+                use std::io::Write;
+                if let Ok(line) = serde_json::to_string(&result) {
+                    let _ = writeln!(w, "{line}");
+                }
+            }
+            Some(result)
+        })
+        .collect();
+
+    if let Ok(mut w) = writer.lock() {
+        use std::io::Write;
+        let _ = w.flush();
     }
-
-    write_results(&out, &results)?;
     print_summary(&results, killed.len(), total_candidates, dropped, &out);
     Ok(())
 }
 
-/// SSHOM iff killed and every killer is in the intersection; empty → decoupled
-/// (the two faults mask each other); otherwise non-subsuming.
-fn classify(k_h: &BTreeSet<String>, intersection: &BTreeSet<String>) -> &'static str {
-    if k_h.is_empty() {
-        "decoupled"
-    } else if k_h.is_subset(intersection) {
+/// Classify from the two staged booleans: `inter_kill` = some test in
+/// `K(f1)∩K(f2)` kills the HOM; `outside_kill` = some test outside the
+/// intersection kills it.
+/// - any outside killer → **non-subsuming** (`K(h) ⊄ intersection`)
+/// - else killed only within the intersection → **sshom**
+/// - else nothing kills it → **decoupled** (the faults mask each other)
+fn classify(inter_kill: bool, outside_kill: bool) -> &'static str {
+    if outside_kill {
+        "non-subsuming"
+    } else if inter_kill {
         "sshom"
     } else {
-        "non-subsuming"
+        "decoupled"
     }
 }
 
@@ -250,23 +313,29 @@ fn ranges_overlap(a: &Mutant, b: &Mutant) -> bool {
     a0 < b1 && b0 < a1
 }
 
-/// Splice both edits into the mirror and run `tests` without `-x`, returning the
-/// deduped set of failing node ids — the HOM's kill-set `K(h)`.
+/// Splice both edits into the mirror, then classify the HOM in two staged runs.
+/// Returns `(inter_kill, outside_kill)`: whether any test in the intersection
+/// kills the HOM, and whether any test outside it does.
 ///
 /// The two patches are applied via [`apply_patch`] guards in **descending
 /// start-offset order**: patching the later edit first leaves the earlier edit's
 /// byte offsets valid (bytes before it are untouched), so a length-changing
 /// replacement can't shift the second range. The guards restore the mirror on
 /// scope exit, so the next candidate starts from clean source.
-fn run_hom(
+///
+/// Both stages run with `-x` (stop at the first failure) because each only needs
+/// a boolean "did any of these tests kill it?" — far cheaper than the full
+/// no-`-x` union. The outside stage is skipped when there are no outside tests.
+fn run_hom_staged(
     mirror: &Mirror,
     python: Option<&Path>,
     exe: &str,
     timeout: Duration,
     f1: &Mutant,
     f2: &Mutant,
-    tests: &[String],
-) -> Result<Vec<String>> {
+    inter_tests: &[String],
+    outside_tests: &[String],
+) -> Result<(bool, bool)> {
     let (later, earlier) = if f1.range.start() >= f2.range.start() {
         (f1, f2)
     } else {
@@ -275,6 +344,29 @@ fn run_hom(
     let _g_later = apply_patch(mirror, later)?;
     let _g_earlier = apply_patch(mirror, earlier)?;
 
+    let inter_kill = if inter_tests.is_empty() {
+        false
+    } else {
+        any_test_fails(mirror, python, exe, timeout, inter_tests)?
+    };
+    let outside_kill = if outside_tests.is_empty() {
+        false
+    } else {
+        any_test_fails(mirror, python, exe, timeout, outside_tests)?
+    };
+    Ok((inter_kill, outside_kill))
+}
+
+/// Run `tests` against the already-patched `mirror` with `-x` and report whether
+/// any failed (exit non-zero). `-x` short-circuits at the first failure, so this
+/// is a cheap "any killer?" probe.
+fn any_test_fails(
+    mirror: &Mirror,
+    python: Option<&Path>,
+    exe: &str,
+    timeout: Duration,
+    tests: &[String],
+) -> Result<bool> {
     let mut cmd = match python {
         Some(py) => {
             let mut c = Command::new(py);
@@ -283,23 +375,19 @@ fn run_hom(
         }
         None => Command::new(exe),
     };
-    cmd.arg("--tb=no").arg("-q").arg("-rfE");
+    cmd.arg("-x").arg("--tb=no").arg("-q");
     for t in tests {
         cmd.arg(t);
     }
     configure_mirror_cmd(&mut cmd, mirror)?;
-    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
     let child = cmd.spawn().context("spawning HOM test run")?;
-    let (_status, output) = wait_draining_stdout(child, timeout, kill_group)?;
-
-    let mut ids = output
-        .as_deref()
-        .map(crate::kill_order::parse_all_failed)
-        .unwrap_or_default();
-    let mut seen = std::collections::HashSet::new();
-    ids.retain(|id| seen.insert(id.clone()));
-    Ok(ids)
+    let (status, _output) = wait_draining_stdout(child, timeout, kill_group)?;
+    // Non-zero exit → at least one selected test failed (the HOM was killed by
+    // this test set). A timeout (`None`) counts as not-killed for this stage —
+    // conservative: it can only understate a kill, never fabricate one.
+    Ok(matches!(status, Some(s) if !s.success()))
 }
 
 fn load_kill_sets(path: &Path) -> Result<HashMap<String, Vec<String>>> {
@@ -329,8 +417,8 @@ fn rel_file(file: &Path, source_root: &Path) -> String {
         .replace('\\', "/")
 }
 
-fn write_results(path: &Path, results: &[HomResult]) -> Result<()> {
-    use std::io::Write;
+/// Open the output file for streaming JSONL writes (truncating any prior run).
+fn open_writer(path: &Path) -> Result<std::io::BufWriter<std::fs::File>> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -339,12 +427,7 @@ fn write_results(path: &Path, results: &[HomResult]) -> Result<()> {
     }
     let file =
         std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    let mut w = std::io::BufWriter::new(file);
-    for r in results {
-        writeln!(w, "{}", serde_json::to_string(r)?).context("writing HOM result")?;
-    }
-    w.flush().context("flushing HOM results")?;
-    Ok(())
+    Ok(std::io::BufWriter::new(file))
 }
 
 fn print_summary(
@@ -398,20 +481,15 @@ mod tests {
     use super::*;
     use ruff_text_size::{TextRange, TextSize};
 
-    fn set(v: &[&str]) -> BTreeSet<String> {
-        v.iter().map(|s| s.to_string()).collect()
-    }
-
     #[test]
     fn classify_sshom_decoupled_non_subsuming() {
-        let inter = set(&["t1", "t2"]);
-        // Killed only by intersection tests → SSHOM.
-        assert_eq!(classify(&set(&["t1"]), &inter), "sshom");
-        assert_eq!(classify(&set(&["t1", "t2"]), &inter), "sshom");
+        // Killed only within the intersection → SSHOM.
+        assert_eq!(classify(true, false), "sshom");
         // Killed by nothing → the faults masked each other.
-        assert_eq!(classify(&set(&[]), &inter), "decoupled");
-        // A killer outside the intersection → not subsuming.
-        assert_eq!(classify(&set(&["t1", "t3"]), &inter), "non-subsuming");
+        assert_eq!(classify(false, false), "decoupled");
+        // A killer outside the intersection → not subsuming (regardless of inter).
+        assert_eq!(classify(true, true), "non-subsuming");
+        assert_eq!(classify(false, true), "non-subsuming");
     }
 
     fn mutant_at(start: u32, end: u32) -> Mutant {

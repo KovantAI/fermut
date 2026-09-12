@@ -408,13 +408,9 @@ thread_local! {
 /// Run `f` against this worker's mirror, building one on first call.
 /// The mirror is rebuilt only if `tests` or isolation mode changes — neither
 /// should within a run.
-pub(crate) fn with_worker_mirror<F>(
-    tests: &Path,
-    mode: IsolationMode,
-    f: F,
-) -> Result<MutantOutcome>
+pub(crate) fn with_worker_mirror<F, T>(tests: &Path, mode: IsolationMode, f: F) -> Result<T>
 where
-    F: FnOnce(&Mirror) -> Result<MutantOutcome>,
+    F: FnOnce(&Mirror) -> Result<T>,
 {
     WORKER_MIRROR.with(|cell| {
         let mut slot = cell.borrow_mut();

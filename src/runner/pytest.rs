@@ -447,7 +447,7 @@ const DRAIN_GRACE: Duration = Duration::from_secs(5);
 /// [`DRAIN_GRACE`], which usually *recovers* the datapoint the child already
 /// wrote. Bytes are decoded lossily rather than via `read_to_string` so a single
 /// non-UTF-8 byte can't discard the whole capture.
-fn wait_draining_stdout(
+pub(crate) fn wait_draining_stdout(
     child: Child,
     timeout: Duration,
     on_timeout: impl FnMut(&mut Child),

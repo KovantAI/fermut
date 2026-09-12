@@ -318,6 +318,15 @@ enum Cmd {
     /// Generate mutants, run pytest against each, report killed/survived.
     Run(subcmd::run::RunArgs),
 
+    /// Higher-order-mutant experiment (Phase 1): find strongly-subsuming
+    /// second-order mutants.
+    ///
+    /// Consumes a `run --record-kill-sets` JSONL, pairs killed FOMs whose
+    /// kill-sets overlap, runs each 2nd-order mutant, and reports which are
+    /// SSHOMs (killed only by tests that kill both constituents) — the
+    /// fewer-but-stronger mutants. Pytest/rstest + `--coverage` required.
+    Hom(subcmd::hom::HomArgs),
+
     /// Enumerate mutations without running tests.
     ///
     /// By default the same pre-test filters as `run` apply (ty type-check,
@@ -577,6 +586,7 @@ impl Cli {
             Cmd::Clean(args) => subcmd::clean::run(args),
             Cmd::Merge(args) => merge::run(args),
             Cmd::List(args) => subcmd::list::run(args),
+            Cmd::Hom(args) => subcmd::hom::run(args),
         }
     }
 }

@@ -9,6 +9,7 @@ pub mod coverage;
 pub mod dashboard;
 pub mod doctor;
 pub mod explain;
+pub mod hom;
 pub mod init;
 pub mod list;
 pub mod mcp;

@@ -15,7 +15,8 @@ cls = collections.Counter(h["class"] for h in homs)
 n_run = len(homs)
 sshoms = [h for h in homs if h["class"] == "sshom"]
 
-print("=== pyjwt api_jws.py — HOM (2nd order) ===")
+import os
+print(f"=== {os.path.basename(hom_path)} — HOM (2nd order) ===")
 print(f"FOMs: {n_fom_total} total, {n_fom_killed} killed")
 print(f"candidate pairs run: {n_run}")
 for k in ("sshom", "decoupled", "non-subsuming"):

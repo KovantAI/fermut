@@ -32,6 +32,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
+use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
+use ruff_python_ast::Stmt;
+use ruff_python_parser::parse_module;
+use ruff_text_size::{Ranged, TextRange, TextSize};
 use serde::Deserialize;
 
 use crate::cli::build_config::build_config;
@@ -64,6 +68,13 @@ pub(crate) struct HomArgs {
     /// Dropped pairs are reported so the coverage bound is never silent.
     #[arg(long, value_name = "N", default_value_t = 2000)]
     pub(crate) max_pairs: usize,
+
+    /// Also pair FOMs in *different* functions. Off by default: SSHOMs are
+    /// function-local fault interactions, so cross-function pairs are almost all
+    /// non-subsuming noise that dominates cost. Pass this to reproduce the
+    /// same-file-only gate.
+    #[arg(long)]
+    pub(crate) cross_function: bool,
 }
 
 /// The Phase-0 record fields this command reads (a subset of
@@ -81,6 +92,9 @@ struct KilledFom {
     mutant: Mutant,
     kills: BTreeSet<String>,
     covering: BTreeSet<String>,
+    /// Start offset of the innermost enclosing function, or `None` for
+    /// module-level code. The same-function gate pairs only FOMs sharing this.
+    fn_id: Option<u32>,
 }
 
 /// One candidate pair's outcome.
@@ -105,6 +119,7 @@ pub(crate) fn run(args: HomArgs) -> Result<()> {
         kill_sets,
         out,
         max_pairs,
+        cross_function,
     } = args;
     let cfg = build_config(path, cfg_args)?;
 
@@ -130,6 +145,9 @@ pub(crate) fn run(args: HomArgs) -> Result<()> {
     //    ranges/replacements the JSONL omits.
     let catalogue = mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)
         .context("regenerating FOM catalogue")?;
+    // Cache each file's function spans once so the same-function gate is a cheap
+    // lookup per mutant rather than a re-parse.
+    let mut spans_by_file: HashMap<PathBuf, Vec<TextRange>> = HashMap::new();
     let mut killed: Vec<KilledFom> = Vec::new();
     for m in catalogue {
         let Some(kills) = fom_kills.get(&m.id) else {
@@ -139,10 +157,15 @@ pub(crate) fn run(args: HomArgs) -> Result<()> {
             .tests_for_mutant(&m)
             .map(|t| t.iter().cloned().collect())
             .unwrap_or_default();
+        let spans = spans_by_file
+            .entry(m.file.clone())
+            .or_insert_with(|| function_spans(&m.file));
+        let fn_id = enclosing_fn(spans, m.range.start());
         killed.push(KilledFom {
             mutant: m,
             kills: kills.iter().cloned().collect(),
             covering,
+            fn_id,
         });
     }
     // Dedup FOMs that are the *same textual edit* under different operator tags
@@ -178,6 +201,12 @@ pub(crate) fn run(args: HomArgs) -> Result<()> {
             let a = &killed[i];
             let b = &killed[j];
             if a.mutant.file != b.mutant.file {
+                continue;
+            }
+            // Same-function gate (default): SSHOMs are function-local, so cross-
+            // function pairs are almost all non-subsuming noise. `--cross-function`
+            // disables it. Two module-level FOMs (both `None`) count as same scope.
+            if !cross_function && a.fn_id != b.fn_id {
                 continue;
             }
             if ranges_overlap(&a.mutant, &b.mutant) {
@@ -285,7 +314,19 @@ pub(crate) fn run(args: HomArgs) -> Result<()> {
         use std::io::Write;
         let _ = w.flush();
     }
-    print_summary(&results, killed.len(), total_candidates, dropped, &out);
+    let gate = if cross_function {
+        "same-file (cross-function allowed)"
+    } else {
+        "same-function"
+    };
+    print_summary(
+        &results,
+        killed.len(),
+        total_candidates,
+        dropped,
+        &out,
+        gate,
+    );
     Ok(())
 }
 
@@ -303,6 +344,45 @@ fn classify(inter_kill: bool, outside_kill: bool) -> &'static str {
     } else {
         "decoupled"
     }
+}
+
+/// Byte ranges of every function definition in `file` (all nesting depths),
+/// via a source-order walk. Empty on a parse failure or unreadable file — the
+/// same-function gate then treats those mutants as module-level (`None`).
+fn function_spans(file: &Path) -> Vec<TextRange> {
+    let Ok(source) = std::fs::read_to_string(file) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = parse_module(&source) else {
+        return Vec::new();
+    };
+    struct FnSpans {
+        spans: Vec<TextRange>,
+    }
+    impl<'a> SourceOrderVisitor<'a> for FnSpans {
+        fn visit_stmt(&mut self, stmt: &'a Stmt) {
+            if let Stmt::FunctionDef(f) = stmt {
+                self.spans.push(f.range());
+            }
+            walk_stmt(self, stmt);
+        }
+    }
+    let mut v = FnSpans { spans: Vec::new() };
+    for stmt in &parsed.syntax().body {
+        v.visit_stmt(stmt);
+    }
+    v.spans
+}
+
+/// The innermost function span containing `off`, keyed by its start offset;
+/// `None` if the offset is module-level. "Innermost" = the shortest containing
+/// span, so a method inside a class inside a function resolves to the method.
+fn enclosing_fn(spans: &[TextRange], off: TextSize) -> Option<u32> {
+    spans
+        .iter()
+        .filter(|r| r.contains(off))
+        .min_by_key(|r| r.len())
+        .map(|r| u32::from(r.start()))
 }
 
 /// Two mutants' byte ranges touch — applying both edits is ill-defined, so the
@@ -326,6 +406,7 @@ fn ranges_overlap(a: &Mutant, b: &Mutant) -> bool {
 /// Both stages run with `-x` (stop at the first failure) because each only needs
 /// a boolean "did any of these tests kill it?" — far cheaper than the full
 /// no-`-x` union. The outside stage is skipped when there are no outside tests.
+#[allow(clippy::too_many_arguments)]
 fn run_hom_staged(
     mirror: &Mirror,
     python: Option<&Path>,
@@ -430,12 +511,14 @@ fn open_writer(path: &Path) -> Result<std::io::BufWriter<std::fs::File>> {
     Ok(std::io::BufWriter::new(file))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_summary(
     results: &[HomResult],
     killed_foms: usize,
     total_candidates: usize,
     dropped: usize,
     out: &Path,
+    gate: &str,
 ) {
     let sshom = results.iter().filter(|r| r.class == "sshom").count();
     let decoupled = results.iter().filter(|r| r.class == "decoupled").count();
@@ -460,6 +543,7 @@ fn print_summary(
     };
 
     println!("HOM experiment (2nd order)");
+    println!("  gate:               {}", gate);
     println!("  killed FOMs:        {killed_foms}");
     println!("  candidate pairs:    {total_candidates} (kill-overlap gate)");
     if dropped > 0 {
@@ -480,6 +564,37 @@ fn print_summary(
 mod tests {
     use super::*;
     use ruff_text_size::{TextRange, TextSize};
+
+    #[test]
+    fn enclosing_fn_resolves_innermost_and_module_level() {
+        let src = "\
+x = 1
+
+def outer():
+    y = 2
+    def inner():
+        z = 3
+        return z
+    return inner()
+";
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("m.py");
+        std::fs::write(&p, src).unwrap();
+        let spans = function_spans(&p);
+        assert_eq!(spans.len(), 2, "outer + inner");
+
+        let off = |needle: &str| TextSize::from(src.find(needle).unwrap() as u32);
+        // module-level assignment → None
+        assert_eq!(enclosing_fn(&spans, off("x = 1")), None);
+        // `z = 3` is inside inner (the shortest containing span)
+        let inner_id = enclosing_fn(&spans, off("z = 3"));
+        // `y = 2` is inside outer only
+        let outer_id = enclosing_fn(&spans, off("y = 2"));
+        assert!(inner_id.is_some() && outer_id.is_some());
+        assert_ne!(inner_id, outer_id, "inner and outer are distinct functions");
+        // `return z` also resolves to inner — same function as `z = 3`
+        assert_eq!(enclosing_fn(&spans, off("return z")), inner_id);
+    }
 
     #[test]
     fn classify_sshom_decoupled_non_subsuming() {

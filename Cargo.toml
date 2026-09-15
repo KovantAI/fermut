@@ -57,7 +57,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2"
 wait-timeout = "0.2"
-which = "6"
+which = "8"
 # Minimal on purpose: the Anthropic client is a single stateless JSON POST, so
 # cookie storage and gzip (with their cookie_store / time / flate2 trees) are
 # dead weight. `rustls` brings TLS + webpki roots; `json` brings send/read_json.

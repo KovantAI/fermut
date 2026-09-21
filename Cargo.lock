@@ -53,7 +53,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -64,7 +64,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -287,7 +287,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "576ba56f6ca18ebb069d0d07260407171712aff4dfe15ee3f8982dc16a455bcf"
 dependencies = [
  "castaway",
- "get-size2",
+ "get-size2 0.10.3",
  "itoa",
  "ryu",
  "serde_core",
@@ -375,7 +375,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -598,7 +598,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -658,7 +658,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -711,10 +711,10 @@ dependencies = [
  "reflink-copy",
  "regex",
  "ruff_db",
- "ruff_notebook",
+ "ruff_notebook 0.0.14",
  "ruff_python_ast",
  "ruff_python_parser",
- "ruff_text_size",
+ "ruff_text_size 0.0.11",
  "rusqlite",
  "rustls",
  "serde",
@@ -843,17 +843,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "get-size-derive2"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7efe46d2adb529015748742f1a38594039ce357dbb21e6d178de342cfce468d4"
+dependencies = [
+ "attribute-derive",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "get-size2"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b411f34418305908ab15a82ff78958c2a9aee9a272b2a2e663836b20a4e4b9d3"
 dependencies = [
  "compact_str",
- "get-size-derive2",
+ "get-size-derive2 0.10.3",
  "hashbrown 0.17.1",
  "indexmap",
  "ordermap",
  "parking_lot",
+ "smallvec",
+ "thin-vec",
+]
+
+[[package]]
+name = "get-size2"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4d338de392104417fe6fdbe588c52383b9236956d8afe5654f0077176edc632"
+dependencies = [
+ "compact_str",
+ "get-size-derive2 0.11.0",
+ "hashbrown 0.17.1",
+ "ordermap",
  "smallvec",
  "thin-vec",
 ]
@@ -1409,7 +1434,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1890,21 +1915,21 @@ dependencies = [
  "dunce",
  "etcetera",
  "filetime",
- "get-size2",
+ "get-size2 0.10.3",
  "ignore",
  "matchit",
  "path-slash",
  "pathdiff",
  "ruff_annotate_snippets",
  "ruff_cache",
- "ruff_diagnostics",
+ "ruff_diagnostics 0.0.11",
  "ruff_memory_usage",
- "ruff_notebook",
+ "ruff_notebook 0.0.11",
  "ruff_python_ast",
  "ruff_python_parser",
  "ruff_python_trivia",
- "ruff_source_file",
- "ruff_text_size",
+ "ruff_source_file 0.0.11",
+ "ruff_text_size 0.0.11",
  "rustc-hash",
  "salsa",
  "same-file",
@@ -1925,10 +1950,20 @@ name = "ruff_diagnostics"
 version = "0.0.11"
 source = "git+https://github.com/astral-sh/ruff?tag=0.16.5#9e4938c4a60bed3e87a11ee1e1db1bd23f4d964a"
 dependencies = [
- "get-size2",
+ "get-size2 0.10.3",
  "is-macro",
- "ruff_text_size",
+ "ruff_text_size 0.0.11",
  "serde",
+]
+
+[[package]]
+name = "ruff_diagnostics"
+version = "0.0.14"
+source = "git+https://github.com/astral-sh/ruff?tag=0.16.8#62914c4b9b79a9e5004374a9c482ad2ed69290e1"
+dependencies = [
+ "get-size2 0.11.0",
+ "is-macro",
+ "ruff_text_size 0.0.14",
 ]
 
 [[package]]
@@ -1936,7 +1971,7 @@ name = "ruff_index"
 version = "0.0.11"
 source = "git+https://github.com/astral-sh/ruff?tag=0.16.5#9e4938c4a60bed3e87a11ee1e1db1bd23f4d964a"
 dependencies = [
- "get-size2",
+ "get-size2 0.10.3",
  "ruff_macros",
  "salsa",
 ]
@@ -1960,7 +1995,7 @@ name = "ruff_memory_usage"
 version = "0.0.11"
 source = "git+https://github.com/astral-sh/ruff?tag=0.16.5#9e4938c4a60bed3e87a11ee1e1db1bd23f4d964a"
 dependencies = [
- "get-size2",
+ "get-size2 0.10.3",
 ]
 
 [[package]]
@@ -1970,9 +2005,25 @@ source = "git+https://github.com/astral-sh/ruff?tag=0.16.5#9e4938c4a60bed3e87a11
 dependencies = [
  "anyhow",
  "rand 0.10.2",
- "ruff_diagnostics",
- "ruff_source_file",
- "ruff_text_size",
+ "ruff_diagnostics 0.0.11",
+ "ruff_source_file 0.0.11",
+ "ruff_text_size 0.0.11",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "ruff_notebook"
+version = "0.0.14"
+source = "git+https://github.com/astral-sh/ruff?tag=0.16.8#62914c4b9b79a9e5004374a9c482ad2ed69290e1"
+dependencies = [
+ "anyhow",
+ "rand 0.10.2",
+ "ruff_diagnostics 0.0.14",
+ "ruff_source_file 0.0.14",
+ "ruff_text_size 0.0.14",
  "serde",
  "serde_json",
  "thiserror",
@@ -1994,13 +2045,13 @@ dependencies = [
  "bitflags",
  "char_str",
  "compact_str",
- "get-size2",
+ "get-size2 0.10.3",
  "is-macro",
  "memchr",
  "ruff_cache",
  "ruff_python_trivia",
- "ruff_source_file",
- "ruff_text_size",
+ "ruff_source_file 0.0.11",
+ "ruff_text_size 0.0.11",
  "rustc-hash",
  "salsa",
  "serde",
@@ -2027,11 +2078,11 @@ dependencies = [
  "bitflags",
  "bstr",
  "drop_bomb",
- "get-size2",
+ "get-size2 0.10.3",
  "memchr",
  "ruff_python_ast",
  "ruff_python_trivia",
- "ruff_text_size",
+ "ruff_text_size 0.0.11",
  "rustc-hash",
  "stacker",
  "static_assertions",
@@ -2056,8 +2107,8 @@ version = "0.0.11"
 source = "git+https://github.com/astral-sh/ruff?tag=0.16.5#9e4938c4a60bed3e87a11ee1e1db1bd23f4d964a"
 dependencies = [
  "itertools",
- "ruff_source_file",
- "ruff_text_size",
+ "ruff_source_file 0.0.11",
+ "ruff_text_size 0.0.11",
  "rustc-hash",
  "unicode-ident",
 ]
@@ -2067,10 +2118,10 @@ name = "ruff_ranged_value"
 version = "0.0.11"
 source = "git+https://github.com/astral-sh/ruff?tag=0.16.5#9e4938c4a60bed3e87a11ee1e1db1bd23f4d964a"
 dependencies = [
- "get-size2",
+ "get-size2 0.10.3",
  "ruff_db",
  "ruff_python_ast",
- "ruff_text_size",
+ "ruff_text_size 0.0.11",
  "serde",
  "toml",
 ]
@@ -2080,9 +2131,19 @@ name = "ruff_source_file"
 version = "0.0.11"
 source = "git+https://github.com/astral-sh/ruff?tag=0.16.5#9e4938c4a60bed3e87a11ee1e1db1bd23f4d964a"
 dependencies = [
- "get-size2",
+ "get-size2 0.10.3",
  "memchr",
- "ruff_text_size",
+ "ruff_text_size 0.0.11",
+ "serde",
+]
+
+[[package]]
+name = "ruff_source_file"
+version = "0.0.14"
+source = "git+https://github.com/astral-sh/ruff?tag=0.16.8#62914c4b9b79a9e5004374a9c482ad2ed69290e1"
+dependencies = [
+ "memchr",
+ "ruff_text_size 0.0.14",
  "serde",
 ]
 
@@ -2091,7 +2152,16 @@ name = "ruff_text_size"
 version = "0.0.11"
 source = "git+https://github.com/astral-sh/ruff?tag=0.16.5#9e4938c4a60bed3e87a11ee1e1db1bd23f4d964a"
 dependencies = [
- "get-size2",
+ "get-size2 0.10.3",
+ "serde",
+]
+
+[[package]]
+name = "ruff_text_size"
+version = "0.0.14"
+source = "git+https://github.com/astral-sh/ruff?tag=0.16.8#62914c4b9b79a9e5004374a9c482ad2ed69290e1"
+dependencies = [
+ "get-size2 0.11.0",
  "serde",
 ]
 
@@ -2126,7 +2196,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2385,7 +2455,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2482,7 +2552,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2703,7 +2773,7 @@ dependencies = [
  "anyhow",
  "camino",
  "compact_str",
- "get-size2",
+ "get-size2 0.10.3",
  "ordermap",
  "regex",
  "regex-syntax",
@@ -2730,7 +2800,7 @@ dependencies = [
  "colored",
  "compact_str",
  "crossbeam",
- "get-size2",
+ "get-size2 0.10.3",
  "globset",
  "notify",
  "ordermap",
@@ -2746,7 +2816,7 @@ dependencies = [
  "ruff_options_metadata",
  "ruff_python_ast",
  "ruff_ranged_value",
- "ruff_text_size",
+ "ruff_text_size 0.0.11",
  "rustc-hash",
  "salsa",
  "serde",
@@ -2773,7 +2843,7 @@ dependencies = [
  "bitflags",
  "bitvec",
  "char_str",
- "get-size2",
+ "get-size2 0.10.3",
  "hashbrown 0.17.1",
  "itertools",
  "ruff_db",
@@ -2782,7 +2852,7 @@ dependencies = [
  "ruff_memory_usage",
  "ruff_python_ast",
  "ruff_python_parser",
- "ruff_text_size",
+ "ruff_text_size 0.0.11",
  "rustc-hash",
  "salsa",
  "serde",
@@ -2805,14 +2875,14 @@ dependencies = [
  "char_str",
  "compact_str",
  "drop_bomb",
- "get-size2",
+ "get-size2 0.10.3",
  "indexmap",
  "itertools",
  "memchr",
  "ordermap",
  "rayon",
  "ruff_db",
- "ruff_diagnostics",
+ "ruff_diagnostics 0.0.11",
  "ruff_index",
  "ruff_macros",
  "ruff_memory_usage",
@@ -2821,8 +2891,8 @@ dependencies = [
  "ruff_python_parser",
  "ruff_python_stdlib",
  "ruff_python_trivia",
- "ruff_source_file",
- "ruff_text_size",
+ "ruff_source_file 0.0.11",
+ "ruff_text_size 0.0.11",
  "rustc-hash",
  "salsa",
  "serde",
@@ -2845,14 +2915,14 @@ source = "git+https://github.com/astral-sh/ruff?tag=0.16.5#9e4938c4a60bed3e87a11
 dependencies = [
  "camino",
  "colored",
- "get-size2",
+ "get-size2 0.10.3",
  "indexmap",
  "ruff_annotate_snippets",
  "ruff_db",
  "ruff_python_ast",
  "ruff_python_trivia",
- "ruff_source_file",
- "ruff_text_size",
+ "ruff_source_file 0.0.11",
+ "ruff_text_size 0.0.11",
  "strum",
  "strum_macros",
  "tracing",
@@ -3176,7 +3246,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

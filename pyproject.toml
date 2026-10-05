@@ -45,3 +45,7 @@ Issues = "https://github.com/KovantAI/fermut/issues"
 [tool.maturin]
 bindings = "bin"
 strip = true
+# `fermut install-skills` embeds plugins/fermut/skills/ (include_bytes! from
+# src/cli/subcmd/install_skills.rs); ship it in the sdist so a source build
+# compiles.
+include = [{ path = "plugins/fermut/skills/*/SKILL.md", format = "sdist" }]

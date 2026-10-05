@@ -464,13 +464,15 @@ live in **[Coding agents](coding-agents.md)**.
 
 `fermut mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)
 server over stdio, so an agent calls fermut as native tools
-(`fermut_doctor`, `fermut_run`, `fermut_next`, `fermut_explain`,
-`fermut_score`, `fermut_list_survivors`) instead of shelling out and
+(`fermut_doctor`, `fermut_baseline`, `fermut_run`, `fermut_next`,
+`fermut_explain`, `fermut_score`, `fermut_list_survivors`) instead of shelling out and
 parsing JSON. See the
 **[`fermut mcp` reference](../reference/cli/mcp.md)** for the tool list and
 error model.
 
-Register it with an MCP client. Claude Code:
+The [Claude Code plugin](claude-code-skill.md#option-2-the-claude-code-plugin)
+registers the server for you, alongside the agent skill. To register it
+yourself with an MCP client — Claude Code:
 
 ```sh
 claude mcp add fermut -- fermut mcp

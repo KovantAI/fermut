@@ -1,0 +1,19 @@
+{
+  "name": "fermut",
+  "owner": {
+    "name": "Kovant AI",
+    "url": "https://github.com/KovantAI"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for fermut, the Rust-powered, ty-aware mutation tester for Python."
+  },
+  "plugins": [
+    {
+      "name": "fermut",
+      "source": "./plugins/fermut",
+      "description": "Skill and MCP server for driving fermut mutation testing: score a Python test suite, triage surviving mutants, and write targeted tests that kill them. The MCP server needs fermut on PATH.",
+      "category": "testing",
+      "homepage": "https://fermut.readthedocs.io/"
+    }
+  ]
+}

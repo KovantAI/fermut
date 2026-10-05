@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "fermut": {
+      "command": "fermut",
+      "args": ["mcp"]
+    }
+  }
+}

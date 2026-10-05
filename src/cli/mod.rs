@@ -378,6 +378,14 @@ enum Cmd {
     /// Wipe the `.fermut/` cache directory under PATH.
     Clean(subcmd::clean::CleanArgs),
 
+    /// Install the fermut agent skill (`fermut-mutation-testing`) bundled
+    /// with this binary, so it matches its flags and subcommands.
+    ///
+    /// Writes `.claude/skills/` in the current directory by default (commit
+    /// it to share with the team). A skill already installed with different
+    /// contents is left alone (exit 1) unless `--force`. Needs no interpreter.
+    InstallSkills(subcmd::install_skills::InstallSkillsArgs),
+
     /// Generate or refresh the `.coverage` database used for per-mutant test
     /// selection — the one command to run after you touch your tests.
     ///
@@ -565,6 +573,7 @@ impl Cli {
             Cmd::Migrate(args) => migrate(args.into()),
             Cmd::Coverage(args) => coverage(args),
             Cmd::Clean(args) => subcmd::clean::run(args),
+            Cmd::InstallSkills(args) => subcmd::install_skills::run(args),
             Cmd::Merge(args) => merge::run(args),
             Cmd::List(args) => subcmd::list::run(args),
         }

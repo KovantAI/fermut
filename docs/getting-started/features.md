@@ -93,9 +93,9 @@ stable JSON, cache-friendly, deterministic, score-delta as reward
 signal. See **[Coding agents](../guides/coding-agents.md)**.
 
 - **`fermut mcp`.** Native [Model Context Protocol](https://modelcontextprotocol.io)
-  server over stdio — agents call `fermut_doctor`, `fermut_run`,
-  `fermut_next`, `fermut_explain`, `fermut_score`, `fermut_list_survivors`
-  as tools instead of shelling out. See
+  server over stdio — agents call `fermut_doctor`, `fermut_baseline`,
+  `fermut_run`, `fermut_next`, `fermut_explain`, `fermut_score`,
+  `fermut_list_survivors` as tools instead of shelling out. See
   **[Integrations → MCP](../guides/integrations.md#mcp-server)**.
 
 ## Reference quick links

@@ -8,35 +8,113 @@ If you're looking for the general agent loop, start with [Coding agents](coding-
 
 ## Install the skill
 
-This playbook ships as a Claude Code [skill](https://docs.claude.com/en/docs/claude-code/skills) in the fermut repo at `skills/fermut-mutation-testing/`. Claude Code auto-discovers skills from `~/.claude/skills/` (user-wide) or `<project>/.claude/skills/` (project-local).
+This playbook ships as an [Agent Skill](https://agentskills.io),
+`fermut-mutation-testing`, that lets a coding agent (Claude Code, Codex, and
+others) drive the loop below for you. A skill only loads from a place the
+agent looks, so installing the `fermut` package doesn't give you the skill by
+itself. Pick one of the two ways below.
 
-=== "User-wide (recommended)"
+### Option 1: from the fermut binary (any agent)
 
-    Symlink so updates to the fermut checkout flow through automatically:
+```bash
+fermut install-skills
+```
 
-    ```bash
-    mkdir -p ~/.claude/skills
-    ln -s "$(realpath <fermut-checkout>/skills/fermut-mutation-testing)" \
-          ~/.claude/skills/fermut-mutation-testing
-    ```
+This writes the skill bundled with your installed fermut into
+`.claude/skills/` in the current directory. Commit that directory and everyone
+on the team gets the skill. The skill always matches the binary it came from,
+so the flags and subcommands it tells the agent to run exist in your version.
+Run the command again after upgrading fermut to refresh it.
 
-    Or copy if you prefer a pinned version:
+| Flag | Writes to |
+|------|-----------|
+| (none) | `./.claude/skills/` (Claude Code, this project) |
+| `--user` | `~/.claude/skills/` (Claude Code, every project) |
+| `--agents` | `./.agents/skills/` (Codex and other Agent Skills readers) |
+| `--user --agents` | `~/.agents/skills/` |
+| `--dir DIR` | `DIR/<skill>/` |
 
-    ```bash
-    cp -R <fermut-checkout>/skills/fermut-mutation-testing ~/.claude/skills/
-    ```
+If the skill is already installed and its files differ from the bundled copy
+(you edited it, or it came from another fermut version), it is left alone and
+the command exits `1`. Add `--force` to overwrite it. `--force` replaces only
+the files fermut ships and keeps any files you added to the skill directory.
 
-=== "Project-local"
+```console
+$ fermut install-skills
+  fermut-mutation-testing: installed
+fermut 0.4.1 skills in /path/to/project/.claude/skills. Claude Code picks up project and user skills live; if they don't show up, start a new session.
+```
 
-    Drop the skill into a project's `.claude/skills/` so it only loads when working in that repo:
+### Option 2: the Claude Code plugin
 
-    ```bash
-    mkdir -p <your-project>/.claude/skills
-    cp -R <fermut-checkout>/skills/fermut-mutation-testing \
-          <your-project>/.claude/skills/
-    ```
+The fermut repository is also a Claude Code plugin marketplace. Inside Claude
+Code:
 
-Verify Claude Code loaded it: in a new session, ask "what claude code skills are available?" — `fermut-mutation-testing` should appear in the list. The skill auto-triggers when you mention fermut, mutation testing, mutation score, weak tests, or similar.
+```text
+/plugin marketplace add KovantAI/fermut
+/plugin install fermut@fermut
+```
+
+Or from a shell:
+
+```bash
+claude plugin marketplace add KovantAI/fermut
+claude plugin install fermut@fermut
+```
+
+The plugin makes the skill available in every project. It also registers the
+[`fermut mcp`](../reference/cli/mcp.md) server, so the agent can call
+`fermut_doctor`, `fermut_run`, `fermut_next`, `fermut_explain` and the other
+tools natively instead of shelling out. The server runs the `fermut` on your
+`PATH` from the directory you start Claude Code in, so install fermut first
+(`pip install fermut`); without it, `/mcp` lists the `fermut` server as failed
+and the skill still works through the CLI.
+
+Its version follows fermut releases, so plugin updates bring the skill for the
+latest fermut rather than the version you have installed. If you pin an older
+fermut, use `fermut install-skills` instead, and register the server yourself
+with `claude mcp add fermut -- fermut mcp`.
+
+To suggest the plugin to everyone who opens your repository in Claude Code,
+add this to the project's `.claude/settings.json`:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "fermut": {
+      "source": { "source": "github", "repo": "KovantAI/fermut" }
+    }
+  },
+  "enabledPlugins": {
+    "fermut@fermut": true
+  }
+}
+```
+
+### Using the skill
+
+The agent picks the skill when your request matches it: "are my tests any
+good", "get the mutation score above 80%", "kill the survivors in
+`billing.py`". To run it explicitly, type its slash command:
+
+| Installed with | Command |
+|----------------|---------|
+| `fermut install-skills` | `/fermut-mutation-testing` |
+| the plugin | `/fermut:fermut-mutation-testing` |
+
+### If the skill doesn't show up
+
+- **Check that it's loaded.** In Claude Code, `/skills` lists every skill it
+  found. The plugin's skill appears under the `fermut` plugin, and `/mcp`
+  shows the plugin's `fermut` server.
+- **Reload after a plugin install.** If `/plugin install` says to run
+  `/reload-plugins`, do that, or start a new session.
+- **Install where the agent looks.** `fermut install-skills` writes to the
+  current directory. Run it from the project root, the directory you start the
+  agent in.
+- **Match the agent to the directory.** Claude Code reads `.claude/skills/`.
+  Codex and other Agent Skills readers use `.agents/skills/`, so install with
+  `--agents` for them.
 
 ## When to use this playbook
 

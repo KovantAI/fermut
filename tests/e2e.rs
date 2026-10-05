@@ -421,6 +421,7 @@ const SUBCOMMANDS: &[&str] = &[
     "doctor",
     "baseline",
     "clean",
+    "install-skills",
     "coverage",
     "merge",
     "pr-comment",
@@ -656,6 +657,29 @@ fn clean_removes_cache_but_keeps_history() {
     assert!(
         project.join(".fermut").join("history.jsonl").exists(),
         "clean must preserve the history log"
+    );
+}
+
+#[test]
+fn install_skills_writes_bundled_skill_into_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("install-skills")
+        .assert()
+        .success()
+        .stdout(contains("fermut-mutation-testing: installed"));
+
+    let skill_md = dir
+        .path()
+        .join(".claude/skills/fermut-mutation-testing/SKILL.md");
+    assert!(
+        std::fs::read_to_string(&skill_md)
+            .unwrap()
+            .starts_with("---\nname: fermut-mutation-testing\n"),
+        "install-skills must write the bundled SKILL.md"
     );
 }
 

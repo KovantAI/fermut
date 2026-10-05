@@ -105,6 +105,9 @@ Start here:
 
 - **[Coding agents](docs/guides/coding-agents.md)** — agent-driven inner
   loop, cache strategy, JSON parsing recipes.
+- **[Agent skill](docs/guides/claude-code-skill.md#install-the-skill)** —
+  `fermut install-skills`, or the Claude Code plugin
+  (`/plugin marketplace add KovantAI/fermut`).
 - **[First steps](docs/getting-started/first-steps.md)** — `fermut init`
   then `fermut run`, first report in under five minutes.
 - **[Installation](docs/getting-started/installation.md)** — prerequisites

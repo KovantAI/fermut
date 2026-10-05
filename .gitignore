@@ -12,3 +12,6 @@ benchmarks/parity/*.json
 
 # mkdocs build output
 /site
+
+# cargo-mutants run output
+/mutants.out*

@@ -113,6 +113,121 @@ when navigating an unfamiliar area.
 3. Wire dispatch in `src/runner/mod.rs::build`.
 4. Document in `README.md` under "Test runners".
 
+## Mutation testing fermut itself
+
+fermut mutation-tests Python. Its own Rust source is mutation-tested by
+[cargo-mutants](https://mutants.rs), configured in `.cargo/mutants.toml`.
+
+```sh
+cargo install cargo-mutants --locked
+
+# Just what your branch changed — the run you actually want day to day.
+# (--src-prefix/--dst-prefix matter; see the note below.)
+cargo mutants --in-diff <(git diff --src-prefix=a/ --dst-prefix=b/ origin/main...)
+
+# One module.
+cargo mutants --file 'src/mutator/**'
+
+# Whole crate: ~2200 mutants, hours. Overnight job, not an inner-loop one.
+cargo mutants
+```
+
+Each mutant rebuilds the crate and reruns `cargo test --all-features`. Measured
+on a 10-core machine over a 136-mutant run: **median 15s per mutant** (6.6s
+build + 8.4s test), p90 37s, plus a one-off ~70s baseline build. Timeouts cost
+the full 60s.
+
+`--jobs N` runs N mutants at once, and each one still wants a couple of cores:
+`CARGO_BUILD_JOBS=2 cargo mutants --jobs 4` is about the ceiling on 10 cores.
+Going to `--jobs 6` without capping `CARGO_BUILD_JOBS` pushed load average past
+40 and made each build **ten times slower** (67s instead of 6.6s) — oversubscribe
+and you lose more than you gain.
+
+One trap with `--in-diff`: if your git has `diff.mnemonicPrefix` or
+`diff.noprefix` set, `git diff` emits `c/`…`w/` (or bare) path prefixes,
+cargo-mutants matches no files, and the run reports a clean "No mutants to
+filter" instead of an error. Force the prefixes it expects:
+
+```sh
+git diff --src-prefix=a/ --dst-prefix=b/ origin/main... > /tmp/pr.diff
+cargo mutants --in-diff /tmp/pr.diff
+```
+
+Results land in `mutants.out/`: `caught.txt`, `missed.txt`, `timeout.txt`,
+`unviable.txt`.
+
+**A survivor in `missed.txt` is a question, not a defect.** Three honest answers:
+
+1. The assertion is genuinely missing — add it. This is the case worth having
+   the tool for.
+2. The mutant is equivalent to the original, or changes only a log line or an
+   error message we deliberately don't assert on. Leave it.
+3. The whole file is untestable-by-design plumbing. Add it to `exclude_globs` in
+   `.cargo/mutants.toml` with a comment saying why, rather than letting it drown
+   the signal for everyone else.
+
+`src/main.rs`, `src/cli/mod.rs`, `src/watch.rs`, and `src/llm/client.rs` are
+already excluded on those grounds.
+
+### The score and the floor
+
+The **mutation score** is `caught / (caught + missed)`, as a percentage.
+Timeouts and unviable mutants are outside the denominator: an unviable mutant
+never compiled and a timeout never reached a verdict, so neither answers "is
+this line asserted on?". Leaving them out is also the forgiving direction —
+they can't drag the score down.
+
+The **floor** is a single number in `.github/mutants-floor.txt`. Two workflows
+enforce it:
+
+| Workflow | Runs | Scope | Fails when |
+|---|---|---|---|
+| `Mutants` | every PR | only the lines the PR changed | the diff has **≥10 scored mutants** and scores below the floor |
+| `Mutants (weekly)` | Sunday 03:00 UTC, or on demand | the whole crate, in 8 shards | the crate scores below the floor — and it files an issue |
+
+The weekly run skips itself when nothing that could move the score has changed
+since the last run — `src/`, `Cargo.toml`, `Cargo.lock`, `.cargo/mutants.toml`,
+the floor, and the scoring scripts. Most weeks that is the case, and a full run
+is ~11 job-hours of billed runner time to re-derive last week's number. Dispatch
+it manually (Actions → Mutants (weekly) → Run workflow) to force one.
+
+**The weekly run is the real signal.** A PR-sized diff is a small denominator:
+three mutants can only score 0, 33, 67 or 100%, which measures the shape of the
+diff more than the quality of the tests. That is why the PR check ignores its
+own number below ten scored mutants and leans on the weekly run to catch those
+lines later, as part of the crate. What the PR gate is for is narrower: stopping
+a large, thinly-tested change from walking the crate score down before anyone
+sees it.
+
+### When the PR check goes red
+
+In descending order of how much you should want each one:
+
+1. **Add the assertion.** Almost always the right answer, and the reason the
+   tool is here.
+2. **Exclude the mutant** — `exclude_re` (one mutant) or `exclude_globs` (a
+   whole file) in `.cargo/mutants.toml`, with a comment saying why it can't be
+   killed. This is the honest fix for an equivalent mutant: it drops out of the
+   weekly denominator too, so the crate score stops counting something no test
+   could reach.
+3. **Label the PR `mutants-advisory`.** Downgrades the check to a warning for
+   that PR. For the case where the judgement needs a human and shouldn't hold up
+   the merge. GitHub reads labels when the run is triggered, so re-run the job
+   after adding it.
+
+What is *not* on the list is an assertion written to make the number go up. If
+the only way to kill a mutant is a test that asserts on nothing anyone cares
+about, that's option 2.
+
+### Moving the floor
+
+Seed it from a weekly run: take the measured score, subtract a few points of
+headroom, commit that. `0` means unseeded and both gates are inert.
+
+Raise it when the weekly run has cleared the higher value twice running. Lower
+it only as a deliberate, reviewed decision in its own PR — never as the fix for
+a red build. A drop is the thing the floor exists to show you.
+
 ## Style
 
 - **Rustfmt**: `rustfmt.toml` is committed; CI rejects unformatted code.

@@ -1,0 +1,39 @@
+# cargo-mutants configuration. A surviving mutant is a line the suite does not
+# actually assert on. See "Mutation testing fermut itself" in CONTRIBUTING.md.
+#
+# Whole crate (~2200 mutants, hours):  cargo mutants
+# One module:                          cargo mutants --file 'src/mutator/**'
+# Just this branch's changes:          cargo mutants --in-diff <(git diff origin/main...)
+
+# Match what CI tests: --all-features keeps the ty-embedded and LLM paths
+# compiled, so mutants in them are reachable.
+additional_cargo_args = ["--all-features"]
+
+# A mutant can turn a loop bound into an infinite loop, so a timeout needs
+# headroom over the baseline — and never under a minute on a loaded machine.
+timeout_multiplier = 5.0
+minimum_test_timeout = 60
+
+# Files where every mutant would survive for reasons a test can't fix, and so
+# would bury the real signal. Removing these drops ~90 mutants.
+exclude_globs = [
+    # Thin main() wrapper around cli::run.
+    "src/main.rs",
+    # clap derive structs, tracing setup, and subcommand dispatch. Covered by
+    # the compiler and by e2e, not by assertions.
+    "src/cli/mod.rs",
+    # Filesystem-watch event loop. Untested by design.
+    "src/watch.rs",
+    # Outbound HTTP to the LLM provider. Not exercised offline.
+    "src/llm/client.rs",
+]
+
+# Individual mutants nothing can kill — equivalent mutants, or lines whose only
+# effect is an unasserted log message. Matched against the full mutant name:
+# file, impl/trait, function, replacement.
+#
+# This is the pressure valve for both score gates: an entry here leaves the
+# denominator everywhere, which is the point — a floor is only honest over
+# mutants a test could kill. Every entry needs a reason. "This PR would go green
+# faster" is not one; the `mutants-advisory` label is for that.
+exclude_re = []

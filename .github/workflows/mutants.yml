@@ -1,0 +1,159 @@
+name: Mutants
+
+# Mutation-test the PR's own diff. The whole crate is ~2200 mutants and hours;
+# mutants-weekly.yml covers that. See CONTRIBUTING.md for what the gate means.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  in-diff:
+    name: cargo mutants (PR diff)
+    runs-on: ubuntu-latest
+    # ~15 min for a cold ruff/ty build, then a rebuild per mutant.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # `--in-diff` needs the base commit, which a depth-1 checkout lacks.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # Saves the dep clone, not the compile: mutants build in a scratch copy
+      # of the tree, so the cold build above is paid every run. `copy_target`
+      # would change that at the cost of copying target/ per mutant.
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: mutants
+      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
+        with:
+          # Pinned: mutants.toml rejects unknown keys, so a renamed config key
+          # in a new release would fail every PR.
+          tool: cargo-mutants@27.1.0
+
+      # The prefixes are load-bearing: cargo-mutants matches `a/`…`b/`, and a
+      # git with diff.mnemonicPrefix or diff.noprefix makes --in-diff match
+      # nothing and report "No mutants to filter" instead of failing.
+      #
+      # Context reaches the shell via env, never `${{ }}` in a script body.
+      - name: Diff against the PR base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git diff --src-prefix=a/ --dst-prefix=b/ "$BASE_SHA" > /tmp/pr.diff
+          wc -l < /tmp/pr.diff | xargs echo "diff lines:"
+
+      # No build. Distinguishes a genuinely empty diff from a misparsed one.
+      - name: Count mutants in the diff
+        id: count
+        run: |
+          cargo mutants --list --in-diff /tmp/pr.diff > /tmp/list.txt
+          n=$(grep -c '^src/' /tmp/list.txt || true)
+          echo "count=$n" >> "$GITHUB_OUTPUT"
+          echo "mutants in diff: $n"
+
+      # continue-on-error: cargo-mutants exits non-zero on the first survivor,
+      # which is not the bar. The floor comparison below decides this job.
+      - name: Run cargo mutants
+        if: steps.count.outputs.count != '0'
+        continue-on-error: true
+        run: cargo mutants --in-diff /tmp/pr.diff
+
+      - name: Score the diff
+        id: score
+        if: always()
+        run: |
+          # Absent when the run was skipped or died early; an empty dir scores
+          # as "no verdict", which is what it is.
+          mkdir -p mutants.out
+          .github/scripts/mutants-score.sh mutants.out | tee -a "$GITHUB_OUTPUT"
+
+      - name: Summarise
+        if: always()
+        env:
+          MUTANT_COUNT: ${{ steps.count.outputs.count }}
+          CAUGHT: ${{ steps.score.outputs.caught }}
+          MISSED: ${{ steps.score.outputs.missed }}
+          SCORED: ${{ steps.score.outputs.scored }}
+          SCORE: ${{ steps.score.outputs.score }}
+          FLOOR: ${{ steps.score.outputs.floor }}
+        run: |
+          out=mutants.out
+          {
+            echo "### cargo-mutants (PR diff)"
+            echo
+            if [ "$MUTANT_COUNT" = "0" ]; then
+              echo "No mutable lines in this diff — nothing to test."
+            elif [ "$SCORED" -eq 0 ]; then
+              echo "No mutant reached a caught/missed verdict. See the artifact."
+            else
+              echo "| | |"
+              echo "|---|---|"
+              echo "| score | **${SCORE}%** |"
+              [ "$FLOOR" -gt 0 ] && echo "| floor | ${FLOOR}% |"
+              echo "| caught | ${CAUGHT} |"
+              echo "| missed | ${MISSED} |"
+              for f in timeout unviable; do
+                if [ -s "$out/$f.txt" ]; then
+                  echo "| $f (not scored) | $(wc -l < "$out/$f.txt" | tr -d ' ') |"
+                fi
+              done
+              if [ -s "$out/missed.txt" ]; then
+                echo
+                echo "<details><summary>Surviving mutants</summary>"
+                echo
+                echo '```'
+                cat "$out/missed.txt"
+                echo '```'
+                echo
+                echo "</details>"
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Under MIN_SCORED the percentage is arithmetic noise (three mutants can
+      # only score 0, 33, 67 or 100), so report and pass; the weekly run sees
+      # those lines again. Unkillable mutants belong in exclude_re. The
+      # mutants-advisory label (read at trigger time) downgrades this to a
+      # warning. CONTRIBUTING.md has the reasoning.
+      - name: Gate on the floor
+        if: always()
+        env:
+          MIN_SCORED: 10
+          SCORED: ${{ steps.score.outputs.scored }}
+          SCORE: ${{ steps.score.outputs.score }}
+          FLOOR: ${{ steps.score.outputs.floor }}
+          ADVISORY: ${{ contains(github.event.pull_request.labels.*.name, 'mutants-advisory') }}
+        run: |
+          if [ "$FLOOR" -eq 0 ]; then
+            echo "::notice::no floor seeded in .github/mutants-floor.txt — reporting only"
+            exit 0
+          fi
+          if [ "$SCORED" -lt "$MIN_SCORED" ]; then
+            echo "::notice::${SCORED} scored mutants is under the ${MIN_SCORED} needed for the percentage to mean anything — reporting only"
+            exit 0
+          fi
+          if [ "$SCORE" -ge "$FLOOR" ]; then
+            echo "score ${SCORE}% >= floor ${FLOOR}%"
+            exit 0
+          fi
+          msg="mutation score ${SCORE}% over ${SCORED} scored mutants is below the floor of ${FLOOR}% — see mutants.out/missed.txt in the artifact"
+          if [ "$ADVISORY" = "true" ]; then
+            echo "::warning::${msg} (mutants-advisory label set, not failing)"
+            exit 0
+          fi
+          echo "::error::${msg}"
+          exit 1
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutants.out
+          path: mutants.out
+          if-no-files-found: ignore

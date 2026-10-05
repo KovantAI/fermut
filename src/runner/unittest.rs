@@ -462,11 +462,12 @@ mod tests {
         let hint = zero_collection_hint(tmp.path(), DEFAULT_PATTERN);
         assert!(hint.contains("`a`"), "got: {hint}");
         assert!(
-            hint.contains(&format!("`{}`", Path::new("c/d").display())),
+            hint.contains(&format!("`{}`", Path::new("c").join("d").display())),
             "got: {hint}"
         );
         assert!(
-            !hint.contains("`a/b`") && !hint.contains("Set `unittest_pattern`"),
+            !hint.contains(&format!("`{}`", Path::new("a").join("b").display()))
+                && !hint.contains("Set `unittest_pattern`"),
             "got: {hint}"
         );
     }

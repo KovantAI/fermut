@@ -723,7 +723,6 @@ dependencies = [
  "similar",
  "subtle",
  "tempfile",
- "thiserror",
  "toml",
  "tracing",
  "tracing-subscriber",

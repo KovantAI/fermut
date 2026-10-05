@@ -21,9 +21,12 @@
 //!   so `python3`-only systems don't crash on a hardcoded `python`.
 //! - a **configurable discovery pattern** with a zero-collection guard, so a
 //!   pattern that matches no tests errors instead of exiting 0 and reporting
-//!   every mutant as surviving.
+//!   every mutant as surviving. The guard's message names the actual cause
+//!   ([`zero_collection_hint`]) — most often not the pattern but a pytest-style
+//!   tree whose subdirectories lack `__init__.py`, which `discover` won't enter.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
@@ -165,15 +168,16 @@ impl Runner for UnittestRunner {
         // exits 0, so the baseline would vacuously "pass" and then EVERY mutant
         // would "survive" (nothing runs to kill it) — silently, with no error.
         // Count first and fail loudly, naming the pattern to fix.
+        // Name the user's tests dir, not the throwaway mirror copy.
         if self.count_tests(&mirror) == Some(0) {
             return Ok(BaselineStatus::Failed {
                 output: format!(
-                    "no tests collected: `unittest discover -s {} -p '{}'` matched nothing, \
-                     so the suite would vacuously pass and every mutant would be reported as \
-                     surviving. Set `unittest_pattern` in your fermut config to match your test \
-                     files (e.g. `\"*_test.py\"`).",
-                    mirror.tests.display(),
+                    "no tests collected: `unittest discover -s {} -p '{}'` found 0 tests, so \
+                     the suite would vacuously pass and every mutant would be reported as \
+                     surviving. {}",
+                    self.tests.display(),
                     self.pattern,
+                    zero_collection_hint(&self.tests, &self.pattern),
                 ),
             });
         }
@@ -181,6 +185,110 @@ impl Runner for UnittestRunner {
         let cmd = self.discover_command(&mirror)?;
         run_baseline_with_timeout(cmd, self.baseline_timeout)
     }
+}
+
+/// Explain why `unittest discover -s tests -p pattern` collected nothing, by
+/// re-deriving discovery's reachability rules from the filesystem (no Python):
+/// a file is loaded only if its name matches `pattern` (`fnmatch`), is an
+/// importable module name, and every directory between `tests` and it is a
+/// package (`__init__.py`). The last rule is the usual culprit — a pytest-style
+/// `tests/unit/test_x.py` tree without `__init__.py` files collects 0 under
+/// unittest while pytest runs it fine, and a "fix your pattern" hint would
+/// misdirect. Returns the remediation sentence(s) for the guard's message.
+fn zero_collection_hint(tests: &Path, pattern: &str) -> String {
+    let matcher = match globset::GlobBuilder::new(pattern)
+        // `fnmatch` normcases, so discovery is case-insensitive on Windows.
+        .case_insensitive(cfg!(windows))
+        .build()
+    {
+        Ok(g) => g.compile_matcher(),
+        Err(_) => {
+            return format!(
+                "`{pattern}` is not a valid glob; set `unittest_pattern` in your fermut config."
+            )
+        }
+    };
+
+    let mut reachable = 0usize;
+    let mut bad_names = BTreeSet::new();
+    let mut non_packages = BTreeSet::new();
+    let walk = walkdir::WalkDir::new(tests).into_iter().filter_entry(|e| {
+        let name = e.file_name().to_string_lossy();
+        e.depth() == 0 || !(name.starts_with('.') || name == "__pycache__")
+    });
+    for entry in walk.flatten() {
+        if !entry.file_type().is_file() || !matcher.is_match(entry.file_name()) {
+            continue;
+        }
+        let rel = entry.path().strip_prefix(tests).unwrap_or(entry.path());
+        // First directory on the way down that isn't a package — discovery
+        // stops there, so it's the one to fix.
+        let blocked = rel
+            .ancestors()
+            .skip(1)
+            .filter(|a| !a.as_os_str().is_empty())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .find(|a| !tests.join(a).join("__init__.py").is_file());
+        if let Some(dir) = blocked {
+            non_packages.insert(dir.to_path_buf());
+        } else if !is_module_name(&entry.file_name().to_string_lossy()) {
+            bad_names.insert(rel.to_path_buf());
+        } else {
+            reachable += 1;
+        }
+    }
+
+    let list = |set: &BTreeSet<PathBuf>| {
+        set.iter()
+            .take(5)
+            .map(|p| format!("`{}`", p.display()))
+            .collect::<Vec<_>>()
+            .join(", ")
+            + if set.len() > 5 { ", …" } else { "" }
+    };
+    let mut hints = Vec::new();
+    if !non_packages.is_empty() {
+        hints.push(format!(
+            "Files matching `{pattern}` exist under {}, but `unittest discover` only descends \
+             into packages and these directories have no `__init__.py` (pytest doesn't need \
+             one, unittest does). Add an `__init__.py` to each, or use `runner = \"pytest\"`.",
+            list(&non_packages),
+        ));
+    }
+    if !bad_names.is_empty() {
+        hints.push(format!(
+            "{} match `{pattern}` but are not importable module names (letters, digits, `_`; \
+             no leading digit), so discovery skips them. Rename them.",
+            list(&bad_names),
+        ));
+    }
+    if reachable > 0 {
+        hints.push(format!(
+            "{reachable} reachable file(s) match `{pattern}` but define no `unittest.TestCase` \
+             tests — if they are pytest-style test functions, use `runner = \"pytest\"`."
+        ));
+    }
+    if hints.is_empty() {
+        hints.push(format!(
+            "No file under the tests dir matches `{pattern}`. Set `unittest_pattern` in your \
+             fermut config to match your test files (e.g. `\"*_test.py\"`)."
+        ));
+    }
+    hints.join(" ")
+}
+
+/// unittest's `VALID_MODULE_NAME` (`[_a-z]\w*\.py$`, case-insensitive).
+fn is_module_name(file: &str) -> bool {
+    let Some(stem) = file.strip_suffix(".py") else {
+        return false;
+    };
+    let mut chars = stem.chars();
+    chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_alphanumeric())
 }
 
 #[cfg(test)]
@@ -211,9 +319,10 @@ mod tests {
     fn project_with_test(dir: &Path, test_name: &str) {
         fs::write(dir.join("pyproject.toml"), "[project]\nname = \"x\"\n").unwrap();
         let tests = dir.join("tests");
-        fs::create_dir_all(&tests).unwrap();
+        let file = tests.join(test_name);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(
-            tests.join(test_name),
+            file,
             "import unittest\n\
              class T(unittest.TestCase):\n\
              \x20   def test_ok(self):\n\
@@ -301,6 +410,97 @@ mod tests {
             }
             BaselineStatus::Passed => panic!("zero-collection must not pass vacuously"),
         }
+    }
+
+    /// Pytest-style tree: the test lives in a subdirectory with no
+    /// `__init__.py`, which `unittest discover` never enters. The guard must
+    /// blame the missing package marker, not the (correct) pattern.
+    #[test]
+    fn baseline_zero_collection_names_missing_init() {
+        let Some(py) = python_or_skip() else { return };
+        let tmp = tempfile::tempdir().unwrap();
+        project_with_test(tmp.path(), "unit/test_widget.py");
+        let tests = tmp.path().join("tests");
+        let r = runner(tests.clone(), py, None);
+        match r.baseline().unwrap() {
+            BaselineStatus::Failed { output } => {
+                assert!(output.contains("`unit`"), "got: {output}");
+                assert!(output.contains("__init__.py"), "got: {output}");
+                assert!(!output.contains("Set `unittest_pattern`"), "got: {output}");
+                // The user's path, not the temp mirror copy.
+                assert!(
+                    output.contains(&tests.display().to_string()),
+                    "got: {output}"
+                );
+            }
+            BaselineStatus::Passed => panic!("zero-collection must not pass vacuously"),
+        }
+    }
+
+    fn touch(root: &Path, rel: &str) {
+        let p = root.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, "").unwrap();
+    }
+
+    #[test]
+    fn hint_blames_pattern_when_nothing_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        touch(tmp.path(), "widget_test.py");
+        let hint = zero_collection_hint(tmp.path(), DEFAULT_PATTERN);
+        assert!(hint.contains("Set `unittest_pattern`"), "got: {hint}");
+    }
+
+    #[test]
+    fn hint_names_shallowest_non_package_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `a/` lacks `__init__.py`; `a/b/` has one but is unreachable anyway.
+        touch(tmp.path(), "a/b/__init__.py");
+        touch(tmp.path(), "a/b/test_x.py");
+        touch(tmp.path(), "c/__init__.py");
+        touch(tmp.path(), "c/d/test_y.py");
+        let hint = zero_collection_hint(tmp.path(), DEFAULT_PATTERN);
+        assert!(hint.contains("`a`"), "got: {hint}");
+        assert!(
+            hint.contains(&format!("`{}`", Path::new("c/d").display())),
+            "got: {hint}"
+        );
+        assert!(
+            !hint.contains("`a/b`") && !hint.contains("Set `unittest_pattern`"),
+            "got: {hint}"
+        );
+    }
+
+    #[test]
+    fn hint_flags_unimportable_names_and_pytest_style_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        touch(tmp.path(), "test-dash.py");
+        touch(tmp.path(), "test_ok.py");
+        let hint = zero_collection_hint(tmp.path(), DEFAULT_PATTERN);
+        assert!(
+            hint.contains("`test-dash.py`") && hint.contains("Rename"),
+            "got: {hint}"
+        );
+        assert!(hint.contains("1 reachable file(s)"), "got: {hint}");
+        assert!(hint.contains("runner = \"pytest\""), "got: {hint}");
+    }
+
+    #[test]
+    fn hint_ignores_pycache_and_hidden_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        touch(tmp.path(), "__pycache__/test_x.py");
+        touch(tmp.path(), ".venv/test_y.py");
+        let hint = zero_collection_hint(tmp.path(), DEFAULT_PATTERN);
+        assert!(hint.contains("Set `unittest_pattern`"), "got: {hint}");
+    }
+
+    #[test]
+    fn module_name_matches_unittest_rule() {
+        assert!(is_module_name("test_x.py"));
+        assert!(is_module_name("_private.py"));
+        assert!(!is_module_name("test-x.py"));
+        assert!(!is_module_name("1test.py"));
+        assert!(!is_module_name("test_x.pyc"));
     }
 
     #[test]

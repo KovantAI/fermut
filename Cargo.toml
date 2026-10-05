@@ -51,7 +51,6 @@ hmac = "0.13"
 subtle = "2"
 similar = "3"
 tempfile = "3"
-thiserror = "2"
 toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

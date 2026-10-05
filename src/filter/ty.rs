@@ -125,20 +125,6 @@ struct TyCache {
 const CACHE_SCHEMA: &str = "ty-cache:v1";
 
 impl TyFilter {
-    pub fn new() -> Result<Self> {
-        Self::with_cache_path(None)
-    }
-
-    /// Construct a `TyFilter` and optionally load its persistent verdict
-    /// cache from `cache_path`. A `None` path disables disk persistence
-    /// entirely (used in tests). No embedded checker — every call
-    /// spawns `ty` subprocesses.
-    pub fn with_cache_path(cache_path: Option<PathBuf>) -> Result<Self> {
-        // No project scope here (used by `new()` and tests) — resolve `ty`
-        // against the current directory's venv/PATH.
-        Self::build(cache_path, None, Path::new("."))
-    }
-
     /// Construct a `TyFilter` that prefers a pool of in-process
     /// [`EmbeddedTyChecker`]s rooted at `project_path` (one per
     /// worker, sized to `pool_size`). Falls back to the subprocess

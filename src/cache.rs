@@ -296,15 +296,12 @@ impl Cache {
         self.entries.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     pub fn save(&self, path: &Path) -> Result<()> {
         let raw = serde_json::to_string_pretty(self).context("serializing cache")?;
         atomic_write(path, raw)
     }
 
+    #[cfg(test)]
     pub fn lookup(&self, mutant_id: &str, file_hash: &str, scope: &str) -> Option<MutantOutcome> {
         self.lookup_entry(mutant_id, file_hash, scope)
             .map(|(outcome, _)| outcome)
@@ -328,6 +325,7 @@ impl Cache {
         }
     }
 
+    #[cfg(test)]
     pub fn insert(
         &mut self,
         mutant_id: String,

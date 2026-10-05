@@ -3,6 +3,7 @@
 //! runs first. Permutation-only: never changes the kill/survive verdict, only
 //! which test pytest tries first.
 
+#[cfg(test)]
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -12,6 +13,7 @@ impl CoverageContexts {
     /// Per-test coverage breadth (number of covered `(file, line)` cells),
     /// keyed by test node id. Empty when there are no contexts. The smart-order
     /// cold-start prior reads this to prefer more-targeted tests.
+    #[cfg(test)]
     pub fn breadth_map(&self) -> &HashMap<String, u32> {
         &self.test_breadth
     }
@@ -54,6 +56,7 @@ impl CoverageContexts {
     /// and for callers with no file to scope by; prefer
     /// [`order_by_breadth_in`](Self::order_by_breadth_in) whenever a mutated file
     /// is known. Permutation-only, same as the scoped form.
+    #[cfg(test)]
     pub fn order_by_breadth<'a>(&self, ids: &'a [String]) -> Vec<&'a String> {
         let mut ordered: Vec<&String> = ids.iter().collect();
         ordered.sort_by_key(|id| self.test_breadth.get(*id).copied().unwrap_or(u32::MAX));

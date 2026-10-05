@@ -1,0 +1,254 @@
+# fermut whole-tree mutation sweep, optionally one shard of a matrix.
+#
+#   shard:
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         shard: [1, 2, 3, 4]
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@<sha>
+#       - uses: KovantAI/fermut/sweep@v0.4.1
+#         with:
+#           shard: ${{ matrix.shard }}/4
+#
+# Without `shard`, the run gates on its own score. With it, the run uploads
+# its report as `<artifact-name>-shard-<i>-of-<n>` and never gates — combine
+# the shards with KovantAI/fermut/merge in a job that `needs:` this one.
+#
+# See the root action.yml for the secrets and composite-vs-reusable notes.
+
+name: "fermut mutation sweep"
+description: "Mutation-test a whole Python project with fermut, or one shard of it."
+author: "KovantAI"
+
+inputs:
+  shard:
+    description: '"i/n" (1-based) to run one slice of n. Pass "${{ matrix.shard }}/N". Empty runs everything and gates.'
+    required: false
+    default: ""
+  working-directory:
+    description: "Project root, relative to the workspace. For monorepos."
+    required: false
+    default: "."
+  source:
+    description: "Python source root. Empty uses fermut.toml, else the project root."
+    required: false
+    default: ""
+  tests:
+    description: "Test directory. Empty uses fermut.toml, else `<source>/tests`."
+    required: false
+    default: ""
+  fermut-version:
+    description: >-
+      fermut release to install from PyPI. Empty matches the action ref, else
+      the latest release. "project" uses the project's own fermut.
+    required: false
+    default: ""
+  python-version:
+    description: "Interpreter for setup-uv. Empty uses the runner default or `.python-version`."
+    required: false
+    default: ""
+  install-command:
+    description: "Installs the project and its test dependencies, in working-directory. Empty skips it."
+    required: false
+    default: "uv sync --all-extras --dev"
+  post-install-command:
+    description: "Setup between install and the first test run. Empty skips it."
+    required: false
+    default: ""
+  fail-under:
+    description: "Gate threshold in percent, when not sharded. Empty defers to fermut.toml, else any survivor fails."
+    required: false
+    default: ""
+  blocking:
+    description: '"false" turns a failing gate into a warning. Setup failures still fail.'
+    required: false
+    default: "true"
+  cache:
+    description: '"true" caches the verdict cache and the coverage DB across runs.'
+    required: false
+    default: "true"
+  cache-key-hash:
+    description: "Override for the cache key hash. Empty hashes sources, lockfiles and config."
+    required: false
+    default: ""
+  cache-key-prefix:
+    description: "Cache namespace. Share it with the PR gate to share the coverage cache."
+    required: false
+    default: "fermut"
+  artifact-name:
+    description: "Report artifact name. A shard appends `-shard-<i>-of-<n>`; pass the same value to merge."
+    required: false
+    default: "fermut-report"
+  args:
+    description: "Extra arguments appended to `fermut run`."
+    required: false
+    default: ""
+
+outputs:
+  score:
+    description: 'Mutation score in percent, or "" when nothing was scored (N/A). A shard reports its slice only.'
+    value: ${{ steps.stats.outputs.score }}
+  scored:
+    description: "Mutants with a real verdict."
+    value: ${{ steps.stats.outputs.scored }}
+  killed:
+    description: "Killed mutants."
+    value: ${{ steps.stats.outputs.killed }}
+  survived:
+    description: "Surviving mutants."
+    value: ${{ steps.stats.outputs.survived }}
+  errored:
+    description: "Mutants that errored. Excluded from the score."
+    value: ${{ steps.stats.outputs.errored }}
+  report-json:
+    description: "Path to the JSON report, relative to the workspace."
+    value: ${{ steps.setup.outputs.out }}/report.json
+  report-markdown:
+    description: "Path to the Markdown report, relative to the workspace."
+    value: ${{ steps.setup.outputs.out }}/report.md
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs
+      id: setup
+      shell: bash
+      env:
+        BOOL_blocking: ${{ inputs.blocking }}
+        BOOL_cache: ${{ inputs.cache }}
+        FAIL_UNDER: ${{ inputs.fail-under }}
+        WD: ${{ inputs.working-directory }}
+        SHARD: ${{ inputs.shard }}
+        ARTIFACT: ${{ inputs.artifact-name }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/setup.sh"
+
+    - name: Compute cache key
+      id: key
+      if: inputs.cache == 'true'
+      shell: bash
+      env:
+        OVERRIDE: ${{ inputs.cache-key-hash }}
+        DEFAULT: ${{ hashFiles('**/*.py', '**/pyproject.toml', '**/uv.lock', '**/poetry.lock', '**/requirements*.txt', '**/fermut.toml', '**/.coveragerc', '**/setup.cfg', '**/pytest.ini', '**/tox.ini', '!**/.venv/**', '!**/venv/**', '!**/node_modules/**') }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/cache-key.sh"
+
+    - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+      with:
+        python-version: ${{ inputs.python-version }}
+        enable-cache: ${{ inputs.install-command != '' }}
+        cache-dependency-glob: |
+          **/uv.lock
+          **/pyproject.toml
+          **/requirements*.txt
+
+    - name: Install fermut
+      id: fermut
+      shell: bash
+      env:
+        VERSION: ${{ inputs.fermut-version }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/install-fermut.sh"
+
+    - name: Install project
+      if: inputs.install-command != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INSTALL_COMMAND: ${{ inputs.install-command }}
+      run: eval "$INSTALL_COMMAND"
+
+    - name: Resolve interpreter and fermut
+      id: env
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SPEC: ${{ steps.fermut.outputs.spec }}
+        NEED_COV: "true"
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/resolve-env.sh"
+
+    - name: Post-install setup
+      if: inputs.post-install-command != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        POST_INSTALL_COMMAND: ${{ inputs.post-install-command }}
+      run: eval "$POST_INSTALL_COMMAND"
+
+    # Each shard keeps its own verdict file: shards test disjoint mutants, and
+    # a shared key would let the first shard to finish win the save.
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      if: inputs.cache == 'true'
+      with:
+        path: ${{ inputs.working-directory }}/.fermut/cache.json
+        key: ${{ inputs.cache-key-prefix }}-verdicts-${{ steps.setup.outputs.artifact }}-${{ runner.os }}-${{ steps.key.outputs.hash }}
+        restore-keys: |
+          ${{ inputs.cache-key-prefix }}-verdicts-${{ steps.setup.outputs.artifact }}-${{ runner.os }}-
+          ${{ inputs.cache-key-prefix }}-verdicts-
+
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      if: inputs.cache == 'true'
+      with:
+        path: |
+          ${{ inputs.working-directory }}/.coverage
+          ${{ inputs.working-directory }}/.coverage.fermut-fingerprints.json
+        key: ${{ inputs.cache-key-prefix }}-coverage-${{ runner.os }}-${{ steps.key.outputs.hash }}
+        restore-keys: |
+          ${{ inputs.cache-key-prefix }}-coverage-${{ runner.os }}-
+
+    - name: Build per-test coverage
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        FERMUT: ${{ steps.env.outputs.bin }}
+        PY: ${{ steps.env.outputs.python }}
+        SOURCE: ${{ inputs.source }}
+        TESTS: ${{ inputs.tests }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/coverage.sh"
+
+    - name: Run fermut
+      id: run
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        FERMUT: ${{ steps.env.outputs.bin }}
+        PY: ${{ steps.env.outputs.python }}
+        SOURCE: ${{ inputs.source }}
+        TESTS: ${{ inputs.tests }}
+        DIFF_BASE: ""
+        SHARD: ${{ inputs.shard }}
+        FAIL_UNDER: ${{ inputs.fail-under }}
+        EXTRA_ARGS: ${{ inputs.args }}
+        OUT: ${{ steps.setup.outputs.out_abs }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/run.sh"
+
+    - name: Read results
+      id: stats
+      if: ${{ !cancelled() && steps.run.outcome == 'success' }}
+      shell: bash
+      env:
+        OUT: ${{ steps.setup.outputs.out_abs }}
+        HEADING: ${{ inputs.shard != '' && format('fermut shard {0}', inputs.shard) || '' }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/stats.sh"
+
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      if: ${{ !cancelled() && steps.stats.outcome == 'success' }}
+      with:
+        name: ${{ steps.setup.outputs.artifact }}
+        path: |
+          ${{ steps.setup.outputs.out }}/report.json
+          ${{ steps.setup.outputs.out }}/report.md
+        if-no-files-found: error
+
+    - name: Enforce gate
+      if: ${{ !cancelled() && steps.stats.outcome == 'success' && inputs.shard == '' }}
+      shell: bash
+      env:
+        RC: ${{ steps.run.outputs.rc }}
+        BLOCKING: ${{ inputs.blocking }}
+        FAIL_UNDER: ${{ inputs.fail-under }}
+        SCORE: ${{ steps.stats.outputs.score }}
+        SCORED: ${{ steps.stats.outputs.scored }}
+        SURVIVED: ${{ steps.stats.outputs.survived }}
+        ERRORED: ${{ steps.stats.outputs.errored }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/gate.sh"

@@ -4,6 +4,12 @@ How to wire fermut into the systems that already build/test your code.
 
 ## GitHub Actions
 
+> **Prefer the packaged action.** `uses: KovantAI/fermut@<tag>` wraps
+> everything below — install, coverage, caching, gate, summary, sticky
+> comment, sharding — behind a few inputs. See
+> **[GitHub Action](github-action.md)**. The raw YAML here is for other
+> CI systems or for full control.
+
 The canonical PR-gate workflow. `fermut init --with-gha` drops this
 template at `.github/workflows/fermut.yml`:
 

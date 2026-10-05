@@ -1,7 +1,7 @@
 //! Command-line interface: clap parser + dispatch.
 //!
 //! - `build_config` — merges CLI args with the loaded config file into a
-//!   runtime [`Config`](crate::config::Config). Pure function, easy to test.
+//!   runtime `Config`. Pure function, easy to test.
 //! - `subcmd` — one handler per `Cmd` variant. `Cli::run` is a thin dispatch
 //!   match: every arm is a single delegation to the variant's handler, either
 //!   directly (`subcmd::show::run(args)`) or through the pure `Args → Opts`

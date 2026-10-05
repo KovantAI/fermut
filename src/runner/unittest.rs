@@ -35,7 +35,7 @@ use super::exit::{anomaly_message, classify_exit, ExitVerdict, TestTool};
 use super::process_group::kill_group;
 use super::{
     build_mirror, configure_mirror_cmd, mirror_pythonpath, run_baseline_with_timeout, run_patched,
-    BaselineStatus, Mirror, Runner,
+    sanitize_python_env, BaselineStatus, Mirror, Runner,
 };
 use crate::config::IsolationMode;
 use crate::mutator::Mutant;
@@ -110,6 +110,7 @@ impl UnittestRunner {
             .stderr(Stdio::null());
         cmd.env("PYTHONPATH", mirror_pythonpath(mirror).ok()?);
         cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+        sanitize_python_env(&mut cmd);
         let out = cmd.output().ok()?;
         if !out.status.success() {
             return None;

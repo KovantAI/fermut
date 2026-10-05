@@ -17,7 +17,6 @@ use serde::Deserialize;
 use crate::filter::coverage::CoverageContexts;
 use crate::mutator::Operator;
 
-pub use file::FileConfig;
 pub use loader::{ConfigSource, LoadedConfig};
 
 /// Resolved, ready-to-use configuration. The CLI builds one of these by

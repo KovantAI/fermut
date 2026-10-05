@@ -43,6 +43,7 @@ impl BytecodeIdentity {
         }
     }
 
+    #[cfg(test)]
     pub fn with_python(python: impl Into<String>) -> Self {
         Self {
             python: python.into(),

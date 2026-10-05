@@ -21,14 +21,21 @@
 //!   because it's the most expensive and the least precise.
 
 pub mod bytecode;
+// TODO: not yet wired into the pipeline (no CLI flag constructs it); kept
+// pending a wire-up-or-delete decision. Remove the allow once reachable.
+#[allow(dead_code)]
 pub mod llm;
 pub mod patterns;
+// TODO: not yet wired into the pipeline (no CLI flag constructs it); kept
+// pending a wire-up-or-delete decision. Remove the allow once reachable.
+#[allow(dead_code)]
 pub mod probe;
 
 use crate::mutator::Mutant;
 
 /// One detector's verdict on a single mutant.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::enum_variant_names)] // `*Equivalent` reads as a scale, not noise
 pub enum EquivVerdict {
     /// Detector has no opinion / mutant is not equivalent under this rule.
     NotEquivalent,
@@ -46,12 +53,18 @@ pub enum EquivVerdict {
 }
 
 impl EquivVerdict {
+    // TODO: extension surface for the unwired probe/LLM detectors; drop the
+    // allow with them (see the module TODO above).
+    #[allow(dead_code)]
     pub fn is_equivalent_signal(&self) -> bool {
         !matches!(self, EquivVerdict::NotEquivalent)
     }
 }
 
 pub trait EquivDetector: Send + Sync {
+    // TODO: extension surface for the unwired probe/LLM detectors; drop the
+    // allow with them (see the module TODO above).
+    #[allow(dead_code)]
     fn name(&self) -> &'static str;
     /// Inspect a mutant given the original (un-patched) source of the file
     /// it lives in. Detectors must be pure with respect to their inputs.
@@ -85,11 +98,13 @@ impl EquivPipeline {
         ])
     }
 
+    #[allow(dead_code)] // unwired probe/LLM surface, see module TODO
     pub fn with_threshold(mut self, t: f32) -> Self {
         self.threshold = t;
         self
     }
 
+    #[allow(dead_code)] // unwired probe/LLM surface, see module TODO
     /// Append the hypothesis probe (Layer 3). Off by default; the probe
     /// spawns a Python subprocess and depends on `hypothesis` being
     /// installed, so callers opt in explicitly.
@@ -98,6 +113,7 @@ impl EquivPipeline {
         self
     }
 
+    #[allow(dead_code)] // unwired probe/LLM surface, see module TODO
     /// Append the LLM judge (Layer 4). Off by default; runs last by
     /// construction so cheaper layers short-circuit it for free.
     pub fn with_llm(mut self, judge: llm::LlmJudge) -> Self {

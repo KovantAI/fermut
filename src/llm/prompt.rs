@@ -54,6 +54,7 @@ pub struct SampleTest {
 }
 
 impl PromptContext {
+    #[cfg(test)]
     pub fn empty() -> Self {
         Self {
             source_snippet: String::new(),

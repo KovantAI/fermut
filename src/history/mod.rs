@@ -29,8 +29,10 @@ pub use analytics::{
     survivor_diff, survivors_by_file, trailing_streak, StreakDir,
 };
 pub(crate) use entry::trend_step;
-pub use entry::{HistoryEntry, CURRENT_SCHEMA_V};
+pub use entry::HistoryEntry;
+#[cfg(test)]
+pub use entry::CURRENT_SCHEMA_V;
 pub use hash::config_hash;
-pub use io::{append, load, load_with_stats, LoadStats};
+pub use io::{append, load, load_with_stats};
 pub use paths::{default_history_path, resolve_root};
 pub use render::{sparkline, sparkline_scaled};

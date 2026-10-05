@@ -448,8 +448,9 @@ fn changed_paths(
 /// context node id is `<file>::<test>|<phase>`; the file part is the test file
 /// to re-run.
 fn tests_covering_sources(db_path: &Path, source_rels: &[String]) -> Result<Vec<PathBuf>> {
-    use rusqlite::Connection;
-    let conn = Connection::open(db_path).context("opening coverage database")?;
+    use rusqlite::{Connection, OpenFlags};
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .context("opening coverage database")?;
     let mut test_files = std::collections::BTreeSet::<String>::new();
     for src in source_rels {
         // Escape LIKE metacharacters so a filename's `_` (ubiquitous in Python)
@@ -511,6 +512,7 @@ fn run_pytest(
         }
         None => Command::new("pytest"),
     };
+    crate::runner::sanitize_python_env(&mut cmd);
     cmd.current_dir(base_dir);
     cmd.arg(format!("--cov={}", cov_target.display()));
     cmd.arg("--cov-context=test");

@@ -20,7 +20,16 @@ Built for an agent picking its next target, so JSON is the default format.
 
 ## How ranking works
 
-Survivors are grouped into clusters — same `(file, operator)` **and** within
+First, survivors are **folded**. At a compare (`a < b`) or an `and`/`or`
+condition, one surviving mutant can make another redundant: a test that
+kills `a < b` → `a > b` also kills `a < b` → `a >= b`, because `>=` differs
+from `<` on every input where `>` does, and more. The redundant survivor is
+not shown as its own target; it is listed in the dominator's
+`subsumed_ids`. This follows from the comparison itself, not from a guess,
+but assumes ordinary ordered values (see the caveats in
+[Operator profiles](../operators/profiles.md#caveats)).
+
+Then the remaining survivors are grouped into clusters — same `(file, operator)` **and** within
 2 lines of a neighbour — then ranked descending by:
 
 1. **Cluster size** — survivors at the same code site (same file, same
@@ -72,6 +81,7 @@ an unexecuted line and need a brand-new test, not just an assertion.
     "max_gain_pts": 50.0,
     "hint": "boundary shift (`>=`↔`>` …). Add a test where the input equals the bound.",
     "sibling_ids": ["src/a.py@60:boundary-shift:<=-><"],
+    "subsumed_ids": [],
     "coverage_selected": true
   }
 ]
@@ -80,14 +90,18 @@ an unexecuted line and need a brand-new test, not just an assertion.
 - **`cluster_size`** — survivors sharing this `(file, operator)`,
   representative included.
 - **`min_gain_pts`** — points the score climbs from killing the representative
-  alone (`1 / score_denominator`). The floor: one test, one guaranteed kill.
-- **`max_gain_pts`** — points if one test kills *every* mutant in the cluster
-  (`cluster_size / score_denominator`). The ceiling, realised only when the
-  co-kill guess holds; equals `min_gain_pts` for a lone survivor.
+  alone, plus the survivors it subsumes (`(1 + subsumed) / score_denominator`).
+  The floor: one test, guaranteed kills.
+- **`max_gain_pts`** — points if one test kills *every* mutant in the cluster,
+  including each member's subsumed survivors. The ceiling, realised only when
+  the co-kill guess holds; equals `min_gain_pts` for a lone survivor.
 - **`hint`** — the operator-specific tip, shared with
   **[`fermut explain`](explain.md)**.
 - **`sibling_ids`** — other survivors in the cluster; a test for the
-  representative often kills these too.
+  representative often kills these too (a guess).
+- **`subsumed_ids`** — survivors at the representative's compare / `and`-`or`
+  site that a test killing the representative kills too (derived, not
+  guessed). Empty for most operators.
 - **`coverage_selected`** — whether the run used coverage selection. When
   `false`, a high-`ease` survivor may sit on an unexecuted line and need a
   brand-new test, not just a stronger assertion (same caveat the `human`

@@ -97,6 +97,19 @@ pub fn config_hash(cfg: &Config) -> String {
     // comparable to a non-parity one.
     h.update(b"|parity=");
     h.update(if cfg.parity { &b"on"[..] } else { &b"off"[..] });
+    // The operator profile changes the ROR/logical mutant set. Fed only when
+    // not `default`, so every existing default-profile history entry keeps
+    // its hash (no spurious "config changed" step in `trend`).
+    if cfg.operator_profile != crate::config::OperatorProfile::Default {
+        h.update(b"|profile=");
+        h.update(cfg.operator_profile.name().as_bytes());
+    }
+    // A run with inferred kills is not comparable to an all-observed one:
+    // `trend` shows the switch as a config change, not a score move. Fed only
+    // when on, so existing hashes are unchanged.
+    if cfg.only_dominators {
+        h.update(b"|dominators=inferred");
+    }
     // Diff scope. A run restricted to changed lines scores over a different
     // universe than a full run; `--since` and `--diff-only` are mutually
     // exclusive at the parser. The spec/base string is included so a full run
@@ -230,6 +243,10 @@ mod tests {
             cache_path: PathBuf::from(".fermut/cache.json"),
             smart_order: false,
             kill_order_path: PathBuf::from(".fermut/kill-order.json"),
+            dominators_path: PathBuf::from(".fermut/dominators.json"),
+            operator_profile: crate::config::OperatorProfile::Default,
+            only_dominators: false,
+            inferred_audit_rate: 0.0,
             history: false,
             history_path: PathBuf::from(".fermut/history.jsonl"),
             sample_ratio: None,
@@ -316,6 +333,24 @@ mod tests {
             ..cfg()
         });
         assert_ne!(base, parity, "parity run must differ from non-parity");
+        let minimal = config_hash(&Config {
+            operator_profile: crate::config::OperatorProfile::Minimal,
+            ..cfg()
+        });
+        let full = config_hash(&Config {
+            operator_profile: crate::config::OperatorProfile::Full,
+            ..cfg()
+        });
+        assert_ne!(
+            base, minimal,
+            "minimal-profile run must differ from default"
+        );
+        assert_ne!(minimal, full, "profiles must hash apart");
+        let inferred = config_hash(&Config {
+            only_dominators: true,
+            ..cfg()
+        });
+        assert_ne!(base, inferred, "an inferred-kill run must differ");
 
         // Sharding partitions the mutant set; index and total both matter.
         let sh1 = config_hash(&Config {

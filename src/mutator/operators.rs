@@ -43,6 +43,17 @@ pub enum Operator {
     AsyncWithToSync,
     MatchGuardNegate,
 
+    // Minimal-profile operators — the region-model dominators the default set
+    // lacks (see `region`). Always emitted by the visitor; the `--operators`
+    // profile filter keeps them only under `minimal` / `full`.
+    RelationalToEquality,
+    CompareToConst,
+    BoolOperandDrop,
+    BoolOpToConst,
+    /// The remaining region-model forms of a site, so the subsumption gate can
+    /// check all 7 ROR mutants. Kept only under the hidden `ror-all` profile.
+    RegionRest,
+
     // Experimental — opt-in via `--experimental`.
     // Higher noise: more equivalent mutants, more likely to break runtime
     // semantics in ways the test suite can't usefully detect.
@@ -101,6 +112,11 @@ impl Operator {
             Self::AsyncForToSync => "async-for-to-sync",
             Self::AsyncWithToSync => "async-with-to-sync",
             Self::MatchGuardNegate => "match-guard-negate",
+            Self::RelationalToEquality => "ror-equality",
+            Self::CompareToConst => "ror-const",
+            Self::BoolOperandDrop => "bool-operand-drop",
+            Self::BoolOpToConst => "bool-const",
+            Self::RegionRest => "region-rest",
             Self::ExceptionClassSwap => "exp:exception-class-swap",
             Self::BareExcept => "exp:bare-except",
             Self::ZeroIterationForLoop => "exp:zero-iteration-for-loop",
@@ -138,6 +154,24 @@ impl Operator {
         )
     }
 
+    /// Emitted only for the `minimal` / `full` operator profiles: the
+    /// region-model dominators the default catalogue lacks.
+    pub fn is_minimal_only(self) -> bool {
+        matches!(
+            self,
+            Self::RelationalToEquality
+                | Self::CompareToConst
+                | Self::BoolOperandDrop
+                | Self::BoolOpToConst
+        )
+    }
+
+    /// Gated by the operator profile rather than on by default: the
+    /// minimal-only operators plus [`Operator::RegionRest`].
+    pub fn is_profile_gated(self) -> bool {
+        self.is_minimal_only() || self == Self::RegionRest
+    }
+
     pub fn all() -> &'static [Operator] {
         &[
             Operator::ArithOpSwap,
@@ -170,6 +204,11 @@ impl Operator {
             Operator::AsyncForToSync,
             Operator::AsyncWithToSync,
             Operator::MatchGuardNegate,
+            Operator::RelationalToEquality,
+            Operator::CompareToConst,
+            Operator::BoolOperandDrop,
+            Operator::BoolOpToConst,
+            Operator::RegionRest,
             Operator::ExceptionClassSwap,
             Operator::BareExcept,
             Operator::ZeroIterationForLoop,
@@ -277,9 +316,15 @@ mod tests {
     #[test]
     fn all_covers_every_variant() {
         // Cheap proxy: kick `name()` on every variant via `all()` and assert
-        // none panic and the count matches the expected total (30 stable + 8
-        // experimental + 3 parity). Update when adding/removing operators.
-        assert_eq!(Operator::all().len(), 41);
+        // none panic and the count matches the expected total (30 stable + 5
+        // profile-gated + 8 experimental + 3 parity). Update when
+        // adding/removing operators.
+        assert_eq!(Operator::all().len(), 46);
+        let gated = Operator::all()
+            .iter()
+            .filter(|o| o.is_profile_gated())
+            .count();
+        assert_eq!(gated, 5);
         let experimental_count = Operator::all()
             .iter()
             .filter(|o| o.is_experimental())
@@ -303,7 +348,7 @@ mod tests {
     fn stable_op_names() -> HashSet<String> {
         Operator::all()
             .iter()
-            .filter(|o| !o.is_experimental() && !o.is_parity())
+            .filter(|o| !o.is_experimental() && !o.is_parity() && !o.is_profile_gated())
             .map(|o| o.name().to_string())
             .collect()
     }

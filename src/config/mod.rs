@@ -39,6 +39,8 @@ pub struct Config {
     /// Include parity operators (expr→None, positional/element drop, string
     /// case-swap) — for cross-tool comparison only, never a default score.
     pub parity: bool,
+    /// ROR / logical operator set (`--operators`). See [`OperatorProfile`].
+    pub operator_profile: OperatorProfile,
     pub ops_allow: Option<HashSet<Operator>>,
     pub ops_deny: HashSet<Operator>,
     pub diff_base: Option<String>,
@@ -70,6 +72,9 @@ pub struct Config {
     pub cache_audit_rate: f64,
     /// Path to the advisory kill-order sidecar (`.fermut/kill-order.json`).
     pub kill_order_path: PathBuf,
+    /// Dominator store written by `fermut subsume` (`.fermut/dominators.json`).
+    /// Read after a run to add `dominator_score` to the summary while fresh.
+    pub dominators_path: PathBuf,
     /// When true, each `fermut run` appends a summary line to `history_path`.
     /// Disable with `--no-history` or `history = false` in the config file.
     pub history: bool,
@@ -141,12 +146,49 @@ pub struct Config {
     /// `--no-cache`: a cache hit skips the run and records no kill-set. Set via
     /// `--record-kill-sets`.
     pub record_kill_sets: Option<PathBuf>,
+    /// `--only-dominators`: run dominators, infer the kills they imply. See
+    /// [`crate::subsume::DominatorPlan`].
+    pub only_dominators: bool,
+    /// Fraction of inferred kills re-verified (`--audit-inferred`).
+    pub inferred_audit_rate: f64,
 }
 
 /// Default for [`Config::cache_audit_rate`].
 pub const DEFAULT_CACHE_AUDIT_RATE: f64 = 0.05;
 
 /// Cache-key granularity for source-file identity. See `Config::cache_scope`.
+/// Which ROR / logical operator set to test (see `mutator::region`). Set via
+/// `--operators` / `operators = "..."`.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum OperatorProfile {
+    /// The historical catalogue: `and`↔`or` and the 3 compare swaps per
+    /// ordering op, no region-model operators.
+    #[default]
+    Default,
+    /// The region-model minimal set: per ordering compare and 2-operand
+    /// truth-position `and`/`or`, only the 3 dominator mutants. About the same
+    /// count as `default`, but none is trivially killed.
+    Minimal,
+    /// `default` plus the minimal-set operators. For experiments.
+    Full,
+    /// `full` plus every remaining region-model form (all 7 per ordering
+    /// compare). Only for the subsumption gate; not documented as a profile.
+    RorAll,
+}
+
+impl OperatorProfile {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Minimal => "minimal",
+            Self::Full => "full",
+            Self::RorAll => "ror-all",
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]

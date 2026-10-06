@@ -17,6 +17,7 @@
 //! | `report` | Outcome types + writers (json/junit/html/markdown) + GHA annotations |
 //! | `history` | Per-run history log (`.fermut/history.jsonl`) powering `trend`/`score` |
 //! | `kill_order` | Smart test ordering — historical "which test killed this mutant kind" first |
+//! | `subsume` | Dominator mutants from recorded kill-sets (`fermut subsume`) + dominator score |
 //! | `llm` | LLM integration: Anthropic Messages API client + prompt builders + cache |
 //! | `sync` | Internal sync helpers (e.g. `lock_recover` for poisoned `Mutex`es) |
 //! | `watch` | File-system watch loop for `--watch` mode |
@@ -35,6 +36,7 @@ pub(crate) mod llm;
 pub(crate) mod mutator;
 pub(crate) mod report;
 pub(crate) mod runner;
+pub(crate) mod subsume;
 pub(crate) mod sync;
 pub(crate) mod test_tree;
 pub(crate) mod util;

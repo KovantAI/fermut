@@ -113,6 +113,7 @@ mod tests {
             replacement: "-".into(),
             line: 7,
             stmt_line: 7,
+            site: None,
         }
     }
 

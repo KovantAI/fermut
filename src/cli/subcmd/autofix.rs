@@ -553,6 +553,7 @@ mod tests {
             replacement: "<".into(),
             line: 2,
             stmt_line: 2,
+            site: None,
         }
     }
 

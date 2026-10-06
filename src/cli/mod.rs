@@ -125,6 +125,13 @@ pub(crate) struct FilterArgs {
     #[arg(long)]
     pub parity: bool,
 
+    /// ROR / logical operator set. `default`: today's swaps. `minimal`: per
+    /// ordering compare and truth-position `and`/`or`, only the 3 mutants no
+    /// other mutant subsumes (e.g. `<` → `<=`, `!=`, `False`). Same count,
+    /// stronger tests. `full`: both. See the operator-profiles reference.
+    #[arg(long, value_enum, value_name = "PROFILE")]
+    pub operators: Option<OperatorProfileCli>,
+
     /// Exclude paths from mutation collection. Repeatable. Patterns are
     /// globs matched against paths relative to the source root. Examples:
     /// `--exclude 'alembic/**' --exclude 'tests/integration/**'`.
@@ -321,6 +328,28 @@ pub(crate) struct RunConfigArgs {
     #[arg(long, value_name = "PATH")]
     pub record_kill_sets: Option<PathBuf>,
 
+    /// [experimental] Run only the dominator mutants from
+    /// `.fermut/dominators.json` (see `fermut subsume`), plus anything new,
+    /// changed, or not killed when recorded. A remaining mutant is counted
+    /// killed, without running, when a dominator of it was killed this run by
+    /// a test in its recorded kill-set. Inferred kills are reported apart
+    /// (`inferred_killed`, `observed_score`). For full nightly sweeps; refused
+    /// with `--diff-only`/`--since`, so a PR gate never scores on inference.
+    #[arg(long, conflicts_with_all = ["diff_only", "since", "record_kill_sets"])]
+    pub only_dominators: bool,
+
+    /// Fraction (0.0–1.0) of inferred kills re-run against their killing test
+    /// under `--only-dominators`. Any that doesn't die fails the run: the
+    /// recorded kill-sets are stale. At least one is audited when any are
+    /// inferred. Default 0.05.
+    #[arg(
+        long,
+        value_name = "RATE",
+        value_parser = build_config::parse_audit_rate,
+        requires = "only_dominators"
+    )]
+    pub audit_inferred: Option<f64>,
+
     #[command(flatten)]
     pub filter: FilterArgs,
 }
@@ -339,6 +368,15 @@ enum Cmd {
     /// SSHOMs (killed only by tests that kill both constituents) — the
     /// fewer-but-stronger mutants. Pytest/rstest + `--coverage` required.
     Hom(subcmd::hom::HomArgs),
+
+    /// Derive dominator mutants from a `run --record-kill-sets` JSONL.
+    ///
+    /// Groups killed mutants with identical kill-sets, keeps the ⊆-minimal
+    /// classes (killing those kills every killed mutant), and writes the class
+    /// map to `.fermut/dominators.json`. Prints the reduction and the dominator
+    /// score. While the mutated files are unchanged, `run` adds
+    /// `dominator_score` to its JSON summary from that file.
+    Subsume(subcmd::subsume::SubsumeArgs),
 
     /// Enumerate mutations without running tests.
     ///
@@ -569,6 +607,16 @@ cli_enum! {
 }
 
 cli_enum! {
+    pub(crate) enum OperatorProfileCli => crate::config::OperatorProfile {
+        Default => Default,
+        Minimal => Minimal,
+        Full => Full,
+        #[value(hide = true)]
+        RorAll => RorAll,
+    }
+}
+
+cli_enum! {
     pub(crate) enum CacheScopeCli => crate::config::CacheScope {
         File => File,
         Scope => Scope,
@@ -609,6 +657,7 @@ impl Cli {
             Cmd::Merge(args) => merge::run(args),
             Cmd::List(args) => subcmd::list::run(args),
             Cmd::Hom(args) => subcmd::hom::run(args),
+            Cmd::Subsume(args) => subcmd::subsume::run(args),
         }
     }
 }
@@ -629,6 +678,23 @@ mod tests {
         );
         // --no-fail alone parses fine.
         assert!(Cli::try_parse_from(["fermut", "run", "--no-fail"]).is_ok());
+    }
+
+    #[test]
+    fn only_dominators_refuses_diff_scope_and_audit_needs_it() {
+        use clap::Parser;
+        let parse = |args: &[&str]| {
+            let mut v = vec!["fermut", "run", "."];
+            v.extend_from_slice(args);
+            Cli::try_parse_from(v)
+        };
+        assert!(parse(&["--only-dominators"]).is_ok());
+        assert!(parse(&["--only-dominators", "--diff-only"]).is_err());
+        assert!(parse(&["--only-dominators", "--since", "HEAD~1"]).is_err());
+        assert!(parse(&["--only-dominators", "--record-kill-sets", "k.jsonl"]).is_err());
+        assert!(parse(&["--audit-inferred", "0.1"]).is_err());
+        assert!(parse(&["--only-dominators", "--audit-inferred", "0.1"]).is_ok());
+        assert!(parse(&["--only-dominators", "--audit-inferred", "2"]).is_err());
     }
 
     #[test]

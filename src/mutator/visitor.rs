@@ -25,7 +25,8 @@ use super::operators::{
     Operator, ARITH_SWAPS, AUG_ASSIGN_SWAPS, BOOL_SWAPS, BOUNDARY_SWAPS, COMPARE_SWAPS,
     CONSTANT_SWAPS, CONTAINER_TYPE_SWAPS,
 };
-use super::Mutant;
+use super::region::{self, LogicForm};
+use super::{Mutant, SiteTag};
 
 pub fn collect(path: &Path, source: &str) -> Result<Vec<Mutant>> {
     let parsed = parse_module(source).with_context(|| format!("parsing {}", path.display()))?;
@@ -45,6 +46,7 @@ pub fn collect(path: &Path, source: &str) -> Result<Vec<Mutant>> {
         ignores,
         annotation_ranges: Vec::new(),
         stmt_line: 0,
+        truth_positions: HashSet::new(),
     };
     for stmt in &module.body {
         collector.visit_stmt(stmt);
@@ -170,6 +172,33 @@ struct Collector<'a> {
     /// so coverage lookups can fall back to the line coverage.py actually
     /// attributes execution to — see `Mutant::stmt_line`.
     stmt_line: u32,
+    /// Ranges of expressions whose value is used only for its truth (`if`/
+    /// `while`/`assert` tests, ternary tests, `not` operands, comprehension
+    /// `if`s, match guards, and the operands of a `BoolOp` that is itself in
+    /// truth position). Inserted by the parent before the walk reaches the
+    /// child, so `emit_boolop` can tell whether `a and b` → `a` is a
+    /// truth-preserving operand drop. See `region`.
+    truth_positions: HashSet<TextRange>,
+}
+
+/// Region tag for a mutant of a single-op ordering compare `orig` → `repl`.
+fn ror_tag(start: TextSize, orig: &str, repl: &str) -> Option<SiteTag> {
+    let mask = region::ror_diff(orig, repl)?;
+    Some(SiteTag {
+        start: start.into(),
+        mask,
+        minimal: region::ror_is_minimal(orig, mask),
+    })
+}
+
+/// Region tag for a mutant of a 2-operand `and`/`or` in truth position.
+fn logic_tag(start: TextSize, orig: LogicForm, repl: LogicForm) -> SiteTag {
+    let mask = region::logic_diff(orig, repl);
+    SiteTag {
+        start: start.into(),
+        mask,
+        minimal: region::logic_is_minimal(orig, mask),
+    }
 }
 
 impl<'a> Collector<'a> {
@@ -181,6 +210,17 @@ impl<'a> Collector<'a> {
     }
 
     fn push(&mut self, op: Operator, range: TextRange, replacement: &str) {
+        self.push_site(op, range, replacement, None);
+    }
+
+    /// [`push`](Self::push) with a region-model tag (see [`SiteTag`]).
+    fn push_site(
+        &mut self,
+        op: Operator,
+        range: TextRange,
+        replacement: &str,
+        site: Option<SiteTag>,
+    ) {
         let line = self.line_of(range);
         if self.ignores.is_ignored(line, op) {
             return;
@@ -234,6 +274,7 @@ impl<'a> Collector<'a> {
             } else {
                 self.stmt_line
             },
+            site,
         });
     }
 
@@ -592,11 +633,25 @@ impl<'a> Collector<'a> {
     }
 
     fn emit_boolop(&mut self, b: &ast::ExprBoolOp) {
-        let lex = if matches!(b.op, ast::BoolOp::And) {
-            "and"
+        let is_and = matches!(b.op, ast::BoolOp::And);
+        let lex = if is_and { "and" } else { "or" };
+        let (orig, swapped) = if is_and {
+            (LogicForm::And, LogicForm::Or)
         } else {
-            "or"
+            (LogicForm::Or, LogicForm::And)
         };
+        let in_truth = self.truth_positions.contains(&b.range());
+        if in_truth {
+            // `a and b` used as a truth value: its operands are too.
+            for v in &b.values {
+                self.truth_positions.insert(v.range());
+            }
+        }
+        // The region model covers only a 2-operand connective whose value is
+        // used for its truth: elsewhere `a and b` → `a` changes the value, not
+        // just its truth, and a longer chain has more than 4 regions.
+        let modelled = in_truth && b.values.len() == 2;
+        let start = b.range().start();
         // ruff flattens `a and b and c` into one node with three values, so
         // there is one operator site per adjacent pair, not one per node.
         for pair in b.values.windows(2) {
@@ -605,12 +660,54 @@ impl<'a> Collector<'a> {
             else {
                 continue;
             };
-            for (orig, repl) in BOOL_SWAPS {
-                if *orig == lex {
-                    self.push(Operator::BoolOpSwap, r, repl);
+            for (o, repl) in BOOL_SWAPS {
+                if *o == lex {
+                    let tag = modelled.then(|| logic_tag(start, orig, swapped));
+                    self.push_site(Operator::BoolOpSwap, r, repl, tag);
                 }
             }
         }
+        if !modelled {
+            return;
+        }
+        // Operand drops replace the whole node with one operand, wrapped in
+        // parens so a lower-precedence operand (`x if c else y`, a lambda,
+        // a walrus) can't re-associate with the surrounding expression.
+        let lhs = format!("({})", &self.source[b.values[0].range()]);
+        let rhs = format!("({})", &self.source[b.values[1].range()]);
+        let node = b.range();
+        self.push_site(
+            Operator::BoolOperandDrop,
+            node,
+            &lhs,
+            Some(logic_tag(start, orig, LogicForm::Lhs)),
+        );
+        // `a and a`: both drops are the same edit.
+        if rhs != lhs {
+            self.push_site(
+                Operator::BoolOperandDrop,
+                node,
+                &rhs,
+                Some(logic_tag(start, orig, LogicForm::Rhs)),
+            );
+        }
+        let (konst, kform, rest, rform) = if is_and {
+            ("False", LogicForm::False, "True", LogicForm::True)
+        } else {
+            ("True", LogicForm::True, "False", LogicForm::False)
+        };
+        self.push_site(
+            Operator::BoolOpToConst,
+            node,
+            konst,
+            Some(logic_tag(start, orig, kform)),
+        );
+        self.push_site(
+            Operator::RegionRest,
+            node,
+            rest,
+            Some(logic_tag(start, orig, rform)),
+        );
     }
 
     fn emit_unaryop(&mut self, u: &ast::ExprUnaryOp) {
@@ -637,24 +734,67 @@ impl<'a> Collector<'a> {
     }
 
     fn emit_compare(&mut self, c: &ast::ExprCompare) {
+        // The region model covers a single ordering op only: in a chain
+        // `a < b < c` one op's regions aren't the whole predicate's.
+        let modelled = c.ops.len() == 1 && region::is_ordering(cmpop_lexeme(c.ops[0]));
+        let start = c.range().start();
         for (i, op) in c.ops.iter().enumerate() {
             let lex = cmpop_lexeme(*op);
+            let tag = |repl: &str| {
+                if modelled {
+                    ror_tag(start, lex, repl)
+                } else {
+                    None
+                }
+            };
             let lhs_end = if i == 0 {
                 c.left.range().end()
             } else {
                 c.comparators[i - 1].range().end()
             };
-            if let Some(r) = self.op_range_between(lhs_end, c.comparators[i].range().start(), lex) {
-                for (orig, repl) in COMPARE_SWAPS {
-                    if *orig == lex {
-                        self.push(Operator::CompareOpSwap, r, repl);
-                    }
+            let Some(r) = self.op_range_between(lhs_end, c.comparators[i].range().start(), lex)
+            else {
+                continue;
+            };
+            let mut emitted: Vec<&str> = Vec::new();
+            for (orig, repl) in COMPARE_SWAPS {
+                if *orig == lex {
+                    self.push_site(Operator::CompareOpSwap, r, repl, tag(repl));
+                    emitted.push(repl);
                 }
-                for (orig, repl) in BOUNDARY_SWAPS {
-                    if *orig == lex {
-                        self.push(Operator::BoundaryShift, r, repl);
-                    }
+            }
+            for (orig, repl) in BOUNDARY_SWAPS {
+                if *orig == lex {
+                    self.push_site(Operator::BoundaryShift, r, repl, tag(repl));
+                    emitted.push(repl);
                 }
+            }
+            if !modelled {
+                continue;
+            }
+            // The two dominators the default set lacks (see `region`): the
+            // equality op that differs only off the boundary, and the constant
+            // that differs only on the original's true side.
+            let strict = matches!(lex, "<" | ">");
+            let (eq, konst) = if strict {
+                ("!=", "False")
+            } else {
+                ("==", "True")
+            };
+            self.push_site(Operator::RelationalToEquality, r, eq, tag(eq));
+            self.push_site(Operator::CompareToConst, c.range(), konst, tag(konst));
+            emitted.extend([eq, konst]);
+            // Whatever is left of the 7 forms, for the subsumption gate.
+            for f in region::ror_candidates(lex) {
+                if emitted.contains(&f) {
+                    continue;
+                }
+                let range = if matches!(f, "True" | "False") {
+                    c.range()
+                } else {
+                    r
+                };
+                self.push_site(Operator::RegionRest, range, f, tag(f));
             }
         }
     }
@@ -836,6 +976,63 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// Record the children of `stmt` that are used only for their truth. Runs
+    /// before the walk descends, so the child sees its own entry.
+    fn mark_truth_positions_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::If(s) => {
+                self.truth_positions.insert(s.test.range());
+                for clause in &s.elif_else_clauses {
+                    if let Some(test) = &clause.test {
+                        self.truth_positions.insert(test.range());
+                    }
+                }
+            }
+            Stmt::While(s) => {
+                self.truth_positions.insert(s.test.range());
+            }
+            Stmt::Assert(s) => {
+                self.truth_positions.insert(s.test.range());
+            }
+            Stmt::Match(m) => {
+                for case in &m.cases {
+                    if let Some(guard) = &case.guard {
+                        self.truth_positions.insert(guard.range());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Expression counterpart of [`mark_truth_positions_stmt`]. `BoolOp`
+    /// operands are marked in `emit_boolop`, which knows whether the node
+    /// itself is in truth position.
+    ///
+    /// [`mark_truth_positions_stmt`]: Self::mark_truth_positions_stmt
+    fn mark_truth_positions_expr(&mut self, expr: &Expr) {
+        let generators = match expr {
+            Expr::If(i) => {
+                self.truth_positions.insert(i.test.range());
+                return;
+            }
+            Expr::UnaryOp(u) if matches!(u.op, ast::UnaryOp::Not) => {
+                self.truth_positions.insert(u.operand.range());
+                return;
+            }
+            Expr::ListComp(c) => &c.generators,
+            Expr::SetComp(c) => &c.generators,
+            Expr::DictComp(c) => &c.generators,
+            Expr::Generator(c) => &c.generators,
+            _ => return,
+        };
+        for g in generators {
+            for cond in &g.ifs {
+                self.truth_positions.insert(cond.range());
+            }
+        }
+    }
+
     fn emit_slice(&mut self, s: &ast::ExprSlice) {
         if let Some(lower) = &s.lower {
             self.push(Operator::SliceBoundDrop, lower.range(), "");
@@ -858,6 +1055,7 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
         // so a nested body's mutants do not inherit the outer statement's head.
         let outer_stmt_line = self.stmt_line;
         self.stmt_line = self.line_of(stmt.range());
+        self.mark_truth_positions_stmt(stmt);
         match stmt {
             Stmt::AugAssign(a) => self.handle_aug_assign(a),
             Stmt::Return(r) => self.handle_return(r),
@@ -913,6 +1111,7 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
     }
 
     fn visit_expr(&mut self, expr: &'ast Expr) {
+        self.mark_truth_positions_expr(expr);
         // Thin dispatcher: match the variant (with its guard) and delegate to
         // the matching `emit_*` helper. Bodies live on `Collector` above.
         match expr {
@@ -2081,6 +2280,174 @@ def f(a, b, lo, hi):
                     m.id
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod region_emission_tests {
+    use super::collect;
+    use crate::mutator::{Mutant, Operator};
+    use std::path::Path;
+
+    fn all(src: &str) -> Vec<Mutant> {
+        collect(Path::new("t.py"), src).unwrap()
+    }
+
+    /// Every region-model mutant must splice into source that still parses.
+    fn assert_region_mutants_parse(src: &str) {
+        for m in all(src).into_iter().filter(|m| m.site.is_some()) {
+            let patched = crate::emit::patch_source(src, m.range, &m.replacement);
+            assert!(
+                ruff_python_parser::parse_module(&patched).is_ok(),
+                "{} → {:?} doesn't parse:\n{patched}",
+                m.describe(),
+                m.replacement
+            );
+        }
+    }
+
+    fn by_op(src: &str, op: Operator) -> Vec<String> {
+        let mut v: Vec<String> = all(src)
+            .into_iter()
+            .filter(|m| m.operator == op)
+            .map(|m| m.replacement)
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn region_mutants_parse_with_parens_and_multiline_operands() {
+        for src in [
+            "if (a) < b:\n    pass\n",
+            "if a < (b):\n    pass\n",
+            "if ((a < b)):\n    pass\n",
+            "if (x or y) and z:\n    pass\n",
+            "if (x\n    or y):\n    pass\n",
+            "if a and (b or\n        c):\n    pass\n",
+            "while not (a and b):\n    pass\n",
+            "x = [i for i in y if i > 0 and i < 9]\n",
+            "assert a >= b, 'msg'\n",
+            "y = 1 if a <= b else 2\n",
+            "if (lambda: 1) and (c := 2):\n    pass\n",
+            "match v:\n    case 1 if a and b:\n        pass\n",
+        ] {
+            assert_region_mutants_parse(src);
+        }
+    }
+
+    /// Corpus-wide version of the re-parse check over the parity fixtures
+    /// (`benchmarks/fixtures/fermut-*`, not committed everywhere). Run with
+    /// `cargo test -- --ignored region_mutants_parse_across_fixture_corpus`.
+    #[test]
+    #[ignore]
+    fn region_mutants_parse_across_fixture_corpus() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("benchmarks/fixtures");
+        let mut checked = 0usize;
+        for entry in walkdir::WalkDir::new(&root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.path().extension().is_some_and(|x| x == "py")
+                    && e.path()
+                        .strip_prefix(&root)
+                        .ok()
+                        .and_then(|p| p.components().next())
+                        .is_some_and(|c| c.as_os_str().to_string_lossy().starts_with("fermut-"))
+            })
+        {
+            let Ok(src) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            let Ok(ms) = collect(entry.path(), &src) else {
+                continue;
+            };
+            for m in ms.into_iter().filter(|m| m.site.is_some()) {
+                let patched = crate::emit::patch_source(&src, m.range, &m.replacement);
+                assert!(
+                    ruff_python_parser::parse_module(&patched).is_ok(),
+                    "{} doesn't parse",
+                    m.describe()
+                );
+                checked += 1;
+            }
+        }
+        eprintln!("re-parsed {checked} region-model mutants");
+    }
+
+    #[test]
+    fn ordering_compare_gets_equality_const_and_rest() {
+        let src = "if a <= b:\n    pass\n";
+        assert_eq!(by_op(src, Operator::RelationalToEquality), vec!["=="]);
+        assert_eq!(by_op(src, Operator::CompareToConst), vec!["True"]);
+        assert_eq!(by_op(src, Operator::RegionRest), vec!["!=", ">", "False"]);
+        // Every mutant of the site shares the node start.
+        let starts: std::collections::HashSet<u32> = all(src)
+            .iter()
+            .filter_map(|m| m.site)
+            .map(|s| s.start)
+            .collect();
+        assert_eq!(starts.len(), 1);
+    }
+
+    #[test]
+    fn equality_chained_and_membership_compares_are_not_modelled() {
+        for src in [
+            "if a == b:\n    pass\n",
+            "if a < b < c:\n    pass\n",
+            "if a in b:\n    pass\n",
+        ] {
+            let ms = all(src);
+            assert!(ms.iter().all(|m| m.site.is_none()), "{src}");
+            assert!(ms.iter().all(|m| !m.operator.is_profile_gated()), "{src}");
+        }
+    }
+
+    #[test]
+    fn bool_operand_drop_only_in_truth_position_with_two_operands() {
+        assert_eq!(
+            by_op("if a and b:\n    pass\n", Operator::BoolOperandDrop),
+            vec!["(a)", "(b)"]
+        );
+        // Value position: `a or default` → `a` changes the value.
+        assert!(by_op("x = a or b\n", Operator::BoolOperandDrop).is_empty());
+        assert!(by_op("return a and b\n", Operator::BoolOperandDrop).is_empty());
+        // 3-operand chain: more than 4 regions.
+        assert!(by_op("if a and b and c:\n    pass\n", Operator::BoolOperandDrop).is_empty());
+        // `a and a`: one drop, not a duplicate.
+        assert_eq!(
+            by_op("if a and a:\n    pass\n", Operator::BoolOperandDrop),
+            vec!["(a)"]
+        );
+    }
+
+    #[test]
+    fn truth_position_reaches_nested_operands_and_every_context() {
+        // The inner `or` is an operand of a truth-position `and`.
+        let src = "if (x or y) and z:\n    pass\n";
+        assert_eq!(by_op(src, Operator::BoolOpToConst), vec!["False", "True"]);
+        for src in [
+            "while a or b:\n    pass\n",
+            "assert a or b\n",
+            "y = 1 if a or b else 2\n",
+            "y = not (a or b)\n",
+            "y = [i for i in z if a or b]\n",
+            "y = {i: 1 for i in z if a or b}\n",
+            "if c:\n    pass\nelif a or b:\n    pass\n",
+            "match v:\n    case 1 if a or b:\n        pass\n",
+        ] {
+            assert_eq!(by_op(src, Operator::BoolOpToConst), vec!["True"], "{src}");
+        }
+    }
+
+    #[test]
+    fn default_swaps_at_a_modelled_site_are_tagged_non_minimal() {
+        let src = "if a < b:\n    pass\n";
+        for m in all(src) {
+            let Some(site) = m.site else { continue };
+            let expect_minimal = matches!(m.replacement.as_str(), "<=" | "!=" | "False");
+            assert_eq!(site.minimal, expect_minimal, "{}", m.describe());
         }
     }
 }

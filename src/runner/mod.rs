@@ -667,6 +667,7 @@ mod tests {
             replacement: repl.to_string(),
             line: 1,
             stmt_line: 1,
+            site: None,
         }
     }
 

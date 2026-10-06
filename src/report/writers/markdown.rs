@@ -6,6 +6,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::history::{self, HistoryEntry};
+use crate::mutator::Mutant;
+use crate::report::fold::FoldIndex;
 use crate::report::{MutantOutcome, Report};
 
 /// HTML comment marker prepended to every Markdown report. Invisible in
@@ -61,26 +63,43 @@ impl Report {
             })
             .collect();
         if !survivors.is_empty() {
+            // Survivors another survivor at the same site subsumes are listed
+            // under it: one test kills the whole group.
+            let folds = FoldIndex::new(&self.outcomes);
             md.push_str(&format!(
                 "\n<details>\n<summary>{} survivor(s)</summary>\n\n",
                 survivors.len()
             ));
             for o in &survivors {
                 let m = o.mutant();
-                md.push_str(&format!(
-                    "- `{}:{}` `{}` — `{}` → `{}`\n",
-                    m.file.display(),
-                    m.line,
-                    m.operator.name(),
-                    m.original.replace('`', "'"),
-                    m.replacement.replace('`', "'")
-                ));
+                if folds.is_folded(&m.id) {
+                    continue;
+                }
+                md.push_str(&format!("- {}\n", markdown_row(m)));
+                let sub = folds.subsumed(&m.id);
+                if !sub.is_empty() {
+                    md.push_str("  - also killed by a test that kills this one:\n");
+                    for s in sub {
+                        md.push_str(&format!("    - {}\n", markdown_row(s)));
+                    }
+                }
             }
             md.push_str("\n</details>\n");
         }
         std::fs::write(path, md).with_context(|| format!("writing {}", path.display()))?;
         Ok(())
     }
+}
+
+fn markdown_row(m: &Mutant) -> String {
+    format!(
+        "`{}:{}` `{}` — `{}` → `{}`",
+        m.file.display(),
+        m.line,
+        m.operator.name(),
+        m.original.replace('`', "'"),
+        m.replacement.replace('`', "'")
+    )
 }
 
 /// Build the trend section that goes between the score line and the count
@@ -141,6 +160,23 @@ fn render_trend_block(current_score: Option<f64>, prior_history: &[HistoryEntry]
 mod tests {
     use crate::report::testing::make_mutant;
     use crate::report::{MutantOutcome, Report};
+
+    #[test]
+    fn markdown_nests_subsumed_survivors_under_their_dominator() {
+        let r = Report::new(crate::report::testing::folded_pair());
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        r.write_markdown(tmp.path()).unwrap();
+        let md = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(md.contains("2 survivor(s)"), "{md}");
+        let top = md
+            .find("- `t.py:1` `compare-op-swap` — `<` → `>`\n")
+            .unwrap();
+        let nested = md
+            .find("    - `t.py:1` `compare-op-swap` — `<` → `>=`")
+            .unwrap();
+        assert!(top < nested, "{md}");
+        assert!(md.contains("also killed by a test that kills this one"));
+    }
 
     #[test]
     fn write_markdown_includes_score_and_survivors() {

@@ -38,6 +38,7 @@ fermut run [PATH] [flags...]
 | `--trend`                   | off                              | Include a compact trend block at the top of the Markdown report.      |
 | `--experimental`            | off                              | Include experimental operators.                                       |
 | `--parity`                  | off                              | Include parity operators (cross-tool comparison only — very noisy, never for normal scoring). See [Parity operators](../operators/parity.md). |
+| `--operators <profile>`     | `default`                        | Compare / `and`-`or` operator set: `default`, `minimal`, `full`. See [Operator profiles](../operators/profiles.md). |
 | `--ops <list>`              | all                              | Allowlist operators.                                                  |
 | `--skip-ops <list>`         | none                             | Denylist operators (wins over `--ops`).                                |
 | `--diff-only [base]`        | off                              | Restrict to lines changed vs base ref (default `main`).               |
@@ -54,6 +55,8 @@ fermut run [PATH] [flags...]
 | `--no-smart-order`          | on                               | Disable smart test ordering. On by default, timeout or not — ordering only permutes the selected set, so the score and `--fail-on-regression` gate stay order-invariant. See [Smart test ordering](#smart-test-ordering). |
 | `--smart-order`             | off                              | Force smart test ordering on over `smart_order = false` in config. Conflicts with `--no-smart-order`. |
 | `--max-time <SECS>`         | off (whole catalogue)            | Wall-clock ceiling on the testing phase. Evaluates highest-value mutants first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` (excluded from the score) instead of run — in-flight mutants finish. A predictable time ceiling for PR gates. See [Time-boxed runs](#time-boxed-runs-max-time). |
+| `--only-dominators`         | off                              | [experimental] Run dominator mutants from `.fermut/dominators.json` and infer the kills they imply; for nightly sweeps, refused with `--diff-only`/`--since`. See [`fermut subsume`](subsume.md#fermut-run-only-dominators-experimental). |
+| `--audit-inferred <RATE>`   | `0.05`                           | With `--only-dominators`: fraction of inferred kills re-run against their killing test; any that survives fails the run. |
 | `--fail-on-regression <PTS>`| off                              | Exit non-zero when score dropped more than `PTS` vs the most recent prior entry on the same git branch. Requires history. Ignored in `--watch`. |
 | `--trend-branch <NAME>`     | none                             | Restrict the `--trend` markdown block's "previous run" lookup to entries recorded on this branch. Requires `--trend`. |
 

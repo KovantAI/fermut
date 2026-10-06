@@ -868,6 +868,63 @@ fn dashboard_writes_self_contained_html() {
 
 #[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn coverage_output_flag_receives_the_data() {
+    // `--output` used to set only where fermut purged and fingerprinted: pytest
+    // still wrote `<project>/.coverage`, clobbering it and leaving the output
+    // path empty. A relative path is the sharp case, since pytest runs from
+    // the project root and fermut from its own cwd.
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    let out_rel = PathBuf::from("out/cov.db");
+    std::fs::create_dir_all(tmp.path().join("out")).unwrap();
+    let out = tmp.path().join(&out_rel);
+    let contexts = || -> i64 {
+        rusqlite::Connection::open(&out)
+            .unwrap()
+            .query_row("SELECT count(*) FROM context", [], |r| r.get(0))
+            .unwrap()
+    };
+    let coverage = |tmp: &std::path::Path| {
+        Command::cargo_bin("fermut")
+            .unwrap()
+            .current_dir(tmp)
+            .arg("coverage")
+            .arg(&sample)
+            .arg("--output")
+            .arg(&out_rel)
+            .assert()
+            .success()
+    };
+
+    coverage(tmp.path());
+    assert!(contexts() > 1, "full build must land in --output");
+    assert!(
+        !sample.join(".coverage").exists(),
+        "full build must not write the project's default .coverage"
+    );
+
+    // Incremental: append and purge must hit the same --output file.
+    std::fs::write(
+        sample.join("tests/test_extra.py"),
+        "from src.calculator import add\n\n\ndef test_extra():\n    assert add(1, 1) == 2\n",
+    )
+    .unwrap();
+    coverage(tmp.path()).stdout(contains("re-ran 1 test file(s)"));
+    let conn = rusqlite::Connection::open(&out).unwrap();
+    let extra: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM context WHERE context LIKE '%test_extra%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(extra > 0, "incremental re-run must append into --output");
+    assert!(!sample.join(".coverage").exists());
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn coverage_refresh_prunes_deleted_source_file() {
     // Issue #117: an incremental `fermut coverage` must drop a deleted source
     // file's rows from `.coverage`, not leave them for `coverage report` to

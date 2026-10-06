@@ -280,6 +280,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         .clone()
         .map(|p| loaded.resolve_path(p))
         .unwrap_or_else(|| crate::kill_order::default_kill_order_path(&artifact_root));
+    let dominators_path = crate::subsume::default_dominators_path(&artifact_root);
 
     let sample_ratio = cli_sample.or(file.sample);
     let sample_seed = cli_sample_seed.or(file.sample_seed);
@@ -368,6 +369,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         cache_audit_rate,
         smart_order,
         kill_order_path,
+        dominators_path,
         history,
         history_path,
         sample_ratio,

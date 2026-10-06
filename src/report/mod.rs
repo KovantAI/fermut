@@ -244,6 +244,12 @@ pub struct Summary {
     /// written before this field existed.
     #[serde(default)]
     pub scored: usize,
+    /// Dominator mutation score in percent (`fermut subsume`): killed dominator
+    /// classes over those plus survivors. Present only when a fresh
+    /// `.fermut/dominators.json` covers every scored mutant of this run; see
+    /// [`crate::subsume::report_dominator_score`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dominator_score: Option<f64>,
 }
 
 /// Per-operator verdict breakdown for one run. Only real verdicts are counted;
@@ -281,6 +287,10 @@ impl OperatorStat {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Report {
     pub outcomes: Vec<MutantOutcome>,
+    /// Set by the engine from the dominator store after the run; surfaces as
+    /// `summary.dominator_score`. Not read back from a written report.
+    #[serde(skip)]
+    pub dominator_score: Option<f64>,
 }
 
 // Hand-written so JSON output carries a derived `summary` object alongside
@@ -305,7 +315,10 @@ impl Serialize for Report {
 impl Report {
     #[must_use]
     pub fn new(outcomes: Vec<MutantOutcome>) -> Self {
-        Self { outcomes }
+        Self {
+            outcomes,
+            dominator_score: None,
+        }
     }
 
     /// Headline counts + score for this run. Mirrors the human summary line.
@@ -321,6 +334,7 @@ impl Report {
             errored: c.errored,
             mutation_score: round1(c.mutation_score()),
             scored: c.scored(),
+            dominator_score: self.dominator_score,
         }
     }
 

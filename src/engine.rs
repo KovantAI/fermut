@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::ast_hash::{self, ScopeMap};
 use crate::cache::Cache;
@@ -300,7 +300,8 @@ fn persist(
         }
     }
 
-    let report = Report::new(outcomes);
+    let mut report = Report::new(outcomes);
+    report.dominator_score = dominator_score(cfg, &report.outcomes);
 
     let entry = if cfg.history {
         let duration_ms = u64::try_from(started.elapsed().as_millis()).ok();
@@ -320,6 +321,27 @@ fn persist(
     };
 
     (report, entry)
+}
+
+/// Dominator score from `.fermut/dominators.json`, when one exists and still
+/// describes this run. Advisory: a missing store is silent, a stale or broken
+/// one logs why at debug/warn level and leaves the score out.
+fn dominator_score(cfg: &Config, outcomes: &[MutantOutcome]) -> Option<f64> {
+    let store = match crate::subsume::DominatorStore::load(&cfg.dominators_path) {
+        Ok(Some(store)) => store,
+        Ok(None) => return None,
+        Err(e) => {
+            warn!(path = %cfg.dominators_path.display(), error = %e, "ignoring dominator store");
+            return None;
+        }
+    };
+    match crate::subsume::report_dominator_score(&store, outcomes) {
+        Ok(score) => score,
+        Err(reason) => {
+            debug!(path = %cfg.dominators_path.display(), %reason, "dominator store is stale; no dominator_score");
+            None
+        }
+    }
 }
 
 /// Pre-flight: confirm the unmutated suite is green before spending time
@@ -1498,6 +1520,7 @@ mod tests {
             cache_path: PathBuf::from(".fermut/cache.json"),
             smart_order: false,
             kill_order_path: PathBuf::from(".fermut/kill-order.json"),
+            dominators_path: PathBuf::from(".fermut/dominators.json"),
             history: false,
             history_path: PathBuf::from(".fermut/history.jsonl"),
             sample_ratio: None,

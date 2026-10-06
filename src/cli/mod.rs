@@ -340,6 +340,15 @@ enum Cmd {
     /// fewer-but-stronger mutants. Pytest/rstest + `--coverage` required.
     Hom(subcmd::hom::HomArgs),
 
+    /// Derive dominator mutants from a `run --record-kill-sets` JSONL.
+    ///
+    /// Groups killed mutants with identical kill-sets, keeps the ⊆-minimal
+    /// classes (killing those kills every killed mutant), and writes the class
+    /// map to `.fermut/dominators.json`. Prints the reduction and the dominator
+    /// score. While the mutated files are unchanged, `run` adds
+    /// `dominator_score` to its JSON summary from that file.
+    Subsume(subcmd::subsume::SubsumeArgs),
+
     /// Enumerate mutations without running tests.
     ///
     /// By default the same pre-test filters as `run` apply (ty type-check,
@@ -609,6 +618,7 @@ impl Cli {
             Cmd::Merge(args) => merge::run(args),
             Cmd::List(args) => subcmd::list::run(args),
             Cmd::Hom(args) => subcmd::hom::run(args),
+            Cmd::Subsume(args) => subcmd::subsume::run(args),
         }
     }
 }

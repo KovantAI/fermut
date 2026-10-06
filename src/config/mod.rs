@@ -70,6 +70,9 @@ pub struct Config {
     pub cache_audit_rate: f64,
     /// Path to the advisory kill-order sidecar (`.fermut/kill-order.json`).
     pub kill_order_path: PathBuf,
+    /// Dominator store written by `fermut subsume` (`.fermut/dominators.json`).
+    /// Read after a run to add `dominator_score` to the summary while fresh.
+    pub dominators_path: PathBuf,
     /// When true, each `fermut run` appends a summary line to `history_path`.
     /// Disable with `--no-history` or `history = false` in the config file.
     pub history: bool,

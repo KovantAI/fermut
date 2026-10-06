@@ -263,6 +263,89 @@ fn run_finds_known_survivor_with_rstest() {
 }
 
 #[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn import_breaking_mutant_is_killed_under_node_id_selection() {
+    // A mutant that breaks a module's *import* must score as killed. With
+    // coverage-driven selection fermut passes node ids, and pytest reports an
+    // un-collectable module under node-id selection as exit 4 ("found no
+    // collectors") — not the exit 2 it gives for a file argument. Before the
+    // collection probe, every such kill was scored `error` and excluded.
+    //
+    // Shape (from a production repo): `check` is called at import time AND by
+    // the test, so its lines carry the test's coverage context and the test is
+    // selected; mutating its guard makes the import-time call raise, so the
+    // selected test's module can't even be collected.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n",
+    );
+    write("src/pkg/__init__.py", "");
+    write(
+        "src/pkg/registry.py",
+        "def check(name):\n    if not name:\n        raise ValueError(\"empty name\")\n    \
+         return name\n\n\nDEFAULT = check(\"default\")\n",
+    );
+    write(
+        "tests/test_registry.py",
+        "from pkg.registry import check\n\n\ndef test_check():\n    \
+         assert check(\"a\") == \"a\"\n",
+    );
+
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(proj)
+        .assert()
+        .success();
+
+    let report = proj.join("report.json");
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("run")
+        .arg(proj.join("src"))
+        .arg("--tests")
+        .arg(proj.join("tests"))
+        .arg("--coverage")
+        .arg(proj.join(".coverage"))
+        .arg("--no-ty-filter")
+        .arg("--no-cache")
+        .arg("--fail-under")
+        .arg("0")
+        .arg("--json")
+        .arg(&report)
+        .assert()
+        .success();
+
+    let raw = std::fs::read_to_string(&report).expect("report written");
+    let json: serde_json::Value = serde_json::from_str(&raw).expect("report is JSON");
+    let outcomes = json["outcomes"].as_array().expect("outcomes array");
+    let errored: Vec<&serde_json::Value> =
+        outcomes.iter().filter(|o| o["status"] == "error").collect();
+    assert!(
+        errored.is_empty(),
+        "import-breaking mutants must not be scored as errors: {errored:#?}"
+    );
+    // The guard `if not name` on line 2: dropping/doubling the `not` makes the
+    // import-time `check("default")` raise.
+    let guard_killed = outcomes.iter().any(|o| {
+        o["status"] == "killed"
+            && o["mutant"]["line"] == 2
+            && o["mutant"]["file"]
+                .as_str()
+                .is_some_and(|f| f.ends_with("registry.py"))
+    });
+    assert!(guard_killed, "guard mutant on line 2 must be killed: {raw}");
+}
+
+#[test]
 #[ignore = "requires pytest + coverage on PATH; enable once env is set up"]
 fn baseline_reports_grade_and_anchors_trend() {
     // `baseline` writes `.coverage`, its fingerprint sidecar, and `.fermut/`

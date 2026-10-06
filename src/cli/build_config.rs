@@ -81,9 +81,13 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         no_smart_order: cli_no_smart_order,
         smart_order: cli_smart_order,
         max_time: cli_max_time,
+        record_kill_sets: cli_record_kill_sets,
         filter: f,
     } = args;
     let cli_runner: Option<RunnerKind> = cli_runner.map(Into::into);
+    if cli_record_kill_sets.is_some() {
+        warn!("`--record-kill-sets` is experimental: its output format may change");
+    }
     let cli_isolation: Option<IsolationMode> = cli_isolation.map(Into::into);
     let cli_cache_scope: Option<CacheScope> = cli_cache_scope.map(Into::into);
 
@@ -380,6 +384,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         verify_baseline,
         baseline_timeout_secs,
         max_time_secs,
+        record_kill_sets: cli_record_kill_sets.map(absolutize),
     })
 }
 
@@ -755,6 +760,7 @@ mod tests {
             no_smart_order: false,
             smart_order: false,
             max_time: None,
+            record_kill_sets: None,
             cache_audit_rate: None,
             no_cache_audit: false,
             filter,

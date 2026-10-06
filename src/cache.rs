@@ -18,6 +18,18 @@
 //! Stored at `.fermut/cache.json` under the source root by default; one JSON
 //! file, atomic write on save.
 //!
+//! ## Killer-keyed hits
+//!
+//! A `Killed` entry whose killing test `T` is known also stores a
+//! `killer_scope`: a fingerprint of `T`'s file (plus its conftest chain and
+//! shared support files) under the run-shape prefix. When the full `scope`
+//! misses — typically because some *other* covering test file was edited —
+//! the entry is still served if the source hash matches, `T` still covers the
+//! mutant, and `T`'s current killer scope is unchanged ([`Cache::lookup_killer`]).
+//! An edit to a test that didn't kill the mutant can't un-kill it. Survived,
+//! timed-out, and equivalent verdicts never take this path. The engine audits a
+//! sample of killer hits each run to catch flaky or order-dependent kills.
+//!
 //! Filter-skipped outcomes are deliberately **not** cached — the filter chain
 //! changes between invocations (different `--ops`, different `--diff-only`
 //! base) and last run's skip may no longer apply.
@@ -174,6 +186,11 @@ struct CacheEntry {
     /// which simply forces a one-time reclassify on the next detector-on run.
     #[serde(default)]
     equiv_checked: bool,
+    /// Fingerprint of the killing test's scope (see the module docs), present
+    /// only on a `Killed` outcome whose killer is known and covered. Lets the
+    /// entry survive edits to other covering tests via [`Cache::lookup_killer`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    killer_scope: Option<String>,
     /// Hex-encoded HMAC-SHA256 over `(mutant_id, file_hash, scope, outcome)`
     /// keyed by `FERMUT_CACHE_KEY`. Present only when the key was set at
     /// insert time. Verified at load time when the key is set; ignored when
@@ -235,6 +252,15 @@ fn compute_mac(key: &[u8], mutant_id: &str, entry: &CacheEntry) -> Result<String
     if entry.equiv_checked {
         msg.push(0);
         msg.push(1);
+    }
+    // Same additive scheme for `killer_scope`: absent → no suffix, so entries
+    // without one hash as before; present → tagged suffix, so stripping,
+    // adding, or editing it on disk fails verification. (The killer node id
+    // itself lives in the outcome and is already covered by `outcome_json`.)
+    if let Some(ks) = &entry.killer_scope {
+        msg.push(0);
+        msg.push(2);
+        msg.extend_from_slice(ks.as_bytes());
     }
     Ok(hex::encode(hmac_sha256(key, &msg)?))
 }
@@ -325,6 +351,34 @@ impl Cache {
         }
     }
 
+    /// Killer-keyed fallback for a [`lookup_entry`](Self::lookup_entry) miss.
+    /// Serves the cached outcome when it is `Killed` by a known test `T`, the
+    /// source hash still matches, and `current_killer_scope(T)` — which the
+    /// caller returns as `None` when `T` no longer covers the mutant or its
+    /// scope can't be computed — equals the stored killer scope. Returns the
+    /// outcome and `T`.
+    pub fn lookup_killer(
+        &self,
+        mutant_id: &str,
+        file_hash: &str,
+        current_killer_scope: impl FnOnce(&str) -> Option<String>,
+    ) -> Option<(MutantOutcome, String)> {
+        let entry = self.entries.get(mutant_id)?;
+        if entry.file_hash != file_hash {
+            return None;
+        }
+        let stored = entry.killer_scope.as_deref()?;
+        let killer = entry.outcome.killer()?;
+        let current = current_killer_scope(killer)?;
+        (current == stored).then(|| (entry.outcome.clone(), killer.to_string()))
+    }
+
+    /// Drop `mutant_id`'s entry (an audit found its cached kill didn't
+    /// reproduce).
+    pub fn remove(&mut self, mutant_id: &str) {
+        self.entries.remove(mutant_id);
+    }
+
     #[cfg(test)]
     pub fn insert(
         &mut self,
@@ -333,12 +387,14 @@ impl Cache {
         scope: String,
         outcome: MutantOutcome,
     ) {
-        self.insert_checked(mutant_id, file_hash, scope, outcome, false);
+        self.insert_checked(mutant_id, file_hash, scope, outcome, false, None);
     }
 
-    /// Insert with an explicit `equiv_checked` marker. `insert` is the
-    /// `equiv_checked == false` shorthand; the engine calls this directly so
-    /// a detector-on outcome is stored pre-classified.
+    /// Insert with an explicit `equiv_checked` marker and optional killer
+    /// scope. `insert` is the `(false, None)` shorthand; the engine calls this
+    /// directly so a detector-on outcome is stored pre-classified. A
+    /// `killer_scope` is kept only on a `Killed` outcome with a known killer —
+    /// on anything else it is meaningless and dropped.
     pub fn insert_checked(
         &mut self,
         mutant_id: String,
@@ -346,6 +402,7 @@ impl Cache {
         scope: String,
         outcome: MutantOutcome,
         equiv_checked: bool,
+        killer_scope: Option<String>,
     ) {
         // Only cache deterministic outcomes — never skipped (filter-dependent)
         // and never errored (transient infra issue).
@@ -355,11 +412,13 @@ impl Cache {
         ) {
             return;
         }
+        let killer_scope = killer_scope.filter(|_| outcome.killer().is_some());
         let mut entry = CacheEntry {
             file_hash,
             scope,
             outcome,
             equiv_checked,
+            killer_scope,
             mac: None,
         };
         if let Some(key) = self.key.as_deref() {
@@ -724,6 +783,7 @@ mod tests {
             "scope-x".into(),
             MutantOutcome::survived(make_mutant("checked")),
             true,
+            None,
         );
         c.insert_checked(
             "unchecked".into(),
@@ -731,6 +791,7 @@ mod tests {
             "scope-x".into(),
             MutantOutcome::survived(make_mutant("unchecked")),
             false,
+            None,
         );
         c.save(&path).unwrap();
 
@@ -758,6 +819,7 @@ mod tests {
             "scope-x".into(),
             MutantOutcome::survived(make_mutant("id-1")),
             true,
+            None,
         );
         c.save(&path).unwrap();
         // Simulate a pre-marker on-disk shape by dropping the field entirely.
@@ -791,6 +853,7 @@ mod tests {
             "scope-x".into(),
             MutantOutcome::survived(make_mutant("id-1")),
             true,
+            None,
         );
         c.save(&path).unwrap();
 
@@ -832,6 +895,7 @@ mod tests {
             "scope-x".into(),
             MutantOutcome::killed(make_mutant("id-1")),
             false,
+            None,
         );
         c.save(&path).unwrap();
 
@@ -899,5 +963,133 @@ mod tests {
 
         let loaded = Cache::load_with_key(&path, None);
         assert!(loaded.lookup("id-1", "hashA", "scope-x").is_some());
+    }
+
+    // ---- killer-keyed lookup ----------------------------------------------
+
+    fn killed_by_a(id: &str) -> MutantOutcome {
+        MutantOutcome::killed_by(make_mutant(id), Some("tests/test_a.py::test_a".into()))
+    }
+
+    fn insert_killer(c: &mut Cache, killer_scope: &str) {
+        c.insert_checked(
+            "id-1".into(),
+            "hashA".into(),
+            "scope-x".into(),
+            killed_by_a("id-1"),
+            false,
+            Some(killer_scope.into()),
+        );
+    }
+
+    #[test]
+    fn lookup_killer_hits_on_matching_killer_scope() {
+        let mut c = Cache::default();
+        insert_killer(&mut c, "ks-1");
+        let (out, killer) = c
+            .lookup_killer("id-1", "hashA", |t| {
+                assert_eq!(t, "tests/test_a.py::test_a");
+                Some("ks-1".into())
+            })
+            .expect("killer hit");
+        assert_eq!(killer, "tests/test_a.py::test_a");
+        assert_eq!(out.killer(), Some("tests/test_a.py::test_a"));
+        // Full key stays as written: a killer hit is not a scope hit.
+        assert!(c.lookup("id-1", "hashA", "scope-y").is_none());
+    }
+
+    #[test]
+    fn lookup_killer_misses_on_changed_scope_hash_or_uncovered_killer() {
+        let mut c = Cache::default();
+        insert_killer(&mut c, "ks-1");
+        assert!(c
+            .lookup_killer("id-1", "hashA", |_| Some("ks-2".into()))
+            .is_none());
+        assert!(c
+            .lookup_killer("id-1", "hashB", |_| Some("ks-1".into()))
+            .is_none());
+        assert!(c.lookup_killer("id-1", "hashA", |_| None).is_none());
+        assert!(c
+            .lookup_killer("nope", "hashA", |_| Some("ks-1".into()))
+            .is_none());
+    }
+
+    #[test]
+    fn killer_scope_dropped_for_outcomes_without_a_killer() {
+        let mut c = Cache::default();
+        for (id, outcome) in [
+            ("s", MutantOutcome::survived(make_mutant("s"))),
+            ("k", MutantOutcome::killed(make_mutant("k"))),
+            ("t", MutantOutcome::timed_out(make_mutant("t"))),
+        ] {
+            c.insert_checked(
+                id.into(),
+                "h".into(),
+                "sc".into(),
+                outcome,
+                false,
+                Some("ks".into()),
+            );
+            assert!(c.entries[id].killer_scope.is_none(), "{id}");
+            assert!(c.lookup_killer(id, "h", |_| Some("ks".into())).is_none());
+        }
+    }
+
+    #[test]
+    fn killer_fields_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+        let mut c = Cache::default();
+        insert_killer(&mut c, "ks-1");
+        c.save(&path).unwrap();
+        let loaded = Cache::load(&path);
+        assert!(loaded
+            .lookup_killer("id-1", "hashA", |_| Some("ks-1".into()))
+            .is_some());
+    }
+
+    #[test]
+    fn mac_covers_killer_fields() {
+        let key = b"test-cache-key-with-enough-entropy".to_vec();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+        let mut c = keyed_cache(&key);
+        insert_killer(&mut c, "ks-1");
+        c.save(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+
+        // Untampered verifies.
+        assert!(Cache::load_with_key(&path, Some(key.clone()))
+            .lookup("id-1", "hashA", "scope-x")
+            .is_some());
+
+        for (what, tampered) in [
+            ("killer_scope", raw.replace("\"ks-1\"", "\"ks-forged\"")),
+            (
+                "killer",
+                raw.replace("test_a.py::test_a", "test_a.py::test_other"),
+            ),
+            (
+                "killer_scope removed",
+                raw.replace("\"killer_scope\": \"ks-1\",", ""),
+            ),
+        ] {
+            assert_ne!(raw, tampered, "{what}: fixture should differ");
+            std::fs::write(&path, tampered).unwrap();
+            assert!(
+                Cache::load_with_key(&path, Some(key.clone()))
+                    .lookup("id-1", "hashA", "scope-x")
+                    .is_none(),
+                "tampered {what} must fail MAC verification"
+            );
+        }
+    }
+
+    #[test]
+    fn remove_drops_entry() {
+        let mut c = Cache::default();
+        insert_killer(&mut c, "ks-1");
+        c.remove("id-1");
+        assert!(c.lookup("id-1", "hashA", "scope-x").is_none());
     }
 }

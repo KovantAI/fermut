@@ -34,6 +34,9 @@ pub struct FileConfig {
     pub pytest_args: Option<Vec<String>>,
     pub cache: Option<bool>,
     pub cache_path: Option<PathBuf>,
+    /// Fraction (0.0–1.0) of killer-keyed cache hits audited per run. Default
+    /// 0.05; 0 disables. CLI `--cache-audit-rate` / `--no-cache-audit` win.
+    pub cache_audit_rate: Option<f64>,
     /// Smart test ordering: cold-start coverage-breadth prior, then
     /// historical-killer lifted first. Default true; CLI `--no-smart-order`
     /// overrides.

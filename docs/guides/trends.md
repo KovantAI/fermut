@@ -82,7 +82,11 @@ comment across re-runs instead of stacking new ones. See
 ## CI history persistence
 
 GitHub Actions runners are ephemeral, so `.fermut/history.jsonl`
-resets every run unless you persist it. The simplest pattern:
+resets every run unless you persist it. For a sharded sweep, the
+[`KovantAI/fermut/trend`](github-action.md#score-trend) action does this
+for you: it merges the shards, records one entry, persists the history
+and gates on regressions. For a single `fermut run` job, the simplest
+pattern is:
 `actions/cache` keyed on the branch ref, with a `main`-branch
 save-only step.
 

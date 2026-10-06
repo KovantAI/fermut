@@ -49,6 +49,14 @@ pub fn collect(path: &Path, source: &str) -> Result<Vec<Mutant>> {
     for stmt in &module.body {
         collector.visit_stmt(stmt);
     }
+    debug_assert!(
+        {
+            let mut seen = HashSet::new();
+            collector.out.iter().all(|m| seen.insert(m.id.as_str()))
+        },
+        "duplicate mutant ids emitted for {}",
+        path.display()
+    );
     Ok(collector.out)
 }
 
@@ -269,26 +277,67 @@ impl<'a> Collector<'a> {
         inner
     }
 
-    fn op_range(&self, range: TextRange, lexeme: &str) -> Option<TextRange> {
-        let start: usize = range.start().into();
-        let end: usize = range.end().into();
-        let slice = &self.source[start..end];
-        let idx = slice.find(lexeme)?;
-        let abs_start = start + idx;
-        let abs_end = abs_start + lexeme.len();
+    /// Locate the operator token `lexeme` in the gap between two operands
+    /// (`lhs_end`..`rhs_start`). Searching the gap rather than the whole node
+    /// matters: a node-wide `find` hits the first textual match anywhere,
+    /// including inside the left operand — `f(a + 1) + b` resolved the outer
+    /// `+` to the inner one (a duplicate mutant, outer site never mutated) and
+    /// `brand and y` resolved `and` to the letters inside `brand` (a junk
+    /// NameError mutant). The gap holds only trivia (whitespace, parens,
+    /// line continuations, comments) and the operator itself, so skip trivia
+    /// and require the first real token to be `lexeme`.
+    fn op_range_between(
+        &self,
+        lhs_end: TextSize,
+        rhs_start: TextSize,
+        lexeme: &str,
+    ) -> Option<TextRange> {
+        let start: usize = lhs_end.into();
+        let end: usize = rhs_start.into();
+        let gap = &self.source[start..end];
+        let bytes = gap.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b' ' | b'\t' | b'\r' | b'\n' | b'\x0c' | b'\\' | b'(' | b')' => i += 1,
+                b'#' => {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                _ => break,
+            }
+        }
+        let rest = &gap[i..];
+        if !rest.starts_with(lexeme) {
+            return None;
+        }
+        // A keyword lexeme (`and`, `in`, `is not`) must end on a word
+        // boundary; symbol lexemes are already disambiguated because the gap
+        // holds exactly one operator token.
+        let ends_word = lexeme
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphabetic);
+        if ends_word
+            && rest[lexeme.len()..]
+                .bytes()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_')
+        {
+            return None;
+        }
+        let abs_start = start + i;
         Some(TextRange::new(
             (abs_start as u32).into(),
-            (abs_end as u32).into(),
+            ((abs_start + lexeme.len()) as u32).into(),
         ))
     }
 
     fn handle_aug_assign(&mut self, a: &ast::StmtAugAssign) {
         let lex = augop_lexeme(a.op);
-        let s: usize = a.target.range().end().into();
-        let e: usize = a.value.range().start().into();
-        if let Some(idx) = self.source[s..e].find(lex) {
-            let abs = s + idx;
-            let r = TextRange::new((abs as u32).into(), ((abs + lex.len()) as u32).into());
+        if let Some(r) = self.op_range_between(a.target.range().end(), a.value.range().start(), lex)
+        {
             for (orig, repl) in AUG_ASSIGN_SWAPS {
                 if *orig == lex {
                     self.push(Operator::AugAssignSwap, r, repl);
@@ -533,7 +582,7 @@ impl<'a> Collector<'a> {
 
     fn emit_binop(&mut self, b: &ast::ExprBinOp) {
         let lex = binop_lexeme(b.op);
-        if let Some(r) = self.op_range(b.range(), lex) {
+        if let Some(r) = self.op_range_between(b.left.range().end(), b.right.range().start(), lex) {
             for (orig, repl) in ARITH_SWAPS {
                 if *orig == lex {
                     self.push(Operator::ArithOpSwap, r, repl);
@@ -548,7 +597,14 @@ impl<'a> Collector<'a> {
         } else {
             "or"
         };
-        if let Some(r) = self.op_range(b.range(), lex) {
+        // ruff flattens `a and b and c` into one node with three values, so
+        // there is one operator site per adjacent pair, not one per node.
+        for pair in b.values.windows(2) {
+            let Some(r) =
+                self.op_range_between(pair[0].range().end(), pair[1].range().start(), lex)
+            else {
+                continue;
+            };
             for (orig, repl) in BOOL_SWAPS {
                 if *orig == lex {
                     self.push(Operator::BoolOpSwap, r, repl);
@@ -583,17 +639,12 @@ impl<'a> Collector<'a> {
     fn emit_compare(&mut self, c: &ast::ExprCompare) {
         for (i, op) in c.ops.iter().enumerate() {
             let lex = cmpop_lexeme(*op);
-            let search_from = if i == 0 {
+            let lhs_end = if i == 0 {
                 c.left.range().end()
             } else {
                 c.comparators[i - 1].range().end()
             };
-            let search_to = c.comparators[i].range().start();
-            let s: usize = search_from.into();
-            let e: usize = search_to.into();
-            if let Some(idx) = self.source[s..e].find(lex) {
-                let abs = s + idx;
-                let r = TextRange::new((abs as u32).into(), ((abs + lex.len()) as u32).into());
+            if let Some(r) = self.op_range_between(lhs_end, c.comparators[i].range().start(), lex) {
                 for (orig, repl) in COMPARE_SWAPS {
                     if *orig == lex {
                         self.push(Operator::CompareOpSwap, r, repl);
@@ -950,6 +1001,168 @@ mod operator_emission_tests {
     fn bool_op_swap_fires() {
         assert!(contains("x = a and b\n", Operator::BoolOpSwap));
         assert!(contains("x = a or b\n", Operator::BoolOpSwap));
+    }
+
+    /// `(operator, byte offset, original, replacement)` for each mutant of `op`.
+    fn sites(source: &str, op: Operator) -> Vec<(u32, String, String)> {
+        collect(Path::new("test.py"), source)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.operator == op)
+            .map(|m| (u32::from(m.range.start()), m.original, m.replacement))
+            .collect()
+    }
+
+    #[test]
+    fn nested_binop_mutates_each_operator_once() {
+        // Regression: a node-wide search resolved the outer `+` to the inner
+        // one, emitting the inner site twice and never the outer.
+        let src = "x = f(a + 1) + b\n";
+        let got = sites(src, Operator::ArithOpSwap);
+        let inner = src.find("+").unwrap() as u32;
+        let outer = src.rfind("+").unwrap() as u32;
+        assert_eq!(
+            got,
+            vec![
+                (outer, "+".into(), "-".into()),
+                (inner, "+".into(), "-".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn bool_op_site_is_the_keyword_not_an_identifier() {
+        // Regression: `and` was found inside the identifier `brand`.
+        let src = "x = brand and y\n";
+        let at = src.find(" and ").unwrap() as u32 + 1;
+        assert_eq!(
+            sites(src, Operator::BoolOpSwap),
+            vec![(at, "and".into(), "or".into())]
+        );
+    }
+
+    #[test]
+    fn bool_op_chain_mutates_every_operator() {
+        let src = "x = a or b or c\n";
+        let first = src.find("or").unwrap() as u32;
+        let second = src.rfind("or").unwrap() as u32;
+        let got: Vec<u32> = sites(src, Operator::BoolOpSwap)
+            .into_iter()
+            .map(|(at, ..)| at)
+            .collect();
+        assert_eq!(got, vec![first, second]);
+    }
+
+    #[test]
+    fn operator_inside_string_literal_is_not_the_site() {
+        // Regression: `"*" * n` resolved to the `*` inside the string.
+        let src = "x = \"*\" * n\n";
+        let at = src.find(" * ").unwrap() as u32 + 1;
+        assert_eq!(
+            sites(src, Operator::ArithOpSwap),
+            vec![(at, "*".into(), "/".into())]
+        );
+    }
+
+    /// Source shapes that trip a node-wide lexeme search: operators inside
+    /// identifiers, strings, f-strings, comments and nested/chained operands.
+    const OPERATOR_SITE_CORPUS: &str = r#"
+def f(brand, color, origin, a, b, c, xs, n, d):
+    x = brand and color or origin
+    y = f(a + 1) + b + c - d * n * 2
+    z = "*" * n + "%s" % a + f"{a + b}" + "a and b"
+    w = (a  # a + b or c
+         - b)
+    if a < b <= c and not (xs in d or b is not None):
+        n += a - (b // c)
+    v = [i for i in xs if i > a and i < b]
+    return brand if color else origin or a % b ** c
+"#;
+
+    #[test]
+    fn operator_swap_sites_are_real_operator_tokens() {
+        // Invariant: every operator-swap mutant must sit exactly on an
+        // operator/keyword token, never inside a name, string or comment,
+        // and no two mutants may share a site+replacement. Guards every
+        // emitter that locates an operator lexeme in source text, not just
+        // the shapes the targeted regression tests above pin.
+        use ruff_python_parser::parse_module;
+        use ruff_text_size::Ranged;
+        use std::collections::HashSet;
+
+        let parsed = parse_module(OPERATOR_SITE_CORPUS).unwrap();
+        let op_tokens: Vec<_> = parsed
+            .tokens()
+            .iter()
+            .filter(|t| t.kind().is_operator() || t.kind().is_keyword())
+            .map(|t| t.range())
+            .collect();
+        let starts: HashSet<_> = op_tokens.iter().map(|r| r.start()).collect();
+        let ends: HashSet<_> = op_tokens.iter().map(|r| r.end()).collect();
+
+        let mutants = collect(Path::new("test.py"), OPERATOR_SITE_CORPUS).unwrap();
+        let swaps: Vec<_> = mutants
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.operator,
+                    Operator::ArithOpSwap
+                        | Operator::BoolOpSwap
+                        | Operator::CompareOpSwap
+                        | Operator::BoundaryShift
+                        | Operator::AugAssignSwap
+                )
+            })
+            .collect();
+        assert!(swaps.len() > 20, "corpus should exercise many sites");
+
+        let mut seen = HashSet::new();
+        for m in swaps {
+            assert!(
+                starts.contains(&m.range.start()) && ends.contains(&m.range.end()),
+                "mutant not on an operator token: {}",
+                m.describe()
+            );
+            assert!(
+                seen.insert((m.range, m.operator, m.replacement.clone())),
+                "duplicate mutant: {}",
+                m.describe()
+            );
+        }
+    }
+
+    #[test]
+    fn operator_in_comment_between_operands_is_skipped() {
+        let src = "x = (a  # a + b or c\n     - b)\n";
+        let at = src.rfind("- b").unwrap() as u32;
+        assert_eq!(
+            sites(src, Operator::ArithOpSwap),
+            vec![(at, "-".into(), "+".into())]
+        );
+    }
+
+    #[test]
+    fn parenthesised_operands_still_resolve() {
+        let src = "x = (a + 1) * (b - 2)\n";
+        let star = src.find("*").unwrap() as u32;
+        assert!(sites(src, Operator::ArithOpSwap)
+            .iter()
+            .any(|(at, orig, _)| *at == star && orig == "*"));
+        let src = "y = (p and q) or (r)\n";
+        let or = src.find(" or ").unwrap() as u32 + 1;
+        assert!(sites(src, Operator::BoolOpSwap)
+            .iter()
+            .any(|(at, orig, _)| *at == or && orig == "or"));
+    }
+
+    #[test]
+    fn compare_keyword_ops_resolve_in_gap() {
+        let src = "x = item not in items\n";
+        let at = src.find("not in").unwrap() as u32;
+        assert_eq!(
+            sites(src, Operator::CompareOpSwap),
+            vec![(at, "not in".into(), "in".into())]
+        );
     }
 
     #[test]

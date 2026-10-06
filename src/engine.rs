@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -123,14 +124,18 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         equiv: state.equiv.as_ref(),
         file_sources: &state.file_sources,
         deadline: state.deadline,
+        stats: &state.stats,
+        killer_hits: &state.killer_hits,
     };
-    let outcomes: Vec<MutantOutcome> = evaluate_all(cfg, &ctx, &mutants)?;
+    let mut outcomes: Vec<MutantOutcome> = evaluate_all(cfg, &ctx, &mutants)?;
+    audit_killer_hits(cfg, &ctx, &mutants, &mut outcomes)?;
 
     Ok(persist(
         cfg,
         started,
         state.runner.as_ref(),
         &state.cache,
+        &state.stats,
         state.deadline,
         outcomes,
     ))
@@ -150,6 +155,31 @@ struct RunState {
     scope_prefix: String,
     test_tree: TestTree,
     deadline: Option<Instant>,
+    stats: CacheStats,
+    killer_hits: Mutex<Vec<KillerHit>>,
+}
+
+/// Per-run cache counters, reported in the post-run summary. Atomics so the
+/// parallel `evaluate` workers bump them without a lock.
+#[derive(Default)]
+struct CacheStats {
+    /// Lookups served by the full `(file_hash, scope)` key.
+    full_hits: AtomicUsize,
+    /// Lookups served by the killer-scoped fallback.
+    killer_hits: AtomicUsize,
+    /// Lookups that found nothing usable and ran the mutant.
+    misses: AtomicUsize,
+    /// Killer hits re-run against their killer by the audit.
+    audited: AtomicUsize,
+    /// Audited killer hits whose kill didn't reproduce (entry dropped).
+    dropped: AtomicUsize,
+}
+
+/// A mutant served from the cache by its killer scope, queued for the
+/// post-evaluation sampled audit.
+struct KillerHit {
+    mutant: Arc<Mutant>,
+    killer: String,
 }
 
 /// Build the filter chain and runner, verify the baseline suite is green, then
@@ -203,6 +233,8 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
         scope_prefix,
         test_tree,
         deadline,
+        stats: CacheStats::default(),
+        killer_hits: Mutex::new(Vec::new()),
     })
 }
 
@@ -214,6 +246,7 @@ fn persist(
     started: Instant,
     runner: &dyn Runner,
     cache: &Mutex<Cache>,
+    stats: &CacheStats,
     deadline: Option<Instant>,
     outcomes: Vec<MutantOutcome>,
 ) -> (Report, Option<HistoryEntry>) {
@@ -236,7 +269,7 @@ fn persist(
         }
     }
 
-    summarize_integrity(cfg, cache);
+    summarize_integrity(cfg, cache, stats);
 
     // Smart ordering: fold the kills learned this run into the kill-order
     // sidecar so the next run puts proven killers first. Advisory — a write
@@ -354,7 +387,7 @@ fn evaluate_all(
 /// (and CI log scrapers) see the outcome without grepping every `warn!` line.
 /// A non-zero `dropped_on_load` is the signal that someone fed us a tampered
 /// or stale cache. No-op when caching is disabled.
-fn summarize_integrity(cfg: &Config, cache: &Mutex<Cache>) {
+fn summarize_integrity(cfg: &Config, cache: &Mutex<Cache>, stats: &CacheStats) {
     if !cfg.cache {
         return;
     }
@@ -364,10 +397,21 @@ fn summarize_integrity(cfg: &Config, cache: &Mutex<Cache>) {
     if let Err(e) = guard.save(&cfg.cache_path) {
         warn!(path = %cfg.cache_path.display(), error = %e, "failed to save cache");
     }
+    let full = stats.full_hits.load(Ordering::Relaxed);
+    let killer = stats.killer_hits.load(Ordering::Relaxed);
+    let audited = stats.audited.load(Ordering::Relaxed);
+    let audit_dropped = stats.dropped.load(Ordering::Relaxed);
+    let misses = stats.misses.load(Ordering::Relaxed);
     info!(
         entries,
         dropped_on_load = dropped,
-        "cache: post-run summary"
+        full_hits = full,
+        killer_hits = killer,
+        audited,
+        audit_dropped,
+        misses,
+        "cache: {full} full hits, {killer} killer hits, {audited} audited \
+         ({audit_dropped} dropped), {misses} misses"
     );
 }
 
@@ -388,6 +432,9 @@ struct EvalCtx<'a> {
     /// Testing-phase wall-clock ceiling. Identical for every mutant in the
     /// run; a mutant reaching `evaluate` past it is a cheap `time-budget` skip.
     deadline: Option<Instant>,
+    stats: &'a CacheStats,
+    /// Killer hits served this run, for [`audit_killer_hits`].
+    killer_hits: &'a Mutex<Vec<KillerHit>>,
 }
 
 fn evaluate(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
@@ -418,9 +465,9 @@ fn evaluate(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
     let identity_hash = mutant_identity_hash(ctx.cfg, mutant, ctx.file_hashes, ctx.scope_maps);
 
     if let Some(hash) = &identity_hash {
-        if let Some((cached, checked)) =
-            lock_recover(ctx.cache).lookup_entry(&mutant.id, hash, &scope)
-        {
+        let cached = lock_recover(ctx.cache).lookup_entry(&mutant.id, hash, &scope);
+        if let Some((cached, checked)) = cached {
+            ctx.stats.full_hits.fetch_add(1, Ordering::Relaxed);
             // Translate the cached verdict against the current detector
             // setting before returning. The cache stores the post-equiv
             // outcome and an `equiv_checked` marker, so the common warm path
@@ -434,18 +481,49 @@ fn evaluate(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
             let (outcome, rewrite) =
                 remap_cached_outcome(cached, checked, ctx.equiv, ctx.file_sources);
             if let Some(new_checked) = rewrite {
+                // Only a `Survived` is ever rewritten, so no killer scope.
                 lock_recover(ctx.cache).insert_checked(
                     mutant.id.clone(),
                     hash.clone(),
                     scope.clone(),
                     outcome.clone(),
                     new_checked,
+                    None,
                 );
             }
             return outcome;
         }
+        // Full key missed (typically: some covering test file changed). A
+        // cached kill survives if the test that killed it is unchanged and
+        // still covers the mutant — an edit elsewhere can't un-kill it. The
+        // entry keeps its old `scope`, so the next run takes this path again
+        // until the mutant is re-run.
+        let killer_hit = lock_recover(ctx.cache).lookup_killer(&mutant.id, hash, |t| {
+            compute_killer_scope(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant, t)
+        });
+        if let Some((outcome, killer)) = killer_hit {
+            ctx.stats.killer_hits.fetch_add(1, Ordering::Relaxed);
+            lock_recover(ctx.killer_hits).push(KillerHit {
+                mutant: mutant.clone(),
+                killer,
+            });
+            return outcome;
+        }
+        ctx.stats.misses.fetch_add(1, Ordering::Relaxed);
     }
 
+    run_and_cache(ctx, mutant, scope, identity_hash)
+}
+
+/// Run `mutant` for real, remap it through the equiv detector, and cache the
+/// verdict under `(identity_hash, scope)` — plus the killer scope when the
+/// runner named the killing test.
+fn run_and_cache(
+    ctx: &EvalCtx,
+    mutant: &Arc<Mutant>,
+    scope: String,
+    identity_hash: Option<String>,
+) -> MutantOutcome {
     let outcome = ctx
         .runner
         .run(mutant)
@@ -454,6 +532,9 @@ fn evaluate(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
     let outcome = maybe_remap_equivalent(outcome, ctx.equiv, ctx.file_sources);
 
     if let Some(hash) = identity_hash {
+        let killer_scope = outcome.killer().and_then(|t| {
+            compute_killer_scope(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant, t)
+        });
         // A detector-on run classified any surviving mutant just above, so
         // the stored outcome is already post-equiv — mark it checked so warm
         // runs never re-classify it. A detector-off run leaves it unchecked.
@@ -463,10 +544,105 @@ fn evaluate(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
             scope,
             outcome.clone(),
             ctx.equiv.is_some(),
+            killer_scope,
         );
     }
 
     outcome
+}
+
+/// Re-verify a random sample of this run's killer hits by re-running each
+/// mutant against only its recorded killer. Trusting a killer hit skips the
+/// run entirely, so this is the safety net for kills that won't reproduce on
+/// their own — a flaky test, or one that failed only because of state an
+/// earlier test in the same `-x` run left behind. Samples
+/// `ceil(rate × hits)` (at least one) hits; each disagreement drops the
+/// cache entry, warns with the test and mutant, and re-runs the mutant fully,
+/// replacing its outcome. Skipped when the rate is 0, no hits occurred, or
+/// the `--max-time` budget is already spent.
+fn audit_killer_hits(
+    cfg: &Config,
+    ctx: &EvalCtx,
+    mutants: &[Arc<Mutant>],
+    outcomes: &mut [MutantOutcome],
+) -> Result<()> {
+    let hits = std::mem::take(&mut *lock_recover(ctx.killer_hits));
+    let picked = sample_for_audit(hits, cfg.cache_audit_rate);
+    if picked.is_empty() {
+        return Ok(());
+    }
+    if ctx.deadline.is_some_and(|d| Instant::now() >= d) {
+        info!(
+            pending = picked.len(),
+            "cache audit skipped: --max-time budget exhausted"
+        );
+        return Ok(());
+    }
+    let pool = build_pool(cfg.jobs)?;
+    let reruns: Vec<(usize, MutantOutcome)> = pool.install(|| {
+        picked
+            .par_iter()
+            .filter_map(|hit| audit_one(ctx, hit))
+            .filter_map(|outcome| {
+                let id = &outcome.mutant().id;
+                mutants
+                    .iter()
+                    .position(|m| &m.id == id)
+                    .map(|i| (i, outcome))
+            })
+            .collect()
+    });
+    for (i, outcome) in reruns {
+        outcomes[i] = outcome;
+    }
+    Ok(())
+}
+
+/// Audit one killer hit. `None` when the kill reproduced (or the runner can't
+/// audit); otherwise the mutant's fresh full-run outcome.
+fn audit_one(ctx: &EvalCtx, hit: &KillerHit) -> Option<MutantOutcome> {
+    let verdict = match ctx.runner.audit(&hit.mutant, &hit.killer) {
+        Ok(None) => return None,
+        Ok(Some(v)) => v,
+        Err(e) => MutantOutcome::error(hit.mutant.clone(), e.to_string()),
+    };
+    ctx.stats.audited.fetch_add(1, Ordering::Relaxed);
+    if matches!(verdict, MutantOutcome::Killed { .. }) {
+        return None;
+    }
+    ctx.stats.dropped.fetch_add(1, Ordering::Relaxed);
+    warn!(
+        mutant = %hit.mutant.id,
+        file = %hit.mutant.file.display(),
+        line = hit.mutant.line,
+        killer = %hit.killer,
+        audit = verdict.status_label(),
+        "cache audit: cached kill did not reproduce against its killer alone \
+         (flaky or order-dependent test?); re-running the mutant"
+    );
+    lock_recover(ctx.cache).remove(&hit.mutant.id);
+    let scope = compute_mutant_scope(ctx.scope_prefix, ctx.cfg, ctx.test_tree, &hit.mutant);
+    let identity_hash = mutant_identity_hash(ctx.cfg, &hit.mutant, ctx.file_hashes, ctx.scope_maps);
+    Some(run_and_cache(ctx, &hit.mutant, scope, identity_hash))
+}
+
+/// Pick `ceil(rate × n)` of `hits` (at least one when `rate > 0`) uniformly at
+/// random. Uses the process-random `RandomState` hasher as the shuffle key, so
+/// each run audits a different sample without a `rand` dependency.
+fn sample_for_audit(mut hits: Vec<KillerHit>, rate: f64) -> Vec<KillerHit> {
+    if rate <= 0.0 || hits.is_empty() {
+        return Vec::new();
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    let k = ((rate * hits.len() as f64).ceil() as usize).clamp(1, hits.len());
+    let seed = std::collections::hash_map::RandomState::new();
+    hits.sort_by_cached_key(|h| std::hash::BuildHasher::hash_one(&seed, &h.mutant.id));
+    hits.truncate(k);
+    hits
 }
 
 /// The cache-key file-identity hash for `mutant`. In `CacheScope::Scope`
@@ -579,6 +755,9 @@ fn remap_cached_outcome(
 /// Mixed into every cached entry's scope so cache hits require the same shape.
 fn compute_scope_prefix(cfg: &Config) -> String {
     let mut h = Sha256::new();
+    // v7: `Killed` entries also carry a killer scope (see
+    // `compute_killer_scope`) and the runner names the killing test.
+    //
     // v6: the test-suite fingerprint moved out of the prefix and into each
     // mutant's scope (see `compute_mutant_scope`), scoped to the tests that
     // cover the mutant, so an edit to an unrelated test keeps its verdict.
@@ -592,7 +771,7 @@ fn compute_scope_prefix(cfg: &Config) -> String {
     // computed. Mix the mode into the scope prefix so a `file`-mode entry
     // can't satisfy a `scope`-mode lookup (and vice versa) — the two modes
     // produce different identity hashes for the same source.
-    h.update(b"v6");
+    h.update(b"v7");
     h.update(b"|cache_scope=");
     h.update(format!("{:?}", cfg.cache_scope).as_bytes());
     h.update(b"|runner=");
@@ -675,6 +854,34 @@ fn compute_mutant_scope(prefix: &str, cfg: &Config, tree: &TestTree, mutant: &Mu
         }
     }
     hex::encode(h.finalize())
+}
+
+/// Killer scope for `mutant` killed by test `killer`: the run-shape prefix,
+/// the killer's node id, and the scoped fingerprint of just the killer's file
+/// (plus its conftest chain and shared support files). A cached kill stays
+/// valid while this is unchanged, whatever happens to the other covering
+/// tests. `None` — no killer-keyed reuse — when `killer` no longer covers the
+/// mutant (deleted, renamed, or a refreshed coverage DB that doesn't reach the
+/// line) or its file can't be fingerprinted precisely (see
+/// [`scoped_test_fingerprint`]).
+fn compute_killer_scope(
+    prefix: &str,
+    cfg: &Config,
+    tree: &TestTree,
+    mutant: &Mutant,
+    killer: &str,
+) -> Option<String> {
+    let ctx = cfg.coverage.as_ref()?;
+    let ids = ctx.tests_for_mutant(mutant)?;
+    let killer_id = ids.iter().find(|t| *t == killer)?;
+    let fp = scoped_test_fingerprint(cfg, tree, ctx.node_root(), std::slice::from_ref(killer_id))?;
+    let mut h = Sha256::new();
+    h.update(prefix.as_bytes());
+    h.update(b"|killer=");
+    h.update(killer.as_bytes());
+    h.update(b"|tests:scoped=");
+    h.update(fp.as_bytes());
+    Some(hex::encode(h.finalize()))
 }
 
 /// Fingerprint of only the test files behind `ids`, or `None` when the set of
@@ -1287,6 +1494,7 @@ mod tests {
             hypothesis_seed: None,
             pytest_args: Vec::new(),
             cache: false,
+            cache_audit_rate: 0.0,
             cache_path: PathBuf::from(".fermut/cache.json"),
             smart_order: false,
             kill_order_path: PathBuf::from(".fermut/kill-order.json"),
@@ -1350,6 +1558,8 @@ mod tests {
             equiv: None,
             file_sources: &HashMap::new(),
             deadline,
+            stats: &CacheStats::default(),
+            killer_hits: &Mutex::new(Vec::new()),
         };
         evaluate(&ctx, &m)
     }
@@ -1482,5 +1692,337 @@ mod tests {
             }
             other => panic!("expected Equivalent, got {other:?}"),
         }
+    }
+
+    // ---- killer-keyed cache ------------------------------------------------
+
+    /// Scripted runner for the killer-cache tests: `run` kills by `killer`
+    /// (or survives when `survive`), `audit` reports `audit_kills`. Counts
+    /// both so a test can tell a cache hit (no run) from a miss.
+    struct ScriptRunner {
+        killer: Option<String>,
+        survive: bool,
+        audit_kills: bool,
+        runs: AtomicUsize,
+        audits: AtomicUsize,
+    }
+
+    impl ScriptRunner {
+        fn killing(killer: Option<&str>) -> Self {
+            Self {
+                killer: killer.map(str::to_string),
+                survive: false,
+                audit_kills: true,
+                runs: AtomicUsize::new(0),
+                audits: AtomicUsize::new(0),
+            }
+        }
+        fn surviving() -> Self {
+            Self {
+                survive: true,
+                ..Self::killing(None)
+            }
+        }
+        fn runs(&self) -> usize {
+            self.runs.load(Ordering::Relaxed)
+        }
+    }
+
+    impl Runner for ScriptRunner {
+        fn run(&self, m: &Arc<Mutant>) -> Result<MutantOutcome> {
+            self.runs.fetch_add(1, Ordering::Relaxed);
+            Ok(if self.survive {
+                MutantOutcome::survived(m.clone())
+            } else {
+                MutantOutcome::killed_by(m.clone(), self.killer.clone())
+            })
+        }
+        fn baseline(&self) -> Result<runner::BaselineStatus> {
+            Ok(runner::BaselineStatus::Passed)
+        }
+        fn audit(&self, m: &Arc<Mutant>, _killer: &str) -> Result<Option<MutantOutcome>> {
+            self.audits.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(if self.audit_kills {
+                MutantOutcome::killed(m.clone())
+            } else {
+                MutantOutcome::survived(m.clone())
+            }))
+        }
+    }
+
+    const TEST_A: &str = "tests/a/test_a.py::test_a";
+    const TEST_B: &str = "tests/b/test_b.py::test_b";
+
+    /// `ScopeFixture` whose line 1 is covered by both `test_a` and `test_b`.
+    fn two_covering() -> ScopeFixture {
+        let fx = ScopeFixture::new();
+        fx.write_coverage(&[(1, &[TEST_A, TEST_B])]);
+        fx
+    }
+
+    /// Evaluate the line-1 mutant once against the tree as it is now, with
+    /// source identity `src_hash`. Returns the outcome and the run's stats;
+    /// with `audit_rate`, also runs the post-evaluation audit.
+    fn eval_cached(
+        fx: &ScopeFixture,
+        runner: &dyn Runner,
+        cache: &Mutex<Cache>,
+        src_hash: &str,
+        audit_rate: Option<f64>,
+    ) -> (MutantOutcome, CacheStats) {
+        let cfg = Config {
+            cache_audit_rate: audit_rate.unwrap_or(0.0),
+            ..fx.config(RunnerKind::Pytest, true)
+        };
+        let m = Arc::new(fx.mutant(1));
+        let mut hashes = HashMap::new();
+        hashes.insert(m.file.clone(), src_hash.to_string());
+        let tree = TestTree::walk(&cfg.tests_path());
+        let prefix = compute_scope_prefix(&cfg);
+        let stats = CacheStats::default();
+        let killer_hits = Mutex::new(Vec::new());
+        let ctx = EvalCtx {
+            cfg: &cfg,
+            filters: &[],
+            runner,
+            cache,
+            file_hashes: &hashes,
+            scope_maps: &HashMap::new(),
+            scope_prefix: &prefix,
+            test_tree: &tree,
+            equiv: None,
+            file_sources: &HashMap::new(),
+            deadline: None,
+            stats: &stats,
+            killer_hits: &killer_hits,
+        };
+        let mut outcomes = vec![evaluate(&ctx, &m)];
+        if audit_rate.is_some() {
+            audit_killer_hits(&cfg, &ctx, &[m], &mut outcomes).unwrap();
+        }
+        (outcomes.pop().unwrap(), stats)
+    }
+
+    /// Seed the cache with a kill by `TEST_A`, then apply `edit` and return
+    /// the second evaluation's runner (for its run count) and stats.
+    fn killed_then(edit: impl FnOnce(&ScopeFixture)) -> (ScriptRunner, CacheStats) {
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        let first = ScriptRunner::killing(Some(TEST_A));
+        eval_cached(&fx, &first, &cache, "src-1", None);
+        assert_eq!(first.runs(), 1);
+        edit(&fx);
+        let second = ScriptRunner::killing(Some(TEST_A));
+        let (_, stats) = eval_cached(&fx, &second, &cache, "src-1", None);
+        (second, stats)
+    }
+
+    #[test]
+    fn killer_hit_survives_edit_to_other_covering_file() {
+        let (runner, stats) = killed_then(|fx| {
+            fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
+        });
+        assert_eq!(
+            runner.runs(),
+            0,
+            "kill by test_a must survive a test_b edit"
+        );
+        assert_eq!(stats.killer_hits.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.full_hits.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn unchanged_tree_is_a_full_hit_not_a_killer_hit() {
+        let (runner, stats) = killed_then(|_| {});
+        assert_eq!(runner.runs(), 0);
+        assert_eq!(stats.full_hits.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.killer_hits.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn killer_edit_invalidates() {
+        let (runner, stats) = killed_then(|fx| {
+            fx.write("tests/a/test_a.py", "def test_a(): assert 1\n");
+        });
+        assert_eq!(runner.runs(), 1);
+        assert_eq!(stats.misses.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn killer_conftest_chain_edit_invalidates() {
+        for rel in [
+            "tests/a/conftest.py",
+            "tests/conftest.py",
+            "tests/helpers.py",
+        ] {
+            let (runner, _) = killed_then(|fx| fx.write(rel, "changed = 1\n"));
+            assert_eq!(runner.runs(), 1, "{rel} must invalidate the killer hit");
+        }
+    }
+
+    #[test]
+    fn killer_removed_from_covering_set_misses() {
+        let (runner, _) = killed_then(|fx| fx.write_coverage(&[(1, &[TEST_B])]));
+        assert_eq!(runner.runs(), 1, "test_a no longer covers the mutant");
+    }
+
+    #[test]
+    fn source_change_invalidates_killer_hit() {
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &ScriptRunner::killing(Some(TEST_A)),
+            &cache,
+            "src-1",
+            None,
+        );
+        fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
+        let second = ScriptRunner::killing(Some(TEST_A));
+        eval_cached(&fx, &second, &cache, "src-2", None);
+        assert_eq!(second.runs(), 1);
+    }
+
+    #[test]
+    fn survived_never_uses_killer_scope() {
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(&fx, &ScriptRunner::surviving(), &cache, "src-1", None);
+        fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
+        let second = ScriptRunner::surviving();
+        eval_cached(&fx, &second, &cache, "src-1", None);
+        assert_eq!(
+            second.runs(),
+            1,
+            "a covering-test edit must re-test a survivor"
+        );
+    }
+
+    #[test]
+    fn no_killer_falls_back_to_scope_key() {
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(&fx, &ScriptRunner::killing(None), &cache, "src-1", None);
+        fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
+        let second = ScriptRunner::killing(None);
+        eval_cached(&fx, &second, &cache, "src-1", None);
+        assert_eq!(second.runs(), 1);
+    }
+
+    #[test]
+    fn killer_hit_resolves_parametrized_and_class_node_ids() {
+        let killer = "tests/a/test_a.py::TestA::test_x[1-2]";
+        let fx = ScopeFixture::new();
+        fx.write_coverage(&[(1, &[killer, TEST_B])]);
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &ScriptRunner::killing(Some(killer)),
+            &cache,
+            "src-1",
+            None,
+        );
+        fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
+        let second = ScriptRunner::killing(Some(killer));
+        let (out, _) = eval_cached(&fx, &second, &cache, "src-1", None);
+        assert_eq!(second.runs(), 0);
+        assert_eq!(
+            out.killer(),
+            Some(killer),
+            "killer round-trips through the cache"
+        );
+    }
+
+    #[test]
+    fn audit_confirmation_keeps_entry() {
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &ScriptRunner::killing(Some(TEST_A)),
+            &cache,
+            "src-1",
+            None,
+        );
+        fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
+        let second = ScriptRunner::killing(Some(TEST_A));
+        let (out, stats) = eval_cached(&fx, &second, &cache, "src-1", Some(0.01));
+        // Rate 1% of one hit still audits it (minimum one).
+        assert_eq!(second.audits.load(Ordering::Relaxed), 1);
+        assert_eq!(second.runs(), 0);
+        assert_eq!(stats.audited.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.dropped.load(Ordering::Relaxed), 0);
+        assert!(matches!(out, MutantOutcome::Killed { .. }));
+    }
+
+    #[test]
+    fn audit_disagreement_drops_entry() {
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &ScriptRunner::killing(Some(TEST_A)),
+            &cache,
+            "src-1",
+            None,
+        );
+        fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
+        // Audit says the kill doesn't reproduce; the full re-run survives.
+        let second = ScriptRunner {
+            audit_kills: false,
+            ..ScriptRunner::surviving()
+        };
+        let (out, stats) = eval_cached(&fx, &second, &cache, "src-1", Some(1.0));
+        assert_eq!(
+            second.runs(),
+            1,
+            "disagreement must re-run the mutant fully"
+        );
+        assert_eq!(stats.dropped.load(Ordering::Relaxed), 1);
+        assert!(matches!(out, MutantOutcome::Survived { .. }), "{out:?}");
+        // The re-run's verdict replaced the stale kill in the cache.
+        let third = ScriptRunner::surviving();
+        let (out, _) = eval_cached(&fx, &third, &cache, "src-1", None);
+        assert_eq!(third.runs(), 0);
+        assert!(matches!(out, MutantOutcome::Survived { .. }));
+    }
+
+    #[test]
+    fn zero_audit_rate_never_audits() {
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &ScriptRunner::killing(Some(TEST_A)),
+            &cache,
+            "src-1",
+            None,
+        );
+        fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
+        let second = ScriptRunner::killing(Some(TEST_A));
+        eval_cached(&fx, &second, &cache, "src-1", Some(0.0));
+        assert_eq!(second.audits.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn sample_for_audit_sizes() {
+        let hits = |n: usize| -> Vec<KillerHit> {
+            (0..n)
+                .map(|i| {
+                    let mut m = arith_mutant("x + 0", "+", "-");
+                    m.id = format!("m{i}");
+                    KillerHit {
+                        mutant: Arc::new(m),
+                        killer: TEST_A.into(),
+                    }
+                })
+                .collect()
+        };
+        assert_eq!(sample_for_audit(hits(0), 0.05).len(), 0);
+        assert_eq!(sample_for_audit(hits(10), 0.0).len(), 0);
+        assert_eq!(sample_for_audit(hits(10), 0.05).len(), 1, "minimum one");
+        assert_eq!(sample_for_audit(hits(100), 0.05).len(), 5);
+        assert_eq!(sample_for_audit(hits(101), 0.05).len(), 6, "rounds up");
+        assert_eq!(sample_for_audit(hits(7), 1.0).len(), 7);
     }
 }

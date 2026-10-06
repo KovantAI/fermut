@@ -93,6 +93,42 @@ outside the tests tree or couldn't be read.
 | Non-test file under the tests tree             | invalidated (all)| invalidated      |
 | New test covering the mutant's line            | invalidated      | invalidated      |
 
+### Killed verdicts: keyed on the killing test
+
+A `killed` verdict only depends on the test that killed it. When fermut
+knows that test (pytest/rstest with coverage contexts — the runner reads
+it from pytest's summary, or it's the only selected test), the entry
+also stores a **killer scope**: the killer's node id plus the
+fingerprint of *its* file, its `conftest.py` chain, and the shared
+support files. If the full key misses — say you edited another test
+file that also covers the mutant — the kill is still reused as long as:
+
+- the mutant's source hash is unchanged;
+- the killing test still covers the mutant's line;
+- the killer scope is unchanged.
+
+Editing the killing test's file (or its conftest chain, or a support
+file) re-runs the mutant. `survived` and `timed_out` verdicts never take
+this path: a survivor depends on *every* covering test, so any of them
+changing re-runs it.
+
+Trusting a killer hit skips the run entirely, so each run **audits** a
+random sample: `ceil(5%)` of the killer hits (at least one) are
+re-run against the killing test alone. If the kill doesn't reproduce —
+a flaky test, or one that only failed because of state an earlier test
+left behind — fermut drops the entry, warns naming the test and the
+mutant, and re-runs the mutant fully. Tune with `--cache-audit-rate` /
+`cache_audit_rate`; `--no-cache-audit` turns it off for deterministic
+benchmarks. The end-of-run `cache:` log line counts full hits, killer
+hits, audits (and drops), and misses.
+
+| Change                                         | killed (killer known) | survived / timed_out |
+|------------------------------------------------|-----------------------|----------------------|
+| Edit another covering test file                | **kept**              | invalidated          |
+| Edit the killing test's file                   | invalidated           | invalidated          |
+| `conftest.py` above the killing test           | invalidated           | invalidated          |
+| Coverage no longer lists the killing test      | invalidated           | invalidated          |
+
 Not tracked, in either mode: a helper module outside both the tests
 tree and the mutated source, and a `conftest.py` above the tests root.
 The scoped fingerprint also misses a test module importing *another
@@ -104,7 +140,7 @@ if you hit one of these.
 
 | Outcome    | Cached?         | Why                                                                                  |
 |------------|-----------------|--------------------------------------------------------------------------------------|
-| killed     | ✓               | Same patched bytes + same test bytes → same outcome.                                  |
+| killed     | ✓               | Same patched bytes + same killing-test bytes → same outcome.                          |
 | survived   | ✓               | Same.                                                                                |
 | timed_out  | ✓               | Same.                                                                                |
 | skipped    | ✗               | Filter chain may differ between runs (different `--ops`, `--coverage`, etc.) — reusing a skip would be wrong. |

@@ -8,13 +8,14 @@
 #     runs-on: ubuntu-latest
 #     steps:
 #       - uses: actions/checkout@<sha>
-#       - uses: KovantAI/fermut/sweep@v0.4.1
+#       - uses: KovantAI/fermut/sweep@v0.5.0
 #         with:
 #           shard: ${{ matrix.shard }}/4
 #
 # Without `shard`, the run gates on its own score. With it, the run uploads
 # its report as `<artifact-name>-shard-<i>-of-<n>` and never gates — combine
-# the shards with KovantAI/fermut/merge in a job that `needs:` this one.
+# the shards with KovantAI/fermut/merge (or KovantAI/fermut/trend) in a job
+# that `needs:` this one.
 #
 # See the root action.yml for the secrets and composite-vs-reusable notes.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs fermut from PyPI with uv. An empty version follows the action ref
-# (`@v0.4.1` → fermut 0.4.1), else the latest release. "project" installs
+# (`@v0.5.0` → fermut 0.5.0), else the latest release. "project" installs
 # nothing; resolve-env.sh then finds the project's own fermut.
 #
 # env: VERSION     fermut-version input

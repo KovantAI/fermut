@@ -62,6 +62,10 @@ pub struct PytestRunner {
     record_kill_sets: bool,
     /// Per-mutant kill-sets recorded this run, drained by the engine to JSONL.
     kill_set_sink: Arc<Mutex<Vec<super::kill_sets::KillSetRecord>>>,
+    /// Name the killing test on each `Killed` outcome (for the killer-keyed
+    /// cache), capturing output when several tests are selected. On whenever
+    /// the verdict cache is.
+    learn_killer: bool,
     /// Base for the `(file, operator)` history key — the run's `source_root`.
     /// Mutant files are made relative to this so the sidecar survives
     /// moves/checkouts.
@@ -86,6 +90,7 @@ pub struct PytestConfig {
     pub kill_sink: Arc<Mutex<Vec<crate::kill_order::KillRecord>>>,
     pub record_kill_sets: bool,
     pub kill_set_sink: Arc<Mutex<Vec<super::kill_sets::KillSetRecord>>>,
+    pub learn_killer: bool,
     pub key_base: PathBuf,
 }
 
@@ -106,6 +111,7 @@ impl PytestRunner {
             kill_sink,
             record_kill_sets,
             kill_set_sink,
+            learn_killer,
             key_base,
         } = config;
         Self {
@@ -123,6 +129,7 @@ impl PytestRunner {
             kill_sink,
             record_kill_sets,
             kill_set_sink,
+            learn_killer,
             key_base,
         }
     }
@@ -140,19 +147,22 @@ impl PytestRunner {
     }
 
     /// Parse the killing test's node id from captured pytest output (the `-rfE`
-    /// summary) and append it to the shared sink for the engine to fold into the
-    /// kill-order sidecar. Best-effort: any misfire (no failure line,
-    /// unparsable) just forfeits this datapoint. A poisoned sink is recovered
-    /// via [`lock_recover`] so a panicked worker can't silently stop ordering
-    /// from learning for the rest of the run.
-    fn record_killer(&self, output: &str, file: &str, op: &'static str) {
-        if let Some(nodeid) = crate::kill_order::parse_first_failed(output) {
+    /// summary) and, under smart ordering, append it to the shared sink for the
+    /// engine to fold into the kill-order sidecar. Returns the node id so the
+    /// outcome can carry it too (one parse, two uses). Best-effort: any misfire
+    /// (no failure line, unparsable) just forfeits this datapoint. A poisoned
+    /// sink is recovered via [`lock_recover`] so a panicked worker can't
+    /// silently stop ordering from learning for the rest of the run.
+    fn record_killer(&self, output: &str, file: &str, op: &'static str) -> Option<String> {
+        let nodeid = crate::kill_order::parse_first_failed(output)?;
+        if self.smart_order {
             lock_recover(&self.kill_sink).push(crate::kill_order::KillRecord {
                 file: file.to_string(),
                 operator: op.to_string(),
-                nodeid,
+                nodeid: nodeid.clone(),
             });
         }
+        Some(nodeid)
     }
 
     /// Cold-start breadth ordering of the coverage-selected node ids: with smart
@@ -192,14 +202,19 @@ impl PytestRunner {
     /// Assemble the per-mutant test command inside `mirror`: base flags, the
     /// coverage/smart-ordering test selection (or whole-dir sweep), working
     /// directory, PYTHONPATH/pyc env, and stdio. Returns the ready-to-spawn
-    /// `Command` plus whether its stdout is captured (to learn the killer).
+    /// `Command` (stdout piped when capturing to learn the killer) plus the
+    /// sole selected node id, when exactly one test was selected.
+    ///
+    /// `only` replaces the coverage selection with that one node id — the
+    /// cache audit re-running just the recorded killer.
     fn build_mutant_command(
         &self,
         mirror: &super::Mirror,
         mutant: &Mutant,
         key_file: &str,
         key_op: &'static str,
-    ) -> Result<Command> {
+        only: Option<&str>,
+    ) -> Result<(Command, Option<String>)> {
         let mut cmd = self.framework_command();
         cmd.arg("--tb=no").arg("-q");
         // `-x` stops at the first failing test — all a Killed/Survived verdict
@@ -230,17 +245,21 @@ impl PytestRunner {
         // mutated file's lines — first, then [`select_args`] lifts any learned
         // `(file, operator)` killer ahead of that. Breadth fills the no-history
         // gap; history dominates once a killer is known.
-        let ordered: Option<Vec<String>> = self.coverage.as_ref().and_then(|ctx| {
-            ctx.tests_for_mutant(mutant).map(|ids| {
-                self.ordered_ids(ctx, mutant, ids)
-                    .into_iter()
-                    .cloned()
-                    .collect()
-            })
-        });
-        let capture = match select_args(
+        let ordered: Option<Vec<String>> = match only {
+            Some(t) => Some(vec![t.to_string()]),
+            None => self.coverage.as_ref().and_then(|ctx| {
+                ctx.tests_for_mutant(mutant).map(|ids| {
+                    self.ordered_ids(ctx, mutant, ids)
+                        .into_iter()
+                        .cloned()
+                        .collect()
+                })
+            }),
+        };
+        let (capture, sole) = match select_args(
             ordered.as_deref(),
             self.smart_order,
+            self.learn_killer,
             &self.kill_order,
             key_file,
             key_op,
@@ -255,7 +274,8 @@ impl PytestRunner {
                 for a in &args {
                     cmd.arg(a);
                 }
-                capture
+                let sole = (!capture && args.len() == 1).then(|| args[0].clone());
+                (capture, sole)
             }
             Selection::Sweep => {
                 cmd.arg(&mirror.tests);
@@ -263,9 +283,9 @@ impl PytestRunner {
                 // summary from the whole-suite sweep.
                 if self.record_kill_sets {
                     cmd.arg("-rfE");
-                    true
+                    (true, None)
                 } else {
-                    false
+                    (false, None)
                 }
             }
         };
@@ -281,7 +301,7 @@ impl PytestRunner {
             Stdio::null()
         };
         cmd.stdout(stdout_cfg).stderr(Stdio::null());
-        Ok(cmd)
+        Ok((cmd, sole))
     }
 
     /// Record this mutant's full kill-set (the covering tests that failed) into
@@ -350,7 +370,7 @@ impl PytestRunner {
         key_op: &'static str,
     ) -> bool {
         let probe = || -> Result<bool> {
-            let mut cmd = self.build_mutant_command(mirror, mutant, key_file, key_op)?;
+            let (mut cmd, _) = self.build_mutant_command(mirror, mutant, key_file, key_op, None)?;
             cmd.arg("--collect-only");
             let log = tempfile::NamedTempFile::new().context("creating collection probe log")?;
             cmd.stdout(log.as_file().try_clone()?)
@@ -367,8 +387,10 @@ impl PytestRunner {
     }
 
     /// Turn a completed (or timed-out) test run into a `MutantOutcome`. On a
-    /// real kill and captured output, records the killing node id for the next
-    /// run's ordering. Anomalous exits become `error` (excluded from the score).
+    /// real kill, names the killer on the outcome: parsed from captured output
+    /// (also recorded for the next run's ordering), or — when `sole` is the one
+    /// selected test and it *failed* (exit 1) — that test. Anomalous exits
+    /// become `error` (excluded from the score).
     ///
     /// `import_broke` is the verdict of [`Self::probe_collection_failure`] for
     /// an exit-4 run: when the mutant broke a selected module's import, pytest
@@ -379,6 +401,7 @@ impl PytestRunner {
         mutant: &Arc<Mutant>,
         waited: (Option<ExitStatus>, Option<String>),
         import_broke: bool,
+        sole: Option<String>,
         key_file: &str,
         key_op: &'static str,
     ) -> MutantOutcome {
@@ -389,10 +412,11 @@ impl PytestRunner {
                 // pytest couldn't collect). When capturing, learn which test
                 // did it and record it for next time's ordering.
                 ExitVerdict::Killed => {
-                    if let Some(out) = output {
-                        self.record_killer(&out, key_file, key_op);
-                    }
-                    MutantOutcome::killed(mutant.clone())
+                    let parsed = output.and_then(|out| self.record_killer(&out, key_file, key_op));
+                    // Exit 2 (collection error) or a signal has no killing
+                    // *test* to name, so the sole id is used on exit 1 only.
+                    let killer = parsed.or_else(|| sole.filter(|_| status.code() == Some(1)));
+                    MutantOutcome::killed_by(mutant.clone(), killer)
                 }
                 // The mutant broke a selected module's import: no killer test
                 // to record (collection failed before any test ran).
@@ -411,12 +435,14 @@ impl PytestRunner {
 }
 
 /// Whether to capture the per-mutant pytest stdout to learn the killing test.
-/// Only worth it when smart ordering is on AND more than one test was selected:
-/// with a single (or zero) selected test there's nothing to reorder next run, so
-/// the pipe + read + `-rfE` are pure overhead. Kept pure so the wiring is tested.
+/// Only worth it when something consumes the killer — smart ordering or the
+/// killer-keyed cache (`learn`) — AND more than one test was selected: with a
+/// single selected test the killer is that test (no parse needed), and with
+/// zero there's nothing to name, so the pipe + read + `-rfE` are pure
+/// overhead. Kept pure so the wiring is tested.
 #[must_use]
-fn should_capture(smart_order: bool, selected_len: usize) -> bool {
-    smart_order && selected_len > 1
+fn should_capture(learn: bool, selected_len: usize) -> bool {
+    learn && selected_len > 1
 }
 
 /// Per-mutant test selection: either coverage-selected node ids or the
@@ -439,6 +465,7 @@ enum Selection {
 fn select_args(
     ids: Option<&[String]>,
     smart_order: bool,
+    learn_killer: bool,
     kill_order: &crate::kill_order::KillOrder,
     key_file: &str,
     key_op: &str,
@@ -450,7 +477,7 @@ fn select_args(
             } else {
                 ids.to_vec()
             };
-            let capture = should_capture(smart_order, ordered.len());
+            let capture = should_capture(smart_order || learn_killer, ordered.len());
             let mut args = ordered;
             if capture {
                 // `-rfE` prints a `FAILED`/`ERROR <nodeid>` summary line so a
@@ -627,7 +654,8 @@ impl Runner for PytestRunner {
     fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
         run_patched(&self.tests, self.isolation, mutant, |mirror| {
             let (key_file, key_op) = self.kill_key(mutant);
-            let mut cmd = self.build_mutant_command(mirror, mutant, &key_file, key_op)?;
+            let (mut cmd, sole) =
+                self.build_mutant_command(mirror, mutant, &key_file, key_op, None)?;
             let child = cmd.spawn().context("spawning test runner")?;
             let waited = wait_draining_stdout(child, self.timeout, kill_group)?;
             // Exit 4 is ambiguous under node-id selection (see `exit.rs`). The
@@ -639,8 +667,23 @@ impl Runner for PytestRunner {
             if self.record_kill_sets {
                 self.record_kill_set(mutant, &waited, import_broke, &key_file, key_op);
             }
-            Ok(self.classify_run(mutant, waited, import_broke, &key_file, key_op))
+            Ok(self.classify_run(mutant, waited, import_broke, sole, &key_file, key_op))
         })
+    }
+
+    fn audit(&self, mutant: &Arc<Mutant>, killer: &str) -> Result<Option<MutantOutcome>> {
+        // Same command as a real run, but selecting only the recorded killer.
+        // No exit-4 probe: an audit that can't even resolve the node id is a
+        // disagreement either way, and the engine then re-runs the mutant fully.
+        run_patched(&self.tests, self.isolation, mutant, |mirror| {
+            let (key_file, key_op) = self.kill_key(mutant);
+            let (mut cmd, sole) =
+                self.build_mutant_command(mirror, mutant, &key_file, key_op, Some(killer))?;
+            let child = cmd.spawn().context("spawning audit run")?;
+            let waited = wait_draining_stdout(child, self.timeout, kill_group)?;
+            Ok(self.classify_run(mutant, waited, false, sole, &key_file, key_op))
+        })
+        .map(Some)
     }
 
     fn baseline(&self) -> Result<BaselineStatus> {
@@ -712,7 +755,14 @@ mod tests {
         // so the summary surfaces the killer. This is the wiring the ignored
         // e2e can't cheaply guard.
         let ko = KillOrder::default();
-        let sel = select_args(Some(&sids(&["t::a", "t::b"])), true, &ko, "src/f.py", "op");
+        let sel = select_args(
+            Some(&sids(&["t::a", "t::b"])),
+            true,
+            false,
+            &ko,
+            "src/f.py",
+            "op",
+        );
         assert_ids(sel, &["t::a", "t::b", "-rfE"], true);
     }
 
@@ -721,7 +771,14 @@ mod tests {
         // One selected test → nothing to reorder next run, so no capture and no
         // `-rfE` (piping + summary would be pure overhead).
         let ko = KillOrder::default();
-        let sel = select_args(Some(&sids(&["t::only"])), true, &ko, "src/f.py", "op");
+        let sel = select_args(
+            Some(&sids(&["t::only"])),
+            true,
+            false,
+            &ko,
+            "src/f.py",
+            "op",
+        );
         assert_ids(sel, &["t::only"], false);
     }
 
@@ -732,6 +789,7 @@ mod tests {
         let ko = KillOrder::default();
         let sel = select_args(
             Some(&sids(&["t::a", "t::b", "t::c"])),
+            false,
             false,
             &ko,
             "src/f.py",
@@ -750,6 +808,7 @@ mod tests {
         let sel = select_args(
             Some(&sids(&["t::a", "t::b", "t::c"])),
             true,
+            false,
             &ko,
             "src/f.py",
             "op",
@@ -761,11 +820,11 @@ mod tests {
     fn select_args_no_or_empty_coverage_is_sweep() {
         let ko = KillOrder::default();
         assert!(matches!(
-            select_args(None, true, &ko, "src/f.py", "op"),
+            select_args(None, true, false, &ko, "src/f.py", "op"),
             Selection::Sweep
         ));
         assert!(matches!(
-            select_args(Some(&[]), true, &ko, "src/f.py", "op"),
+            select_args(Some(&[]), true, false, &ko, "src/f.py", "op"),
             Selection::Sweep
         ));
     }
@@ -1090,6 +1149,7 @@ mod tests {
             kill_sink: Arc::new(Mutex::new(Vec::new())),
             record_kill_sets: false,
             kill_set_sink: Arc::new(Mutex::new(Vec::new())),
+            learn_killer: false,
             key_base: PathBuf::from("."),
         })
     }
@@ -1170,4 +1230,72 @@ mod tests {
 
     // The exit-code → verdict mapping and anomaly messages now live in
     // `runner::exit` and are unit-tested there (both tools in one place).
+
+    // --- classify_run: naming the killer on the outcome (killer-keyed cache).
+
+    #[cfg(unix)]
+    fn exited(code: i32) -> Option<ExitStatus> {
+        use std::os::unix::process::ExitStatusExt;
+        Some(ExitStatus::from_raw(code << 8))
+    }
+
+    #[cfg(unix)]
+    fn classify(
+        smart_order: bool,
+        code: i32,
+        output: Option<&str>,
+        sole: Option<&str>,
+    ) -> (MutantOutcome, usize) {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = runner(smart_order, breadth_ctx(tmp.path()));
+        let m = Arc::new(mutant_in(tmp.path()));
+        let out = r.classify_run(
+            &m,
+            (exited(code), output.map(str::to_string)),
+            false,
+            sole.map(str::to_string),
+            "foo.py",
+            "op",
+        );
+        (out, r.take_kill_records().len())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn killer_parsed_from_captured_output_for_parametrized_ids() {
+        let out = "F\n= short test summary info =\n\
+                   FAILED tests/t.py::TestX::test_x[1-2] - assert 3 == 4\n";
+        let (o, recorded) = classify(true, 1, Some(out), None);
+        assert_eq!(o.killer(), Some("tests/t.py::TestX::test_x[1-2]"));
+        assert_eq!(recorded, 1, "smart ordering still learns the killer");
+        // Without smart ordering the outcome still names it, but nothing is
+        // queued for the kill-order sidecar.
+        let (o, recorded) = classify(false, 1, Some(out), None);
+        assert_eq!(o.killer(), Some("tests/t.py::TestX::test_x[1-2]"));
+        assert_eq!(recorded, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sole_selected_test_is_the_killer_only_on_a_test_failure() {
+        let (o, _) = classify(false, 1, None, Some("tests/t.py::only"));
+        assert_eq!(o.killer(), Some("tests/t.py::only"));
+        // Exit 2 = collection error: no test failed, so no killer to name.
+        let (o, _) = classify(false, 2, None, Some("tests/t.py::only"));
+        assert!(matches!(o, MutantOutcome::Killed { .. }));
+        assert_eq!(o.killer(), None);
+        // Survived never carries one.
+        let (o, _) = classify(false, 0, None, Some("tests/t.py::only"));
+        assert_eq!(o.killer(), None);
+    }
+
+    #[test]
+    fn select_args_learn_killer_captures_without_smart_order() {
+        // The killer-keyed cache needs the killer even with ordering off.
+        let ko = KillOrder::default();
+        let sel = select_args(Some(&sids(&["t::a", "t::b"])), false, true, &ko, "f", "op");
+        assert_ids(sel, &["t::a", "t::b", "-rfE"], true);
+        let sel = select_args(Some(&sids(&["t::only"])), false, true, &ko, "f", "op");
+        assert_ids(sel, &["t::only"], false);
+    }
 }

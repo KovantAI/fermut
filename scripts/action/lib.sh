@@ -1,4 +1,4 @@
-# Shared helpers for the fermut GitHub Actions (action.yml, sweep/, merge/).
+# Shared helpers for the fermut GitHub Actions (action.yml, sweep/, merge/, trend/).
 # Sourced, not executed. Each step script sources this first.
 
 set -euo pipefail

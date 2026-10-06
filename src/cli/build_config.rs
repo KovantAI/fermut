@@ -63,6 +63,8 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         pytest_args: cli_pytest_args,
         no_cache: cli_no_cache,
         cache_path: cli_cache_path,
+        cache_audit_rate: cli_cache_audit_rate,
+        no_cache_audit: cli_no_cache_audit,
         no_history: cli_no_history,
         history_path: cli_history_path,
         sample: cli_sample,
@@ -241,6 +243,20 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         .or_else(|| file.cache_path.clone().map(|p| loaded.resolve_path(p)))
         .unwrap_or_else(|| crate::cache::default_cache_path(&artifact_root));
 
+    let cache_audit_rate = if cli_no_cache_audit {
+        0.0
+    } else {
+        match cli_cache_audit_rate {
+            Some(r) => r,
+            None => file
+                .cache_audit_rate
+                .map(check_audit_rate)
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("cache_audit_rate: {e}"))?
+                .unwrap_or(crate::config::DEFAULT_CACHE_AUDIT_RATE),
+        }
+    };
+
     let history = if cli_no_history {
         false
     } else {
@@ -349,6 +365,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         pytest_args,
         cache,
         cache_path,
+        cache_audit_rate,
         smart_order,
         kill_order_path,
         history,
@@ -369,6 +386,21 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         max_time_secs,
         record_kill_sets: cli_record_kill_sets.map(absolutize),
     })
+}
+
+/// Clap value parser for `--cache-audit-rate`: a fraction in `[0, 1]`.
+pub(crate) fn parse_audit_rate(s: &str) -> Result<f64, String> {
+    let r: f64 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
+    check_audit_rate(r)
+}
+
+/// A killer-hit audit rate must be a finite fraction in `[0, 1]`.
+fn check_audit_rate(r: f64) -> Result<f64, String> {
+    if (0.0..=1.0).contains(&r) {
+        Ok(r)
+    } else {
+        Err(format!("audit rate must be between 0 and 1, got {r}"))
+    }
 }
 
 /// Make `p` absolute. Prefer `canonicalize` so symlinks resolve to a real
@@ -729,6 +761,8 @@ mod tests {
             smart_order: false,
             max_time: None,
             record_kill_sets: None,
+            cache_audit_rate: None,
+            no_cache_audit: false,
             filter,
         }
     }

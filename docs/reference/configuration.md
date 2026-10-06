@@ -52,6 +52,7 @@ TOML primitives: `string`, `bool`, `int`, `float`, `array<string>`.
 | `pytest_args`      | `array<string>` | `[]`                                            | Extra args forwarded to pytest. Ignored by the unittest runner.                                    |
 | `cache`            | `bool`          | `true`                                          | Enable the per-mutant result cache. **Critical for fast iteration.**                              |
 | `cache_path`       | `string` (path) | `<source_root>/.fermut/cache.json`              | Custom cache file location.                                                                       |
+| `cache_audit_rate` | `float` (0–1)   | `0.05`                                          | Fraction of killer-keyed cache hits re-run against their killing test each run (at least one when any occur). `0` disables. See [Caching](../concepts/caching.md#killed-verdicts-keyed-on-the-killing-test). |
 | `history`          | `bool`          | `true`                                          | Append a summary entry to the history log on every run.                                            |
 | `history_path`     | `string` (path) | `<source_root>/.fermut/history.jsonl`           | Custom history log location.                                                                      |
 | `sample`           | `float`         | `1.0`                                           | Test only this fraction of mutants (0.0–1.0), deterministic per `sample_seed`.                     |

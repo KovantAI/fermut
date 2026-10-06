@@ -113,9 +113,13 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
         .or_else(|| loaded.file.tests.clone().map(|p| loaded.resolve_path(p)))
         .unwrap_or_else(|| source.join("tests"));
 
+    // Absolute: pytest runs from `base_dir`, not our cwd, and gets this path
+    // via `COVERAGE_FILE`, so a relative `--output` would resolve differently
+    // for the two of us.
     let db_path = opts
         .output
         .clone()
+        .map(|p| std::path::absolute(&p).unwrap_or(p))
         .unwrap_or_else(|| base_dir.join(".coverage"));
 
     // Resolve the interpreter the same way `fermut run` does: explicit
@@ -158,6 +162,7 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
         let ran_ok = run_pytest(
             &base_dir,
             &cov_target,
+            &db_path,
             std::slice::from_ref(&tests),
             false,
             &opts.pytest_args,
@@ -302,6 +307,7 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
         run_pytest(
             &base_dir,
             &cov_target,
+            &db_path,
             &rerun,
             true,
             &opts.pytest_args,
@@ -669,11 +675,14 @@ fn purge_import_time(db_path: &Path, file_rels: &[String]) -> Result<usize> {
 
 /// Invoke `pytest <targets> --cov=<target> --cov-context=test [--cov-append]`
 /// from `base_dir`, inheriting stdio so the user sees the live test run.
-/// Returns whether pytest exited 0, so the caller can decide whether to advance
-/// the fingerprint baseline.
+/// Coverage data goes to `db_path` (via `COVERAGE_FILE`), the same file every
+/// purge, prune and sidecar step here operates on. Returns whether pytest
+/// exited 0, so the caller can decide whether to advance the fingerprint
+/// baseline.
 fn run_pytest(
     base_dir: &Path,
     cov_target: &Path,
+    db_path: &Path,
     targets: &[PathBuf],
     append: bool,
     extra: &[String],
@@ -692,6 +701,11 @@ fn run_pytest(
     };
     crate::runner::sanitize_python_env(&mut cmd);
     cmd.current_dir(base_dir);
+    // Without this pytest-cov writes `<base_dir>/.coverage` (or the project's
+    // `[run] data_file`) whatever `--output` says, so the data and the file we
+    // purge, append to and fingerprint drift apart. coverage.py lets the env
+    // var override the config file's `data_file`.
+    cmd.env("COVERAGE_FILE", db_path);
     cmd.arg(format!("--cov={}", cov_target.display()));
     cmd.arg("--cov-context=test");
     if append {

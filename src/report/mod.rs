@@ -7,6 +7,7 @@
 
 pub mod annotations;
 pub mod diff;
+pub mod fold;
 pub mod writers;
 
 use std::sync::Arc;
@@ -250,6 +251,12 @@ pub struct Summary {
     /// [`crate::subsume::report_dominator_score`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dominator_score: Option<f64>,
+    /// Distinct test-writing targets among `survived` once survivors another
+    /// co-located survivor subsumes are folded under it (see
+    /// [`fold`]). Equals `survived` when nothing folds. Presentation only:
+    /// the score still counts every survivor.
+    #[serde(default)]
+    pub survivor_targets: usize,
 }
 
 /// Per-operator verdict breakdown for one run. Only real verdicts are counted;
@@ -335,6 +342,7 @@ impl Report {
             mutation_score: round1(c.mutation_score()),
             scored: c.scored(),
             dominator_score: self.dominator_score,
+            survivor_targets: fold::fold(&fold::survivors(&self.outcomes)).len(),
         }
     }
 
@@ -623,6 +631,15 @@ mod tests {
 
     fn report(outcomes: Vec<MutantOutcome>) -> Report {
         Report::new(outcomes)
+    }
+
+    #[test]
+    fn summary_counts_survivor_targets_after_folding() {
+        let s = report(testing::folded_pair()).summary();
+        assert_eq!(s.survived, 2);
+        assert_eq!(s.survivor_targets, 1);
+        // Score is untouched by folding.
+        assert_eq!(s.mutation_score, 0.0);
     }
 
     #[test]
@@ -992,5 +1009,16 @@ pub(crate) mod testing {
             stmt_line: 2,
             site: None,
         }
+    }
+
+    /// `a < b` survivors `>` and `>=`, as the visitor emits them: `>`
+    /// subsumes `>=`, so they fold to one target.
+    pub fn folded_pair() -> Vec<crate::report::MutantOutcome> {
+        crate::mutator::visitor::collect(std::path::Path::new("t.py"), "if a < b:\n    pass\n")
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.site.is_some() && matches!(m.replacement.as_str(), ">" | ">="))
+            .map(|m| crate::report::MutantOutcome::survived(std::sync::Arc::new(m)))
+            .collect()
     }
 }

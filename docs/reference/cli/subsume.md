@@ -73,7 +73,9 @@ the JSON `summary`, but only if the store still describes the run:
 
 Otherwise the field is left out. `-v` logs the reason. The score uses the
 current run's verdicts: dominator classes with a member killed this run,
-against this run's survivors.
+against this run's survivors. Survivors that another survivor at the same
+compare or `and`/`or` subsumes are folded first, so each counts once (see
+[Operator profiles](../operators/profiles.md#folded-survivors)).
 
 The check is per file. Mutant ids include byte offsets, so an edit above a
 function already renames its mutants, and a per-function check would not

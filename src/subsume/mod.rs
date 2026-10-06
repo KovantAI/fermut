@@ -17,8 +17,11 @@
 //! survivors. It follows Ammann, Delamaro & Offutt, *Establishing Theoretical
 //! Minimal Sets of Mutants* (ICST 2014): redundant, trivially killed mutants
 //! inflate the plain score, while each dominator counts once. Survivors have no
-//! kill-set (`K = ∅`), so they can't be ordered by containment; each counts as
-//! its own class. That is conservative: it can only lower the score.
+//! kill-set (`K = ∅`), so they can't be ordered by containment. In `fermut
+//! subsume` each counts as its own class; at report time, survivors another
+//! survivor at the same compare / `and`-`or` site subsumes are folded first
+//! (see [`crate::report::fold`]), so `S` counts distinct survivor targets.
+//! Counting unfolded survivors can only lower the score.
 //!
 //! Records that carry no usable kill-set are left out of the lattice and counted
 //! separately: timeouts and errors, and kills with an empty `K` (a mutant that
@@ -355,7 +358,8 @@ impl DominatorStore {
 ///   its subsumption relations are unknown.
 ///
 /// Otherwise `D` is the number of dominator classes with at least one member
-/// detected in this run, `S` the survivors in this run, and the score is
+/// detected in this run, `S` this run's survivors after static folding
+/// ([`crate::report::fold`]), and the score is
 /// `D / (D + S)`. Classes with no member in the run (e.g. a `--diff-only`
 /// subset) drop out. Skipped/equivalent/errored outcomes are ignored, as in the
 /// plain score.
@@ -372,7 +376,7 @@ pub fn report_dominator_score(
 
     let mut fresh: HashMap<&Path, bool> = HashMap::new();
     let mut detected_dominators: HashSet<usize> = HashSet::new();
-    let mut survivors = 0;
+    let mut survivors = Vec::new();
     for o in outcomes {
         let detected = match o {
             MutantOutcome::Killed { .. } | MutantOutcome::TimedOut { .. } => true,
@@ -393,7 +397,7 @@ pub fn report_dominator_score(
             ));
         }
         if !detected {
-            survivors += 1;
+            survivors.push(m);
             continue;
         }
         let Some(&ci) = class_of.get(m.id.as_str()) else {
@@ -403,7 +407,8 @@ pub fn report_dominator_score(
             detected_dominators.insert(ci);
         }
     }
-    Ok(dominator_score(detected_dominators.len(), survivors))
+    let survivor_classes = crate::report::fold::fold(&survivors).len();
+    Ok(dominator_score(detected_dominators.len(), survivor_classes))
 }
 
 #[cfg(test)]

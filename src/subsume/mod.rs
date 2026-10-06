@@ -43,11 +43,15 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::mutator::Mutant;
 use crate::report::MutantOutcome;
 
 /// Schema version of [`DominatorStore`]. Bump on a breaking change; a store
 /// with another version is treated as absent.
-pub const STORE_VERSION: u32 = 1;
+///
+/// v2 added [`Class::kill_set`], which `--only-dominators` needs to prove an
+/// inferred kill.
+pub const STORE_VERSION: u32 = 2;
 
 /// Default dominator store location, beside the cache/history/kill-order under
 /// `<artifact_root>/.fermut/`.
@@ -120,6 +124,9 @@ pub struct Class {
     pub members: Vec<String>,
     /// `|K|` shared by every member.
     pub kill_set_size: usize,
+    /// The shared kill-set `K`, sorted. `--only-dominators` infers a member
+    /// killed only by a test in this set.
+    pub kill_set: Vec<String>,
     pub dominator: bool,
 }
 
@@ -181,6 +188,10 @@ pub fn analyze(records: &[Record]) -> Analysis {
         }
     }
     let words = tests.len().div_ceil(64);
+    let mut names: Vec<&str> = vec![""; tests.len()];
+    for (&t, &i) in &tests {
+        names[i as usize] = t;
+    }
 
     // Group identical kill-sets.
     let mut by_set: HashMap<Bits, Vec<&str>> = HashMap::new();
@@ -215,6 +226,14 @@ pub fn analyze(records: &[Record]) -> Analysis {
             rep: members[0].to_string(),
             members: members.iter().map(|s| s.to_string()).collect(),
             kill_set_size: *n,
+            kill_set: {
+                let mut ks: Vec<String> = (0..names.len())
+                    .filter(|&i| bits.0[i / 64] & (1 << (i % 64)) != 0)
+                    .map(|i| names[i].to_string())
+                    .collect();
+                ks.sort_unstable();
+                ks
+            },
             dominator,
         });
     }
@@ -354,8 +373,9 @@ impl DominatorStore {
 ///
 /// Returns `Err(reason)` when the store can't vouch for this run:
 /// - a scored mutant's file is missing from the store or its AST changed;
-/// - a detected (killed/timed-out) mutant isn't in the store's class map, so
-///   its subsumption relations are unknown.
+/// - a killed mutant isn't in the store's class map, so its subsumption
+///   relations are unknown. (A timed-out one without a class is skipped:
+///   `fermut subsume` leaves timeouts out of the lattice too.)
 ///
 /// Otherwise `D` is the number of dominator classes with at least one member
 /// detected in this run, `S` this run's survivors after static folding
@@ -383,6 +403,7 @@ pub fn report_dominator_score(
             MutantOutcome::Survived { .. } => false,
             _ => continue,
         };
+        let timed_out = matches!(o, MutantOutcome::TimedOut { .. });
         let m = o.mutant();
         let ok = *fresh.entry(m.file.as_path()).or_insert_with(|| {
             let key = m.file.display().to_string();
@@ -401,6 +422,11 @@ pub fn report_dominator_score(
             continue;
         }
         let Some(&ci) = class_of.get(m.id.as_str()) else {
+            // A timeout has no kill-set, so `subsume` leaves it out of the
+            // lattice too; only an unknown *kill* means the store is stale.
+            if timed_out {
+                continue;
+            }
             return Err(format!("detected mutant {} has no recorded kill-set", m.id));
         };
         if store.classes[ci].dominator {
@@ -409,6 +435,123 @@ pub fn report_dominator_score(
     }
     let survivor_classes = crate::report::fold::fold(&survivors).len();
     Ok(dominator_score(detected_dominators.len(), survivor_classes))
+}
+
+/// `--only-dominators`: which mutants to run, and which kills to infer.
+///
+/// A mutant is **run** when the store can't vouch for it: its file changed
+/// since `fermut subsume`, it isn't in a killed class (new, a previous
+/// survivor, a timeout or error), or it is a dominator class's representative.
+/// Every other mutant is **deferred**. After the run, a deferred mutant `m` is
+/// inferred killed when a dominator `d` of its class (`K(d) ⊆ K(m)`) was killed
+/// this run by a test `t` that is in the recorded `K(m)`. With `m`'s file and
+/// `t` unchanged, `t` fails on `m` again; that is the same bet the
+/// killer-keyed cache makes, and the inferred-kill audit checks it. A deferred
+/// mutant with no such dominator kill is run normally.
+///
+/// What this does not see: a test in `K(m)` edited so it still fails on the
+/// dominator but no longer on `m`. That gives a false kill until the next
+/// recording; the audit samples for exactly that. (A test that stopped
+/// failing altogether can't: it must kill the dominator this run.)
+pub struct DominatorPlan {
+    store: DominatorStore,
+    class_of: HashMap<String, usize>,
+    /// Per class: dominator classes whose kill-set is a subset of this one's
+    /// (the class itself when it is a dominator), smallest kill-set first.
+    dominated_by: Vec<Vec<usize>>,
+    kill_sets: Vec<HashSet<String>>,
+    fresh: HashMap<PathBuf, bool>,
+}
+
+impl DominatorPlan {
+    /// Build the plan for a run over `files`. Errors when the store is
+    /// missing: `--only-dominators` without one would silently run everything.
+    pub fn load<'a>(path: &Path, files: impl IntoIterator<Item = &'a Path>) -> Result<Self> {
+        let store = DominatorStore::load(path)?.with_context(|| {
+            format!(
+                "--only-dominators needs {}; record kill-sets (`fermut run --no-cache \
+                 --record-kill-sets ks.jsonl`) and run `fermut subsume ks.jsonl` first",
+                path.display()
+            )
+        })?;
+        let fresh = files
+            .into_iter()
+            .map(|f| {
+                let ok = store
+                    .file_hashes
+                    .get(&f.display().to_string())
+                    .is_some_and(|h| crate::ast_hash::hash_file_ast(f).is_ok_and(|now| &now == h));
+                (f.to_path_buf(), ok)
+            })
+            .collect();
+        Ok(Self::with_freshness(store, fresh))
+    }
+
+    fn with_freshness(store: DominatorStore, fresh: HashMap<PathBuf, bool>) -> Self {
+        let mut class_of = HashMap::new();
+        for (i, c) in store.classes.iter().enumerate() {
+            for m in &c.members {
+                class_of.insert(m.clone(), i);
+            }
+        }
+        let kill_sets: Vec<HashSet<String>> = store
+            .classes
+            .iter()
+            .map(|c| c.kill_set.iter().cloned().collect())
+            .collect();
+        let mut dominators: Vec<usize> = (0..store.classes.len())
+            .filter(|&i| store.classes[i].dominator)
+            .collect();
+        dominators.sort_by_key(|&i| (store.classes[i].kill_set_size, i));
+        let dominated_by = kill_sets
+            .iter()
+            .map(|k| {
+                dominators
+                    .iter()
+                    .copied()
+                    .filter(|&d| kill_sets[d].is_subset(k))
+                    .collect()
+            })
+            .collect();
+        Self {
+            store,
+            class_of,
+            dominated_by,
+            kill_sets,
+            fresh,
+        }
+    }
+
+    /// Mutants whose file is unchanged since recording.
+    pub fn fresh_files(&self) -> usize {
+        self.fresh.values().filter(|&&f| f).count()
+    }
+
+    /// `true`: run `m` now. `false`: defer it for inference.
+    pub fn runs_first(&self, m: &Mutant) -> bool {
+        if !self.fresh.get(&m.file).copied().unwrap_or(false) {
+            return true;
+        }
+        let Some(&c) = self.class_of.get(&m.id) else {
+            return true;
+        };
+        let class = &self.store.classes[c];
+        class.dominator && class.rep == m.id
+    }
+
+    /// For a deferred `m`: `(dominator rep, killing test)` when a dominator of
+    /// its class was killed this run by a test in `K(m)`. `killed` maps each
+    /// mutant observed killed this run to its killing test.
+    pub fn infer(&self, m: &Mutant, killed: &HashMap<&str, &str>) -> Option<(String, String)> {
+        let &c = self.class_of.get(&m.id)?;
+        self.dominated_by[c].iter().find_map(|&d| {
+            let rep = &self.store.classes[d].rep;
+            let t = killed.get(rep.as_str())?;
+            self.kill_sets[c]
+                .contains(*t)
+                .then(|| (rep.clone(), t.to_string()))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -609,6 +752,15 @@ mod tests {
         // One dominator class (m1) detected, one survivor.
         assert_eq!(report_dominator_score(&store, &outcomes), Ok(Some(50.0)));
 
+        // A timeout the store never saw is skipped, like `subsume` does.
+        let slow = mutant(&file, "8:compare-op-swap:<->!=");
+        let mut with_timeout = outcomes.clone();
+        with_timeout.push(MutantOutcome::timed_out(Arc::new(slow)));
+        assert_eq!(
+            report_dominator_score(&store, &with_timeout),
+            Ok(Some(50.0))
+        );
+
         // A detected mutant the store never saw → no score.
         let stranger = mutant(&file, "9:compare-op-swap:<->==");
         let mut more = outcomes.clone();
@@ -619,6 +771,90 @@ mod tests {
         std::fs::write(&file, "def f(x):\n    return x <= 2\n").unwrap();
         let err = report_dominator_score(&store, &outcomes).unwrap_err();
         assert!(err.contains("changed"), "{err}");
+    }
+
+    fn plan_for(records: &[Record], fresh: bool) -> DominatorPlan {
+        let store = DominatorStore::new(analyze(records), Path::new("ks"), BTreeMap::new());
+        DominatorPlan::with_freshness(store, HashMap::from([(PathBuf::from("f.py"), fresh)]))
+    }
+
+    fn m(id: &str) -> Mutant {
+        Mutant {
+            id: id.into(),
+            file: PathBuf::from("f.py"),
+            operator: crate::mutator::Operator::CompareOpSwap,
+            range: ruff_text_size::TextRange::new(0.into(), 1.into()),
+            original: "<".into(),
+            replacement: ">".into(),
+            line: 1,
+            stmt_line: 1,
+            site: None,
+        }
+    }
+
+    /// `d` (K={t1}) dominates `x` (K={t1,t2}); `e` shares `d`'s class.
+    fn lattice() -> Vec<Record> {
+        vec![
+            rec("d", "killed", &["t1"]),
+            rec("e", "killed", &["t1"]),
+            rec("x", "killed", &["t1", "t2"]),
+            rec("s", "survived", &[]),
+        ]
+    }
+
+    #[test]
+    fn analyze_records_each_class_kill_set_sorted() {
+        let a = analyze(&lattice());
+        let x = a.classes.iter().find(|c| c.rep == "x").unwrap();
+        assert_eq!(x.kill_set, vec!["t1", "t2"]);
+    }
+
+    #[test]
+    fn plan_runs_reps_survivors_and_unknowns_and_defers_the_rest() {
+        let p = plan_for(&lattice(), true);
+        assert!(p.runs_first(&m("d")), "dominator rep");
+        assert!(
+            !p.runs_first(&m("e")),
+            "non-rep member of a dominator class"
+        );
+        assert!(!p.runs_first(&m("x")), "dominated class");
+        assert!(p.runs_first(&m("s")), "recorded survivor");
+        assert!(p.runs_first(&m("new")), "not in the store");
+        // A changed file runs everything.
+        let stale = plan_for(&lattice(), false);
+        assert!(stale.runs_first(&m("x")));
+    }
+
+    #[test]
+    fn plan_infers_only_from_a_dominator_killer_in_the_recorded_kill_set() {
+        let p = plan_for(&lattice(), true);
+        let killed = HashMap::from([("d", "t1")]);
+        assert_eq!(
+            p.infer(&m("x"), &killed),
+            Some(("d".to_string(), "t1".to_string()))
+        );
+        assert_eq!(
+            p.infer(&m("e"), &killed),
+            Some(("d".to_string(), "t1".to_string()))
+        );
+        // `d` killed by a test outside `K(x)` (e.g. new since recording).
+        let by_new_test = HashMap::from([("d", "t9")]);
+        assert_eq!(p.infer(&m("x"), &by_new_test), None);
+        // `d` not killed this run.
+        assert_eq!(p.infer(&m("x"), &HashMap::new()), None);
+        // Never for a survivor or an unknown mutant.
+        assert_eq!(p.infer(&m("s"), &killed), None);
+        assert_eq!(p.infer(&m("new"), &killed), None);
+    }
+
+    #[test]
+    fn plan_load_without_a_store_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = DominatorPlan::load(&tmp.path().join("none.json"), std::iter::empty())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("fermut subsume"), "{err}");
     }
 
     #[test]

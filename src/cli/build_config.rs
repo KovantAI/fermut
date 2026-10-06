@@ -82,6 +82,8 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         smart_order: cli_smart_order,
         max_time: cli_max_time,
         record_kill_sets: cli_record_kill_sets,
+        only_dominators,
+        audit_inferred,
         filter: f,
     } = args;
     let cli_runner: Option<RunnerKind> = cli_runner.map(Into::into);
@@ -163,6 +165,18 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         }
         (diff_base, since)
     };
+    // Inferred kills are for full nightly sweeps. A diff-scoped run is the PR
+    // gate, which must score observed verdicts only — refuse even when the
+    // scope came from the config file, where clap's conflict can't see it.
+    if only_dominators && (diff_base.is_some() || since.is_some()) {
+        anyhow::bail!(
+            "`--only-dominators` can't be combined with `--diff-only`/`--since` \
+             (from the CLI or config): a diff-scoped run must score observed verdicts"
+        );
+    }
+    if only_dominators {
+        warn!("`--only-dominators` is experimental: some kills are inferred, not run");
+    }
 
     let project_root =
         crate::runner::find_project_root(&source_root).unwrap_or_else(|| source_root.clone());
@@ -393,6 +407,8 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         baseline_timeout_secs,
         max_time_secs,
         record_kill_sets: cli_record_kill_sets.map(absolutize),
+        only_dominators,
+        inferred_audit_rate: audit_inferred.unwrap_or(crate::config::DEFAULT_CACHE_AUDIT_RATE),
     })
 }
 
@@ -770,6 +786,8 @@ mod tests {
             smart_order: false,
             max_time: None,
             record_kill_sets: None,
+            only_dominators: false,
+            audit_inferred: None,
             cache_audit_rate: None,
             no_cache_audit: false,
             filter,
@@ -1026,6 +1044,20 @@ mod tests {
             "kill_order_path {:?} should resolve under the config dir",
             cfg.kill_order_path
         );
+    }
+
+    #[test]
+    fn only_dominators_refuses_a_diff_scope_from_config() {
+        // clap's conflict can't see `diff_only` in the config file; the PR-gate
+        // refusal must still hold.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "diff_only = \"main\"\n").unwrap();
+        let mut args = run_args(empty_filter());
+        args.only_dominators = true;
+        let err = build_config(tmp.path().to_path_buf(), args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--only-dominators"), "{err}");
     }
 
     #[test]

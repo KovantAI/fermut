@@ -146,6 +146,11 @@ pub struct Config {
     /// `--no-cache`: a cache hit skips the run and records no kill-set. Set via
     /// `--record-kill-sets`.
     pub record_kill_sets: Option<PathBuf>,
+    /// `--only-dominators`: run dominators, infer the kills they imply. See
+    /// [`crate::subsume::DominatorPlan`].
+    pub only_dominators: bool,
+    /// Fraction of inferred kills re-verified (`--audit-inferred`).
+    pub inferred_audit_rate: f64,
 }
 
 /// Default for [`Config::cache_audit_rate`].

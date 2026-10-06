@@ -127,10 +127,15 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         stats: &state.stats,
         killer_hits: &state.killer_hits,
     };
-    let mut outcomes: Vec<MutantOutcome> = evaluate_all(cfg, &ctx, &mutants)?;
+    let (mut outcomes, inferred) = if cfg.only_dominators {
+        evaluate_with_dominators(cfg, &ctx, &mutants)?
+    } else {
+        (evaluate_all(cfg, &ctx, &mutants)?, Vec::new())
+    };
     audit_killer_hits(cfg, &ctx, &mutants, &mut outcomes)?;
+    let audit_failures = audit_inferred(cfg, &ctx, &mutants, &mut outcomes, inferred)?;
 
-    Ok(persist(
+    let (mut report, entry) = persist(
         cfg,
         started,
         state.runner.as_ref(),
@@ -138,7 +143,162 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         &state.stats,
         state.deadline,
         outcomes,
+    );
+    report.inferred_audit_failures = audit_failures;
+    Ok((report, entry))
+}
+
+/// `--only-dominators` (see [`crate::subsume::DominatorPlan`]): run the
+/// mutants the dominator store can't vouch for, infer the kills a dominator
+/// kill implies, then run whatever couldn't be inferred. Returns the outcomes
+/// in `mutants` order plus the inferred kills, for [`audit_inferred`].
+fn evaluate_with_dominators(
+    cfg: &Config,
+    ctx: &EvalCtx,
+    mutants: &[Arc<Mutant>],
+) -> Result<(Vec<MutantOutcome>, Vec<KillerHit>)> {
+    let files: std::collections::BTreeSet<&Path> =
+        mutants.iter().map(|m| m.file.as_path()).collect();
+    let plan = crate::subsume::DominatorPlan::load(&cfg.dominators_path, files)?;
+    let (first, deferred): (Vec<usize>, Vec<usize>) =
+        (0..mutants.len()).partition(|&i| plan.runs_first(&mutants[i]));
+    info!(
+        run_first = first.len(),
+        deferred = deferred.len(),
+        fresh_files = plan.fresh_files(),
+        "--only-dominators: running dominators and unvouched mutants first"
+    );
+
+    let mut slots: Vec<Option<MutantOutcome>> = vec![None; mutants.len()];
+    let pick =
+        |idx: &[usize]| -> Vec<Arc<Mutant>> { idx.iter().map(|&i| mutants[i].clone()).collect() };
+    for (&i, o) in first.iter().zip(evaluate_all(cfg, ctx, &pick(&first))?) {
+        slots[i] = Some(o);
+    }
+
+    // Observed kills only: an inferred kill never seeds another inference.
+    let killed: HashMap<String, String> = slots
+        .iter()
+        .flatten()
+        .filter_map(|o| match o {
+            MutantOutcome::Killed {
+                mutant,
+                killer: Some(t),
+                inferred_from: None,
+            } => Some((mutant.id.clone(), t.clone())),
+            _ => None,
+        })
+        .collect();
+    let killed: HashMap<&str, &str> = killed
+        .iter()
+        .map(|(m, t)| (m.as_str(), t.as_str()))
+        .collect();
+
+    // Deferred mutants still pass through the filter chain: a mutant the
+    // chain would skip is skipped, never inferred.
+    let pool = build_pool(cfg.jobs)?;
+    let prechecked: Vec<Option<MutantOutcome>> = pool.install(|| {
+        deferred
+            .par_iter()
+            .map(|&i| precheck(ctx, &mutants[i]))
+            .collect()
+    });
+    let mut inferred = Vec::new();
+    let mut second = Vec::new();
+    for (&i, skip) in deferred.iter().zip(prechecked) {
+        let m = &mutants[i];
+        if let Some(skip) = skip {
+            slots[i] = Some(skip);
+        } else if let Some((rep, t)) = plan.infer(m, &killed) {
+            slots[i] = Some(MutantOutcome::killed_inferred(m.clone(), t.clone(), rep));
+            inferred.push(KillerHit {
+                mutant: m.clone(),
+                killer: t,
+            });
+        } else {
+            second.push(i);
+        }
+    }
+    info!(
+        inferred = inferred.len(),
+        rerun = second.len(),
+        "--only-dominators: inferred kills; running the rest"
+    );
+    for (&i, o) in second
+        .iter()
+        .zip(evaluate_all_with(cfg, &pick(&second), |m| {
+            evaluate_admitted(ctx, m)
+        })?)
+    {
+        slots[i] = Some(o);
+    }
+    Ok((
+        slots
+            .into_iter()
+            .map(|o| o.expect("every mutant gets an outcome"))
+            .collect(),
+        inferred,
     ))
+}
+
+/// Re-run a sample of inferred kills against their killing test alone. A kill
+/// that doesn't reproduce means the recorded kill-sets no longer describe the
+/// suite (an edited test, a flaky one): the mutant is re-run fully, its real
+/// outcome replaces the inferred one, and the failure is counted so `fermut
+/// run` exits non-zero. Returns the number of failures.
+fn audit_inferred(
+    cfg: &Config,
+    ctx: &EvalCtx,
+    mutants: &[Arc<Mutant>],
+    outcomes: &mut [MutantOutcome],
+    inferred: Vec<KillerHit>,
+) -> Result<usize> {
+    let picked = sample_for_audit(inferred, cfg.inferred_audit_rate);
+    if picked.is_empty() {
+        return Ok(0);
+    }
+    if ctx.deadline.is_some_and(|d| Instant::now() >= d) {
+        warn!(
+            pending = picked.len(),
+            "inferred-kill audit skipped: --max-time budget exhausted"
+        );
+        return Ok(0);
+    }
+    let pool = build_pool(cfg.jobs)?;
+    let failed: Vec<MutantOutcome> = pool.install(|| {
+        picked
+            .par_iter()
+            .filter_map(|hit| {
+                let verdict = match ctx.runner.audit(&hit.mutant, &hit.killer) {
+                    // The runner can't audit (unittest): nothing to compare.
+                    Ok(None) => return None,
+                    Ok(Some(v)) => v,
+                    Err(e) => MutantOutcome::error(hit.mutant.clone(), e.to_string()),
+                };
+                if matches!(verdict, MutantOutcome::Killed { .. }) {
+                    return None;
+                }
+                warn!(
+                    mutant = %hit.mutant.id,
+                    file = %hit.mutant.file.display(),
+                    line = hit.mutant.line,
+                    killer = %hit.killer,
+                    audit = verdict.status_label(),
+                    "inferred kill did not reproduce against its killing test; \
+                     re-running the mutant (re-record kill-sets and re-run `fermut subsume`)"
+                );
+                Some(evaluate_admitted(ctx, &hit.mutant))
+            })
+            .collect()
+    });
+    let n = failed.len();
+    for outcome in failed {
+        if let Some(i) = mutants.iter().position(|m| m.id == outcome.mutant().id) {
+            outcomes[i] = outcome;
+        }
+    }
+    info!(audited = picked.len(), failed = n, "inferred-kill audit");
+    Ok(n)
 }
 
 /// Read-only state assembled before the testing phase and borrowed by every
@@ -385,13 +545,23 @@ fn evaluate_all(
     ctx: &EvalCtx,
     mutants: &[Arc<Mutant>],
 ) -> Result<Vec<MutantOutcome>> {
+    evaluate_all_with(cfg, mutants, |m| evaluate(ctx, m))
+}
+
+/// [`evaluate_all`] with a custom per-mutant step: parallel, in input order,
+/// with the progress bar.
+fn evaluate_all_with(
+    cfg: &Config,
+    mutants: &[Arc<Mutant>],
+    step: impl Fn(&Arc<Mutant>) -> MutantOutcome + Sync,
+) -> Result<Vec<MutantOutcome>> {
     let progress = make_progress_bar(mutants.len() as u64);
     let pool = build_pool(cfg.jobs)?;
     let outcomes: Vec<MutantOutcome> = pool.install(|| {
         mutants
             .par_iter()
             .map(|m| {
-                let outcome = evaluate(ctx, m);
+                let outcome = step(m);
                 if let Some(pb) = &progress {
                     pb.inc(1);
                 }
@@ -460,6 +630,12 @@ struct EvalCtx<'a> {
 }
 
 fn evaluate(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
+    precheck(ctx, mutant).unwrap_or_else(|| evaluate_admitted(ctx, mutant))
+}
+
+/// The time budget and the filter chain: `Some(skipped)` when `mutant` must
+/// not be tested, `None` when it is admitted.
+fn precheck(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> Option<MutantOutcome> {
     // Testing-phase budget check first, before the filter chain or the runner.
     // Past the deadline every remaining mutant is a cheap skip — including the
     // ty pre-filter, the dominant per-mutant cost — so the wall-clock ceiling
@@ -467,7 +643,7 @@ fn evaluate(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
     // completion; only not-yet-started ones short-circuit here.
     if let Some(deadline) = ctx.deadline {
         if Instant::now() >= deadline {
-            return MutantOutcome::skipped(mutant.clone(), TIME_BUDGET_FILTER);
+            return Some(MutantOutcome::skipped(mutant.clone(), TIME_BUDGET_FILTER));
         }
     }
 
@@ -476,13 +652,17 @@ fn evaluate(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
     for f in ctx.filters {
         match f.admits(mutant) {
             Ok(true) => continue,
-            Ok(false) => return MutantOutcome::skipped(mutant.clone(), f.name()),
+            Ok(false) => return Some(MutantOutcome::skipped(mutant.clone(), f.name())),
             Err(e) => {
                 warn!(filter = f.name(), error = %e, "filter errored; admitting mutant");
             }
         }
     }
+    None
+}
 
+/// Cache lookup, then a real run, for a mutant the filter chain admitted.
+fn evaluate_admitted(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
     let scope = compute_mutant_scope(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant);
     let identity_hash = mutant_identity_hash(ctx.cfg, mutant, ctx.file_hashes, ctx.scope_maps);
 
@@ -1524,6 +1704,8 @@ mod tests {
             kill_order_path: PathBuf::from(".fermut/kill-order.json"),
             dominators_path: PathBuf::from(".fermut/dominators.json"),
             operator_profile: crate::config::OperatorProfile::Default,
+            only_dominators: false,
+            inferred_audit_rate: 0.0,
             history: false,
             history_path: PathBuf::from(".fermut/history.jsonl"),
             sample_ratio: None,

@@ -322,6 +322,8 @@ mod chain_order_tests {
             kill_order_path: PathBuf::from(".fermut/kill-order.json"),
             dominators_path: PathBuf::from(".fermut/dominators.json"),
             operator_profile: crate::config::OperatorProfile::Default,
+            only_dominators: false,
+            inferred_audit_rate: 0.0,
             history: false,
             history_path: PathBuf::from(".fermut/history.jsonl"),
             sample_ratio: None,

@@ -69,13 +69,16 @@ impl Report {
                     MutantOutcome::Error { .. } => "error",
                     MutantOutcome::Equivalent { .. } => "equivalent",
                 };
-                let label = format!(
+                let mut label = format!(
                     "line {} · {} · <code>{}</code> → <code>{}</code>",
                     m.line,
                     m.operator.name(),
                     html_escape(&m.original),
                     html_escape(&m.replacement)
                 );
+                if o.inferred_from().is_some() {
+                    label.push_str(" · <i>inferred from a dominator, not run</i>");
+                }
                 body.push_str(&format!(
                     "<li class='m {cls}'><span class='tag'>{}</span> {label}",
                     o.status_label()

@@ -49,6 +49,11 @@ pub enum MutantOutcome {
         /// verdict cache (see `crate::cache`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         killer: Option<String>,
+        /// Set when the kill was inferred, not observed (`--only-dominators`):
+        /// the id of the dominator whose killing test `killer` is in this
+        /// mutant's recorded kill-set. Counted in the score, reported apart.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inferred_from: Option<String>,
     },
     Survived {
         mutant: Arc<Mutant>,
@@ -85,6 +90,7 @@ impl MutantOutcome {
         Self::Killed {
             mutant: m.into(),
             killer: None,
+            inferred_from: None,
         }
     }
     /// `Killed` with the killing test's node id recorded (`None` = unknown).
@@ -93,6 +99,24 @@ impl MutantOutcome {
         Self::Killed {
             mutant: m.into(),
             killer,
+            inferred_from: None,
+        }
+    }
+    /// `Killed` by inference (`--only-dominators`): `killer` killed dominator
+    /// `from` this run and is in the mutant's recorded kill-set.
+    #[must_use]
+    pub fn killed_inferred(m: impl Into<Arc<Mutant>>, killer: String, from: String) -> Self {
+        Self::Killed {
+            mutant: m.into(),
+            killer: Some(killer),
+            inferred_from: Some(from),
+        }
+    }
+    /// The dominator a `Killed` outcome was inferred from, if it was.
+    pub fn inferred_from(&self) -> Option<&str> {
+        match self {
+            Self::Killed { inferred_from, .. } => inferred_from.as_deref(),
+            _ => None,
         }
     }
     /// The killing test's node id, for a `Killed` outcome whose runner knew it.
@@ -169,6 +193,10 @@ pub struct Counts {
     pub errored: usize,
     #[serde(default)]
     pub equivalent: usize,
+    /// Of `killed`, how many were inferred rather than observed
+    /// (`--only-dominators`).
+    #[serde(default)]
+    pub inferred_killed: usize,
 }
 
 impl Counts {
@@ -196,6 +224,19 @@ impl Counts {
         }
         let detected = self.killed + self.timed_out;
         Some(100.0 * (detected as f64) / (scored as f64))
+    }
+
+    /// Score over observed verdicts only (inferred kills dropped from both
+    /// sides). `None` when nothing was inferred, or nothing was observed.
+    pub fn observed_score_opt(&self) -> Option<f64> {
+        if self.inferred_killed == 0 {
+            return None;
+        }
+        let scored = self.scored() - self.inferred_killed;
+        (scored > 0).then(|| {
+            let detected = self.killed - self.inferred_killed + self.timed_out;
+            100.0 * detected as f64 / scored as f64
+        })
     }
 
     /// Percent score with the historical empty-denominator floor of `100.0`.
@@ -257,6 +298,19 @@ pub struct Summary {
     /// the score still counts every survivor.
     #[serde(default)]
     pub survivor_targets: usize,
+    /// Of `killed`, how many were inferred from a dominator rather than run
+    /// (`--only-dominators`). Absent when zero.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub inferred_killed: usize,
+    /// The score over observed verdicts only: inferred kills removed from
+    /// both numerator and denominator. Present only when `inferred_killed > 0`,
+    /// so an inferred score is never read without its observed counterpart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_score: Option<f64>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Per-operator verdict breakdown for one run. Only real verdicts are counted;
@@ -298,6 +352,11 @@ pub struct Report {
     /// `summary.dominator_score`. Not read back from a written report.
     #[serde(skip)]
     pub dominator_score: Option<f64>,
+    /// Inferred kills (`--only-dominators`) that the audit re-ran and that
+    /// did not die. Non-zero fails `fermut run`. Not read back from a
+    /// written report.
+    #[serde(skip)]
+    pub inferred_audit_failures: usize,
 }
 
 // Hand-written so JSON output carries a derived `summary` object alongside
@@ -325,6 +384,7 @@ impl Report {
         Self {
             outcomes,
             dominator_score: None,
+            inferred_audit_failures: 0,
         }
     }
 
@@ -343,6 +403,8 @@ impl Report {
             scored: c.scored(),
             dominator_score: self.dominator_score,
             survivor_targets: fold::fold(&fold::survivors(&self.outcomes)).len(),
+            inferred_killed: c.inferred_killed,
+            observed_score: c.observed_score_opt().map(round1),
         }
     }
 
@@ -391,7 +453,12 @@ impl Report {
         let mut c = Counts::default();
         for o in &self.outcomes {
             match o {
-                MutantOutcome::Killed { .. } => c.killed += 1,
+                MutantOutcome::Killed { inferred_from, .. } => {
+                    c.killed += 1;
+                    if inferred_from.is_some() {
+                        c.inferred_killed += 1;
+                    }
+                }
                 MutantOutcome::Survived { .. } => c.survived += 1,
                 MutantOutcome::TimedOut { .. } => c.timed_out += 1,
                 MutantOutcome::Skipped { .. } => c.skipped += 1,
@@ -512,6 +579,17 @@ impl Report {
             c.errored,
             c.score_label()
         );
+        // Inferred kills (`--only-dominators`) are in `killed` and the score;
+        // never print that score without the observed-only one beside it.
+        if c.inferred_killed > 0 {
+            let observed = c
+                .observed_score_opt()
+                .map_or_else(|| "N/A".to_string(), |s| format!("{s:.1}%"));
+            println!(
+                "{} of the kills inferred from dominators, not run  | observed-only score: {observed}",
+                c.inferred_killed
+            );
+        }
         // Flag operators that produced at least as many survivors as kills:
         // they cost test time for little signal, and are the usual `skip_ops`
         // candidates. Only shown when there is something to act on.
@@ -631,6 +709,30 @@ mod tests {
 
     fn report(outcomes: Vec<MutantOutcome>) -> Report {
         Report::new(outcomes)
+    }
+
+    #[test]
+    fn inferred_kills_count_in_the_score_and_get_an_observed_score() {
+        let r = report(vec![
+            MutantOutcome::killed(make_mutant()),
+            MutantOutcome::killed_inferred(make_mutant(), "t".into(), "d".into()),
+            MutantOutcome::killed_inferred(make_mutant(), "t".into(), "d".into()),
+            MutantOutcome::survived(make_mutant()),
+        ]);
+        let s = r.summary();
+        assert_eq!(s.killed, 3);
+        assert_eq!(s.inferred_killed, 2);
+        assert_eq!(s.mutation_score, 75.0);
+        // Observed only: 1 killed of 2 run.
+        assert_eq!(s.observed_score, Some(50.0));
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["observed_score"], 50.0);
+        // Without inference neither field appears.
+        let plain =
+            serde_json::to_value(report(vec![MutantOutcome::killed(make_mutant())]).summary())
+                .unwrap();
+        assert!(plain.get("inferred_killed").is_none());
+        assert!(plain.get("observed_score").is_none());
     }
 
     #[test]

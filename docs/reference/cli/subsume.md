@@ -69,7 +69,8 @@ the JSON `summary`, but only if the store still describes the run:
 
 - every scored mutant's file has the AST hash it had when `subsume` ran
   (comments and formatting don't count), and
-- every killed or timed-out mutant has a class in the store.
+- every killed mutant has a class in the store (timeouts without one are
+  skipped, as `subsume` skips them).
 
 Otherwise the field is left out. `-v` logs the reason. The score uses the
 current run's verdicts: dominator classes with a member killed this run,
@@ -81,11 +82,56 @@ The check is per file. Mutant ids include byte offsets, so an edit above a
 function already renames its mutants, and a per-function check would not
 save their classes.
 
+## `fermut run --only-dominators` (experimental)
+
+For full nightly sweeps. Instead of running every mutant, `run` uses the
+store to skip mutants whose kill it can prove:
+
+1. **Run first:** each dominator class's representative, plus every mutant
+   the store can't vouch for: one whose file changed since `subsume`, one
+   not in the store, and one that wasn't killed when recorded (a survivor,
+   timeout or error).
+2. **Infer:** a remaining mutant `m` counts as killed, without running, when
+   a dominator of its class was killed this run by a test `t`, and `t` is in
+   `m`'s recorded kill-set. `m` is unchanged and `t` failed on it when
+   recorded, so `t` fails on it again. This is the same bet the killer-keyed
+   cache makes.
+3. **Run the rest:** mutants with no such kill.
+4. **Audit:** re-run a sample of inferred kills (`--audit-inferred <RATE>`,
+   default 0.05, at least one) against their test alone. If one doesn't die,
+   its real outcome replaces the inferred one and `run` exits non-zero: the
+   store is stale.
+
+The filter chain still applies, so a mutant the chain would skip is skipped,
+never inferred.
+
+Inferred kills count in `killed` and the score. The summary also carries
+`inferred_killed` and `observed_score` (the score with inferred kills removed
+from both sides), and the human summary prints both. The HTML report marks
+each inferred kill.
+
+**What it can't see:** a test edited so it still fails on the dominator but
+no longer on `m`. A test that stopped failing altogether can't cause a false
+kill, because it must kill the dominator in this run. The partial case is
+wrong until you re-record, and the audit samples for it. Re-record on a
+schedule (e.g. weekly), and after test refactors.
+
+Measured on pyjwt (6,555 mutants, coverage selection, no cache): the
+recording run took 236 s, a normal run 62 s, and `--only-dominators` 44 s.
+1,381 of 1,521 kills were inferred, and every verdict matched the normal run.
+Auditing all 1,381 inferred kills found no failures. Most of the remaining
+time goes to the 360 survivors, which always run.
+
+Refused with `--diff-only` / `--since` (also when set in config) and with
+`--record-kill-sets`. A diff-scoped run is the PR gate, and it scores observed
+verdicts only. The flag also changes `config_hash`, so `trend` shows a config
+change rather than a score move.
+
 ## `dominators.json`
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "generated_at": "2026-10-06T19:37:29Z",
   "kill_sets": "kill-sets.jsonl",
   "stats": {
@@ -96,7 +142,8 @@ save their classes.
   },
   "classes": [
     { "rep": "<mutant id>", "members": ["<mutant id>", "..."],
-      "kill_set_size": 1, "dominator": true }
+      "kill_set_size": 1, "kill_set": ["tests/test_x.py::test_y"],
+      "dominator": true }
   ],
   "file_hashes": { "/abs/path/jwt/api_jws.py": "<ast hash>" }
 }

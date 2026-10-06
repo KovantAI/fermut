@@ -3,9 +3,12 @@
 #
 # env: BOOL_<name>  every boolean input, checked to be exactly true/false
 #      FAIL_UNDER   optional score threshold
+#      REGRESSION   optional regression threshold in points (trend/ only)
+#      MAX_ERRORED  optional errored-mutant ceiling (trend/ only)
 #      WD           working directory (optional)
 #      SHARD        optional "i/n"
 #      ARTIFACT     report artifact name
+#      BRANCH       default branch, when the action needs one (trend/ only)
 # out: out, out_abs, artifact
 source "$(dirname "$0")/lib.sh"
 
@@ -14,6 +17,16 @@ for var in $(compgen -v BOOL_ || true); do
   check_bool "${name//_/-}" "${!var}"
 done
 check_fail_under "${FAIL_UNDER:-}"
+if [ -n "${REGRESSION:-}" ] && ! [[ "$REGRESSION" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+  die "fail-on-regression must be a non-negative number of score points, got \"$REGRESSION\"."
+fi
+if [ -n "${MAX_ERRORED:-}" ] && ! [[ "$MAX_ERRORED" =~ ^[0-9]+$ ]]; then
+  die "max-errored must be a non-negative integer, got \"$MAX_ERRORED\"."
+fi
+
+if [ -n "${BRANCH+x}" ] && [ -z "$BRANCH" ]; then
+  die "Cannot infer the default branch on a ${GITHUB_EVENT_NAME:-unknown} event. Set default-branch."
+fi
 
 if [ -n "${WD:-}" ] && [ ! -d "$WD" ]; then
   die "working-directory \"$WD\" does not exist. Did you forget actions/checkout?"

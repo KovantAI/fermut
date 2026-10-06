@@ -41,6 +41,10 @@ pub struct FileConfig {
     /// historical-killer lifted first. Default true; CLI `--no-smart-order`
     /// overrides.
     pub smart_order: Option<bool>,
+    /// Load fermut's reporter plugin into per-mutant pytest runs for exact
+    /// outcomes (import breaks, the killing test). Default true; CLI
+    /// `--no-pytest-plugin` overrides.
+    pub pytest_plugin: Option<bool>,
     /// Path to the advisory kill-order sidecar. Default
     /// `<artifact_root>/.fermut/kill-order.json`; relative paths resolve
     /// against the config file's directory.

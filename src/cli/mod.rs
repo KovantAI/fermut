@@ -300,6 +300,15 @@ pub(crate) struct RunConfigArgs {
     #[arg(long, conflicts_with = "no_smart_order")]
     pub smart_order: bool,
 
+    /// Don't load fermut's reporter plugin into per-mutant pytest runs. By
+    /// default each run gets `-p _fermut_reporter` (injected via PYTHONPATH;
+    /// nothing is installed in your venv), which reports whether a test module
+    /// or conftest failed to import and which test killed the mutant. Without
+    /// it fermut infers both from the exit code and pytest's output. Also
+    /// settable via `pytest_plugin = false`.
+    #[arg(long)]
+    pub no_pytest_plugin: bool,
+
     /// Wall-clock ceiling (seconds) on the per-mutant testing phase. When
     /// set, mutants are evaluated highest-value first (covered mutants
     /// before uncovered) and, once the deadline passes, every mutant not

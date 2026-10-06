@@ -80,6 +80,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         baseline_timeout: cli_baseline_timeout,
         no_smart_order: cli_no_smart_order,
         smart_order: cli_smart_order,
+        no_pytest_plugin: cli_no_pytest_plugin,
         max_time: cli_max_time,
         filter: f,
     } = args;
@@ -271,6 +272,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     // `smart_order = false` remain the only off switches. The sidecar lives
     // beside cache/history.
     let smart_order = resolve_smart_order(cli_no_smart_order, cli_smart_order, file.smart_order);
+    let pytest_plugin = !cli_no_pytest_plugin && file.pytest_plugin.unwrap_or(true);
     let kill_order_path = file
         .kill_order_path
         .clone()
@@ -363,6 +365,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         cache_path,
         cache_audit_rate,
         smart_order,
+        pytest_plugin,
         kill_order_path,
         history,
         history_path,
@@ -754,6 +757,7 @@ mod tests {
             baseline_timeout: None,
             no_smart_order: false,
             smart_order: false,
+            no_pytest_plugin: false,
             max_time: None,
             cache_audit_rate: None,
             no_cache_audit: false,
@@ -1030,6 +1034,22 @@ mod tests {
         args.no_smart_order = true;
         let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
         assert!(!cfg.smart_order, "--no-smart-order wins over config on");
+    }
+
+    #[test]
+    fn pytest_plugin_defaults_on_and_both_switches_disable_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = build_config(tmp.path().to_path_buf(), run_args(empty_filter())).unwrap();
+        assert!(cfg.pytest_plugin, "the reporter plugin is on by default");
+
+        let mut args = run_args(empty_filter());
+        args.no_pytest_plugin = true;
+        let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
+        assert!(!cfg.pytest_plugin, "--no-pytest-plugin disables it");
+
+        std::fs::write(tmp.path().join("fermut.toml"), "pytest_plugin = false\n").unwrap();
+        let cfg = build_config(tmp.path().to_path_buf(), run_args(empty_filter())).unwrap();
+        assert!(!cfg.pytest_plugin, "pytest_plugin = false disables it");
     }
 
     #[test]

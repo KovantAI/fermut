@@ -13,6 +13,7 @@
 pub(crate) mod exit;
 pub(crate) mod process_group;
 pub mod pytest;
+pub(crate) mod pytest_result;
 pub mod python;
 pub mod unittest;
 
@@ -298,6 +299,7 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
             // Only coverage-selected runs can name a killer the cache can use.
             learn_killer: cfg.cache && cfg.coverage.is_some(),
             key_base: key_base.clone(),
+            plugin: cfg.pytest_plugin,
         }))
     };
     match cfg.runner {
@@ -324,6 +326,10 @@ pub(crate) struct Mirror {
     pub root: PathBuf,
     pub tests: PathBuf,
     pub project_root: PathBuf,
+    /// Directory beside (not inside) the project copy holding fermut's pytest
+    /// reporter plugin and its per-run result files. Kept out of `root` so it
+    /// can't be collected, imported by the project, or swept into a test path.
+    pub plugin_dir: PathBuf,
 }
 
 /// Build a mirror at `tests`'s project root, drop it, return wall-clock
@@ -351,11 +357,18 @@ impl Mirror {
         copy_dir_all(&project_root, &root, mode)?;
         let tests_rel = tests.strip_prefix(&project_root).unwrap_or(tests);
         let tests_in_mirror = root.join(tests_rel);
+        let plugin_dir = workdir.path().join("fermut-plugin");
+        std::fs::create_dir_all(&plugin_dir)
+            .with_context(|| format!("mkdir -p {}", plugin_dir.display()))?;
+        let module = plugin_dir.join(format!("{}.py", pytest_result::REPORTER_MODULE));
+        std::fs::write(&module, pytest_result::REPORTER_SOURCE)
+            .with_context(|| format!("writing {}", module.display()))?;
         Ok(Self {
             _workdir: workdir,
             root,
             tests: tests_in_mirror,
             project_root,
+            plugin_dir,
         })
     }
 }

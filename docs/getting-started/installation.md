@@ -113,7 +113,7 @@ nothing in the project venv is reachable.
   — past the point where mutation testing earns its keep on any real
   PR loop. `pytest-cov` specifically is what tags each line with a
   pytest nodeID; plain `coverage run` cannot
-  ([why](../guides/coverage.md#generate-coveragejson-with-per-test-contexts)).
+  ([why](../guides/coverage.md#generate-coverage-with-per-test-contexts)).
   Generate the coverage data the easy way with
   [`fermut coverage`](../reference/cli/coverage.md) — it sets the
   context flag for you and refreshes incrementally as tests change.

@@ -193,7 +193,7 @@ The most common surprises, in roughly the order people hit them:
   --context=test` (a static label, not per-test contexts) or with
   `dynamic_context = test_function` (dotted Python names, not pytest
   nodeIDs). Regenerate with `pytest --cov=src --cov-context=test`.
-  See [Coverage](../guides/coverage.md#generate-coveragejson-with-per-test-contexts).
+  See [Coverage](../guides/coverage.md#generate-coverage-with-per-test-contexts).
 
 For everything else, see the
 [troubleshooting reference](../reference/troubleshooting/index.md).

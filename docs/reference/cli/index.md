@@ -21,6 +21,7 @@ fermut [-v|-vv|-q] <subcommand> [flags...]
 | Subcommand                          | What it does                                                                  |
 |-------------------------------------|-------------------------------------------------------------------------------|
 | **[`init`](init.md)**               | Detect project layout and emit a starter `fermut.toml` (or `[tool.fermut]`).   |
+| **[`baseline`](baseline.md)**       | Day-one graded verdict: line coverage vs mutation score and the gap.           |
 | **[`run`](run.md)**                 | Generate mutants, run tests against each, report killed / survived.            |
 | **[`coverage`](coverage.md)**       | Generate / incrementally refresh the `.coverage` DB for per-mutant selection.  |
 | **[`list`](list.md)**               | Enumerate mutations without running tests.                                     |
@@ -36,6 +37,7 @@ fermut [-v|-vv|-q] <subcommand> [flags...]
 | **[`doctor`](doctor.md)**           | Diagnose environment + config.                                                 |
 | **[`pr-comment`](pr-comment.md)**   | Post (and stickily update) a Markdown report to a PR.                          |
 | **[`clean`](clean.md)**             | Wipe the result cache (preserves history).                                     |
+| **[`install-skills`](install-skills.md)** | Install the bundled agent skill into `.claude/skills/` (or `.agents/skills/`). |
 | **[`migrate`](migrate.md)**         | Translate a mutmut / cosmic-ray config into `[tool.fermut]`.                   |
 | **[`mcp`](mcp.md)**                 | Run a Model Context Protocol server over stdio for agent integration.          |
 | **[`completions`](completions.md)** | Print a shell-completion script.                                               |

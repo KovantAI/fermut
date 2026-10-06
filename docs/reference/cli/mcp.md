@@ -29,6 +29,7 @@ exposes the same JSON shapes the CLI subcommands emit.
 | Tool                     | Mirrors                              | Arguments                                                        |
 |--------------------------|--------------------------------------|------------------------------------------------------------------|
 | `fermut_doctor`          | [`doctor`](doctor.md)                | `path?`                                                          |
+| `fermut_baseline`        | [`baseline`](baseline.md)            | `path?`, `full?`, `sample?`, `top?`                              |
 | `fermut_run`             | [`run`](run.md)                      | `path?`, `tests?`, `coverage?`, `since?`, `diff_only?`, `jobs?`, `timeout?`, `max_time?`, `python?`, `report_path?` |
 | `fermut_next`            | [`next`](next.md)                    | `report` (required), `limit?`, `max_tokens?`                     |
 | `fermut_explain`         | [`explain`](explain.md)              | `report` (required), `target` (required), `context?`, `tests?`, `coverage?` |
@@ -45,7 +46,9 @@ coverage / ty early.
 `fermut_run` writes its JSON report (default `<project>/.fermut/last.json`)
 and appends to the history log, so a typical loop is:
 
-1. `fermut_doctor` → confirm the environment is ready.
+1. `fermut_doctor` → confirm the environment is ready. On a new project,
+   `fermut_baseline` instead gives a graded first look (it runs doctor
+   itself).
 2. `fermut_run` → mutate, get the summary + `report_path`.
 3. `fermut_next` on that `report_path` → the highest-value survivor to fix.
 4. `fermut_explain` on that survivor → hint + killing-test skeleton.
@@ -84,5 +87,7 @@ data and can recover, rather than treating it as a transport fault.
 
 ## Configuring a client
 
-See **[Integrations → MCP](../../guides/integrations.md#mcp-server)** for a
-Claude Code / Cursor setup snippet.
+The [Claude Code plugin](../../guides/claude-code-skill.md#option-2-the-claude-code-plugin)
+registers the server automatically. See
+**[Integrations → MCP](../../guides/integrations.md#mcp-server)** for a
+Claude Code / Cursor setup snippet to register it by hand.

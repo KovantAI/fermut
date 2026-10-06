@@ -61,6 +61,13 @@ pub struct Config {
     /// verdict, only speed. Default on; disable with `--no-smart-order` /
     /// `smart_order = false`.
     pub smart_order: bool,
+    /// Fraction (0.0–1.0) of killer-keyed cache hits re-run each run against
+    /// just the recorded killing test, to catch flaky or order-dependent kills
+    /// (at least one hit is audited whenever any occur and the rate is > 0). A
+    /// disagreement drops the entry and re-runs the mutant fully. `0.0`
+    /// disables the audit. Default [`DEFAULT_CACHE_AUDIT_RATE`]; set via
+    /// `--cache-audit-rate` / `--no-cache-audit` / `cache_audit_rate`.
+    pub cache_audit_rate: f64,
     /// Path to the advisory kill-order sidecar (`.fermut/kill-order.json`).
     pub kill_order_path: PathBuf,
     /// When true, each `fermut run` appends a summary line to `history_path`.
@@ -124,6 +131,9 @@ pub struct Config {
     /// whole catalogue. Set via `--max-time`.
     pub max_time_secs: Option<u64>,
 }
+
+/// Default for [`Config::cache_audit_rate`].
+pub const DEFAULT_CACHE_AUDIT_RATE: f64 = 0.05;
 
 /// Cache-key granularity for source-file identity. See `Config::cache_scope`.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Deserialize)]

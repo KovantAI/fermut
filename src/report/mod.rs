@@ -42,6 +42,12 @@ pub enum ReportFormat {
 pub enum MutantOutcome {
     Killed {
         mutant: Arc<Mutant>,
+        /// Node id of the test that killed the mutant, when the runner could
+        /// tell (pytest with coverage selection). Additive optional field —
+        /// absent from the JSON when unknown. Also keys the killer-scoped
+        /// verdict cache (see `crate::cache`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        killer: Option<String>,
     },
     Survived {
         mutant: Arc<Mutant>,
@@ -75,7 +81,25 @@ impl MutantOutcome {
     // bump rather than a deep copy of the four heap fields.
     #[must_use]
     pub fn killed(m: impl Into<Arc<Mutant>>) -> Self {
-        Self::Killed { mutant: m.into() }
+        Self::Killed {
+            mutant: m.into(),
+            killer: None,
+        }
+    }
+    /// `Killed` with the killing test's node id recorded (`None` = unknown).
+    #[must_use]
+    pub fn killed_by(m: impl Into<Arc<Mutant>>, killer: Option<String>) -> Self {
+        Self::Killed {
+            mutant: m.into(),
+            killer,
+        }
+    }
+    /// The killing test's node id, for a `Killed` outcome whose runner knew it.
+    pub fn killer(&self) -> Option<&str> {
+        match self {
+            Self::Killed { killer, .. } => killer.as_deref(),
+            _ => None,
+        }
     }
     #[must_use]
     pub fn survived(m: impl Into<Arc<Mutant>>) -> Self {
@@ -110,7 +134,7 @@ impl MutantOutcome {
 
     pub fn mutant(&self) -> &Mutant {
         match self {
-            Self::Killed { mutant }
+            Self::Killed { mutant, .. }
             | Self::Survived { mutant }
             | Self::TimedOut { mutant }
             | Self::Skipped { mutant, .. }

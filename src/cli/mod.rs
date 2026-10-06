@@ -184,6 +184,19 @@ pub(crate) struct RunConfigArgs {
     #[arg(long)]
     pub cache_path: Option<PathBuf>,
 
+    /// Fraction (0.0–1.0) of killer-keyed cache hits to re-verify each run.
+    /// A cached kill by test `T` is reused across edits to *other* tests; the
+    /// audit re-runs a sample of those against `T` alone and re-tests any
+    /// that no longer die (flaky or order-dependent kills). At least one hit
+    /// is audited when any occur. Default 0.05. Also `cache_audit_rate`.
+    #[arg(long, value_name = "RATE", value_parser = build_config::parse_audit_rate)]
+    pub cache_audit_rate: Option<f64>,
+
+    /// Disable the killer-hit audit (same as `--cache-audit-rate 0`), e.g.
+    /// for deterministic benchmarking.
+    #[arg(long, conflicts_with = "cache_audit_rate")]
+    pub no_cache_audit: bool,
+
     /// Disable the run-history log (`.fermut/history.jsonl`).
     /// History is what `fermut trend` reads.
     #[arg(long)]
@@ -596,6 +609,25 @@ mod tests {
         );
         // --no-fail alone parses fine.
         assert!(Cli::try_parse_from(["fermut", "run", "--no-fail"]).is_ok());
+    }
+
+    #[test]
+    fn cache_audit_rate_is_a_fraction_and_conflicts_with_no_cache_audit() {
+        use clap::Parser;
+        let parse = |args: &[&str]| {
+            let mut v = vec!["fermut", "run", "."];
+            v.extend_from_slice(args);
+            Cli::try_parse_from(v)
+        };
+        assert!(parse(&["--cache-audit-rate", "0"]).is_ok());
+        assert!(parse(&["--cache-audit-rate", "0.25"]).is_ok());
+        assert!(parse(&["--cache-audit-rate", "1"]).is_ok());
+        assert!(parse(&["--cache-audit-rate", "1.5"]).is_err());
+        assert!(parse(&["--cache-audit-rate", "-0.1"]).is_err());
+        assert!(parse(&["--cache-audit-rate", "NaN"]).is_err());
+        assert!(parse(&["--cache-audit-rate", "lots"]).is_err());
+        assert!(parse(&["--no-cache-audit"]).is_ok());
+        assert!(parse(&["--no-cache-audit", "--cache-audit-rate", "0.5"]).is_err());
     }
 
     #[test]

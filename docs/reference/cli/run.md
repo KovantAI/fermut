@@ -18,6 +18,8 @@ fermut run [PATH] [flags...]
 | `--pytest-arg <ARG>`        | none, repeatable                 | Forward arbitrary args to pytest.                                   |
 | `--no-cache`                | cache on                         | Disable the result cache.                                           |
 | `--cache-path <p>`          | `<project-root>/.fermut/cache.json`     | Custom cache file location. Project root = nearest `pyproject.toml`/`setup.cfg` ancestor. |
+| `--cache-audit-rate <r>`    | `0.05`                           | Fraction (0–1) of killer-keyed cache hits re-verified against their killing test (at least one when any occur). |
+| `--no-cache-audit`          | audit on                         | Skip the killer-hit audit (same as `--cache-audit-rate 0`).         |
 | `--no-history`              | history on                       | Skip the run-history log append for this run.                        |
 | `--history-path <p>`        | `<project-root>/.fermut/history.jsonl`  | Custom history log location (same anchor as the cache).             |
 | `--sample <r>`              | `1.0`                            | Test only this fraction of mutants (0.0–1.0), deterministic.         |
@@ -29,7 +31,7 @@ fermut run [PATH] [flags...]
 | `--annotate`                | auto in GHA                      | Emit `::error` / `::warning` annotations for CI.                     |
 | `--watch`                   | off                              | Re-run on every `.py` change until Ctrl+C.                            |
 | `--format human\|json`      | `human`                          | stdout output format.                                                |
-| `--json <p>`                | none                             | Also write JSON report.                                              |
+| `--json <p>`                | none                             | Also write JSON report. A `killed` outcome carries an optional `killer` (the killing test's node id) when pytest coverage selection could name it. |
 | `--junit <p>`               | none                             | Also write JUnit XML.                                                |
 | `--html <p>`                | none                             | Also write self-contained HTML report.                                |
 | `--markdown <p>`            | none                             | Also write Markdown summary (for PR comments).                        |

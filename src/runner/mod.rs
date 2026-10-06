@@ -50,6 +50,18 @@ pub trait Runner: Send + Sync {
     fn take_kill_records(&self) -> Vec<crate::kill_order::KillRecord> {
         Vec::new()
     }
+
+    /// Re-run `mutant` against only the test `killer` that a cached verdict
+    /// says killed it — the killer-keyed cache's sampled audit. `Ok(None)`
+    /// when the runner can't select a single test (the default), in which case
+    /// the cached kill is left as is.
+    fn audit(
+        &self,
+        _mutant: &std::sync::Arc<Mutant>,
+        _killer: &str,
+    ) -> Result<Option<MutantOutcome>> {
+        Ok(None)
+    }
 }
 
 /// Result of the pre-flight baseline run (the unmutated suite).
@@ -283,6 +295,8 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
             smart_order: cfg.smart_order,
             kill_order: kill_order.clone(),
             kill_sink: kill_sink.clone(),
+            // Only coverage-selected runs can name a killer the cache can use.
+            learn_killer: cfg.cache && cfg.coverage.is_some(),
             key_base: key_base.clone(),
         }))
     };

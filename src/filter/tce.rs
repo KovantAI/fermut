@@ -138,6 +138,7 @@ mod tests {
             replacement: replacement.into(),
             line: 1,
             stmt_line: 1,
+            site: None,
         };
         (tmp, m)
     }
@@ -182,6 +183,7 @@ mod tests {
             replacement: "-".into(),
             line: 1,
             stmt_line: 1,
+            site: None,
         };
         assert!(f.admits(&m).unwrap(), "unreadable file must fail open");
     }

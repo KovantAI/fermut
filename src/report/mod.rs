@@ -571,6 +571,7 @@ mod tests {
                 replacement: "-".into(),
                 line: 1,
                 stmt_line: 1,
+                site: None,
             }
         }
         let r = Report::new(vec![
@@ -616,6 +617,7 @@ mod tests {
             replacement: "-".into(),
             line: 2,
             stmt_line: 2,
+            site: None,
         }
     }
 
@@ -988,6 +990,7 @@ pub(crate) mod testing {
             replacement: "-".into(),
             line: 2,
             stmt_line: 2,
+            site: None,
         }
     }
 }

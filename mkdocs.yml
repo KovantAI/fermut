@@ -142,6 +142,7 @@ nav:
           - Stable: reference/operators/stable.md
           - Experimental: reference/operators/experimental.md
           - Parity: reference/operators/parity.md
+          - Profiles: reference/operators/profiles.md
           - Selecting: reference/operators/selecting.md
           - Docstring skip: reference/operators/docstring-skip.md
           - Inline ignore: reference/operators/inline-ignore.md

@@ -401,6 +401,7 @@ fn tool_baseline(args: &Value) -> Result<Value> {
             no_coverage: false,
             experimental: false,
             parity: false,
+            operators: None,
             exclude: Vec::new(),
         },
     };
@@ -485,6 +486,7 @@ fn tool_run(args: &Value) -> Result<Value> {
         no_coverage: false,
         experimental: false,
         parity: false,
+        operators: None,
         exclude: Vec::new(),
     };
     // Build the runtime config the same way `fermut run` does, so a project's

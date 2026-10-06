@@ -206,6 +206,7 @@ mod tests {
             replacement: "-".into(),
             line: 1,
             stmt_line: 1,
+            site: None,
         }
     }
 

@@ -197,6 +197,7 @@ mod tests {
             replacement: "<".into(),
             line: 14,
             stmt_line: 14,
+            site: None,
         }
     }
 

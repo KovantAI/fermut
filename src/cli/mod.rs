@@ -125,6 +125,13 @@ pub(crate) struct FilterArgs {
     #[arg(long)]
     pub parity: bool,
 
+    /// ROR / logical operator set. `default`: today's swaps. `minimal`: per
+    /// ordering compare and truth-position `and`/`or`, only the 3 mutants no
+    /// other mutant subsumes (e.g. `<` → `<=`, `!=`, `False`). Same count,
+    /// stronger tests. `full`: both. See the operator-profiles reference.
+    #[arg(long, value_enum, value_name = "PROFILE")]
+    pub operators: Option<OperatorProfileCli>,
+
     /// Exclude paths from mutation collection. Repeatable. Patterns are
     /// globs matched against paths relative to the source root. Examples:
     /// `--exclude 'alembic/**' --exclude 'tests/integration/**'`.
@@ -574,6 +581,16 @@ cli_enum! {
         Copy => Copy,
         Hardlink => Hardlink,
         Reflink => Reflink,
+    }
+}
+
+cli_enum! {
+    pub(crate) enum OperatorProfileCli => crate::config::OperatorProfile {
+        Default => Default,
+        Minimal => Minimal,
+        Full => Full,
+        #[value(hide = true)]
+        RorAll => RorAll,
     }
 }
 

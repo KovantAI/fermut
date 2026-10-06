@@ -14,6 +14,9 @@ or `parity = true`, for cross-tool comparison only).
 - **[Parity operators](parity.md)** — 3 opt-in operators that broaden
   overlap with other tools (mutmut) for comparison only. Very noisy;
   never counted in normal scoring.
+- **[Operator profiles](profiles.md)** — `--operators minimal` swaps
+  the easily killed compare and `and`/`or` mutants for the ones no other
+  mutant subsumes.
 - **[Selecting operators](selecting.md)** — `--ops` allowlist,
   `--skip-ops` denylist, when to narrow.
 - **[Docstring skip](docstring-skip.md)** — module/class/function

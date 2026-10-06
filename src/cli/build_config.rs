@@ -142,6 +142,11 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     let tce = cli_tce || file.tce.unwrap_or(false);
     let experimental = f.experimental || file.experimental.unwrap_or(false);
     let parity = f.parity || file.parity.unwrap_or(false);
+    let operator_profile = f
+        .operators
+        .map(Into::into)
+        .or(file.operators)
+        .unwrap_or_default();
 
     let ops_allow = merge_op_list(f.ops, &file.ops)?;
     let ops_deny = merge_op_list(f.skip_ops, &file.skip_ops)?.unwrap_or_default();
@@ -356,6 +361,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         tce,
         experimental,
         parity,
+        operator_profile,
         ops_allow,
         ops_deny,
         diff_base,
@@ -577,6 +583,7 @@ mod tests {
             no_coverage: false,
             experimental: false,
             parity: false,
+            operators: None,
             exclude: Vec::new(),
         }
     }
@@ -1019,6 +1026,25 @@ mod tests {
             "kill_order_path {:?} should resolve under the config dir",
             cfg.kill_order_path
         );
+    }
+
+    #[test]
+    fn operator_profile_from_config_and_cli_override() {
+        use crate::config::OperatorProfile;
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert_eq!(cfg.operator_profile, OperatorProfile::Default);
+
+        std::fs::write(tmp.path().join("fermut.toml"), "operators = \"minimal\"\n").unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert_eq!(cfg.operator_profile, OperatorProfile::Minimal);
+
+        let f = FilterArgs {
+            operators: Some(crate::cli::OperatorProfileCli::Full),
+            ..empty_filter()
+        };
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
+        assert_eq!(cfg.operator_profile, OperatorProfile::Full, "CLI wins");
     }
 
     #[test]

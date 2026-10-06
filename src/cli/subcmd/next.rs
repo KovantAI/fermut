@@ -97,7 +97,10 @@ fn ease(op: Operator) -> Ease {
     match op {
         BoundaryShift | CompareOpSwap | ArithOpSwap | ConstantReplace | NumberShift
         | NumberToZero | NumberToNeg | StringToEmpty | StringSentinel | BytesSentinel
-        | NotInsertion | BoolOpSwap | UnaryOpSwap | StringCaseSwap | MatchGuardNegate => Ease::High,
+        | NotInsertion | BoolOpSwap | UnaryOpSwap | StringCaseSwap | MatchGuardNegate
+        | RelationalToEquality | CompareToConst | BoolOperandDrop | BoolOpToConst | RegionRest => {
+            Ease::High
+        }
         ReturnValueToNone | AssignValueToNone | DefaultArgToNone | LambdaBodyToNone | ArgToNone
         | NoneToValue | ExprToNone | KeywordArgDrop | DictItemDrop | PositionalDrop
         | SliceBoundDrop | SliceStepMutate | AugAssignSwap | AwaitDrop => Ease::Medium,
@@ -434,6 +437,7 @@ mod tests {
             replacement: "y".into(),
             line,
             stmt_line: line,
+            site: None,
         }
     }
 

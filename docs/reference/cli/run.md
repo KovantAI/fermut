@@ -38,6 +38,7 @@ fermut run [PATH] [flags...]
 | `--trend`                   | off                              | Include a compact trend block at the top of the Markdown report.      |
 | `--experimental`            | off                              | Include experimental operators.                                       |
 | `--parity`                  | off                              | Include parity operators (cross-tool comparison only — very noisy, never for normal scoring). See [Parity operators](../operators/parity.md). |
+| `--operators <profile>`     | `default`                        | Compare / `and`-`or` operator set: `default`, `minimal`, `full`. See [Operator profiles](../operators/profiles.md). |
 | `--ops <list>`              | all                              | Allowlist operators.                                                  |
 | `--skip-ops <list>`         | none                             | Denylist operators (wins over `--ops`).                                |
 | `--diff-only [base]`        | off                              | Restrict to lines changed vs base ref (default `main`).               |

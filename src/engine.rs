@@ -1055,6 +1055,7 @@ mod tests {
             replacement: replacement.into(),
             line: 1,
             stmt_line: 1,
+            site: None,
         }
     }
 
@@ -1163,6 +1164,7 @@ mod tests {
             replacement: "return".into(),
             line: 2,
             stmt_line: 2,
+            site: None,
         };
         let cached = MutantOutcome::survived(m.clone());
         let pipeline = EquivPipeline::default_pipeline();
@@ -1521,6 +1523,7 @@ mod tests {
             smart_order: false,
             kill_order_path: PathBuf::from(".fermut/kill-order.json"),
             dominators_path: PathBuf::from(".fermut/dominators.json"),
+            operator_profile: crate::config::OperatorProfile::Default,
             history: false,
             history_path: PathBuf::from(".fermut/history.jsonl"),
             sample_ratio: None,
@@ -1703,6 +1706,7 @@ mod tests {
             replacement: "return".into(),
             line: 2,
             stmt_line: 2,
+            site: None,
         };
         let out = MutantOutcome::survived(m.clone());
         let pipeline = EquivPipeline::default_pipeline();

@@ -43,6 +43,7 @@ TOML primitives: `string`, `bool`, `int`, `float`, `array<string>`.
 | `ruff_filter`      | `bool`          | `false`                                         | Enable the ruff lint pre-filter.                                                                  |
 | `experimental`     | `bool`          | `false`                                         | Include experimental operators.                                                                   |
 | `parity`           | `bool`          | `false`                                         | Include parity operators — for cross-tool comparison only (very noisy), never normal scoring. CLI `--parity`. See [Parity operators](operators/parity.md). |
+| `operators`        | `string`        | `"default"`                                     | Compare / `and`-`or` operator set: `default`, `minimal`, or `full`. CLI `--operators`. See [Operator profiles](operators/profiles.md). |
 | `ops`              | `array<string>` | (all)                                           | Allowlist operator names. See [Operators](operators/index.md).                                          |
 | `skip_ops`         | `array<string>` | `[]`                                            | Denylist operator names. Wins over `ops`.                                                          |
 | `diff_only`        | `string`        | none                                            | Restrict to lines changed vs base ref. Mutually exclusive with `since`.                            |

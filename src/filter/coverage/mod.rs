@@ -212,6 +212,7 @@ mod tests {
             replacement: "-".into(),
             line,
             stmt_line: line,
+            site: None,
         }
     }
 

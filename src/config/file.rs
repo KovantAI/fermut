@@ -25,6 +25,7 @@ pub struct FileConfig {
     pub tce: Option<bool>,
     pub experimental: Option<bool>,
     pub parity: Option<bool>,
+    pub operators: Option<crate::config::OperatorProfile>,
     pub ops: Option<Vec<String>>,
     pub skip_ops: Option<Vec<String>>,
     pub diff_only: Option<String>,

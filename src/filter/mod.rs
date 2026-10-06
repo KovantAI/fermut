@@ -7,6 +7,7 @@ pub mod diff;
 pub mod experimental;
 pub mod operator;
 pub mod parity;
+pub mod profile;
 pub mod ruff;
 pub mod sample;
 pub mod shard;
@@ -160,6 +161,7 @@ pub fn build_chain(cfg: &Config) -> Result<Vec<Box<dyn Filter>>> {
         cfg.experimental,
     )));
     chain.push(Box::new(parity::ParityFilter::new(cfg.parity)));
+    chain.push(Box::new(profile::ProfileFilter::new(cfg.operator_profile)));
 
     if cfg.ops_allow.is_some() || !cfg.ops_deny.is_empty() {
         chain.push(Box::new(operator::OperatorFilter::new(
@@ -260,6 +262,7 @@ pub fn first_rejector<'a>(
 pub(crate) const CANONICAL_ORDER: &[&str] = &[
     "experimental",
     "parity",
+    "profile",
     "operator",
     "shard",
     "sample",
@@ -318,6 +321,7 @@ mod chain_order_tests {
             smart_order: false,
             kill_order_path: PathBuf::from(".fermut/kill-order.json"),
             dominators_path: PathBuf::from(".fermut/dominators.json"),
+            operator_profile: crate::config::OperatorProfile::Default,
             history: false,
             history_path: PathBuf::from(".fermut/history.jsonl"),
             sample_ratio: None,
@@ -362,13 +366,16 @@ mod chain_order_tests {
 
     #[test]
     fn empty_config_only_includes_operator_gates() {
-        // The experimental and parity gates are unconditionally first in the
+        // The experimental, parity and profile gates are unconditionally first in the
         // chain — that's how the build distinguishes stable from gated ops
         // regardless of any flags. The rest of the chain is opt-in. If this
         // test fails because another filter became unconditional, the design
         // changed and both the chain semantics and CANONICAL_ORDER should be
         // reviewed together.
-        assert_eq!(names(&empty_config()), vec!["experimental", "parity"]);
+        assert_eq!(
+            names(&empty_config()),
+            vec!["experimental", "parity", "profile"]
+        );
     }
 
     #[test]
@@ -388,6 +395,7 @@ mod chain_order_tests {
             vec![
                 "experimental",
                 "parity",
+                "profile",
                 "operator",
                 "shard",
                 "sample",
@@ -437,7 +445,7 @@ mod chain_order_tests {
         // asserts they kept the buckets in the right order.
         fn bucket(name: &str) -> u8 {
             match name {
-                "experimental" | "parity" | "operator" | "shard" | "sample" => 0,
+                "experimental" | "parity" | "profile" | "operator" | "shard" | "sample" => 0,
                 "diff-only" | "since" | "coverage" => 1,
                 "ruff" | "ty" => 2,
                 "tce" => 3,

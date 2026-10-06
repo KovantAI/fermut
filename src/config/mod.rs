@@ -39,6 +39,8 @@ pub struct Config {
     /// Include parity operators (expr→None, positional/element drop, string
     /// case-swap) — for cross-tool comparison only, never a default score.
     pub parity: bool,
+    /// ROR / logical operator set (`--operators`). See [`OperatorProfile`].
+    pub operator_profile: OperatorProfile,
     pub ops_allow: Option<HashSet<Operator>>,
     pub ops_deny: HashSet<Operator>,
     pub diff_base: Option<String>,
@@ -150,6 +152,38 @@ pub struct Config {
 pub const DEFAULT_CACHE_AUDIT_RATE: f64 = 0.05;
 
 /// Cache-key granularity for source-file identity. See `Config::cache_scope`.
+/// Which ROR / logical operator set to test (see `mutator::region`). Set via
+/// `--operators` / `operators = "..."`.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum OperatorProfile {
+    /// The historical catalogue: `and`↔`or` and the 3 compare swaps per
+    /// ordering op, no region-model operators.
+    #[default]
+    Default,
+    /// The region-model minimal set: per ordering compare and 2-operand
+    /// truth-position `and`/`or`, only the 3 dominator mutants. About the same
+    /// count as `default`, but none is trivially killed.
+    Minimal,
+    /// `default` plus the minimal-set operators. For experiments.
+    Full,
+    /// `full` plus every remaining region-model form (all 7 per ordering
+    /// compare). Only for the subsumption gate; not documented as a profile.
+    RorAll,
+}
+
+impl OperatorProfile {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Minimal => "minimal",
+            Self::Full => "full",
+            Self::RorAll => "ror-all",
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]

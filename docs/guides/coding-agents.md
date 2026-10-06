@@ -132,9 +132,15 @@ After every successful mutant evaluation, fermut writes
 `.fermut/cache.json`. The file hash is **AST-structural** —
 reformat / comment edits leave it untouched. `scope` is a hex digest
 of the run-shape inputs (runner, timeout, hypothesis seed, pytest
-args, coverage on/off), so a stale `survived` from a narrow
-`--coverage` run can't poison a later full-suite run. On the next
-`run`:
+args, coverage on/off) plus a fingerprint of the tests that run
+against the mutant, so a stale `survived` from a narrow `--coverage`
+run can't poison a later full-suite run, and adding a killing test
+re-evaluates the mutants it covers. With coverage contexts only the
+covering test files (plus their `conftest.py` chain and shared support
+files) are fingerprinted, so editing an unrelated test keeps the
+verdict; without coverage, any test edit invalidates everything — see
+[Test-suite invalidation](../concepts/caching.md#test-suite-invalidation).
+On the next `run`:
 
 - For each mutant, fermut computes the current AST hash and the
   current run-shape `scope`.

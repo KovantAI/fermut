@@ -295,6 +295,7 @@ impl CoverageContexts {
             canonical_cache: RwLock::new(HashMap::new()),
             test_breadth,
             file_test_breadth,
+            node_root: canonical_project,
         }))
     }
 }

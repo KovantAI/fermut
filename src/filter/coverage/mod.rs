@@ -81,6 +81,11 @@ pub struct CoverageContexts {
     /// broad integration test that heavily exercises the mutated function from
     /// sinking below a narrow test that merely grazes one of its lines.
     file_test_breadth: HashMap<PathBuf, HashMap<String, u32>>,
+    /// Canonical directory every node id's path component is relative to (the
+    /// `project_root` they were rebased onto at load). Lets callers resolve a
+    /// node id back to its test file — the verdict cache uses it to fingerprint
+    /// only the test files that cover a mutant.
+    node_root: PathBuf,
 }
 
 impl CoverageContexts {
@@ -110,6 +115,12 @@ impl CoverageContexts {
             guard.insert(file.to_path_buf(), canonical.clone());
         }
         canonical
+    }
+
+    /// Canonical directory node ids are relative to. `path/to/test_x.py::test`
+    /// resolves to `node_root().join("path/to/test_x.py")`.
+    pub fn node_root(&self) -> &Path {
+        &self.node_root
     }
 
     /// Test node ids that executed `file:line`, or `None` if none recorded.

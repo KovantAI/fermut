@@ -24,7 +24,7 @@ author: "KovantAI"
 
 inputs:
   shard:
-    description: '"i/n" (1-based) to run one slice of n. Pass "${{ matrix.shard }}/N". Empty runs everything and gates.'
+    description: '"i/n" (1-based) to run one slice of n. Pass the matrix shard index over N, as in the example above. Empty runs everything and gates.'
     required: false
     default: ""
   working-directory:

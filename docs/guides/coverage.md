@@ -264,7 +264,12 @@ fermut run src/ --tests tests/ \
 ```
 
 - `--diff-only` narrows the *mutants* to changed lines.
-- `--coverage` narrows the *tests* per remaining mutant.
+- `--coverage` narrows the *tests* per remaining mutant — and, as a
+  side effect, keeps the verdict cache alive across pushes: a cached
+  verdict is only invalidated when one of the mutant's covering test
+  files (or its `conftest.py` chain, or a shared support file) changes,
+  not on every test edit. See
+  [Test-suite invalidation](../concepts/caching.md#test-suite-invalidation).
 
 This is what the `pr-gate` profile sets. See
 **[Integrations → GitHub Actions](integrations.md#github-actions)**

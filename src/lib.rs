@@ -36,6 +36,7 @@ pub(crate) mod mutator;
 pub(crate) mod report;
 pub(crate) mod runner;
 pub(crate) mod sync;
+pub(crate) mod test_tree;
 pub(crate) mod util;
 pub(crate) mod watch;
 

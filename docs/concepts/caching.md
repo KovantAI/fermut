@@ -24,13 +24,15 @@ After every successful mutant evaluation, fermut writes one entry to
   narrows to the enclosing top-level def/class instead of the whole
   file, so sibling-function edits keep cache hits intact (see
   [`cache_scope`](../reference/configuration.md#schema)).
-- `scope` captures every run-shape input that could change the
-  outcome without touching the AST: runner kind, timeout, hypothesis
-  seed, pytest args, and the per-mutant test selection set when
-  coverage-driven selection is on. A mismatch on any of those
-  invalidates the entry — a stale `survived` from a narrow
-  `--coverage` run can't poison a later full-suite run, and vice
-  versa.
+- `scope` captures every input that could change the outcome without
+  touching the AST: runner kind, interpreter, timeout, hypothesis
+  seed, pytest args, the per-mutant test selection set when
+  coverage-driven selection is on, and a fingerprint of the tests
+  that run against the mutant (see
+  [Test-suite invalidation](#test-suite-invalidation)). A mismatch on
+  any of those invalidates the entry — a stale `survived` from a
+  narrow `--coverage` run can't poison a later full-suite run, and
+  vice versa.
 
 All of fermut's sidecar state lives in one `.fermut/` directory at the
 **project root** (nearest `pyproject.toml`/`setup.cfg`, so a
@@ -52,6 +54,51 @@ On the next `run`:
 Result: editing one function in one file only pays for mutants
 inside that function (under `cache_scope = "scope"`) or that file
 (default `cache_scope = "file"`). Everything else is reused.
+
+## Test-suite invalidation
+
+Editing a test can flip a verdict without touching the source — that's
+the whole point of writing a killing test. So each entry's `scope`
+folds in a content fingerprint of the tests. *Which* tests depends on
+whether fermut knows exactly what runs against the mutant.
+
+**With coverage contexts** (`pytest` or `rstest` runner), the
+fingerprint covers only:
+
+- the test files holding the mutant's covering node ids;
+- every `conftest.py` from the tests root down to each of those files'
+  directories (a sibling directory's `conftest.py` is not included);
+- every shared support file under the tests tree — anything that is
+  neither a test module (`test_*.py` / `*_test.py`) nor a
+  `conftest.py`: helpers, `__init__.py`, fixture data. Conservative:
+  changing one invalidates every entry.
+
+The covering node-id set is part of the key too, so a new test that
+starts covering the mutant's line invalidates it even if no existing
+file changed.
+
+**Otherwise** the fingerprint covers the whole tests tree, and any
+test edit invalidates every entry. That fallback applies with no
+coverage file, under the `unittest` runner (it runs the full suite
+regardless of coverage), for a mutant with no recorded context (the
+runner sweeps the whole tests dir), and when a covering file lies
+outside the tests tree or couldn't be read.
+
+| Change                                         | With coverage    | Without coverage |
+|------------------------------------------------|------------------|------------------|
+| Edit/add a test that doesn't cover the mutant  | **kept**         | invalidated      |
+| Sibling-directory `conftest.py`                | **kept**         | invalidated      |
+| Edit a covering test file                      | invalidated      | invalidated      |
+| `conftest.py` above a covering test            | invalidated      | invalidated      |
+| Non-test file under the tests tree             | invalidated (all)| invalidated      |
+| New test covering the mutant's line            | invalidated      | invalidated      |
+
+Not tracked, in either mode: a helper module outside both the tests
+tree and the mutated source, and a `conftest.py` above the tests root.
+The scoped fingerprint also misses a test module importing *another
+test module* (`from tests.test_a import helper`) — keep shared helpers
+in non-test files so they count as support files. Run `fermut clean`
+if you hit one of these.
 
 ## What's cached
 

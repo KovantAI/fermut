@@ -121,6 +121,7 @@ pub(crate) fn run(args: HomArgs) -> Result<()> {
         max_pairs,
         cross_function,
     } = args;
+    tracing::warn!("`fermut hom` is experimental: its flags and output format may change");
     let cfg = build_config(path, cfg_args)?;
 
     let coverage = cfg.coverage.clone().ok_or_else(|| {

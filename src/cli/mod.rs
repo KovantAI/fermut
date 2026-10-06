@@ -298,7 +298,7 @@ pub(crate) struct RunConfigArgs {
     #[arg(long, value_name = "SECS")]
     pub max_time: Option<u64>,
 
-    /// Experiment: record each mutant's full kill-set (the covering tests that
+    /// [experimental] Record each mutant's full kill-set (the covering tests that
     /// fail) to <PATH> as JSONL. Drops pytest's `-x`, so a killed mutant runs
     /// every selected test instead of stopping at the first — markedly slower.
     /// Captures the kill-set containment structure that fermut's normal
@@ -318,7 +318,7 @@ enum Cmd {
     /// Generate mutants, run pytest against each, report killed/survived.
     Run(subcmd::run::RunArgs),
 
-    /// Higher-order-mutant experiment (Phase 1): find strongly-subsuming
+    /// [experimental] Higher-order-mutant experiment (Phase 1): find strongly-subsuming
     /// second-order mutants.
     ///
     /// Consumes a `run --record-kill-sets` JSONL, pairs killed FOMs whose

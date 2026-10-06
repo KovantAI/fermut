@@ -83,6 +83,9 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         filter: f,
     } = args;
     let cli_runner: Option<RunnerKind> = cli_runner.map(Into::into);
+    if cli_record_kill_sets.is_some() {
+        warn!("`--record-kill-sets` is experimental: its output format may change");
+    }
     let cli_isolation: Option<IsolationMode> = cli_isolation.map(Into::into);
     let cli_cache_scope: Option<CacheScope> = cli_cache_scope.map(Into::into);
 

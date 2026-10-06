@@ -1,5 +1,10 @@
 # fermut · GitHub Actions examples
 
+> **Prefer the packaged action** — `uses: KovantAI/fermut@<tag>` covers the
+> PR gate, sharded sweeps and cache warming without copying YAML. See
+> [docs/guides/github-action.md](../../docs/guides/github-action.md). The
+> workflows below are the hand-rolled equivalents.
+
 Copy-paste-ready workflows for the common patterns:
 
 | File | Trigger | Purpose |

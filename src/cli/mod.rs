@@ -1,7 +1,7 @@
 //! Command-line interface: clap parser + dispatch.
 //!
 //! - `build_config` — merges CLI args with the loaded config file into a
-//!   runtime [`Config`](crate::config::Config). Pure function, easy to test.
+//!   runtime `Config`. Pure function, easy to test.
 //! - `subcmd` — one handler per `Cmd` variant. `Cli::run` is a thin dispatch
 //!   match: every arm is a single delegation to the variant's handler, either
 //!   directly (`subcmd::show::run(args)`) or through the pure `Args → Opts`
@@ -397,6 +397,14 @@ enum Cmd {
     /// Wipe the `.fermut/` cache directory under PATH.
     Clean(subcmd::clean::CleanArgs),
 
+    /// Install the fermut agent skill (`fermut-mutation-testing`) bundled
+    /// with this binary, so it matches its flags and subcommands.
+    ///
+    /// Writes `.claude/skills/` in the current directory by default (commit
+    /// it to share with the team). A skill already installed with different
+    /// contents is left alone (exit 1) unless `--force`. Needs no interpreter.
+    InstallSkills(subcmd::install_skills::InstallSkillsArgs),
+
     /// Generate or refresh the `.coverage` database used for per-mutant test
     /// selection — the one command to run after you touch your tests.
     ///
@@ -584,6 +592,7 @@ impl Cli {
             Cmd::Migrate(args) => migrate(args.into()),
             Cmd::Coverage(args) => coverage(args),
             Cmd::Clean(args) => subcmd::clean::run(args),
+            Cmd::InstallSkills(args) => subcmd::install_skills::run(args),
             Cmd::Merge(args) => merge::run(args),
             Cmd::List(args) => subcmd::list::run(args),
             Cmd::Hom(args) => subcmd::hom::run(args),

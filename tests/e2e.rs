@@ -263,6 +263,89 @@ fn run_finds_known_survivor_with_rstest() {
 }
 
 #[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn import_breaking_mutant_is_killed_under_node_id_selection() {
+    // A mutant that breaks a module's *import* must score as killed. With
+    // coverage-driven selection fermut passes node ids, and pytest reports an
+    // un-collectable module under node-id selection as exit 4 ("found no
+    // collectors") — not the exit 2 it gives for a file argument. Before the
+    // collection probe, every such kill was scored `error` and excluded.
+    //
+    // Shape (from a production repo): `check` is called at import time AND by
+    // the test, so its lines carry the test's coverage context and the test is
+    // selected; mutating its guard makes the import-time call raise, so the
+    // selected test's module can't even be collected.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n",
+    );
+    write("src/pkg/__init__.py", "");
+    write(
+        "src/pkg/registry.py",
+        "def check(name):\n    if not name:\n        raise ValueError(\"empty name\")\n    \
+         return name\n\n\nDEFAULT = check(\"default\")\n",
+    );
+    write(
+        "tests/test_registry.py",
+        "from pkg.registry import check\n\n\ndef test_check():\n    \
+         assert check(\"a\") == \"a\"\n",
+    );
+
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(proj)
+        .assert()
+        .success();
+
+    let report = proj.join("report.json");
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("run")
+        .arg(proj.join("src"))
+        .arg("--tests")
+        .arg(proj.join("tests"))
+        .arg("--coverage")
+        .arg(proj.join(".coverage"))
+        .arg("--no-ty-filter")
+        .arg("--no-cache")
+        .arg("--fail-under")
+        .arg("0")
+        .arg("--json")
+        .arg(&report)
+        .assert()
+        .success();
+
+    let raw = std::fs::read_to_string(&report).expect("report written");
+    let json: serde_json::Value = serde_json::from_str(&raw).expect("report is JSON");
+    let outcomes = json["outcomes"].as_array().expect("outcomes array");
+    let errored: Vec<&serde_json::Value> =
+        outcomes.iter().filter(|o| o["status"] == "error").collect();
+    assert!(
+        errored.is_empty(),
+        "import-breaking mutants must not be scored as errors: {errored:#?}"
+    );
+    // The guard `if not name` on line 2: dropping/doubling the `not` makes the
+    // import-time `check("default")` raise.
+    let guard_killed = outcomes.iter().any(|o| {
+        o["status"] == "killed"
+            && o["mutant"]["line"] == 2
+            && o["mutant"]["file"]
+                .as_str()
+                .is_some_and(|f| f.ends_with("registry.py"))
+    });
+    assert!(guard_killed, "guard mutant on line 2 must be killed: {raw}");
+}
+
+#[test]
 #[ignore = "requires pytest + coverage on PATH; enable once env is set up"]
 fn baseline_reports_grade_and_anchors_trend() {
     // `baseline` writes `.coverage`, its fingerprint sidecar, and `.fermut/`
@@ -421,6 +504,7 @@ const SUBCOMMANDS: &[&str] = &[
     "doctor",
     "baseline",
     "clean",
+    "install-skills",
     "coverage",
     "merge",
     "pr-comment",
@@ -660,6 +744,29 @@ fn clean_removes_cache_but_keeps_history() {
 }
 
 #[test]
+fn install_skills_writes_bundled_skill_into_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .current_dir(dir.path())
+        .arg("install-skills")
+        .assert()
+        .success()
+        .stdout(contains("fermut-mutation-testing: installed"));
+
+    let skill_md = dir
+        .path()
+        .join(".claude/skills/fermut-mutation-testing/SKILL.md");
+    assert!(
+        std::fs::read_to_string(&skill_md)
+            .unwrap()
+            .starts_with("---\nname: fermut-mutation-testing\n"),
+        "install-skills must write the bundled SKILL.md"
+    );
+}
+
+#[test]
 fn init_writes_config_for_detected_layout() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path();
@@ -756,5 +863,126 @@ fn dashboard_writes_self_contained_html() {
     assert!(
         !html.contains("<script src="),
         "dashboard must not pull external scripts"
+    );
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn coverage_refresh_prunes_deleted_source_file() {
+    // Issue #117: an incremental `fermut coverage` must drop a deleted source
+    // file's rows from `.coverage`, not leave them for `coverage report` to
+    // trip over (`couldnt-parse`) forever.
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    std::fs::write(
+        sample.join("src/helper.py"),
+        "def triple(x):\n    return x * 3\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sample.join("tests/test_helper.py"),
+        "from src.helper import triple\n\n\ndef test_triple():\n    assert triple(2) == 6\n",
+    )
+    .unwrap();
+    let coverage = sample.join(".coverage");
+    let recorded = || -> Vec<String> {
+        let conn = rusqlite::Connection::open(&coverage).unwrap();
+        let mut stmt = conn.prepare("SELECT path FROM file").unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
+    };
+
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(&sample)
+        .assert()
+        .success();
+    assert!(
+        recorded().iter().any(|p| p.ends_with("helper.py")),
+        "full build must record helper.py: {:?}",
+        recorded()
+    );
+
+    std::fs::remove_file(sample.join("src/helper.py")).unwrap();
+    std::fs::remove_file(sample.join("tests/test_helper.py")).unwrap();
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(&sample)
+        .assert()
+        .success()
+        .stdout(contains("dropped 1 removed source file(s)"));
+
+    let after = recorded();
+    assert!(
+        !after.iter().any(|p| p.ends_with("helper.py")),
+        "deleted helper.py must leave the DB: {after:?}"
+    );
+    assert!(
+        after.iter().any(|p| p.ends_with("calculator.py")),
+        "live calculator.py must stay: {after:?}"
+    );
+
+    // Baseline advanced → the next refresh is a no-op.
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(&sample)
+        .assert()
+        .success()
+        .stdout(contains("up to date"));
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn coverage_refresh_rebuilds_import_time_lines_of_changed_source() {
+    // Import-time lines live under the shared `""` context, which `--cov-append`
+    // unions. Shifting a source's lines must not leave its old line numbers
+    // marked executed: the count of import-time lines stays the same.
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    let coverage = sample.join(".coverage");
+    let import_time_lines = || -> u32 {
+        let conn = rusqlite::Connection::open(&coverage).unwrap();
+        conn.query_row(
+            "SELECT lb.numbits FROM line_bits lb \
+             JOIN context c ON c.id = lb.context_id \
+             JOIN file f ON f.id = lb.file_id \
+             WHERE c.context = '' AND f.path LIKE '%calculator.py'",
+            [],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .unwrap()
+        .iter()
+        .map(|b| b.count_ones())
+        .sum()
+    };
+    let refresh = || {
+        Command::cargo_bin("fermut")
+            .unwrap()
+            .arg("coverage")
+            .arg(&sample)
+            .assert()
+            .success();
+    };
+
+    refresh();
+    let before = import_time_lines();
+    assert!(before > 0, "full build must record import-time lines");
+
+    let calc = sample.join("src/calculator.py");
+    let src = std::fs::read_to_string(&calc).unwrap();
+    std::fs::write(&calc, format!("{}{src}", "\n".repeat(30))).unwrap();
+    refresh();
+
+    assert_eq!(
+        import_time_lines(),
+        before,
+        "shifted source must not keep its pre-change import-time lines"
     );
 }

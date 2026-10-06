@@ -57,6 +57,7 @@ pub struct LoadStats {
 
 impl LoadStats {
     /// Non-empty lines that did not become a loaded entry.
+    #[cfg(test)]
     pub fn dropped(&self) -> usize {
         self.malformed + self.newer_schema
     }

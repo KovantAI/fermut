@@ -82,7 +82,9 @@ impl CoverageContexts {
     ) -> Result<Arc<Self>> {
         use rusqlite::Connection;
 
-        let conn = Connection::open(path)
+        // Read-only: the filter is a pure consumer, and a plain `open` would
+        // silently create an empty DB at a mistyped path.
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("opening coverage database {}", path.display()))?;
 
         // context id -> nodeid string (with the `|run|setup|teardown` phase
@@ -293,6 +295,7 @@ impl CoverageContexts {
             canonical_cache: RwLock::new(HashMap::new()),
             test_breadth,
             file_test_breadth,
+            node_root: canonical_project,
         }))
     }
 }

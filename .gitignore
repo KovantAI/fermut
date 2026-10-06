@@ -6,7 +6,14 @@
 .fermut/
 *.log
 .DS_Store
-.claude
+.claude/*
+# The skill lives in plugins/fermut/skills/ (the Claude Code plugin);
+# .claude/skills/ holds a symlink to it so it loads when working in this repo.
+# Keep the rest of .claude (local settings) and eval scratch workspaces ignored.
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/fermut-mutation-testing
+plugins/fermut/skills/*-workspace/
 .cursor
 benchmarks/parity/*.json
 

@@ -19,7 +19,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use wait_timeout::ChildExt;
 
-use super::exit::{anomaly_message, classify_exit, ExitVerdict, TestTool};
+use super::exit::{
+    anomaly_message, classify_exit, is_collection_failure, ExitVerdict, TestTool,
+    PYTEST_USAGE_ERROR,
+};
 use super::process_group::{kill_group, with_new_process_group};
 use super::{
     build_mirror, configure_mirror_cmd, mirror_pythonpath, run_baseline_with_timeout, run_patched,
@@ -291,6 +294,7 @@ impl PytestRunner {
         &self,
         mutant: &Arc<Mutant>,
         waited: &(Option<ExitStatus>, Option<String>),
+        import_broke: bool,
         key_file: &str,
         key_op: &'static str,
     ) {
@@ -310,6 +314,9 @@ impl PytestRunner {
                     ids.retain(|id| seen.insert(id.clone()));
                     ("killed", ids)
                 }
+                // Broken import: collection failed before any test ran, so
+                // there is no failing node id to record.
+                ExitVerdict::Anomaly(PYTEST_USAGE_ERROR) if import_broke => ("killed", Vec::new()),
                 ExitVerdict::Anomaly(_) => ("error", Vec::new()),
             },
             None => ("timed_out", Vec::new()),
@@ -324,13 +331,54 @@ impl PytestRunner {
         });
     }
 
+    /// Re-run the mutant's exact selection with `--collect-only`, capturing
+    /// stdout and stderr together, and report whether a selected module failed
+    /// to collect ([`is_collection_failure`]). Called only after an exit-4 run,
+    /// with the mutant still applied in `mirror`.
+    ///
+    /// Output goes to a temp file rather than a pipe: both streams
+    /// share one file description (so their writes interleave instead of
+    /// clobbering each other), and with no pipe there is no drain to deadlock
+    /// on or grandchild holding a write end. Any failure to probe — spawn
+    /// error, timeout, unreadable output — answers `false`, leaving the run an
+    /// anomaly exactly as before this probe existed.
+    fn probe_collection_failure(
+        &self,
+        mirror: &super::Mirror,
+        mutant: &Mutant,
+        key_file: &str,
+        key_op: &'static str,
+    ) -> bool {
+        let probe = || -> Result<bool> {
+            let mut cmd = self.build_mutant_command(mirror, mutant, key_file, key_op)?;
+            cmd.arg("--collect-only");
+            let log = tempfile::NamedTempFile::new().context("creating collection probe log")?;
+            cmd.stdout(log.as_file().try_clone()?)
+                .stderr(log.as_file().try_clone()?);
+            let child = cmd.spawn().context("spawning collection probe")?;
+            let (status, _) = wait_draining_stdout(child, self.timeout, kill_group)?;
+            if status.is_none() {
+                return Ok(false); // timed out — no evidence either way
+            }
+            let out = std::fs::read(log.path()).context("reading collection probe log")?;
+            Ok(is_collection_failure(&String::from_utf8_lossy(&out)))
+        };
+        probe().unwrap_or(false)
+    }
+
     /// Turn a completed (or timed-out) test run into a `MutantOutcome`. On a
     /// real kill and captured output, records the killing node id for the next
     /// run's ordering. Anomalous exits become `error` (excluded from the score).
+    ///
+    /// `import_broke` is the verdict of [`Self::probe_collection_failure`] for
+    /// an exit-4 run: when the mutant broke a selected module's import, pytest
+    /// reports a usage error (node ids can't resolve) rather than exit 2, and
+    /// that is a kill, not an anomaly.
     fn classify_run(
         &self,
         mutant: &Arc<Mutant>,
         waited: (Option<ExitStatus>, Option<String>),
+        import_broke: bool,
         key_file: &str,
         key_op: &'static str,
     ) -> MutantOutcome {
@@ -344,6 +392,11 @@ impl PytestRunner {
                     if let Some(out) = output {
                         self.record_killer(&out, key_file, key_op);
                     }
+                    MutantOutcome::killed(mutant.clone())
+                }
+                // The mutant broke a selected module's import: no killer test
+                // to record (collection failed before any test ran).
+                ExitVerdict::Anomaly(PYTEST_USAGE_ERROR) if import_broke => {
                     MutantOutcome::killed(mutant.clone())
                 }
                 // Not a verdict — surface as Error, excluded from the score
@@ -577,10 +630,16 @@ impl Runner for PytestRunner {
             let mut cmd = self.build_mutant_command(mirror, mutant, &key_file, key_op)?;
             let child = cmd.spawn().context("spawning test runner")?;
             let waited = wait_draining_stdout(child, self.timeout, kill_group)?;
+            // Exit 4 is ambiguous under node-id selection (see `exit.rs`). The
+            // mutant is still applied here, so re-collect once to tell a broken
+            // import (kill) from a stale node id (anomaly). Rare path: the
+            // common exits never pay for it.
+            let import_broke = matches!(&waited, (Some(s), _) if s.code() == Some(PYTEST_USAGE_ERROR))
+                && self.probe_collection_failure(mirror, mutant, &key_file, key_op);
             if self.record_kill_sets {
-                self.record_kill_set(mutant, &waited, &key_file, key_op);
+                self.record_kill_set(mutant, &waited, import_broke, &key_file, key_op);
             }
-            Ok(self.classify_run(mutant, waited, &key_file, key_op))
+            Ok(self.classify_run(mutant, waited, import_broke, &key_file, key_op))
         })
     }
 

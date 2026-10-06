@@ -88,6 +88,7 @@ nav:
   - Guides:
       - guides/index.md
       - CI quickstart: guides/ci-quickstart.md
+      - GitHub Action: guides/github-action.md
       - Integrations: guides/integrations.md
       - Working on projects: guides/projects.md
       - Tightening the inner loop: guides/inner-loop.md
@@ -114,6 +115,7 @@ nav:
       - CLI:
           - reference/cli/index.md
           - fermut init: reference/cli/init.md
+          - fermut baseline: reference/cli/baseline.md
           - fermut run: reference/cli/run.md
           - fermut coverage: reference/cli/coverage.md
           - fermut list: reference/cli/list.md
@@ -129,6 +131,7 @@ nav:
           - fermut doctor: reference/cli/doctor.md
           - fermut pr-comment: reference/cli/pr-comment.md
           - fermut clean: reference/cli/clean.md
+          - fermut install-skills: reference/cli/install-skills.md
           - fermut migrate: reference/cli/migrate.md
           - fermut mcp: reference/cli/mcp.md
           - fermut completions: reference/cli/completions.md

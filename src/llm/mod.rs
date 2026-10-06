@@ -18,13 +18,13 @@
 pub mod cache;
 pub mod client;
 pub mod prompt;
+// TODO: not yet wired into the pipeline (no CLI flag constructs it); kept
+// pending a wire-up-or-delete decision. Remove the allow once reachable.
+#[allow(dead_code)]
 pub mod prompt_equiv;
 pub mod redact;
 
-pub use cache::LlmCache;
-pub use client::{client_from_env, LlmClient, LlmRequest, MockClient};
-pub use prompt::{build_explain_prompt, build_suggest_prompt, PromptContext};
-pub use prompt_equiv::{build_equivalence_prompt, PROMPT_TEMPLATE_VERSION};
+pub use client::LlmClient;
 
 /// Default Anthropic model used when neither config nor `--model` overrides.
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";

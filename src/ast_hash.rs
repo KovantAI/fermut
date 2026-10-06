@@ -38,6 +38,7 @@ use std::path::Path;
 /// Hex-encoded sha256 over the AST of `source`, with `TextRange` offsets
 /// stripped. Returns `None` if the source fails to parse so the caller can
 /// fall back to byte hashing.
+#[cfg(test)]
 pub fn hash_ast_source(source: &str) -> Option<String> {
     let parsed = parse_module(source).ok()?;
     Some(hash_module(parsed.syntax()))
@@ -251,13 +252,6 @@ impl ScopeMap {
         })
     }
 
-    /// Test-only accessors so consumers can verify the map without poking at
-    /// private fields.
-    #[cfg(test)]
-    pub fn prelude_hash(&self) -> &str {
-        &self.prelude_hash
-    }
-
     #[cfg(test)]
     pub fn scope_qualnames(&self) -> Vec<&str> {
         self.scopes.iter().map(|s| s.qualname.as_str()).collect()
@@ -266,6 +260,7 @@ impl ScopeMap {
 
 /// Parse `source` and build a [`ScopeMap`]. Returns `None` on parse failure
 /// so the caller can fall back to file-level hashing.
+#[cfg(test)]
 pub fn compute_scope_map(source: &str) -> Option<ScopeMap> {
     let parsed = parse_module(source).ok()?;
     Some(compute_scope_map_parsed(parsed.syntax()))

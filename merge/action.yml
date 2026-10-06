@@ -1,0 +1,135 @@
+# Combine fermut shard reports from KovantAI/fermut/sweep and gate.
+#
+#   merge:
+#     needs: shard
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: KovantAI/fermut/merge@v0.4.1
+#         with:
+#           fail-under: "70"
+#
+# Needs no checkout and no project install: it downloads every
+# `<artifact-name>-shard-*` artifact from this workflow run, runs
+# `fermut merge`, and applies the same gate rule as `fermut run`. Merge fails
+# when a shard's report is missing, so a crashed shard cannot inflate the
+# combined score.
+
+name: "fermut shard merge"
+description: "Merge fermut shard reports into one and gate on the combined mutation score."
+author: "KovantAI"
+
+inputs:
+  fail-under:
+    description: "Gate threshold in percent. Empty fails on any survivor."
+    required: false
+    default: ""
+  blocking:
+    description: '"false" turns a failing gate into a warning. Setup failures still fail.'
+    required: false
+    default: "true"
+  artifact-name:
+    description: "The artifact-name the sweep shards used."
+    required: false
+    default: "fermut-report"
+  fermut-version:
+    description: >-
+      fermut release to install from PyPI. Empty matches the action ref, else
+      the latest release. "project" uses a fermut already on PATH.
+    required: false
+    default: ""
+
+outputs:
+  score:
+    description: 'Combined mutation score in percent, or "" when nothing was scored (N/A).'
+    value: ${{ steps.stats.outputs.score }}
+  scored:
+    description: "Mutants with a real verdict."
+    value: ${{ steps.stats.outputs.scored }}
+  killed:
+    description: "Killed mutants."
+    value: ${{ steps.stats.outputs.killed }}
+  survived:
+    description: "Surviving mutants."
+    value: ${{ steps.stats.outputs.survived }}
+  errored:
+    description: "Mutants that errored. Excluded from the score."
+    value: ${{ steps.stats.outputs.errored }}
+  report-json:
+    description: "Path to the merged JSON report, relative to the workspace."
+    value: ${{ steps.setup.outputs.out }}/report.json
+  report-markdown:
+    description: "Path to the merged Markdown report, relative to the workspace."
+    value: ${{ steps.setup.outputs.out }}/report.md
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs
+      id: setup
+      shell: bash
+      env:
+        BOOL_blocking: ${{ inputs.blocking }}
+        FAIL_UNDER: ${{ inputs.fail-under }}
+        ARTIFACT: ${{ inputs.artifact-name }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/setup.sh"
+
+    - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+      with:
+        enable-cache: false
+
+    - name: Install fermut
+      id: fermut
+      shell: bash
+      env:
+        VERSION: ${{ inputs.fermut-version }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/install-fermut.sh"
+
+    - name: Resolve fermut
+      id: env
+      shell: bash
+      env:
+        SPEC: ${{ steps.fermut.outputs.spec }}
+        NEED_COV: "false"
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/resolve-env.sh"
+
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      with:
+        pattern: ${{ inputs.artifact-name }}-shard-*
+        path: ${{ steps.setup.outputs.out }}/shards
+
+    - name: Merge shard reports
+      shell: bash
+      env:
+        FERMUT: ${{ steps.env.outputs.bin }}
+        OUT: ${{ steps.setup.outputs.out_abs }}
+        ARTIFACT: ${{ inputs.artifact-name }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/merge.sh"
+
+    - name: Read results
+      id: stats
+      shell: bash
+      env:
+        OUT: ${{ steps.setup.outputs.out_abs }}
+        HEADING: "fermut merged report"
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/stats.sh"
+
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ steps.setup.outputs.out }}/report.json
+          ${{ steps.setup.outputs.out }}/report.md
+        if-no-files-found: error
+
+    - name: Enforce gate
+      shell: bash
+      env:
+        RC: ""
+        BLOCKING: ${{ inputs.blocking }}
+        FAIL_UNDER: ${{ inputs.fail-under }}
+        SCORE: ${{ steps.stats.outputs.score }}
+        SCORED: ${{ steps.stats.outputs.scored }}
+        SURVIVED: ${{ steps.stats.outputs.survived }}
+        ERRORED: ${{ steps.stats.outputs.errored }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/gate.sh"

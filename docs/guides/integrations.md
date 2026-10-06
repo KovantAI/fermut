@@ -4,6 +4,12 @@ How to wire fermut into the systems that already build/test your code.
 
 ## GitHub Actions
 
+> **Prefer the packaged action.** `uses: KovantAI/fermut@<tag>` wraps
+> everything below — install, coverage, caching, gate, summary, sticky
+> comment, sharding — behind a few inputs. See
+> **[GitHub Action](github-action.md)**. The raw YAML here is for other
+> CI systems or for full control.
+
 The canonical PR-gate workflow. `fermut init --with-gha` drops this
 template at `.github/workflows/fermut.yml`:
 
@@ -464,13 +470,15 @@ live in **[Coding agents](coding-agents.md)**.
 
 `fermut mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)
 server over stdio, so an agent calls fermut as native tools
-(`fermut_doctor`, `fermut_run`, `fermut_next`, `fermut_explain`,
-`fermut_score`, `fermut_list_survivors`) instead of shelling out and
+(`fermut_doctor`, `fermut_baseline`, `fermut_run`, `fermut_next`,
+`fermut_explain`, `fermut_score`, `fermut_list_survivors`) instead of shelling out and
 parsing JSON. See the
 **[`fermut mcp` reference](../reference/cli/mcp.md)** for the tool list and
 error model.
 
-Register it with an MCP client. Claude Code:
+The [Claude Code plugin](claude-code-skill.md#option-2-the-claude-code-plugin)
+registers the server for you, alongside the agent skill. To register it
+yourself with an MCP client — Claude Code:
 
 ```sh
 claude mcp add fermut -- fermut mcp

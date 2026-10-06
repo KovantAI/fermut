@@ -103,6 +103,30 @@ pub(crate) fn mirror_pythonpath(mirror: &Mirror) -> Result<std::ffi::OsString> {
     std::env::join_paths(&paths).context("joining PYTHONPATH")
 }
 
+/// Caller-shell variables that silently change how the suite runs — and so
+/// can change verdicts — without appearing in the project's config.
+/// `PYTEST_ADDOPTS` / `PYTEST_PLUGINS` inject flags or plugins (`-n auto`,
+/// `--cov`, `-p ...`) into every spawned pytest; `PYTHONWARNINGS` can turn a
+/// warning into a failure (a false kill); `PYTHONOPTIMIZE` strips `assert`
+/// from the code under test; `PYTHONINSPECT` drops the child into a REPL that
+/// blocks until the timeout. Project-level settings belong in `pytest_args`
+/// or the project's pytest config, which still apply.
+pub(crate) const SANITIZED_ENV_VARS: &[&str] = &[
+    "PYTEST_ADDOPTS",
+    "PYTEST_PLUGINS",
+    "PYTHONWARNINGS",
+    "PYTHONOPTIMIZE",
+    "PYTHONINSPECT",
+];
+
+/// Strip [`SANITIZED_ENV_VARS`] from `cmd` so every suite run is reproducible
+/// from the project alone, independent of the caller's shell.
+pub(crate) fn sanitize_python_env(cmd: &mut std::process::Command) {
+    for var in SANITIZED_ENV_VARS {
+        cmd.env_remove(var);
+    }
+}
+
 /// Apply the environment every per-mutant framework command against a mirror
 /// needs: run from the mirror root, in a fresh process group (so a timeout kill
 /// reaches child processes), with `PYTHONPATH` pinned to the mirror (beats an
@@ -115,6 +139,7 @@ pub(crate) fn configure_mirror_cmd(cmd: &mut std::process::Command, mirror: &Mir
     process_group::with_new_process_group(cmd);
     cmd.env("PYTHONPATH", mirror_pythonpath(mirror)?);
     cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+    sanitize_python_env(cmd);
     Ok(())
 }
 
@@ -181,6 +206,7 @@ pub(crate) fn run_baseline_with_timeout(
     // Same staleness guard as the per-mutant run: don't write `.pyc` into the
     // mirror during the baseline pass.
     cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+    sanitize_python_env(&mut cmd);
 
     let started = Instant::now();
     let mut child = match cmd.spawn() {
@@ -491,7 +517,8 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
             .file_type()
             .with_context(|| format!("no file type for {}", path.display()))?;
         if file_type.is_dir() {
-            std::fs::create_dir_all(&target).ok();
+            std::fs::create_dir_all(&target)
+                .with_context(|| format!("create mirror dir {}", target.display()))?;
         } else if file_type.is_file() {
             // Skip stray compiled bytecode outside `__pycache__` (e.g. legacy
             // sidecar `.pyc`); same staleness hazard as above.
@@ -502,7 +529,8 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
                 continue;
             }
             if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent).ok();
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create mirror dir {}", parent.display()))?;
             }
             clone_file(path, &target, mode)?;
         }
@@ -541,7 +569,32 @@ fn clone_file(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_patch, copy_dir_all, tail_lines, Mirror, PatchGuard};
+    use super::{
+        apply_patch, copy_dir_all, sanitize_python_env, tail_lines, Mirror, PatchGuard,
+        SANITIZED_ENV_VARS,
+    };
+
+    #[test]
+    fn sanitize_python_env_removes_caller_overrides() {
+        let mut cmd = std::process::Command::new("python");
+        cmd.env("PYTEST_ADDOPTS", "-n auto");
+        cmd.env("PYTHONPATH", "/mirror");
+        sanitize_python_env(&mut cmd);
+        let envs: std::collections::HashMap<_, _> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_owned())))
+            .collect();
+        // Every listed var is explicitly unset (`None`), not just left unset,
+        // so it is stripped from the inherited parent environment too.
+        for var in SANITIZED_ENV_VARS {
+            assert_eq!(envs.get(*var), Some(&None), "{var} not removed");
+        }
+        // fermut's own pins are untouched.
+        assert_eq!(
+            envs.get("PYTHONPATH"),
+            Some(&Some(std::ffi::OsString::from("/mirror")))
+        );
+    }
 
     #[test]
     fn tail_lines_keeps_all_when_under_limit() {

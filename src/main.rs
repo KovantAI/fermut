@@ -18,7 +18,7 @@ fn main() -> Result<()> {
 }
 
 fn run() -> Result<()> {
-    let cli = fermut::cli::Cli::parse();
+    let cli = fermut::Cli::parse();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(cli.tracing_filter())

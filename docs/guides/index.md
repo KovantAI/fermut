@@ -5,6 +5,8 @@ well — rolling out, integrating, tuning a filter.
 
 - **[CI quickstart](ci-quickstart.md)** — zero to a green
   mutation-testing job on every PR, in one read.
+- **[GitHub Action](github-action.md)** — `uses: KovantAI/fermut@<tag>`:
+  PR gate, sharded sweeps and cache warming in one reusable action.
 - **[Integrations](integrations.md)** — GitHub Actions, sharded
   full sweeps, pre-commit, ReadTheDocs.
 - **[Working on projects](projects.md)** — gradual rollout

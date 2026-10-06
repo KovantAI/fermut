@@ -12,7 +12,14 @@
 //!
 //! - pytest ([exit codes]): 0 pass, 1 tests failed, 2 collection interrupted,
 //!   3 internal error, 4 usage error, 5 no tests collected. A mutant that
-//!   breaks import makes pytest fail collection (exit 2) — that IS a kill.
+//!   breaks import makes pytest fail collection — that IS a kill. Which exit
+//!   code it produces depends on how the tests were selected: a file/dir
+//!   argument gives exit 2, but a **node id** (`file.py::test`, what
+//!   coverage-driven selection passes) gives exit 4 with `found no collectors`,
+//!   because the id can't be resolved inside a module that never imported. So
+//!   exit 4 alone is ambiguous between "the mutant broke import" (a kill) and
+//!   "a stale/bad node id" (`not found:`, a real anomaly); the pytest runner
+//!   disambiguates it from collection output via [`is_collection_failure`].
 //! - unittest: 0 success, 1 failures/errors (including a broken import, which
 //!   unittest runs as an errored `_FailedTest` — a real kill), 2 usage error
 //!   from argparse, and on Python 3.12+ exit 5 when no tests ran. unittest
@@ -61,6 +68,36 @@ pub(crate) fn classify_exit(tool: TestTool, code: Option<i32>) -> ExitVerdict {
             _ => ExitVerdict::Killed,
         },
     }
+}
+
+/// pytest exit code for a usage error. Ambiguous under node-id selection — see
+/// the module docs and [`is_collection_failure`].
+pub(crate) const PYTEST_USAGE_ERROR: i32 = 4;
+
+/// Whether combined pytest stdout+stderr from a node-id-selected run shows that
+/// a selected test module failed to *collect* (an import-time error), as
+/// opposed to a node id that simply doesn't exist.
+///
+/// pytest 7–9 report the former as `ERROR: found no collectors for <id>` on
+/// stderr; a missing id is `ERROR: not found: <id>` instead. That alone is
+/// required, plus independent evidence on stdout that collection actually
+/// errored, so an unrelated usage error can't be read as a kill. The stdout
+/// evidence varies with flags — fermut runs `--tb=no`, which drops the
+/// `ERROR collecting <file>` section — so any of these counts: that section,
+/// a short-summary `ERROR <file> - <exc>` line, or an `N error(s) in` tally.
+///
+/// A module that was *already* broken on the clean tree would match too — the
+/// same caveat as exit 2, which fermut already scores as a kill; the baseline
+/// check is what guards against it.
+pub(crate) fn is_collection_failure(output: &str) -> bool {
+    let unresolved = output.contains("found no collectors for");
+    let collect_errored = output.lines().any(|l| {
+        l.contains("ERROR collecting")
+            || (l.starts_with("ERROR ") && l.contains(" - "))
+            || l.contains(" error in ")
+            || l.contains(" errors in ")
+    });
+    unresolved && collect_errored
 }
 
 /// Human-readable label for an anomaly exit code, used to describe the
@@ -119,6 +156,56 @@ mod tests {
         assert_eq!(classify_exit(TestTool::Unittest, Some(5)), Anomaly(5));
         assert_eq!(classify_exit(TestTool::Unittest, Some(139)), Killed);
         assert_eq!(classify_exit(TestTool::Unittest, None), Killed);
+    }
+
+    // pytest 9.1.1 output (stdout + stderr) for a node id whose module raises
+    // at import, under fermut's own flags (`-x --tb=no -q`) — no `ERROR
+    // collecting` section, only the short summary.
+    const BROKEN_IMPORT_TB_NO: &str = "\
+ERROR: found no collectors for /proj/tests/a_test.py::test_a
+
+
+=========================== short test summary info ============================
+ERROR tests/a_test.py - ValueError: boom at import
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
+no tests collected, 1 error in 0.00s
+";
+    // Same failure with default traceback output (abridged).
+    const BROKEN_IMPORT_TB: &str = "\
+==================================== ERRORS ====================================
+_______________________ ERROR collecting tests/a_test.py _______________________
+E   ValueError: boom at import
+ERROR: found no collectors for /proj/tests/a_test.py::test_a
+";
+    // A node id that doesn't exist in a healthy module.
+    const MISSING_ID: &str = "\
+no tests ran in 0.00s
+ERROR: not found: /proj/tests/b_test.py::nope
+(no match in any of [<Module b_test.py>])
+";
+
+    #[test]
+    fn collection_failure_detects_import_breakage_under_node_ids() {
+        assert!(is_collection_failure(BROKEN_IMPORT_TB_NO));
+        assert!(is_collection_failure(BROKEN_IMPORT_TB));
+    }
+
+    #[test]
+    fn collection_failure_rejects_missing_node_id() {
+        assert!(!is_collection_failure(MISSING_ID));
+    }
+
+    #[test]
+    fn collection_failure_requires_both_signals() {
+        // The unresolved-id error alone is not enough evidence…
+        assert!(!is_collection_failure(
+            "ERROR: found no collectors for /proj/t.py::x\n"
+        ));
+        // …nor is a collection error without it.
+        assert!(!is_collection_failure(
+            "ERROR tests/t.py - ImportError: x\n1 error in 0.01s\n"
+        ));
+        assert!(!is_collection_failure(""));
     }
 
     #[test]

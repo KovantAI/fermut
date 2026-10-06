@@ -11,6 +11,7 @@ pub mod doctor;
 pub mod explain;
 pub mod hom;
 pub mod init;
+pub mod install_skills;
 pub mod list;
 pub mod mcp;
 pub mod migrate;

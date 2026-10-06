@@ -26,6 +26,7 @@ use crate::mutator::{self, Mutant};
 use crate::report::{MutantOutcome, Report};
 use crate::runner::{self, Runner};
 use crate::sync::lock_recover;
+use crate::test_tree::TestTree;
 
 /// Filter name recorded on mutants left untested when `--max-time` runs out.
 /// Callers (the PR gate, `skipped_by_filter`) match on this to tell a
@@ -118,6 +119,7 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         file_hashes: &state.file_hashes,
         scope_maps: &state.scope_maps,
         scope_prefix: &state.scope_prefix,
+        test_tree: &state.test_tree,
         equiv: state.equiv.as_ref(),
         file_sources: &state.file_sources,
         deadline: state.deadline,
@@ -146,6 +148,7 @@ struct RunState {
     file_sources: HashMap<PathBuf, String>,
     equiv: Option<EquivPipeline>,
     scope_prefix: String,
+    test_tree: TestTree,
     deadline: Option<Instant>,
 }
 
@@ -176,6 +179,8 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
         None
     };
     let scope_prefix = compute_scope_prefix(cfg);
+    // Walked and hashed once; each mutant's test fingerprint folds from it.
+    let test_tree = TestTree::walk(&cfg.tests_path());
     let cache = if cfg.cache {
         Mutex::new(Cache::load(&cfg.cache_path))
     } else {
@@ -196,6 +201,7 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
         file_sources,
         equiv,
         scope_prefix,
+        test_tree,
         deadline,
     })
 }
@@ -376,6 +382,7 @@ struct EvalCtx<'a> {
     file_hashes: &'a HashMap<PathBuf, String>,
     scope_maps: &'a HashMap<PathBuf, ScopeMap>,
     scope_prefix: &'a str,
+    test_tree: &'a TestTree,
     equiv: Option<&'a EquivPipeline>,
     file_sources: &'a HashMap<PathBuf, String>,
     /// Testing-phase wall-clock ceiling. Identical for every mutant in the
@@ -407,7 +414,7 @@ fn evaluate(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
         }
     }
 
-    let scope = compute_mutant_scope(ctx.scope_prefix, ctx.cfg, mutant);
+    let scope = compute_mutant_scope(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant);
     let identity_hash = mutant_identity_hash(ctx.cfg, mutant, ctx.file_hashes, ctx.scope_maps);
 
     if let Some(hash) = &identity_hash {
@@ -572,20 +579,20 @@ fn remap_cached_outcome(
 /// Mixed into every cached entry's scope so cache hits require the same shape.
 fn compute_scope_prefix(cfg: &Config) -> String {
     let mut h = Sha256::new();
-    // v4: the scope prefix now folds in a fingerprint of the test-suite tree
-    // (see `|tests=` below). Bumping the tag isn't strictly required — adding
-    // a new field already shifts the hash — but it documents the composition
-    // change and keeps the intent legible.
+    // v6: the test-suite fingerprint moved out of the prefix and into each
+    // mutant's scope (see `compute_mutant_scope`), scoped to the tests that
+    // cover the mutant, so an edit to an unrelated test keeps its verdict.
+    //
+    // v5: folds in the resolved Python interpreter (`|python=` below) — a
+    // different interpreter (or its venv's package set) can flip a mutant's
+    // verdict, so a `--python` change must not reuse another interpreter's
+    // cached outcomes.
     //
     // v3: cache-scope mode now affects how the file-identity hash is
     // computed. Mix the mode into the scope prefix so a `file`-mode entry
     // can't satisfy a `scope`-mode lookup (and vice versa) — the two modes
     // produce different identity hashes for the same source.
-    // v5: folds in the resolved Python interpreter (`|python=` below) — a
-    // different interpreter (or its venv's package set) can flip a mutant's
-    // verdict, so a `--python` change must not reuse another interpreter's
-    // cached outcomes.
-    h.update(b"v5");
+    h.update(b"v6");
     h.update(b"|cache_scope=");
     h.update(format!("{:?}", cfg.cache_scope).as_bytes());
     h.update(b"|runner=");
@@ -614,72 +621,6 @@ fn compute_scope_prefix(cfg: &Config) -> String {
     } else {
         &b"off"[..]
     });
-    // Test-suite content. A mutant's outcome depends on the tests as much as
-    // on the source: editing a test (without touching the source AST) can turn
-    // a survivor into a kill, but the source `file_hash` and the rest of the
-    // scope are unchanged. Without this, an agent's "add the killing test,
-    // re-run" loop keeps reading the stale "survived" verdict from the cache
-    // and never sees its fix land. Folding the tree fingerprint in means any
-    // test edit invalidates every cached outcome — coarse, but correct: a new
-    // test can kill more than one survivor, so re-evaluating all of them is the
-    // right semantics, not just the safe one.
-    h.update(b"|tests=");
-    h.update(test_suite_fingerprint(&cfg.tests_path()).as_bytes());
-    hex::encode(h.finalize())
-}
-
-/// Content fingerprint of the test-suite tree rooted at `tests_path`.
-///
-/// Walks the tree the same way the worker mirror does — `.gitignore` honored,
-/// hidden directories and `__pycache__` pruned, compiled bytecode skipped —
-/// and folds each surviving file's relative path plus a content hash into one
-/// stable digest. Path-sorted so the result is independent of directory
-/// iteration order. A missing or empty tree hashes to a constant (the empty
-/// digest), which is fine: it still differs from any populated tree.
-fn test_suite_fingerprint(tests_path: &Path) -> String {
-    let mut files: Vec<(PathBuf, [u8; 32])> = Vec::new();
-    let walker = ignore::WalkBuilder::new(tests_path)
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(false)
-        .require_git(false)
-        .parents(false)
-        .filter_entry(|entry| {
-            if entry.depth() == 0 {
-                return true;
-            }
-            let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
-            let name = entry.file_name().to_str();
-            !(is_dir && name.is_some_and(|n| n.starts_with('.') || n == "__pycache__"))
-        })
-        .build();
-    for entry in walker.flatten() {
-        let path = entry.path();
-        if !entry.file_type().is_some_and(|t| t.is_file()) {
-            continue;
-        }
-        // Stale compiled bytecode outside `__pycache__` never affects the run.
-        if path.extension().is_some_and(|e| e == "pyc" || e == "pyo") {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(path) else {
-            // Unreadable file: skip it rather than abort. Its absence from the
-            // fingerprint is conservative — at worst a cache entry lives one
-            // run too long, never the inverse.
-            continue;
-        };
-        let mut fh = Sha256::new();
-        fh.update(&bytes);
-        let rel = path.strip_prefix(tests_path).unwrap_or(path).to_path_buf();
-        files.push((rel, fh.finalize().into()));
-    }
-    files.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut h = Sha256::new();
-    for (rel, fh) in &files {
-        h.update(rel.to_string_lossy().as_bytes());
-        h.update(b"\0");
-        h.update(fh);
-    }
     hex::encode(h.finalize())
 }
 
@@ -693,23 +634,74 @@ fn runner_cache_tag(kind: RunnerKind) -> &'static str {
     }
 }
 
-/// Per-mutant final scope: prefix + sorted list of selected test ids when
-/// coverage-driven selection is on. Without coverage selection, every mutant
-/// shares the prefix.
-fn compute_mutant_scope(prefix: &str, cfg: &Config, mutant: &Mutant) -> String {
+/// Per-mutant final scope: prefix + sorted selected test ids (when
+/// coverage-driven selection is on) + a fingerprint of the tests that run
+/// against the mutant.
+///
+/// A mutant's outcome depends on the tests as much as on its source: editing a
+/// test (without touching the source AST) can turn a survivor into a kill, and
+/// without the fingerprint an agent's "add the killing test, re-run" loop would
+/// keep reading the stale verdict. When the covering tests are known precisely,
+/// only their files (plus conftest chain and shared support files, see
+/// [`TestTree::scoped`]) are fingerprinted, so editing an unrelated test keeps
+/// the verdict. Otherwise the whole tree is — any test edit invalidates. The
+/// covering id set itself is folded in too, so a new test that starts covering
+/// the line changes the key even when no existing file changed.
+fn compute_mutant_scope(prefix: &str, cfg: &Config, tree: &TestTree, mutant: &Mutant) -> String {
     let mut h = Sha256::new();
     h.update(prefix.as_bytes());
-    if let Some(ctx) = &cfg.coverage {
-        if let Some(tests) = ctx.tests_for_mutant(mutant) {
-            let mut sorted: Vec<&String> = tests.iter().collect();
-            sorted.sort();
-            for t in sorted {
-                h.update(b"|");
-                h.update(t.as_bytes());
-            }
+    let covering = cfg
+        .coverage
+        .as_ref()
+        .and_then(|ctx| ctx.tests_for_mutant(mutant).map(|ids| (ctx, ids)));
+    if let Some((_, tests)) = covering {
+        let mut sorted: Vec<&String> = tests.iter().collect();
+        sorted.sort();
+        for t in sorted {
+            h.update(b"|");
+            h.update(t.as_bytes());
+        }
+    }
+    let scoped =
+        covering.and_then(|(ctx, ids)| scoped_test_fingerprint(cfg, tree, ctx.node_root(), ids));
+    match scoped {
+        Some(fp) => {
+            h.update(b"|tests:scoped=");
+            h.update(fp.as_bytes());
+        }
+        None => {
+            h.update(b"|tests:tree=");
+            h.update(tree.whole().as_bytes());
         }
     }
     hex::encode(h.finalize())
+}
+
+/// Fingerprint of only the test files behind `ids`, or `None` when the set of
+/// tests that run against the mutant isn't known precisely and the caller must
+/// fall back to the whole tree:
+///
+/// - `unittest` runner — it ignores coverage selection and runs the full suite;
+/// - empty selection — the runner then sweeps the whole tests dir;
+/// - a covering file outside the tests tree, or one the walk didn't hash.
+fn scoped_test_fingerprint(
+    cfg: &Config,
+    tree: &TestTree,
+    node_root: &Path,
+    ids: &[String],
+) -> Option<String> {
+    if matches!(cfg.runner, RunnerKind::Unittest) || ids.is_empty() {
+        return None;
+    }
+    let abs: Vec<PathBuf> = ids
+        .iter()
+        .map(|id| node_root.join(id.split_once("::").map_or(id.as_str(), |(p, _)| p)))
+        .collect();
+    let rel: Vec<&Path> = abs
+        .iter()
+        .map(|p| tree.relative(p))
+        .collect::<Option<_>>()?;
+    Some(tree.scoped(rel))
 }
 
 /// Per-file artifacts for a run, keyed by source path. Built in one pass by
@@ -1046,83 +1038,229 @@ mod tests {
         assert_ne!(file_a, file_b, "file-mode bar hash must change on foo edit");
     }
 
-    #[test]
-    fn test_suite_fingerprint_is_stable_and_tracks_content() {
-        let tmp = tempfile::tempdir().unwrap();
-        let tests = tmp.path().join("tests");
-        std::fs::create_dir_all(&tests).unwrap();
-        std::fs::write(tests.join("test_a.py"), b"def test_a():\n    assert True\n").unwrap();
+    /// Project fixture for per-mutant scope tests:
+    ///
+    /// ```text
+    /// pyproject.toml
+    /// src/calc.py                      (mutated; line 1 covered by test_a, line 2 by test_b)
+    /// tests/conftest.py
+    /// tests/helpers.py
+    /// tests/a/conftest.py
+    /// tests/a/test_a.py
+    /// tests/b/conftest.py
+    /// tests/b/test_b.py
+    /// ```
+    struct ScopeFixture {
+        tmp: tempfile::TempDir,
+    }
 
-        let h1 = test_suite_fingerprint(&tests);
-        let h2 = test_suite_fingerprint(&tests);
-        assert_eq!(h1, h2, "fingerprint must be deterministic");
+    impl ScopeFixture {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let fx = Self { tmp };
+            fx.write("pyproject.toml", "");
+            fx.write("src/calc.py", "x = 1 + 1\ny = 2 + 2\nz = 3 + 3\n");
+            fx.write("tests/conftest.py", "root = 1\n");
+            fx.write("tests/helpers.py", "def h(): pass\n");
+            fx.write("tests/a/conftest.py", "a = 1\n");
+            fx.write("tests/a/test_a.py", "def test_a(): pass\n");
+            fx.write("tests/b/conftest.py", "b = 1\n");
+            fx.write("tests/b/test_b.py", "def test_b(): pass\n");
+            fx.write_coverage(&[
+                (1, &["tests/a/test_a.py::test_a"]),
+                (2, &["tests/b/test_b.py::test_b"]),
+            ]);
+            fx
+        }
 
-        // Editing a test body — same file, same path — must move the hash.
-        std::fs::write(
-            tests.join("test_a.py"),
-            b"def test_a():\n    assert 1 == 1\n",
-        )
-        .unwrap();
-        let h3 = test_suite_fingerprint(&tests);
-        assert_ne!(h1, h3, "editing a test must change the fingerprint");
+        fn root(&self) -> &Path {
+            self.tmp.path()
+        }
 
-        // Adding a test file must also move it.
-        std::fs::write(tests.join("test_b.py"), b"def test_b():\n    assert True\n").unwrap();
-        let h4 = test_suite_fingerprint(&tests);
-        assert_ne!(h3, h4, "adding a test must change the fingerprint");
+        fn write(&self, rel: &str, body: &str) {
+            let p = self.root().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+
+        fn write_coverage(&self, lines: &[(u32, &[&str])]) {
+            let contexts: serde_json::Map<String, serde_json::Value> = lines
+                .iter()
+                .map(|(line, ids)| {
+                    let ids: Vec<String> = ids.iter().map(|id| format!("{id}|run")).collect();
+                    (line.to_string(), serde_json::json!(ids))
+                })
+                .collect();
+            let doc = serde_json::json!({
+                "files": { "src/calc.py": { "contexts": contexts } }
+            });
+            self.write("coverage.json", &doc.to_string());
+        }
+
+        fn config(&self, runner: RunnerKind, with_coverage: bool) -> Config {
+            use crate::filter::coverage::CoverageContexts;
+            let coverage = with_coverage.then(|| {
+                CoverageContexts::from_json(
+                    &self.root().join("coverage.json"),
+                    &self.root().join("src"),
+                    self.root(),
+                )
+                .unwrap()
+            });
+            Config {
+                source_root: self.root().join("src"),
+                tests: Some(self.root().join("tests")),
+                coverage,
+                runner,
+                ..base_test_config()
+            }
+        }
+
+        fn mutant(&self, line: u32) -> Mutant {
+            let mut m = arith_mutant("x = 1 + 1", "+", "-");
+            m.file = self.root().join("src/calc.py");
+            m.line = line;
+            m.stmt_line = line;
+            m
+        }
+
+        /// Scope of the mutant on `line` against the tree as it is now.
+        fn scope(&self, cfg: &Config, line: u32) -> String {
+            let tree = TestTree::walk(&cfg.tests_path());
+            compute_mutant_scope(&compute_scope_prefix(cfg), cfg, &tree, &self.mutant(line))
+        }
     }
 
     #[test]
-    fn test_suite_fingerprint_ignores_pycache_and_bytecode() {
-        let tmp = tempfile::tempdir().unwrap();
-        let tests = tmp.path().join("tests");
-        std::fs::create_dir_all(&tests).unwrap();
-        std::fs::write(tests.join("test_a.py"), b"def test_a():\n    assert True\n").unwrap();
-        let baseline = test_suite_fingerprint(&tests);
+    fn scope_prefix_ignores_test_edits() {
+        // The test fingerprint lives in the per-mutant scope now, not in the
+        // prefix every entry shares.
+        let fx = ScopeFixture::new();
+        let cfg = fx.config(RunnerKind::Pytest, true);
+        let before = compute_scope_prefix(&cfg);
+        fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
+        assert_eq!(before, compute_scope_prefix(&cfg));
+    }
 
-        // Stale bytecode under __pycache__ and a stray .pyc must not count —
-        // they never affect what pytest runs.
-        let pycache = tests.join("__pycache__");
-        std::fs::create_dir_all(&pycache).unwrap();
-        std::fs::write(pycache.join("test_a.cpython-312.pyc"), b"\x00\x01junk").unwrap();
-        std::fs::write(tests.join("test_a.pyc"), b"\x00\x01junk").unwrap();
-
+    #[test]
+    fn mutant_scope_survives_edit_to_non_covering_test() {
+        let fx = ScopeFixture::new();
+        let cfg = fx.config(RunnerKind::Pytest, true);
+        let before = fx.scope(&cfg, 1);
+        assert_eq!(before, fx.scope(&cfg, 1), "scope must be stable");
+        fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
+        fx.write("tests/b/conftest.py", "b = 2\n");
+        fx.write("tests/b/test_new.py", "def test_new(): pass\n");
         assert_eq!(
-            baseline,
-            test_suite_fingerprint(&tests),
-            "compiled bytecode must not alter the fingerprint"
+            before,
+            fx.scope(&cfg, 1),
+            "unrelated test edits keep the key"
         );
     }
 
     #[test]
-    fn scope_prefix_changes_when_a_test_is_edited() {
-        // The core regression: editing a test (no source-AST change) must
-        // invalidate cached per-mutant outcomes, or an agent's add-test/re-run
+    fn mutant_scope_changes_when_a_covering_test_is_edited() {
+        // The core regression: editing a covering test (no source-AST change)
+        // must invalidate the cached outcome, or an agent's add-test/re-run
         // loop reads the stale pre-edit verdict forever.
-        let tmp = tempfile::tempdir().unwrap();
-        let tests = tmp.path().join("tests");
-        std::fs::create_dir_all(&tests).unwrap();
-        std::fs::write(
-            tests.join("test_calc.py"),
-            b"def test_add():\n    assert add(1, 2) == 3\n",
-        )
-        .unwrap();
+        let fx = ScopeFixture::new();
+        let cfg = fx.config(RunnerKind::Pytest, true);
+        let before = fx.scope(&cfg, 1);
+        fx.write("tests/a/test_a.py", "def test_a(): assert 1\n");
+        assert_ne!(before, fx.scope(&cfg, 1));
+    }
 
-        let cfg = Config {
-            source_root: tmp.path().to_path_buf(),
-            tests: Some(tests.clone()),
-            ..base_test_config()
+    #[test]
+    fn mutant_scope_tracks_conftest_chain_and_support_files() {
+        for (rel, body) in [
+            ("tests/conftest.py", "root = 2\n"),
+            ("tests/a/conftest.py", "a = 2\n"),
+            ("tests/helpers.py", "def h(): return 1\n"),
+            ("tests/b/data.json", "{}"),
+        ] {
+            let fx = ScopeFixture::new();
+            let cfg = fx.config(RunnerKind::Pytest, true);
+            let before = fx.scope(&cfg, 1);
+            fx.write(rel, body);
+            assert_ne!(before, fx.scope(&cfg, 1), "{rel} must invalidate");
+        }
+    }
+
+    #[test]
+    fn mutant_scope_changes_with_a_new_covering_test() {
+        let fx = ScopeFixture::new();
+        let before = fx.scope(&fx.config(RunnerKind::Pytest, true), 1);
+        // Same files on disk, but test_b now also covers line 1.
+        fx.write_coverage(&[
+            (
+                1,
+                &["tests/a/test_a.py::test_a", "tests/b/test_b.py::test_b"],
+            ),
+            (2, &["tests/b/test_b.py::test_b"]),
+        ]);
+        assert_ne!(before, fx.scope(&fx.config(RunnerKind::Pytest, true), 1));
+    }
+
+    #[test]
+    fn mutant_scope_resolves_parametrized_and_class_node_ids() {
+        let fx = ScopeFixture::new();
+        fx.write_coverage(&[(1, &["tests/a/test_a.py::TestA::test_x[1-2]"])]);
+        let cfg = fx.config(RunnerKind::Pytest, true);
+        let before = fx.scope(&cfg, 1);
+        fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
+        assert_eq!(
+            before,
+            fx.scope(&cfg, 1),
+            "resolved to test_a.py, not the tree"
+        );
+        fx.write("tests/a/test_a.py", "def test_a(): assert 1\n");
+        assert_ne!(before, fx.scope(&cfg, 1));
+    }
+
+    #[test]
+    fn mutant_scope_falls_back_to_whole_tree() {
+        // Each case must make an unrelated test edit invalidate the key.
+        let edit_unrelated = |fx: &ScopeFixture| {
+            fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
         };
-        let before = compute_scope_prefix(&cfg);
-        assert_eq!(before, compute_scope_prefix(&cfg), "prefix must be stable");
 
-        std::fs::write(
-            tests.join("test_calc.py"),
-            b"def test_add():\n    assert add(1, 2) == 3\n\ndef test_add_neg():\n    assert add(-1, 1) == 0\n",
-        )
-        .unwrap();
-        let after = compute_scope_prefix(&cfg);
-        assert_ne!(before, after, "editing tests must change the scope prefix");
+        // No coverage.
+        let fx = ScopeFixture::new();
+        let cfg = fx.config(RunnerKind::Pytest, false);
+        let before = fx.scope(&cfg, 1);
+        edit_unrelated(&fx);
+        assert_ne!(before, fx.scope(&cfg, 1), "no coverage");
+
+        // unittest ignores coverage selection and runs the full suite.
+        let fx = ScopeFixture::new();
+        let cfg = fx.config(RunnerKind::Unittest, true);
+        let before = fx.scope(&cfg, 1);
+        edit_unrelated(&fx);
+        assert_ne!(before, fx.scope(&cfg, 1), "unittest");
+
+        // No recorded context for the line (line 3).
+        let fx = ScopeFixture::new();
+        let cfg = fx.config(RunnerKind::Pytest, true);
+        let before = fx.scope(&cfg, 3);
+        edit_unrelated(&fx);
+        assert_ne!(before, fx.scope(&cfg, 3), "no context");
+
+        // Covering test outside the tests tree (a doctest-style id in src/).
+        let fx = ScopeFixture::new();
+        fx.write_coverage(&[(1, &["src/calc.py::calc"])]);
+        let cfg = fx.config(RunnerKind::Pytest, true);
+        let before = fx.scope(&cfg, 1);
+        edit_unrelated(&fx);
+        assert_ne!(before, fx.scope(&cfg, 1), "covering file outside tests/");
+    }
+
+    #[test]
+    fn rstest_uses_scoped_fingerprint() {
+        let fx = ScopeFixture::new();
+        let cfg = fx.config(RunnerKind::Rstest, true);
+        let before = fx.scope(&cfg, 1);
+        fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
+        assert_eq!(before, fx.scope(&cfg, 1));
     }
 
     /// Minimal `Config` for tests that exercise hash/scope logic without
@@ -1208,6 +1346,7 @@ mod tests {
             file_hashes: &HashMap::new(),
             scope_maps: &HashMap::new(),
             scope_prefix: "",
+            test_tree: &TestTree::default(),
             equiv: None,
             file_sources: &HashMap::new(),
             deadline,

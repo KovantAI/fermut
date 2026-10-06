@@ -1,0 +1,329 @@
+# fermut PR mutation gate.
+#
+#   - uses: actions/checkout@<sha>
+#   - uses: KovantAI/fermut@v0.4.1
+#     with:
+#       fail-under: "80"
+#
+# Mutates only the lines the PR changed, gates on the score, publishes the
+# report to the job summary and posts one sticky PR comment (the job needs
+# `pull-requests: write`). With `warm-only: "true"` it only builds and caches
+# the coverage DB — run that on push to the default branch so new PR branches
+# restore a warm cache instead of starting cold.
+#
+# Sibling actions in this repo, released under the same tags:
+#   KovantAI/fermut/sweep  whole-tree run, optionally one shard of a matrix
+#   KovantAI/fermut/merge  combine shard reports and gate
+#
+# Composite rather than a reusable workflow so the caller keeps its own job:
+# `services:`, `container:` and private-registry install steps cannot be passed
+# into a reusable workflow. Shared logic lives in scripts/action/.
+#
+# Secrets: composites cannot read `secrets`, and any `env:` on this step
+# reaches every step below — including the ones executing mutated code. If
+# your dependencies need credentials, install them in your own step and set
+# `install-command: ""`.
+#
+# Supported runners: Linux and macOS.
+
+name: "fermut mutation gate"
+description: "Mutation-test the lines a PR changed with fermut and gate on the score."
+author: "KovantAI"
+branding:
+  icon: "check-circle"
+  color: "orange"
+
+inputs:
+  working-directory:
+    description: "Project root, relative to the workspace. For monorepos."
+    required: false
+    default: "."
+  source:
+    description: "Python source root. Empty uses fermut.toml, else the project root."
+    required: false
+    default: ""
+  tests:
+    description: "Test directory. Empty uses fermut.toml, else `<source>/tests`."
+    required: false
+    default: ""
+  fermut-version:
+    description: >-
+      fermut release to install from PyPI. Empty installs the version matching
+      the action ref (`@v0.4.1` → fermut 0.4.1), else the latest release.
+      "project" uses the fermut already installed in the project environment.
+    required: false
+    default: ""
+  python-version:
+    description: "Interpreter for setup-uv. Empty uses the runner default or `.python-version`."
+    required: false
+    default: ""
+  install-command:
+    description: >-
+      Installs the project and its test dependencies, in working-directory.
+      Empty skips it — do that when you install in your own step.
+    required: false
+    default: "uv sync --all-extras --dev"
+  post-install-command:
+    description: "Setup between install and the first test run, e.g. creating a test database against your `services:`. Empty skips it."
+    required: false
+    default: ""
+  base-ref:
+    description: >-
+      Ref the diff is computed against. Empty uses origin/<PR base branch>,
+      else origin/<default branch>. A shallow checkout is deepened
+      automatically.
+    required: false
+    default: ""
+  fail-under:
+    description: >-
+      Gate threshold in percent. Empty defers to `fail_under` in fermut.toml,
+      else fermut's default: any survivor fails. Small PRs produce few
+      mutants, so the score is high-variance there.
+    required: false
+    default: ""
+  blocking:
+    description: >-
+      "false" turns a failing gate into a warning, for adopting the gate
+      before the suite can pass it. Setup failures still fail. Prefer it over
+      `continue-on-error`, which hides a broken setup too.
+    required: false
+    default: "true"
+  comment:
+    description: '"true" posts or updates one sticky PR comment with the report.'
+    required: false
+    default: "true"
+  github-token:
+    description: "Token used for the PR comment."
+    required: false
+    default: ${{ github.token }}
+  warm-only:
+    description: '"true" only builds and caches the coverage DB. For a push-to-main job.'
+    required: false
+    default: "false"
+  cache:
+    description: '"true" caches the verdict cache and the coverage DB across runs.'
+    required: false
+    default: "true"
+  cache-key-hash:
+    description: >-
+      Override for the cache key hash. Empty hashes every *.py, pyproject.toml,
+      lockfile, fermut.toml and test config in the repo. A stale restore is
+      safe: verdicts are keyed per mutant on source, tests and run config.
+    required: false
+    default: ""
+  cache-key-prefix:
+    description: "Cache namespace. Change it to drop every cached verdict. Share it with sweep to share the coverage cache."
+    required: false
+    default: "fermut"
+  artifact-name:
+    description: "Name of the uploaded report artifact."
+    required: false
+    default: "fermut-report"
+  args:
+    description: 'Extra arguments appended to `fermut run`, e.g. "--ops arith,compare --timeout 20".'
+    required: false
+    default: ""
+
+outputs:
+  score:
+    description: 'Mutation score in percent, or "" when nothing was scored (N/A).'
+    value: ${{ steps.stats.outputs.score }}
+  scored:
+    description: "Mutants with a real verdict (killed + survived + timed out). 0 means the score is N/A."
+    value: ${{ steps.stats.outputs.scored }}
+  killed:
+    description: "Killed mutants."
+    value: ${{ steps.stats.outputs.killed }}
+  survived:
+    description: "Surviving mutants."
+    value: ${{ steps.stats.outputs.survived }}
+  errored:
+    description: "Mutants that errored. Excluded from the score."
+    value: ${{ steps.stats.outputs.errored }}
+  skipped:
+    description: '"true" when the PR changed no Python files and the run was skipped.'
+    value: ${{ steps.detect.outputs.skip }}
+  report-json:
+    description: "Path to the JSON report, relative to the workspace."
+    value: ${{ steps.setup.outputs.out }}/report.json
+  report-markdown:
+    description: "Path to the Markdown report, relative to the workspace."
+    value: ${{ steps.setup.outputs.out }}/report.md
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs
+      id: setup
+      shell: bash
+      env:
+        BOOL_blocking: ${{ inputs.blocking }}
+        BOOL_comment: ${{ inputs.comment }}
+        BOOL_cache: ${{ inputs.cache }}
+        BOOL_warm_only: ${{ inputs.warm-only }}
+        FAIL_UNDER: ${{ inputs.fail-under }}
+        WD: ${{ inputs.working-directory }}
+        ARTIFACT: ${{ inputs.artifact-name }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action/setup.sh"
+
+    - name: Compute cache key
+      id: key
+      if: inputs.cache == 'true'
+      shell: bash
+      env:
+        OVERRIDE: ${{ inputs.cache-key-hash }}
+        DEFAULT: ${{ hashFiles('**/*.py', '**/pyproject.toml', '**/uv.lock', '**/poetry.lock', '**/requirements*.txt', '**/fermut.toml', '**/.coveragerc', '**/setup.cfg', '**/pytest.ini', '**/tox.ini', '!**/.venv/**', '!**/venv/**', '!**/node_modules/**') }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action/cache-key.sh"
+
+    - name: Detect changed Python files
+      id: detect
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        WARM_ONLY: ${{ inputs.warm-only }}
+        BASE_REF: ${{ inputs.base-ref }}
+        PR_BASE: ${{ github.base_ref }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action/detect.sh"
+
+    - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+      if: steps.detect.outputs.go == 'true'
+      with:
+        python-version: ${{ inputs.python-version }}
+        enable-cache: ${{ inputs.install-command != '' }}
+        cache-dependency-glob: |
+          **/uv.lock
+          **/pyproject.toml
+          **/requirements*.txt
+
+    - name: Install fermut
+      id: fermut
+      if: steps.detect.outputs.go == 'true'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.fermut-version }}
+        ACTION_REF: ${{ github.action_ref }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action/install-fermut.sh"
+
+    - name: Install project
+      if: steps.detect.outputs.go == 'true' && inputs.install-command != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INSTALL_COMMAND: ${{ inputs.install-command }}
+      run: eval "$INSTALL_COMMAND"
+
+    - name: Resolve interpreter and fermut
+      id: env
+      if: steps.detect.outputs.go == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        SPEC: ${{ steps.fermut.outputs.spec }}
+        NEED_COV: "true"
+      run: bash "$GITHUB_ACTION_PATH/scripts/action/resolve-env.sh"
+
+    - name: Post-install setup
+      if: steps.detect.outputs.go == 'true' && inputs.post-install-command != ''
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        POST_INSTALL_COMMAND: ${{ inputs.post-install-command }}
+      run: eval "$POST_INSTALL_COMMAND"
+
+    # Verdicts are keyed per mutant on (id, file AST hash, scope), and scope
+    # fingerprints tests, interpreter and run config — so a prefix-restored
+    # cache from another branch only hits where the verdict is still valid.
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      if: steps.detect.outputs.go == 'true' && inputs.cache == 'true' && inputs.warm-only != 'true'
+      with:
+        path: ${{ inputs.working-directory }}/.fermut/cache.json
+        key: ${{ inputs.cache-key-prefix }}-verdicts-pr-${{ runner.os }}-${{ steps.key.outputs.hash }}
+        restore-keys: |
+          ${{ inputs.cache-key-prefix }}-verdicts-pr-${{ runner.os }}-
+          ${{ inputs.cache-key-prefix }}-verdicts-
+
+    # The DB and its fingerprint sidecar travel together: the DB alone has no
+    # fingerprints and triggers a full rebuild.
+    - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      if: steps.detect.outputs.go == 'true' && inputs.cache == 'true'
+      with:
+        path: |
+          ${{ inputs.working-directory }}/.coverage
+          ${{ inputs.working-directory }}/.coverage.fermut-fingerprints.json
+        key: ${{ inputs.cache-key-prefix }}-coverage-${{ runner.os }}-${{ steps.key.outputs.hash }}
+        restore-keys: |
+          ${{ inputs.cache-key-prefix }}-coverage-${{ runner.os }}-
+
+    - name: Build per-test coverage
+      if: steps.detect.outputs.go == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        FERMUT: ${{ steps.env.outputs.bin }}
+        PY: ${{ steps.env.outputs.python }}
+        SOURCE: ${{ inputs.source }}
+        TESTS: ${{ inputs.tests }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action/coverage.sh"
+
+    - name: Run fermut on changed lines
+      id: run
+      if: steps.detect.outputs.go == 'true' && inputs.warm-only != 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        FERMUT: ${{ steps.env.outputs.bin }}
+        PY: ${{ steps.env.outputs.python }}
+        SOURCE: ${{ inputs.source }}
+        TESTS: ${{ inputs.tests }}
+        DIFF_BASE: ${{ steps.detect.outputs.base }}
+        SHARD: ""
+        FAIL_UNDER: ${{ inputs.fail-under }}
+        EXTRA_ARGS: ${{ inputs.args }}
+        OUT: ${{ steps.setup.outputs.out_abs }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action/run.sh"
+
+    - name: Read results
+      id: stats
+      if: ${{ !cancelled() && steps.run.outcome == 'success' }}
+      shell: bash
+      env:
+        OUT: ${{ steps.setup.outputs.out_abs }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action/stats.sh"
+
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      if: ${{ !cancelled() && steps.stats.outcome == 'success' }}
+      with:
+        name: ${{ steps.setup.outputs.artifact }}
+        path: |
+          ${{ steps.setup.outputs.out }}/report.json
+          ${{ steps.setup.outputs.out }}/report.md
+        if-no-files-found: error
+
+    # Sticky: `fermut pr-comment` edits its previous comment in place. A fork
+    # PR's token is read-only, so a failed post warns instead of failing.
+    - name: Comment on PR
+      if: ${{ !cancelled() && inputs.comment == 'true' && github.event.pull_request.number && steps.stats.outcome == 'success' && steps.stats.outputs.scored != '0' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        FERMUT: ${{ steps.env.outputs.bin }}
+        OUT: ${{ steps.setup.outputs.out_abs }}
+      run: |
+        "$FERMUT" pr-comment --markdown "$OUT/report.md" \
+          || echo "::warning title=fermut action::Could not post the PR comment (fork PRs get a read-only token; the job needs pull-requests: write). The report is in the job summary."
+
+    - name: Enforce gate
+      if: ${{ !cancelled() && steps.stats.outcome == 'success' }}
+      shell: bash
+      env:
+        RC: ${{ steps.run.outputs.rc }}
+        BLOCKING: ${{ inputs.blocking }}
+        FAIL_UNDER: ${{ inputs.fail-under }}
+        SCORE: ${{ steps.stats.outputs.score }}
+        SCORED: ${{ steps.stats.outputs.scored }}
+        SURVIVED: ${{ steps.stats.outputs.survived }}
+        ERRORED: ${{ steps.stats.outputs.errored }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action/gate.sh"

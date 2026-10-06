@@ -88,6 +88,7 @@ nav:
   - Guides:
       - guides/index.md
       - CI quickstart: guides/ci-quickstart.md
+      - GitHub Action: guides/github-action.md
       - Integrations: guides/integrations.md
       - Working on projects: guides/projects.md
       - Tightening the inner loop: guides/inner-loop.md

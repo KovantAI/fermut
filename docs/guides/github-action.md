@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@<sha>
         with:
           fetch-depth: 0     # optional: the action deepens a shallow clone itself
-      - uses: KovantAI/fermut@v0.4.1
+      - uses: KovantAI/fermut@v0.5.0
         with:
           fail-under: "80"
 ```
@@ -65,7 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@<sha>
-      - uses: KovantAI/fermut@v0.4.1
+      - uses: KovantAI/fermut@v0.5.0
         with:
           warm-only: "true"
 ```
@@ -85,7 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@<sha>
-      - uses: KovantAI/fermut/sweep@v0.4.1
+      - uses: KovantAI/fermut/sweep@v0.5.0
         with:
           shard: ${{ matrix.shard }}/4
 
@@ -93,7 +93,7 @@ jobs:
     needs: shard
     runs-on: ubuntu-latest
     steps:
-      - uses: KovantAI/fermut/merge@v0.4.1
+      - uses: KovantAI/fermut/merge@v0.5.0
         with:
           fail-under: "70"
 ```
@@ -144,7 +144,7 @@ with the credentials scoped to that step, and set `install-command: ""`:
   env:
     UV_INDEX_PRIVATE_PASSWORD: ${{ secrets.REGISTRY_TOKEN }}
   run: uv sync --dev
-- uses: KovantAI/fermut@v0.4.1
+- uses: KovantAI/fermut@v0.5.0
   with:
     install-command: ""
 ```

@@ -127,8 +127,8 @@ venv, and runs each tool against the **same source tree** with the
 with per-phase timing, mutant total, score, and return code.
 
 Numbers below are **preliminary** `cold`-scenario runs (fermut
-0.4.1 vs mutmut 3.6.0). **They are illustrative — your codebase
-will produce different results**, and fermut 0.4.1 is
+0.5.0 vs mutmut 3.6.0). **They are illustrative — your codebase
+will produce different results**, and fermut 0.5.0 is
 pre-optimization. See [Reference → Benchmarks](../reference/benchmarks.md)
 for the full table and caveats.
 

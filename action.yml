@@ -1,7 +1,7 @@
 # fermut PR mutation gate.
 #
 #   - uses: actions/checkout@<sha>
-#   - uses: KovantAI/fermut@v0.4.1
+#   - uses: KovantAI/fermut@v0.5.0
 #     with:
 #       fail-under: "80"
 #
@@ -49,7 +49,7 @@ inputs:
   fermut-version:
     description: >-
       fermut release to install from PyPI. Empty installs the version matching
-      the action ref (`@v0.4.1` → fermut 0.4.1), else the latest release.
+      the action ref (`@v0.5.0` → fermut 0.5.0), else the latest release.
       "project" uses the fermut already installed in the project environment.
     required: false
     default: ""

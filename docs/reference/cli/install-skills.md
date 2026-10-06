@@ -13,7 +13,7 @@ fermut install-skills [--user] [--agents] [--dir <DIR>] [--force]
 ```console
 $ fermut install-skills
   fermut-mutation-testing: installed
-fermut 0.4.1 skills in /path/to/project/.claude/skills. Claude Code picks up project and user skills live; if they don't show up, start a new session.
+fermut 0.5.0 skills in /path/to/project/.claude/skills. Claude Code picks up project and user skills live; if they don't show up, start a new session.
 ```
 
 | Flag          | Effect                                                              |

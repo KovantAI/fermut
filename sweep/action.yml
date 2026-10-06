@@ -8,7 +8,7 @@
 #     runs-on: ubuntu-latest
 #     steps:
 #       - uses: actions/checkout@<sha>
-#       - uses: KovantAI/fermut/sweep@v0.4.1
+#       - uses: KovantAI/fermut/sweep@v0.5.0
 #         with:
 #           shard: ${{ matrix.shard }}/4
 #

@@ -1,6 +1,6 @@
 {
   "name": "fermut",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Skill and MCP server for driving fermut mutation testing: score a Python test suite, triage surviving mutants, and write targeted tests that kill them. The MCP server needs fermut on PATH.",
   "author": {
     "name": "Kovant AI",

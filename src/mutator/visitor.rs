@@ -4,7 +4,6 @@
 //! If you bump the pinned tag in `Cargo.toml`, re-verify against the
 //! corresponding `ruff_python_ast` source.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -31,9 +30,6 @@ pub fn collect(path: &Path, source: &str) -> Result<Vec<Mutant>> {
     let parsed = parse_module(source).with_context(|| format!("parsing {}", path.display()))?;
     let module = parsed.syntax();
 
-    let mut docstrings: HashSet<TextRange> = HashSet::new();
-    collect_docstring_ranges(&module.body, &mut docstrings);
-
     let ignores = collect_from_tokens(source, parsed.tokens());
 
     let mut collector = Collector {
@@ -41,7 +37,6 @@ pub fn collect(path: &Path, source: &str) -> Result<Vec<Mutant>> {
         source,
         line_starts: line_start_offsets(source),
         out: Vec::new(),
-        docstrings,
         ignores,
         annotation_ranges: Vec::new(),
         stmt_line: 0,
@@ -52,21 +47,15 @@ pub fn collect(path: &Path, source: &str) -> Result<Vec<Mutant>> {
     Ok(collector.out)
 }
 
-/// Walk all function/class/module bodies and record the range of the leading
-/// `Stmt::Expr(StringLiteral)` (the docstring) so later passes can skip them.
-fn collect_docstring_ranges(body: &[Stmt], out: &mut HashSet<TextRange>) {
-    if let Some(Stmt::Expr(e)) = body.first() {
-        if let Expr::StringLiteral(_) = e.value.as_ref() {
-            out.insert(e.value.range());
-        }
-    }
-    for stmt in body {
-        match stmt {
-            Stmt::FunctionDef(f) => collect_docstring_ranges(&f.body, out),
-            Stmt::ClassDef(c) => collect_docstring_ranges(&c.body, out),
-            _ => {}
-        }
-    }
+/// A statement that is only a plain string or bytes literal: a docstring, or
+/// a "docstring" placed after an attribute. It does nothing at runtime, so every
+/// mutation of it is equivalent. f-strings are excluded since their `{}`
+/// expressions can have side effects.
+fn is_bare_literal_stmt(stmt: &Stmt) -> bool {
+    matches!(
+        stmt,
+        Stmt::Expr(e) if matches!(e.value.as_ref(), Expr::StringLiteral(_) | Expr::BytesLiteral(_))
+    )
 }
 
 /// Byte offset of the first character of each line (0-based). `line_starts[0]`
@@ -150,7 +139,6 @@ struct Collector<'a> {
     /// See [`line_start_offsets`].
     line_starts: Vec<usize>,
     out: Vec<Mutant>,
-    docstrings: HashSet<TextRange>,
     ignores: IgnoreMap,
     /// Ranges of union-annotation tokens whose generic mutation is invalid: each
     /// `|` operator (arith swap → `&`) and each `None` arm (none-to-value), both
@@ -803,6 +791,9 @@ impl<'a> Collector<'a> {
 
 impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
     fn visit_stmt(&mut self, stmt: &'ast Stmt) {
+        if is_bare_literal_stmt(stmt) {
+            return;
+        }
         // Innermost enclosing statement wins, and is restored on the way out,
         // so a nested body's mutants do not inherit the outer statement's head.
         let outer_stmt_line = self.stmt_line;
@@ -870,14 +861,12 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
             Expr::UnaryOp(u) => self.emit_unaryop(u),
             Expr::Compare(c) => self.emit_compare(c),
             Expr::NumberLiteral(n) => self.emit_number(n),
-            Expr::StringLiteral(s) if !self.docstrings.contains(&expr.range()) => {
-                self.emit_string(s)
-            }
+            Expr::StringLiteral(s) => self.emit_string(s),
             // f-strings (`Expr::FString`) are a distinct node from plain string
             // literals, so the catalogue used to skip them entirely. They carry
             // real logic (error messages, formatted output); collapse the whole
             // f-string to an empty string — does the formatted result matter?
-            Expr::FString(_) if !self.docstrings.contains(&expr.range()) => {
+            Expr::FString(_) => {
                 self.push(Operator::StringToEmpty, expr.range(), "\"\"");
             }
             Expr::BytesLiteral(b) => self.emit_bytes(b),
@@ -1741,6 +1730,37 @@ mod operator_emission_tests {
             .filter(|m| m.original.contains("module docstring"))
             .collect();
         assert!(on_docstring.is_empty());
+    }
+
+    #[test]
+    fn attribute_docstring_not_mutated() {
+        // A string after a field is a bare expression statement, not the
+        // body's first statement, and is just as dead at runtime.
+        let src = "class C:\n    x: int = 0\n    \"\"\"attr doc\"\"\"\n    y = b\"raw\"\n    b\"bytes doc\"\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+        assert!(
+            mutants.iter().all(|m| !m.original.contains("doc")),
+            "{:?}",
+            mutants.iter().map(|m| m.describe()).collect::<Vec<_>>()
+        );
+        // The bytes value in a real assignment still mutates.
+        assert!(mutants.iter().any(|m| m.original.contains("raw")));
+    }
+
+    #[test]
+    fn nested_bare_string_not_mutated() {
+        let src = "def f(a):\n    if a:\n        \"note\"\n        return \"live\"\n";
+        let mutants = collect(Path::new("test.py"), src).unwrap();
+        assert!(mutants.iter().all(|m| !m.original.contains("note")));
+        assert!(mutants.iter().any(|m| m.original.contains("live")));
+    }
+
+    #[test]
+    fn bare_fstring_statement_still_mutated() {
+        // `{}` expressions inside an f-string can have side effects.
+        let src = "x = 1\nf\"{g()}\"\n";
+        let ops = ops_for(src);
+        assert!(ops.contains(&Operator::StringToEmpty));
     }
 }
 

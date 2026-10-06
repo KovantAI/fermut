@@ -16,8 +16,8 @@ or `parity = true`, for cross-tool comparison only).
   never counted in normal scoring.
 - **[Selecting operators](selecting.md)** — `--ops` allowlist,
   `--skip-ops` denylist, when to narrow.
-- **[Docstring skip](docstring-skip.md)** — module/class/function
-  docstrings are never mutated.
+- **[Docstring skip](docstring-skip.md)** — docstrings and other
+  bare string statements are never mutated.
 - **[Inline ignore markers](inline-ignore.md)** — `# fermut: ignore`
   on a line to drop one or all operators from that line.
 

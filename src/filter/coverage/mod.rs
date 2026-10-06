@@ -54,7 +54,7 @@ use crate::mutator::Mutant;
 mod order;
 mod parse;
 
-pub(crate) use parse::is_sqlite;
+pub(crate) use parse::{has_table, is_sqlite};
 
 /// Per-file, per-line index of test node ids that touched the line.
 #[derive(Debug, Default)]
@@ -889,6 +889,59 @@ mod tests {
         );
         // Line 2 only had the empty import-time context -> no selectable test.
         assert!(ctx.tests_for(&py, 2).is_none());
+    }
+
+    #[test]
+    fn reads_branch_coverage_arcs() {
+        // `branch = true`: coverage.py leaves `line_bits` empty and records
+        // `arc(fromno, tono)` instead. Executed lines are the positive arc
+        // endpoints; negatives mark code-object entry/exit.
+        let tmp = tempfile::tempdir().unwrap();
+        let py = tmp.path().join("foo.py");
+        std::fs::write(
+            &py,
+            "def f(x):\n    if x:\n        return 1\n    return 2\n",
+        )
+        .unwrap();
+        let db = tmp.path().join(".coverage");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE file (id integer primary key, path text, unique(path));
+             CREATE TABLE context (id integer primary key, context text, unique(context));
+             CREATE TABLE line_bits (file_id integer, context_id integer, numbits blob,
+                 unique(file_id, context_id));
+             CREATE TABLE arc (file_id integer, context_id integer, fromno integer,
+                 tono integer, unique(file_id, context_id, fromno, tono));
+             INSERT INTO file VALUES (1, 'foo.py');
+             INSERT INTO context VALUES (1, 'tests/test_a.py::test_t|run'),
+                                        (2, 'tests/test_a.py::test_f|run'),
+                                        (3, '');
+             -- test_t: 2 -> 3 -> exit; test_f: 2 -> 4 -> exit.
+             INSERT INTO arc VALUES (1,1,-1,2),(1,1,2,3),(1,1,3,-1),
+                                    (1,2,-1,2),(1,2,2,4),(1,2,4,-1),
+                                    (1,3,-1,1),(1,3,1,-1);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let ctx = CoverageContexts::from_path(&db, tmp.path(), tmp.path()).unwrap();
+        assert_eq!(
+            ctx.tests_for(&py, 2).unwrap(),
+            &[
+                "tests/test_a.py::test_f".to_string(),
+                "tests/test_a.py::test_t".to_string()
+            ]
+        );
+        assert_eq!(
+            ctx.tests_for(&py, 3).unwrap(),
+            &["tests/test_a.py::test_t".to_string()]
+        );
+        assert_eq!(
+            ctx.tests_for(&py, 4).unwrap(),
+            &["tests/test_a.py::test_f".to_string()]
+        );
+        // Line 1 only ran at import time (`""` context) -> no selectable test.
+        assert!(ctx.tests_for(&py, 1).is_none());
     }
 
     #[test]

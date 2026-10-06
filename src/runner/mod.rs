@@ -354,6 +354,36 @@ pub fn time_mirror_build(tests: &Path, mode: IsolationMode) -> Result<Duration> 
 }
 
 impl Mirror {
+    /// The mirror copy of project file `file`.
+    ///
+    /// `file` and `project_root` can spell the same directory differently: on
+    /// macOS the temp dir is `/var/...` but its canonical form is
+    /// `/private/var/...`, and the CLI path and config-resolved `tests` path
+    /// don't agree on which one they use. A plain `strip_prefix` then fails,
+    /// so retry with both sides canonicalized. Never fall back to `file`
+    /// itself: `root.join(<absolute>)` is that absolute path, so the mutant
+    /// would be written into the user's real source tree.
+    fn target_for(&self, file: &Path) -> Result<PathBuf> {
+        if let Ok(rel) = file.strip_prefix(&self.project_root) {
+            return Ok(self.root.join(rel));
+        }
+        let canon_file = file
+            .canonicalize()
+            .with_context(|| format!("resolving mutant file {}", file.display()))?;
+        let canon_root = self
+            .project_root
+            .canonicalize()
+            .with_context(|| format!("resolving project root {}", self.project_root.display()))?;
+        let rel = canon_file.strip_prefix(&canon_root).with_context(|| {
+            format!(
+                "mutant file {} is outside the mirrored project root {}",
+                file.display(),
+                self.project_root.display()
+            )
+        })?;
+        Ok(self.root.join(rel))
+    }
+
     fn build(tests: &Path, mode: IsolationMode) -> Result<Self> {
         let workdir = tempfile::tempdir().context("creating workdir")?;
         let project_root = find_project_root(tests).unwrap_or_else(|| {
@@ -413,11 +443,7 @@ impl Drop for PatchGuard {
 /// Write the mutant's patched source into the mirror, returning a guard
 /// that reverts the file when dropped.
 pub(crate) fn apply_patch(mirror: &Mirror, mutant: &Mutant) -> Result<PatchGuard> {
-    let rel = mutant
-        .file
-        .strip_prefix(&mirror.project_root)
-        .unwrap_or(&mutant.file);
-    let target = mirror.root.join(rel);
+    let target = mirror.target_for(&mutant.file)?;
 
     let original_bytes = std::fs::read(&target)
         .with_context(|| format!("reading mirror file {}", target.display()))?;
@@ -785,6 +811,45 @@ mod tests {
         assert_eq!(fs::read(&src).unwrap(), b"x = 1\n");
         // Avoid unused warning on root.
         let _ = root;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn patch_through_symlinked_path_lands_in_mirror_not_source() {
+        // macOS `/var` -> `/private/var`: the mutant's path and the mirror's
+        // project root name the same tree through different prefixes. The
+        // patch must still hit the mirror, never the real source.
+        let (_tmp, _root, tests, src) = fake_project();
+        let mirror = Mirror::build(&tests, IsolationMode::Copy).unwrap();
+        let alias_dir = tempfile::tempdir().unwrap();
+        let alias = alias_dir.path().join("alias");
+        std::os::unix::fs::symlink(&mirror.project_root, &alias).unwrap();
+        let mirrored_src = mirror.root.join("app.py");
+
+        let m = make_mutant(alias.join("app.py"), 4, 5, "2");
+        let guard = apply_patch(&mirror, &m).unwrap();
+        assert_eq!(fs::read(&mirrored_src).unwrap(), b"x = 2\n");
+        assert_eq!(
+            fs::read(&src).unwrap(),
+            b"x = 1\n",
+            "source must stay untouched"
+        );
+        drop(guard);
+        assert_eq!(fs::read(&mirrored_src).unwrap(), b"x = 1\n");
+    }
+
+    #[test]
+    fn patch_outside_project_root_is_refused() {
+        let (_tmp, _root, tests, _src) = fake_project();
+        let mirror = Mirror::build(&tests, IsolationMode::Copy).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let outside = other.path().join("elsewhere.py");
+        fs::write(&outside, b"x = 1\n").unwrap();
+
+        let m = make_mutant(outside.clone(), 4, 5, "2");
+        let err = apply_patch(&mirror, &m).err().expect("must refuse");
+        assert!(format!("{err:#}").contains("outside the mirrored project root"));
+        assert_eq!(fs::read(&outside).unwrap(), b"x = 1\n");
     }
 
     #[test]

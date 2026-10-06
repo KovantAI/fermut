@@ -124,12 +124,20 @@ pub(crate) const SANITIZED_ENV_VARS: &[&str] = &[
     "PYTHONINSPECT",
 ];
 
+/// Set on every suite run fermut spawns. The `pytest --fermut` front-end
+/// (`python/pytest_fermut/plugin.py`) stays inert when it sees this, so a
+/// project with `--fermut` in its pytest `addopts` can't recurse into another
+/// mutation run from inside fermut's own baseline, coverage, or mutant runs.
+pub(crate) const CHILD_ENV: &str = "FERMUT_CHILD";
+
 /// Strip [`SANITIZED_ENV_VARS`] from `cmd` so every suite run is reproducible
-/// from the project alone, independent of the caller's shell.
+/// from the project alone, independent of the caller's shell, and mark it as
+/// a fermut child ([`CHILD_ENV`]).
 pub(crate) fn sanitize_python_env(cmd: &mut std::process::Command) {
     for var in SANITIZED_ENV_VARS {
         cmd.env_remove(var);
     }
+    cmd.env(CHILD_ENV, "1");
 }
 
 /// Apply the environment every per-mutant framework command against a mirror
@@ -586,7 +594,7 @@ fn clone_file(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_patch, copy_dir_all, sanitize_python_env, tail_lines, Mirror, PatchGuard,
+        apply_patch, copy_dir_all, sanitize_python_env, tail_lines, Mirror, PatchGuard, CHILD_ENV,
         SANITIZED_ENV_VARS,
     };
 
@@ -609,6 +617,11 @@ mod tests {
         assert_eq!(
             envs.get("PYTHONPATH"),
             Some(&Some(std::ffi::OsString::from("/mirror")))
+        );
+        // Marked as a fermut child so `pytest --fermut` can't recurse.
+        assert_eq!(
+            envs.get(CHILD_ENV),
+            Some(&Some(std::ffi::OsString::from("1")))
         );
     }
 

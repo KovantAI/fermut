@@ -455,6 +455,66 @@ fn conftest_import_break_is_killed_and_plugin_matches_fallback() {
 }
 
 #[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn pytest_fermut_front_end_runs_and_gates() {
+    // `pytest --fermut` (python/pytest_fermut/plugin.py) against the real
+    // binary: green suite → `fermut coverage` + `fermut run` → survivors in the
+    // terminal summary and a failed session; a met `--fermut-min-score` passes.
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    let plugin_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+    let fermut = assert_cmd::cargo::cargo_bin("fermut");
+    let pytest = |extra: &[&str]| {
+        let mut cmd = std::process::Command::new("python");
+        cmd.args([
+            "-m",
+            "pytest",
+            "-p",
+            "pytest_fermut.plugin",
+            "-p",
+            "no:cacheprovider",
+        ])
+        .args([
+            "--fermut",
+            "--fermut-arg=--no-cache",
+            "--fermut-arg=--no-history",
+        ])
+        .args(extra)
+        .current_dir(&sample)
+        .env("PYTHONPATH", &plugin_src)
+        .env("FERMUT_BIN", &fermut)
+        .env_remove("FERMUT_CHILD");
+        cmd.output().expect("spawn python -m pytest")
+    };
+
+    let gated = pytest(&[]);
+    let out = String::from_utf8_lossy(&gated.stdout);
+    assert_eq!(
+        gated.status.code(),
+        Some(1),
+        "survivors fail the session:\n{out}"
+    );
+    assert!(out.contains("= fermut ="), "{out}");
+    assert!(out.contains("surviving mutants"), "{out}");
+    assert!(out.contains("mutation gate failed"), "{out}");
+    assert!(
+        sample.join(".coverage").is_file(),
+        "`fermut coverage` built the per-test coverage DB first"
+    );
+
+    let passed = pytest(&["--fermut-min-score=50"]);
+    let out = String::from_utf8_lossy(&passed.stdout);
+    assert_eq!(
+        passed.status.code(),
+        Some(0),
+        "a met min score passes:\n{out}"
+    );
+    assert!(out.contains("mutation score"), "{out}");
+    assert!(!out.contains("mutation gate failed"), "{out}");
+}
+
+#[test]
 #[ignore = "requires pytest + coverage on PATH; enable once env is set up"]
 fn baseline_reports_grade_and_anchors_trend() {
     // `baseline` writes `.coverage`, its fingerprint sidecar, and `.fermut/`

@@ -90,6 +90,7 @@ nav:
       - CI quickstart: guides/ci-quickstart.md
       - GitHub Action: guides/github-action.md
       - Integrations: guides/integrations.md
+      - pytest plugin: guides/pytest-plugin.md
       - Working on projects: guides/projects.md
       - Tightening the inner loop: guides/inner-loop.md
       - Coding agents: guides/coding-agents.md

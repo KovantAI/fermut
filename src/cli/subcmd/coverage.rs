@@ -59,6 +59,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::loader::LoadedConfig;
+use crate::filter::coverage::has_table;
 
 /// Current fingerprint-sidecar schema version. `load_fingerprints` rejects any
 /// sidecar not stamped with exactly this value, so bumping it here genuinely
@@ -598,12 +599,20 @@ fn tests_covering_sources(db_path: &Path, source_rels: &[String]) -> Result<Vec<
     use rusqlite::{Connection, OpenFlags};
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .context("opening coverage database")?;
+    // Branch coverage records `arc` rows instead of `line_bits`; a context
+    // covers the file if it has either.
+    let data = if has_table(&conn, "arc")? {
+        "(SELECT file_id, context_id FROM line_bits \
+          UNION SELECT file_id, context_id FROM arc)"
+    } else {
+        "line_bits"
+    };
     let mut test_files = std::collections::BTreeSet::<String>::new();
     for src in source_rels {
         let suffix = like_suffix(src);
         let mut stmt = conn.prepare(&format!(
             "SELECT DISTINCT c.context \
-             FROM line_bits lb \
+             FROM {data} lb \
              JOIN context c ON c.id = lb.context_id \
              WHERE lb.file_id IN ({FILE_IDS_MATCHING})"
         ))?;
@@ -881,12 +890,7 @@ fn prune_orphan_files(db_path: &Path, base_dir: &Path, source_root: &Path) -> Re
     }
     // Drop contexts the prune left with no data. Harmless to keep, but they'd
     // otherwise accumulate as the tree churns.
-    let has_arc: bool = tx.query_row(
-        "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'arc'",
-        [],
-        |r| r.get(0),
-    )?;
-    let orphan_ctx = if has_arc {
+    let orphan_ctx = if has_table(&tx, "arc")? {
         "DELETE FROM context WHERE id NOT IN (SELECT context_id FROM line_bits) \
          AND id NOT IN (SELECT context_id FROM arc)"
     } else {
@@ -1304,6 +1308,26 @@ mod tests {
 
         let got = tests_covering_sources(&db, &["src/foo.py".to_string()]).unwrap();
         assert_eq!(got, vec![PathBuf::from("tests/test_x.py")]);
+    }
+
+    #[test]
+    fn tests_covering_sources_reads_branch_arcs() {
+        // `branch = true` DBs keep coverage in `arc`, leaving `line_bits`
+        // empty; the coverers must still be found.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = make_db_with_files_opts(tmp.path(), true);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute("DELETE FROM line_bits", ()).unwrap();
+        drop(conn);
+
+        let got = tests_covering_sources(&db, &["src/foo.py".to_string()]).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from("tests/test_both.py"),
+                PathBuf::from("tests/test_foo.py")
+            ]
+        );
     }
 
     fn count(conn: &Connection, sql: &str) -> i64 {

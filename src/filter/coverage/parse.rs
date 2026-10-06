@@ -118,8 +118,21 @@ impl CoverageContexts {
             }
         }
 
-        // Invert line_bits into file_key -> line -> raw nodeids.
+        // Invert line_bits (and, under branch coverage, arc) into
+        // file_key -> line -> raw nodeids.
         let mut per_file: HashMap<String, HashMap<u32, Vec<String>>> = HashMap::new();
+        let mut record = |fid: i64, cid: i64, executed: &mut dyn Iterator<Item = u32>| {
+            let Some(file_key) = path_by_file.get(&fid) else {
+                return;
+            };
+            let Some(nodeid) = ctx_by_id.get(&cid) else {
+                return;
+            };
+            let lines = per_file.entry(file_key.clone()).or_default();
+            for line in executed {
+                lines.entry(line).or_default().push(nodeid.clone());
+            }
+        };
         {
             let mut stmt = conn
                 .prepare("SELECT file_id, context_id, numbits FROM line_bits")
@@ -135,16 +148,42 @@ impl CoverageContexts {
                 .context("querying line_bits table")?;
             for row in rows {
                 let (fid, cid, blob) = row.context("reading line_bits row")?;
-                let Some(file_key) = path_by_file.get(&fid) else {
-                    continue;
-                };
-                let Some(nodeid) = ctx_by_id.get(&cid) else {
-                    continue;
-                };
-                let lines = per_file.entry(file_key.clone()).or_default();
-                for line in numbits_to_lines(&blob) {
-                    lines.entry(line).or_default().push(nodeid.clone());
-                }
+                record(fid, cid, &mut numbits_to_lines(&blob).into_iter());
+            }
+        }
+        // With `branch = true`, coverage.py records `arc(file_id, context_id,
+        // fromno, tono)` instead of `line_bits`. The executed lines are every
+        // positive arc endpoint (negative numbers mark code-object entry/exit),
+        // which is exactly how coverage.py's own `CoverageData.lines()` derives
+        // them. Collapse per (file, context) first: each line is the endpoint
+        // of several arcs.
+        if has_table(&conn, "arc")? {
+            let mut arc_lines: HashMap<(i64, i64), BTreeSet<u32>> = HashMap::new();
+            let mut stmt = conn
+                .prepare("SELECT file_id, context_id, fromno, tono FROM arc")
+                .context("preparing arc query")?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                    ))
+                })
+                .context("querying arc table")?;
+            for row in rows {
+                let (fid, cid, from, to) = row.context("reading arc row")?;
+                let set = arc_lines.entry((fid, cid)).or_default();
+                set.extend(
+                    [from, to]
+                        .into_iter()
+                        .filter(|&n| n > 0)
+                        .filter_map(|n| u32::try_from(n).ok()),
+                );
+            }
+            for ((fid, cid), lines) in arc_lines {
+                record(fid, cid, &mut lines.into_iter());
             }
         }
 
@@ -336,6 +375,17 @@ pub(super) fn numbits_to_lines(blob: &[u8]) -> Vec<u32> {
         }
     }
     out
+}
+
+/// Whether the coverage database has table `name`. coverage.py creates `arc`
+/// only for branch coverage and `tracer` only when a plugin recorded one.
+pub(crate) fn has_table(conn: &rusqlite::Connection, name: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+        [name],
+        |r| r.get(0),
+    )
+    .with_context(|| format!("checking for coverage table {name}"))
 }
 
 /// Sniff whether a file is a SQLite database by its 16-byte magic header

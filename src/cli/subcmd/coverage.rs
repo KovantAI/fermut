@@ -42,8 +42,15 @@
 //! lines, the old line bits would linger and falsely mark a line as covered.
 //! So before appending we DELETE the re-run and removed files' contexts from the
 //! DB (`purge_contexts`), guaranteeing their line bits are rebuilt from scratch.
+//!
+//! A **deleted source file** is dropped from the DB (`prune_orphan_files`) and
+//! the tests that covered it re-run, so a moved/renamed module is measured at
+//! its new path without a `--full` rebuild. The prune checks the filesystem and
+//! refuses to act when most recorded files look missing (a DB restored onto a
+//! different checkout root), so it can't wipe a cached CI database.
 
 use std::collections::BTreeMap;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -173,89 +180,47 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
     }
     let prior = prior.unwrap_or_default();
 
-    // Content diffs. `changed_tests` re-run because the test changed;
-    // `changed_sources` matter because any test covering them now has a stale
-    // line mapping; `deleted_tests` must have their contexts purged so a removed
-    // test stops marking lines covered.
-    let changed_tests = changed_paths(&current.tests, &prior.tests, &base_dir);
-    let changed_sources = changed_keys(&current.sources, &prior.sources);
-    let deleted_tests: Vec<String> = prior
-        .tests
-        .keys()
-        .filter(|k| !current.tests.contains_key(*k))
-        .cloned()
-        .collect();
-
-    // Tests whose recorded contexts cover a changed source file — re-run so
-    // their line mapping is rebuilt against the new source. This is the
-    // source-awareness that makes the incremental DB safe for `--since`.
-    //
-    // Filtered to paths that still exist: the DB may list a test deleted in this
-    // same change, and handing a missing path to pytest aborts collection (its
-    // stale contexts are purged below via `deleted_tests`). Filtering here keeps
-    // the re-measure count accurate for the message too.
-    let tests_for_sources: Vec<PathBuf> = if changed_sources.is_empty() {
-        Vec::new()
-    } else {
-        tests_covering_sources(&db_path, &changed_sources)
-            .with_context(|| format!("querying {} for source coverage", db_path.display()))?
-            .into_iter()
-            .map(|rel| base_dir.join(rel))
-            .filter(|f| f.exists())
-            .collect()
-    };
-
-    // Union the two re-run sets by base-dir-relative key. Skip any path that no
-    // longer exists on disk: `tests_covering_sources` reads the DB, which still
-    // lists a test deleted in this same change — handing that missing path to
-    // pytest is a usage error that aborts collection and appends NOTHING for the
-    // other (valid) files too. Its stale contexts are still purged below via
-    // `deleted_tests`.
-    let mut rerun: Vec<PathBuf> = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    for f in changed_tests.iter().chain(tests_for_sources.iter()) {
-        if !f.exists() {
-            continue;
-        }
-        if let Some(key) =
-            rel_to(f, &base_dir).and_then(|p| p.to_str().map(|s| s.replace('\\', "/")))
-        {
-            if seen.insert(key) {
-                rerun.push(f.clone());
-            }
-        }
-    }
-
-    // Genuinely nothing changed → done. Gate on the raw diffs, not on `rerun`:
-    // a changed source with no re-runnable coverer leaves `rerun` empty but is
-    // NOT "up to date" — we still advance the baseline below so we don't
-    // re-detect it every run.
-    if changed_tests.is_empty() && changed_sources.is_empty() && deleted_tests.is_empty() {
+    let Some(plan) = plan_incremental(&current, &prior, &db_path, &base_dir)? else {
         println!(
             "{} is up to date (no test or source content changed since it was written). \
              Nothing to do.",
             display_rel(&db_path, &base_dir)
         );
         return Ok(());
-    }
+    };
+    let IncrementalPlan {
+        changed_sources,
+        deleted_tests,
+        deleted_sources,
+        tests_for_sources,
+        reimported,
+        rerun,
+    } = plan;
 
-    if !changed_sources.is_empty() {
-        if tests_for_sources.is_empty() {
-            // Source changed but nothing in the DB covers it that we can re-run
-            // (covered only by an untracked test — a root conftest, a test
-            // outside the tests dir — or its coverers were deleted). We can't
-            // refresh that coverage incrementally; the baseline still advances
-            // so the change isn't re-detected forever.
+    let touched_sources = changed_sources.len() + deleted_sources.len();
+    if touched_sources > 0 {
+        // A changed source that nothing in the DB covers re-runnably (covered
+        // only by an untracked test — a root conftest, a test outside the tests
+        // dir — or its coverers were deleted). We can't refresh that coverage
+        // incrementally; the baseline still advances so the change isn't
+        // re-detected forever. A pure deletion with no coverer is fine — its
+        // rows are pruned below, nothing goes stale.
+        let uncovered = changed_sources
+            .iter()
+            .filter(|s| !reimported.contains(*s))
+            .count();
+        if uncovered > 0 {
             eprintln!(
-                "warning: {} source file(s) changed but no re-runnable test covers them in \
-                 {} — their coverage may be stale. Run `fermut coverage --full` to rebuild.",
-                changed_sources.len(),
+                "warning: {uncovered} source file(s) changed but no re-runnable test covers \
+                 them in {} — their coverage may be stale. Run `fermut coverage --full` \
+                 to rebuild.",
                 display_rel(&db_path, &base_dir)
             );
-        } else {
+        }
+        if !tests_for_sources.is_empty() {
             println!(
-                "{} changed source file(s); re-measuring the {} test file(s) that cover them.",
-                changed_sources.len(),
+                "{touched_sources} changed or removed source file(s); re-measuring the {} \
+                 test file(s) that cover them.",
                 tests_for_sources.len()
             );
         }
@@ -286,6 +251,50 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
     if purged > 0 {
         println!("Purged {purged} stale context(s).");
     }
+
+    // Import-time lines (module bodies, `def`/`class` headers) are recorded
+    // under the shared empty `""` context, which no test-file purge reaches,
+    // and `--cov-append` unions them. For a changed file that leaves its
+    // pre-change line numbers marked executed forever. Drop that file's `""`
+    // bits so the re-run rebuilds them — only for files the re-run will
+    // re-import (changed tests, and changed sources with a re-run coverer);
+    // purging anything else would lose its import-time coverage until `--full`.
+    if !rerun.is_empty() {
+        purge_import_time(&db_path, &reimported).with_context(|| {
+            format!(
+                "purging stale import-time coverage from {}",
+                db_path.display()
+            )
+        })?;
+    }
+
+    // Drop `file` rows for sources that no longer exist. Runs after the coverer
+    // query above (which reads those rows) and checks the filesystem rather
+    // than the fingerprint diff, so deletions from before this existed heal too.
+    let pruned_files = match prune_orphan_files(&db_path, &base_dir, &source)
+        .with_context(|| format!("pruning removed source files from {}", db_path.display()))?
+    {
+        Prune::Pruned(paths) => {
+            if !paths.is_empty() {
+                println!("dropping {} removed source file(s):", paths.len());
+                if paths.len() <= 10 || std::io::stdout().is_terminal() {
+                    for p in &paths {
+                        println!("  {p}");
+                    }
+                }
+            }
+            paths.len()
+        }
+        Prune::Skipped { missing, total } => {
+            eprintln!(
+                "warning: {missing} of {total} source file(s) recorded in {} are missing on \
+                 disk — likely a coverage DB restored onto a different checkout root, not \
+                 real deletions. Not pruning; run `fermut coverage --full` to rebuild.",
+                display_rel(&db_path, &base_dir)
+            );
+            0
+        }
+    };
 
     let ran_ok = if rerun.is_empty() {
         true // deletions-only refresh: nothing to run, purge already applied
@@ -318,9 +327,129 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
         Done::Incremental {
             reran: rerun.len(),
             removed: deleted_tests.len(),
+            pruned_files,
         },
     );
     Ok(())
+}
+
+/// What an incremental refresh has to do, derived from the fingerprint diff and
+/// the DB's recorded coverers. `None` from [`plan_incremental`] means nothing
+/// changed.
+#[derive(Debug)]
+struct IncrementalPlan {
+    /// Sources whose content is new or modified.
+    changed_sources: Vec<String>,
+    /// Test files in the baseline that no longer exist — their contexts are purged.
+    deleted_tests: Vec<String>,
+    /// Source files in the baseline that no longer exist — their `file` rows are
+    /// pruned and their coverers re-run.
+    deleted_sources: Vec<String>,
+    /// Existing test files whose recorded contexts cover a changed or deleted
+    /// source.
+    tests_for_sources: Vec<PathBuf>,
+    /// Changed files (base-dir-relative keys) the re-run is sure to import
+    /// again: every changed test, plus each changed source with at least one
+    /// existing coverer in `rerun`. Their stale import-time bits get purged.
+    reimported: Vec<String>,
+    /// Deduplicated, existing test files to re-run under `--cov-append`.
+    rerun: Vec<PathBuf>,
+}
+
+/// Diff `current` against `prior` and work out which tests to re-measure.
+///
+/// Content diffs: changed tests re-run because the test changed; changed
+/// sources matter because any test covering them now has a stale line mapping;
+/// deleted tests must have their contexts purged so a removed test stops
+/// marking lines covered; deleted sources must leave the DB, and the tests that
+/// covered them re-run — after a move they most likely exercise the module's
+/// new path, which otherwise would have no coverage until `--full`.
+///
+/// Must run before [`prune_orphan_files`]: the coverer query reads the very
+/// `file` rows the prune deletes.
+fn plan_incremental(
+    current: &Fingerprints,
+    prior: &Fingerprints,
+    db_path: &Path,
+    base_dir: &Path,
+) -> Result<Option<IncrementalPlan>> {
+    let changed_tests = changed_paths(&current.tests, &prior.tests, base_dir);
+    let changed_sources = changed_keys(&current.sources, &prior.sources);
+    let deleted_tests = deleted_keys(&current.tests, &prior.tests);
+    let deleted_sources = deleted_keys(&current.sources, &prior.sources);
+
+    // Genuinely nothing changed → done. Gate on the raw diffs, not on `rerun`:
+    // a changed source with no re-runnable coverer leaves `rerun` empty but is
+    // NOT "up to date" — the caller still advances the baseline so we don't
+    // re-detect it every run. Same for a deletion-only change, which still has
+    // rows to prune.
+    if changed_tests.is_empty()
+        && changed_sources.is_empty()
+        && deleted_tests.is_empty()
+        && deleted_sources.is_empty()
+    {
+        return Ok(None);
+    }
+
+    // Tests whose recorded contexts cover a changed or deleted source file —
+    // re-run so their line mapping is rebuilt against the new source tree. This
+    // is the source-awareness that makes the incremental DB safe for `--since`.
+    //
+    // Filtered to paths that still exist: the DB may list a test deleted in this
+    // same change, and handing a missing path to pytest aborts collection (its
+    // stale contexts are purged via `deleted_tests`). Filtering here keeps the
+    // re-measure count accurate for the message too.
+    //
+    // Changed sources are queried one at a time so we know which of them the
+    // re-run is guaranteed to import (see `IncrementalPlan::reimported`).
+    let coverers = |srcs: &[String]| -> Result<Vec<PathBuf>> {
+        if srcs.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(tests_covering_sources(db_path, srcs)
+            .with_context(|| format!("querying {} for source coverage", db_path.display()))?
+            .into_iter()
+            .map(|rel| base_dir.join(rel))
+            .filter(|f| f.exists())
+            .collect())
+    };
+    let mut tests_for_sources = std::collections::BTreeSet::<PathBuf>::new();
+    let mut reimported: Vec<String> = changed_keys(&current.tests, &prior.tests);
+    for src in &changed_sources {
+        let found = coverers(std::slice::from_ref(src))?;
+        if !found.is_empty() {
+            reimported.push(src.clone());
+            tests_for_sources.extend(found);
+        }
+    }
+    tests_for_sources.extend(coverers(&deleted_sources)?);
+    let tests_for_sources: Vec<PathBuf> = tests_for_sources.into_iter().collect();
+
+    // Union the two re-run sets by base-dir-relative key, skipping any path that
+    // no longer exists on disk (see above).
+    let mut rerun: Vec<PathBuf> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for f in changed_tests.iter().chain(tests_for_sources.iter()) {
+        if !f.exists() {
+            continue;
+        }
+        if let Some(key) =
+            rel_to(f, base_dir).and_then(|p| p.to_str().map(|s| s.replace('\\', "/")))
+        {
+            if seen.insert(key) {
+                rerun.push(f.clone());
+            }
+        }
+    }
+
+    Ok(Some(IncrementalPlan {
+        changed_sources,
+        deleted_tests,
+        deleted_sources,
+        tests_for_sources,
+        reimported,
+        rerun,
+    }))
 }
 
 /// Sidecar path: the DB path with `.fermut-fingerprints.json` appended, so a
@@ -424,6 +553,18 @@ fn changed_keys(
         .collect()
 }
 
+/// Keys present in `prior` but gone from `current` (deleted files).
+fn deleted_keys(
+    current: &BTreeMap<String, String>,
+    prior: &BTreeMap<String, String>,
+) -> Vec<String> {
+    prior
+        .keys()
+        .filter(|k| !current.contains_key(*k))
+        .cloned()
+        .collect()
+}
+
 /// Like [`changed_keys`] but resolves each changed key back to an absolute path
 /// under `base_dir` (for handing to pytest).
 fn changed_paths(
@@ -453,22 +594,13 @@ fn tests_covering_sources(db_path: &Path, source_rels: &[String]) -> Result<Vec<
         .context("opening coverage database")?;
     let mut test_files = std::collections::BTreeSet::<String>::new();
     for src in source_rels {
-        // Escape LIKE metacharacters so a filename's `_` (ubiquitous in Python)
-        // or `%` matches literally, not as a wildcard — otherwise `my_module.py`
-        // would also match `myXmodule.py`. The exact `path = ?1` arm needs no
-        // escaping. `\` is the ESCAPE char below.
-        let escaped = src
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let suffix = format!("%/{escaped}");
-        let mut stmt = conn.prepare(
+        let suffix = like_suffix(src);
+        let mut stmt = conn.prepare(&format!(
             "SELECT DISTINCT c.context \
              FROM line_bits lb \
              JOIN context c ON c.id = lb.context_id \
-             WHERE lb.file_id IN \
-                 (SELECT id FROM file WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\')",
-        )?;
+             WHERE lb.file_id IN ({FILE_IDS_MATCHING})"
+        ))?;
         let rows = stmt.query_map((src, &suffix), |r| r.get::<_, String>(0))?;
         for ctx in rows.filter_map(|r| r.ok()) {
             // `<file>::<test>|<phase>` → `<file>`; also handles a context with
@@ -487,6 +619,52 @@ fn tests_covering_sources(db_path: &Path, source_rels: &[String]) -> Result<Vec<
         }
     }
     Ok(test_files.into_iter().map(PathBuf::from).collect())
+}
+
+/// `file` ids whose stored path is `?1` exactly or ends in `/?1` (`?2` is
+/// [`like_suffix`] of it). coverage.py stores paths absolute or relative
+/// depending on `relative_files`, hence the suffix arm.
+const FILE_IDS_MATCHING: &str = "SELECT id FROM file WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'";
+
+/// LIKE pattern matching any stored path ending in `/<rel>`. Escapes LIKE
+/// metacharacters so a filename's `_` (ubiquitous in Python) or `%` matches
+/// literally, not as a wildcard — otherwise `my_module.py` would also match
+/// `myXmodule.py`. `\` is the ESCAPE char in [`FILE_IDS_MATCHING`].
+fn like_suffix(rel: &str) -> String {
+    let escaped = rel
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%/{escaped}")
+}
+
+/// Delete the import-time coverage (`line_bits` / `arc` rows under the empty
+/// `""` context) of each file in `file_rels`, leaving every other file's
+/// import-time bits and all per-test contexts alone. Returns the number of
+/// `line_bits` rows removed.
+fn purge_import_time(db_path: &Path, file_rels: &[String]) -> Result<usize> {
+    use rusqlite::Connection;
+    if file_rels.is_empty() {
+        return Ok(0);
+    }
+    let mut conn = Connection::open(db_path).context("opening coverage database")?;
+    let tx = conn.transaction()?;
+    let mut removed = 0usize;
+    for rel in file_rels {
+        let suffix = like_suffix(rel);
+        let filter = format!(
+            "context_id IN (SELECT id FROM context WHERE context = '') \
+             AND file_id IN ({FILE_IDS_MATCHING})"
+        );
+        removed += tx.execute(
+            &format!("DELETE FROM line_bits WHERE {filter}"),
+            (rel, &suffix),
+        )?;
+        // `arc` only exists when branch coverage was recorded.
+        let _ = tx.execute(&format!("DELETE FROM arc WHERE {filter}"), (rel, &suffix));
+    }
+    tx.commit()?;
+    Ok(removed)
 }
 
 /// Invoke `pytest <targets> --cov=<target> --cov-context=test [--cov-append]`
@@ -553,7 +731,11 @@ fn purge_contexts(db_path: &Path, prefixes: &[String]) -> Result<usize> {
     if prefixes.is_empty() {
         return Ok(0);
     }
-    let conn = Connection::open(db_path).context("opening coverage database")?;
+    let mut conn = Connection::open(db_path).context("opening coverage database")?;
+    // One transaction: a crash mid-loop must not leave a half-purged DB whose
+    // sidecar still claims the old baseline.
+    let tx = conn.transaction()?;
+    let conn = &tx;
     let mut removed = 0usize;
     for prefix in prefixes {
         let like = format!("{prefix}::%");
@@ -572,16 +754,148 @@ fn purge_contexts(db_path: &Path, prefixes: &[String]) -> Result<usize> {
             removed += conn.execute("DELETE FROM context WHERE id = ?1", [id])?;
         }
     }
+    tx.commit()?;
     Ok(removed)
+}
+
+/// Outcome of [`prune_orphan_files`].
+#[derive(Debug, PartialEq, Eq)]
+enum Prune {
+    /// These base-dir-relative paths (absolute when outside `base_dir`) were
+    /// dropped from the DB. Empty when nothing was orphaned.
+    Pruned(Vec<String>),
+    /// Too many recorded files are missing for it to be real deletions — most
+    /// likely the DB was restored onto a different checkout root. Nothing was
+    /// touched.
+    Skipped { missing: usize, total: usize },
+}
+
+/// Delete `file` rows (and their `line_bits` / `arc` / `tracer` children)
+/// whose path resolves under `source_root` but no longer exists on disk.
+///
+/// Trusts the filesystem rather than the fingerprint diff, so a DB that
+/// already carries stale rows (e.g. a cached CI generation from before this
+/// prune existed) heals on its next incremental run.
+///
+/// Conservative by construction, since a wrong resolution would wipe the DB:
+/// - relative paths resolve against `base_dir` (pytest's cwd); absolute paths
+///   count only when under `source_root` in raw or canonical form (macOS
+///   `/var` vs `/private/var`). Anything else — a foreign CI root, a `..`
+///   path, a file outside the measured tree — is kept;
+/// - if every file under the root, or more than half of them, is missing, it
+///   prunes nothing and returns [`Prune::Skipped`]. Pure deletions that large
+///   are rare; a checkout-root mismatch is the likely explanation.
+fn prune_orphan_files(db_path: &Path, base_dir: &Path, source_root: &Path) -> Result<Prune> {
+    use rusqlite::Connection;
+    let mut conn = Connection::open(db_path).context("opening coverage database")?;
+
+    let forms = |p: &Path| -> Vec<PathBuf> {
+        let mut v = vec![p.to_path_buf()];
+        if let Ok(c) = p.canonicalize() {
+            if c != p {
+                v.push(c);
+            }
+        }
+        v
+    };
+    let base_forms = forms(base_dir);
+    let mut source_forms = forms(source_root);
+    // `source_root` as seen from each base form, so a canonical base pairs with
+    // a canonical source even when only the base is a symlink.
+    if let Some(rel) = rel_to(source_root, base_dir) {
+        for b in &base_forms {
+            let s = b.join(&rel);
+            if !source_forms.contains(&s) {
+                source_forms.push(s);
+            }
+        }
+    }
+
+    // (file id, display path) for every row under the source root, and the
+    // subset missing on disk.
+    let mut total = 0usize;
+    let mut missing: Vec<(i64, String)> = Vec::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, path FROM file")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        for row in rows {
+            let (id, stored) = row?;
+            let stored_path = Path::new(&stored);
+            let abs = if stored_path.is_absolute() {
+                stored_path.to_path_buf()
+            } else if stored_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                continue; // can't place it confidently → keep
+            } else {
+                base_dir.join(stored_path)
+            };
+            if !source_forms.iter().any(|s| abs.starts_with(s)) {
+                continue; // outside the measured tree (or a foreign root) → keep
+            }
+            total += 1;
+            if !abs.exists() {
+                let shown = base_forms
+                    .iter()
+                    .find_map(|b| abs.strip_prefix(b).ok())
+                    .map(|r| r.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_else(|| abs.display().to_string());
+                missing.push((id, shown));
+            }
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(Prune::Pruned(Vec::new()));
+    }
+    if missing.len() == total || missing.len() * 2 > total {
+        return Ok(Prune::Skipped {
+            missing: missing.len(),
+            total,
+        });
+    }
+
+    let tx = conn.transaction()?;
+    for (id, _) in &missing {
+        tx.execute("DELETE FROM line_bits WHERE file_id = ?1", [id])?;
+        // `arc` exists only with branch coverage and `tracer` only when a
+        // plugin/tracer was recorded; ignore "no such table" on line-only DBs.
+        let _ = tx.execute("DELETE FROM arc WHERE file_id = ?1", [id]);
+        let _ = tx.execute("DELETE FROM tracer WHERE file_id = ?1", [id]);
+        tx.execute("DELETE FROM file WHERE id = ?1", [id])?;
+    }
+    // Drop contexts the prune left with no data. Harmless to keep, but they'd
+    // otherwise accumulate as the tree churns.
+    let has_arc: bool = tx.query_row(
+        "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'arc'",
+        [],
+        |r| r.get(0),
+    )?;
+    let orphan_ctx = if has_arc {
+        "DELETE FROM context WHERE id NOT IN (SELECT context_id FROM line_bits) \
+         AND id NOT IN (SELECT context_id FROM arc)"
+    } else {
+        "DELETE FROM context WHERE id NOT IN (SELECT context_id FROM line_bits)"
+    };
+    tx.execute(orphan_ctx, [])?;
+    tx.commit()?;
+
+    Ok(Prune::Pruned(missing.into_iter().map(|(_, p)| p).collect()))
 }
 
 /// What a `fermut coverage` invocation did, for the summary line.
 enum Done {
     /// A full-suite (re)build wrote the whole database.
     Full,
-    /// An incremental refresh re-ran `reran` test files and dropped `removed`
-    /// deleted ones from the database.
-    Incremental { reran: usize, removed: usize },
+    /// An incremental refresh re-ran `reran` test files, dropped `removed`
+    /// deleted test files' contexts and `pruned_files` deleted source files
+    /// from the database.
+    Incremental {
+        reran: usize,
+        removed: usize,
+        pruned_files: usize,
+    },
 }
 
 /// Print a short "what now" footer. If the loaded config doesn't already wire
@@ -589,16 +903,29 @@ enum Done {
 fn report_done(loaded: &LoadedConfig, db_path: &Path, done: Done) {
     match done {
         Done::Full => println!("\nWrote {}.", display_rel(db_path, &loaded.base_dir)),
-        Done::Incremental { reran, removed } => match (reran, removed) {
-            // Source changed but no coverer was re-runnable (see the warning
-            // above); the baseline advanced but the DB is otherwise unchanged.
-            (0, 0) => println!("\nCoverage baseline updated (nothing to re-run)."),
-            (0, r) => println!("\nRefreshed coverage — dropped {r} removed test file(s)."),
-            (n, 0) => println!("\nRefreshed coverage — re-ran {n} test file(s)."),
-            (n, r) => {
-                println!("\nRefreshed coverage — re-ran {n} test file(s), dropped {r} removed.")
+        Done::Incremental {
+            reran,
+            removed,
+            pruned_files,
+        } => {
+            let mut parts: Vec<String> = Vec::new();
+            if reran > 0 {
+                parts.push(format!("re-ran {reran} test file(s)"));
             }
-        },
+            if removed > 0 {
+                parts.push(format!("dropped {removed} removed test file(s)"));
+            }
+            if pruned_files > 0 {
+                parts.push(format!("dropped {pruned_files} removed source file(s)"));
+            }
+            if parts.is_empty() {
+                // Source changed but no coverer was re-runnable (see the warning
+                // above); the baseline advanced but the DB is otherwise unchanged.
+                println!("\nCoverage baseline updated (nothing to re-run).");
+            } else {
+                println!("\nRefreshed coverage — {}.", parts.join(", "));
+            }
+        }
     }
     let configured = loaded.file.coverage.is_some();
     if configured {
@@ -821,8 +1148,23 @@ mod tests {
     /// `src/bar.py` by test_bar. Used to prove source-aware invalidation picks
     /// exactly the tests that cover a changed source file.
     fn make_db_with_files(dir: &Path) -> PathBuf {
+        make_db_with_files_opts(dir, false)
+    }
+
+    /// [`make_db_with_files`], optionally with the branch-coverage `arc` table
+    /// and the `tracer` table populated for both files.
+    fn make_db_with_files_opts(dir: &Path, arcs_and_tracer: bool) -> PathBuf {
         let db = dir.join(".coverage");
         let conn = Connection::open(&db).unwrap();
+        if arcs_and_tracer {
+            conn.execute_batch(
+                "CREATE TABLE arc (file_id integer, context_id integer, fromno integer, tono integer);
+                 CREATE TABLE tracer (file_id integer primary key, tracer text);
+                 INSERT INTO arc VALUES (10,1,1,2),(10,3,1,2),(11,2,1,2);
+                 INSERT INTO tracer VALUES (10,''),(11,'');",
+            )
+            .unwrap();
+        }
         conn.execute_batch(
             "CREATE TABLE context (id integer primary key, context text, unique(context));
              CREATE TABLE file (id integer primary key, path text, unique(path));
@@ -948,6 +1290,361 @@ mod tests {
 
         let got = tests_covering_sources(&db, &["src/foo.py".to_string()]).unwrap();
         assert_eq!(got, vec![PathBuf::from("tests/test_x.py")]);
+    }
+
+    fn count(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// Lay out `src/foo.py` (and `src/bar.py` unless `bar_deleted`) on disk to
+    /// match [`make_db_with_files`].
+    fn write_sources(base: &Path, bar_deleted: bool) {
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        std::fs::write(base.join("src/foo.py"), "x = 1\n").unwrap();
+        if !bar_deleted {
+            std::fs::write(base.join("src/bar.py"), "y = 1\n").unwrap();
+        }
+    }
+
+    /// Add `n` more live, covered files so a single deletion stays under the
+    /// prune safety valve's majority threshold.
+    fn add_live_files(db: &Path, base: &Path, n: i64) {
+        let conn = Connection::open(db).unwrap();
+        for i in 0..n {
+            let rel = format!("src/live{i}.py");
+            std::fs::write(base.join(&rel), "z = 1\n").unwrap();
+            conn.execute(
+                "INSERT INTO file (id, path) VALUES (?1, ?2)",
+                (100 + i, &rel),
+            )
+            .unwrap();
+            conn.execute("INSERT INTO line_bits VALUES (?1, 1, x'02')", [100 + i])
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn prune_removes_orphan_file_and_children() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let db = make_db_with_files_opts(base, true);
+        write_sources(base, true); // src/bar.py deleted
+        add_live_files(&db, base, 1);
+
+        let got = prune_orphan_files(&db, base, &base.join("src")).unwrap();
+        assert_eq!(got, Prune::Pruned(vec!["src/bar.py".to_string()]));
+
+        let conn = Connection::open(&db).unwrap();
+        assert_eq!(count(&conn, "SELECT count(*) FROM file WHERE id = 11"), 0);
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM line_bits WHERE file_id = 11"),
+            0
+        );
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM arc WHERE file_id = 11"),
+            0
+        );
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM tracer WHERE file_id = 11"),
+            0
+        );
+        // Live foo.py untouched.
+        assert_eq!(count(&conn, "SELECT count(*) FROM file WHERE id = 10"), 1);
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM line_bits WHERE file_id = 10"),
+            2
+        );
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM arc WHERE file_id = 10"),
+            2
+        );
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM tracer WHERE file_id = 10"),
+            1
+        );
+        // test_bar's context only had bar.py data → dropped; the others stay.
+        assert_eq!(count(&conn, "SELECT count(*) FROM context WHERE id = 2"), 0);
+        assert_eq!(count(&conn, "SELECT count(*) FROM context"), 2);
+    }
+
+    #[test]
+    fn prune_tolerates_line_only_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let db = make_db_with_files(base); // no arc / tracer tables
+        write_sources(base, true);
+        add_live_files(&db, base, 1);
+
+        let got = prune_orphan_files(&db, base, &base.join("src")).unwrap();
+        assert_eq!(got, Prune::Pruned(vec!["src/bar.py".to_string()]));
+        let conn = Connection::open(&db).unwrap();
+        assert_eq!(count(&conn, "SELECT count(*) FROM file"), 2);
+    }
+
+    #[test]
+    fn prune_is_noop_when_nothing_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let db = make_db_with_files(base);
+        write_sources(base, false);
+
+        let got = prune_orphan_files(&db, base, &base.join("src")).unwrap();
+        assert_eq!(got, Prune::Pruned(Vec::new()));
+        let conn = Connection::open(&db).unwrap();
+        assert_eq!(count(&conn, "SELECT count(*) FROM file"), 2);
+        assert_eq!(count(&conn, "SELECT count(*) FROM context"), 3);
+    }
+
+    #[test]
+    fn prune_keeps_paths_outside_source_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let db = make_db_with_files(base);
+        write_sources(base, false);
+        // Missing, but outside the measured `src/` tree (and a `..` escape).
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO file (id, path) VALUES (20, 'other/gone.py'), (21, '../gone.py')",
+            (),
+        )
+        .unwrap();
+
+        let got = prune_orphan_files(&db, base, &base.join("src")).unwrap();
+        assert_eq!(got, Prune::Pruned(Vec::new()));
+        assert_eq!(count(&conn, "SELECT count(*) FROM file"), 4);
+    }
+
+    #[test]
+    fn prune_skips_when_all_paths_missing() {
+        // Simulates a CI cache restored onto a different checkout: every
+        // recorded path under the root is "missing". Must not wipe the DB.
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let db = make_db_with_files_opts(base, true);
+        std::fs::create_dir_all(base.join("src")).unwrap(); // no files on disk
+
+        let got = prune_orphan_files(&db, base, &base.join("src")).unwrap();
+        assert_eq!(
+            got,
+            Prune::Skipped {
+                missing: 2,
+                total: 2
+            }
+        );
+        let conn = Connection::open(&db).unwrap();
+        assert_eq!(count(&conn, "SELECT count(*) FROM file"), 2);
+        assert_eq!(count(&conn, "SELECT count(*) FROM line_bits"), 3);
+        assert_eq!(count(&conn, "SELECT count(*) FROM context"), 3);
+    }
+
+    #[test]
+    fn prune_skips_when_majority_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let db = make_db_with_files(base);
+        std::fs::create_dir_all(base.join("src")).unwrap();
+        add_live_files(&db, base, 1); // 1 live of 3 → 2/3 missing
+
+        let got = prune_orphan_files(&db, base, &base.join("src")).unwrap();
+        assert_eq!(
+            got,
+            Prune::Skipped {
+                missing: 2,
+                total: 3
+            }
+        );
+    }
+
+    #[test]
+    fn prune_resolves_absolute_stored_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let db = make_db_with_files(base);
+        write_sources(base, false);
+        add_live_files(&db, base, 2);
+        // coverage.py records realpath'd absolute keys (`/private/var/...` on
+        // macOS), so store the canonical form of a missing file under base.
+        let canon_base = base.canonicalize().unwrap();
+        let gone = canon_base.join("src/gone.py");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute(
+            "INSERT INTO file (id, path) VALUES (30, ?1), (31, '/home/runner/work/proj/src/foo.py')",
+            [gone.to_str().unwrap()],
+        )
+        .unwrap();
+
+        let got = prune_orphan_files(&db, base, &base.join("src")).unwrap();
+        assert_eq!(got, Prune::Pruned(vec!["src/gone.py".to_string()]));
+        // The foreign-root path is kept: it can't be placed under our root.
+        assert_eq!(count(&conn, "SELECT count(*) FROM file WHERE id = 31"), 1);
+        assert_eq!(count(&conn, "SELECT count(*) FROM file WHERE id = 30"), 0);
+    }
+
+    fn fp(tests: &[&str], sources: &[&str]) -> Fingerprints {
+        let m = |ks: &[&str]| {
+            ks.iter()
+                .map(|k| (k.to_string(), "h".to_string()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        Fingerprints {
+            v: CURRENT_FP_V,
+            tests: m(tests),
+            sources: m(sources),
+        }
+    }
+
+    #[test]
+    fn unchanged_tree_is_up_to_date() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = make_db_with_files(tmp.path());
+        let same = fp(&["tests/test_foo.py"], &["src/foo.py"]);
+        assert!(plan_incremental(&same, &same, &db, tmp.path())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn deleted_source_only_is_not_up_to_date() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = make_db_with_files(tmp.path());
+        let prior = fp(&[], &["src/foo.py", "src/bar.py"]);
+        let current = fp(&[], &["src/foo.py"]);
+        let plan = plan_incremental(&current, &prior, &db, tmp.path())
+            .unwrap()
+            .expect("a deletion-only change must not short-circuit as up to date");
+        assert_eq!(plan.deleted_sources, vec!["src/bar.py".to_string()]);
+        assert!(plan.changed_sources.is_empty());
+    }
+
+    #[test]
+    fn deleted_source_reruns_its_coverers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let db = make_db_with_files(base);
+        std::fs::create_dir_all(base.join("tests")).unwrap();
+        for t in ["test_foo.py", "test_bar.py", "test_both.py"] {
+            std::fs::write(base.join("tests").join(t), "def test_t(): pass\n").unwrap();
+        }
+        let tests = [
+            "tests/test_foo.py",
+            "tests/test_bar.py",
+            "tests/test_both.py",
+        ];
+        let prior = fp(&tests, &["src/foo.py", "src/bar.py"]);
+        let current = fp(&tests, &["src/foo.py"]);
+
+        let plan = plan_incremental(&current, &prior, &db, base)
+            .unwrap()
+            .unwrap();
+        let rerun: Vec<String> = plan
+            .rerun
+            .iter()
+            .filter_map(|f| rel_to(f, base))
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect();
+        // bar.py's coverer only — foo.py is unchanged.
+        assert_eq!(rerun, vec!["tests/test_bar.py".to_string()]);
+    }
+
+    #[test]
+    fn purge_import_time_drops_only_target_files_empty_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = make_db_with_files_opts(tmp.path(), true);
+        let conn = Connection::open(&db).unwrap();
+        // Import-time bits for both files under the shared `""` context.
+        conn.execute_batch(
+            "INSERT INTO context (id, context) VALUES (4, '');
+             INSERT INTO line_bits VALUES (10,4,x'ff'),(11,4,x'ff');
+             INSERT INTO arc VALUES (10,4,-1,1),(11,4,-1,1);",
+        )
+        .unwrap();
+
+        let removed = purge_import_time(&db, &["src/foo.py".to_string()]).unwrap();
+        assert_eq!(removed, 1);
+        // foo's import-time bits gone; bar's kept.
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM line_bits WHERE context_id = 4 AND file_id = 10"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM arc WHERE context_id = 4 AND file_id = 10"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM line_bits WHERE context_id = 4 AND file_id = 11"
+            ),
+            1
+        );
+        // Per-test bits for foo untouched; the shared `""` context row survives.
+        assert_eq!(
+            count(
+                &conn,
+                "SELECT count(*) FROM line_bits WHERE context_id IN (1,3)"
+            ),
+            2
+        );
+        assert_eq!(count(&conn, "SELECT count(*) FROM context WHERE id = 4"), 1);
+    }
+
+    #[test]
+    fn purge_import_time_tolerates_line_only_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = make_db_with_files(tmp.path()); // no arc table, no `""` context
+        assert_eq!(
+            purge_import_time(&db, &["src/foo.py".to_string()]).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn reimported_covers_changed_tests_and_rerun_sources_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let db = make_db_with_files(base);
+        std::fs::create_dir_all(base.join("tests")).unwrap();
+        for t in ["test_foo.py", "test_bar.py", "test_both.py", "test_new.py"] {
+            std::fs::write(base.join("tests").join(t), "def test_t(): pass\n").unwrap();
+        }
+        let prior = fp(
+            &[
+                "tests/test_foo.py",
+                "tests/test_bar.py",
+                "tests/test_both.py",
+            ],
+            &["src/foo.py", "src/orphan.py"],
+        );
+        let mut current = fp(
+            &[
+                "tests/test_foo.py",
+                "tests/test_bar.py",
+                "tests/test_both.py",
+                "tests/test_new.py",
+            ],
+            &["src/foo.py", "src/orphan.py"],
+        );
+        // foo.py has coverers in the DB; orphan.py has none.
+        current.sources.insert("src/foo.py".into(), "h2".into());
+        current.sources.insert("src/orphan.py".into(), "h2".into());
+
+        let plan = plan_incremental(&current, &prior, &db, base)
+            .unwrap()
+            .unwrap();
+        let mut got = plan.reimported.clone();
+        got.sort();
+        // The new test re-runs (so re-imports); foo.py's coverers re-run; nothing
+        // re-imports orphan.py, so its import-time bits must be left alone.
+        assert_eq!(
+            got,
+            vec!["src/foo.py".to_string(), "tests/test_new.py".to_string()]
+        );
     }
 }
 

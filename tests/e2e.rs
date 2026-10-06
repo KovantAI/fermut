@@ -865,3 +865,124 @@ fn dashboard_writes_self_contained_html() {
         "dashboard must not pull external scripts"
     );
 }
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn coverage_refresh_prunes_deleted_source_file() {
+    // Issue #117: an incremental `fermut coverage` must drop a deleted source
+    // file's rows from `.coverage`, not leave them for `coverage report` to
+    // trip over (`couldnt-parse`) forever.
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    std::fs::write(
+        sample.join("src/helper.py"),
+        "def triple(x):\n    return x * 3\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sample.join("tests/test_helper.py"),
+        "from src.helper import triple\n\n\ndef test_triple():\n    assert triple(2) == 6\n",
+    )
+    .unwrap();
+    let coverage = sample.join(".coverage");
+    let recorded = || -> Vec<String> {
+        let conn = rusqlite::Connection::open(&coverage).unwrap();
+        let mut stmt = conn.prepare("SELECT path FROM file").unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
+    };
+
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(&sample)
+        .assert()
+        .success();
+    assert!(
+        recorded().iter().any(|p| p.ends_with("helper.py")),
+        "full build must record helper.py: {:?}",
+        recorded()
+    );
+
+    std::fs::remove_file(sample.join("src/helper.py")).unwrap();
+    std::fs::remove_file(sample.join("tests/test_helper.py")).unwrap();
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(&sample)
+        .assert()
+        .success()
+        .stdout(contains("dropped 1 removed source file(s)"));
+
+    let after = recorded();
+    assert!(
+        !after.iter().any(|p| p.ends_with("helper.py")),
+        "deleted helper.py must leave the DB: {after:?}"
+    );
+    assert!(
+        after.iter().any(|p| p.ends_with("calculator.py")),
+        "live calculator.py must stay: {after:?}"
+    );
+
+    // Baseline advanced → the next refresh is a no-op.
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(&sample)
+        .assert()
+        .success()
+        .stdout(contains("up to date"));
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn coverage_refresh_rebuilds_import_time_lines_of_changed_source() {
+    // Import-time lines live under the shared `""` context, which `--cov-append`
+    // unions. Shifting a source's lines must not leave its old line numbers
+    // marked executed: the count of import-time lines stays the same.
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    let coverage = sample.join(".coverage");
+    let import_time_lines = || -> u32 {
+        let conn = rusqlite::Connection::open(&coverage).unwrap();
+        conn.query_row(
+            "SELECT lb.numbits FROM line_bits lb \
+             JOIN context c ON c.id = lb.context_id \
+             JOIN file f ON f.id = lb.file_id \
+             WHERE c.context = '' AND f.path LIKE '%calculator.py'",
+            [],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .unwrap()
+        .iter()
+        .map(|b| b.count_ones())
+        .sum()
+    };
+    let refresh = || {
+        Command::cargo_bin("fermut")
+            .unwrap()
+            .arg("coverage")
+            .arg(&sample)
+            .assert()
+            .success();
+    };
+
+    refresh();
+    let before = import_time_lines();
+    assert!(before > 0, "full build must record import-time lines");
+
+    let calc = sample.join("src/calculator.py");
+    let src = std::fs::read_to_string(&calc).unwrap();
+    std::fs::write(&calc, format!("{}{src}", "\n".repeat(30))).unwrap();
+    refresh();
+
+    assert_eq!(
+        import_time_lines(),
+        before,
+        "shifted source must not keep its pre-change import-time lines"
+    );
+}

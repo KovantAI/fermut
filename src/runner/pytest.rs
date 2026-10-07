@@ -57,6 +57,12 @@ pub struct PytestRunner {
     kill_order: Arc<crate::kill_order::KillOrder>,
     /// Kills learned this run, folded into the sidecar by the engine afterward.
     kill_sink: Arc<Mutex<Vec<crate::kill_order::KillRecord>>>,
+    /// Kill-set recording on (the higher-order-mutant experiment). When set, the
+    /// per-mutant command drops `-x` and always captures stdout, and every
+    /// mutant's full kill-set is pushed to `kill_set_sink`.
+    record_kill_sets: bool,
+    /// Per-mutant kill-sets recorded this run, drained by the engine to JSONL.
+    kill_set_sink: Arc<Mutex<Vec<super::kill_sets::KillSetRecord>>>,
     /// Name the killing test on each `Killed` outcome (for the killer-keyed
     /// cache), capturing output when several tests are selected. On whenever
     /// the verdict cache is.
@@ -87,6 +93,8 @@ pub struct PytestConfig {
     pub smart_order: bool,
     pub kill_order: Arc<crate::kill_order::KillOrder>,
     pub kill_sink: Arc<Mutex<Vec<crate::kill_order::KillRecord>>>,
+    pub record_kill_sets: bool,
+    pub kill_set_sink: Arc<Mutex<Vec<super::kill_sets::KillSetRecord>>>,
     pub learn_killer: bool,
     pub key_base: PathBuf,
     pub plugin: bool,
@@ -107,6 +115,8 @@ impl PytestRunner {
             smart_order,
             kill_order,
             kill_sink,
+            record_kill_sets,
+            kill_set_sink,
             learn_killer,
             key_base,
             plugin,
@@ -124,6 +134,8 @@ impl PytestRunner {
             smart_order,
             kill_order,
             kill_sink,
+            record_kill_sets,
+            kill_set_sink,
             learn_killer,
             key_base,
             plugin,
@@ -219,7 +231,14 @@ impl PytestRunner {
         only: Option<&str>,
     ) -> Result<MutantCommand> {
         let mut cmd = self.framework_command();
-        cmd.arg("-x").arg("--tb=no").arg("-q");
+        cmd.arg("--tb=no").arg("-q");
+        // `-x` stops at the first failing test — all a Killed/Survived verdict
+        // needs. Kill-set recording needs EVERY covering test that fails, so drop
+        // `-x` when recording (at the cost of running the full selected set on a
+        // killed mutant instead of short-circuiting).
+        if !self.record_kill_sets {
+            cmd.arg("-x");
+        }
         // A fresh file per run: a process leaked by an earlier run can still
         // hold its own (already unlinked) file open, but never this one.
         let result = self.plugin.then(|| next_result_path(&mirror.plugin_dir));
@@ -269,7 +288,13 @@ impl PytestRunner {
             key_file,
             key_op,
         ) {
-            Selection::Ids { args, capture } => {
+            Selection::Ids { mut args, capture } => {
+                // Recording forces capture (we parse the failing nodeids from the
+                // `-rfE` summary); add `-rfE` if smart-order selection didn't.
+                let capture = capture || self.record_kill_sets;
+                if capture && !args.iter().any(|a| a == "-rfE") {
+                    args.push("-rfE".to_string());
+                }
                 for a in &args {
                     cmd.arg(a);
                 }
@@ -278,7 +303,14 @@ impl PytestRunner {
             }
             Selection::Sweep => {
                 cmd.arg(&mirror.tests);
-                (false, None)
+                // No coverage selection, but recording still needs the failure
+                // summary from the whole-suite sweep.
+                if self.record_kill_sets {
+                    cmd.arg("-rfE");
+                    (true, None)
+                } else {
+                    (false, None)
+                }
             }
         };
         configure_mirror_cmd(&mut cmd, mirror)?;
@@ -298,6 +330,53 @@ impl PytestRunner {
         };
         cmd.stdout(stdout_cfg).stderr(Stdio::null());
         Ok(MutantCommand { cmd, sole, result })
+    }
+
+    /// Record this mutant's full kill-set (the covering tests that failed) into
+    /// the shared sink for the engine to write out. Only called under
+    /// `--record-kill-sets`, where `-x` is dropped and stdout always captured, so
+    /// the `-rfE` summary lists every failure — the mutant's `K(m)`. The verdict
+    /// is derived the same way [`classify_run`] derives it, so the recorded
+    /// `status` matches the report; `kill_set` is populated only on a real kill.
+    fn record_kill_set(
+        &self,
+        mutant: &Arc<Mutant>,
+        waited: &(Option<ExitStatus>, Option<String>),
+        import_broke: bool,
+        key_file: &str,
+        key_op: &'static str,
+    ) {
+        let (status, output) = waited;
+        let (verdict, kill_set) = match status {
+            Some(s) => match classify_exit(TestTool::Pytest, s.code()) {
+                ExitVerdict::Survived => ("survived", Vec::new()),
+                ExitVerdict::Killed => {
+                    let mut ids = output
+                        .as_deref()
+                        .map(crate::kill_order::parse_all_failed)
+                        .unwrap_or_default();
+                    // Dedupe preserving first-seen order: a parametrized test can
+                    // list the same nodeid once per failing param, but the
+                    // kill-set is a set of tests.
+                    let mut seen = std::collections::HashSet::new();
+                    ids.retain(|id| seen.insert(id.clone()));
+                    ("killed", ids)
+                }
+                // Broken import: collection failed before any test ran, so
+                // there is no failing node id to record.
+                ExitVerdict::Anomaly(PYTEST_USAGE_ERROR) if import_broke => ("killed", Vec::new()),
+                ExitVerdict::Anomaly(_) => ("error", Vec::new()),
+            },
+            None => ("timed_out", Vec::new()),
+        };
+        lock_recover(&self.kill_set_sink).push(super::kill_sets::KillSetRecord {
+            mutant_id: mutant.id.clone(),
+            file: key_file.to_string(),
+            operator: key_op.to_string(),
+            line: mutant.line,
+            status: verdict,
+            kill_set,
+        });
     }
 
     /// Re-run the mutant's exact selection with `--collect-only`, capturing
@@ -554,7 +633,7 @@ const DRAIN_GRACE: Duration = Duration::from_secs(5);
 /// [`DRAIN_GRACE`], which usually *recovers* the datapoint the child already
 /// wrote. Bytes are decoded lossily rather than via `read_to_string` so a single
 /// non-UTF-8 byte can't discard the whole capture.
-fn wait_draining_stdout(
+pub(crate) fn wait_draining_stdout(
     child: Child,
     timeout: Duration,
     on_timeout: impl FnMut(&mut Child),
@@ -674,6 +753,10 @@ impl Runner for PytestRunner {
         std::mem::take(&mut *lock_recover(&self.kill_sink))
     }
 
+    fn take_kill_sets(&self) -> Vec<super::kill_sets::KillSetRecord> {
+        std::mem::take(&mut *lock_recover(&self.kill_set_sink))
+    }
+
     fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
         run_patched(&self.tests, self.isolation, mutant, |mirror| {
             let (key_file, key_op) = self.kill_key(mutant);
@@ -697,6 +780,9 @@ impl Runner for PytestRunner {
                     Some(r) => r.import_broke(),
                     None => self.probe_collection_failure(mirror, mutant, &key_file, key_op),
                 };
+            if self.record_kill_sets {
+                self.record_kill_set(mutant, &waited, import_broke, &key_file, key_op);
+            }
             Ok(self.classify_run(
                 mutant,
                 waited,
@@ -1191,6 +1277,8 @@ mod tests {
             smart_order,
             kill_order: Arc::new(crate::kill_order::KillOrder::default()),
             kill_sink: Arc::new(Mutex::new(Vec::new())),
+            record_kill_sets: false,
+            kill_set_sink: Arc::new(Mutex::new(Vec::new())),
             learn_killer: false,
             key_base: PathBuf::from("."),
             plugin: false,

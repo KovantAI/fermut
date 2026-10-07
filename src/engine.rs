@@ -285,6 +285,21 @@ fn persist(
         }
     }
 
+    // Kill-set recording (higher-order-mutant experiment): drain the per-mutant
+    // kill-sets the runner captured and write them as JSONL. Observational — a
+    // write failure warns but never sinks the run.
+    if let Some(path) = &cfg.record_kill_sets {
+        let records = runner.take_kill_sets();
+        match crate::runner::kill_sets::write_jsonl(path, &records) {
+            Ok(()) => info!(
+                path = %path.display(),
+                count = records.len(),
+                "wrote per-mutant kill-sets"
+            ),
+            Err(e) => warn!(path = %path.display(), error = %e, "failed to write kill-sets"),
+        }
+    }
+
     let report = Report::new(outcomes);
 
     let entry = if cfg.history {
@@ -1500,6 +1515,7 @@ mod tests {
             verify_baseline: false,
             baseline_timeout_secs: 300,
             max_time_secs: None,
+            record_kill_sets: None,
         }
     }
 

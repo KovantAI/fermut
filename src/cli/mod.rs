@@ -320,6 +320,16 @@ pub(crate) struct RunConfigArgs {
     #[arg(long, value_name = "SECS")]
     pub max_time: Option<u64>,
 
+    /// [experimental] Record each mutant's full kill-set (the covering tests that
+    /// fail) to <PATH> as JSONL. Drops pytest's `-x`, so a killed mutant runs
+    /// every selected test instead of stopping at the first — markedly slower.
+    /// Captures the kill-set containment structure that fermut's normal
+    /// Killed/Survived verdict discards, needed to study subsuming / higher-order
+    /// mutants. Pytest/rstest runner only. Pair with `--no-cache`, or a cache hit
+    /// skips the run and records nothing for that mutant.
+    #[arg(long, value_name = "PATH")]
+    pub record_kill_sets: Option<PathBuf>,
+
     #[command(flatten)]
     pub filter: FilterArgs,
 }
@@ -329,6 +339,15 @@ pub(crate) struct RunConfigArgs {
 enum Cmd {
     /// Generate mutants, run pytest against each, report killed/survived.
     Run(subcmd::run::RunArgs),
+
+    /// [experimental] Higher-order-mutant experiment (Phase 1): find strongly-subsuming
+    /// second-order mutants.
+    ///
+    /// Consumes a `run --record-kill-sets` JSONL, pairs killed FOMs whose
+    /// kill-sets overlap, runs each 2nd-order mutant, and reports which are
+    /// SSHOMs (killed only by tests that kill both constituents) — the
+    /// fewer-but-stronger mutants. Pytest/rstest + `--coverage` required.
+    Hom(subcmd::hom::HomArgs),
 
     /// Enumerate mutations without running tests.
     ///
@@ -598,6 +617,7 @@ impl Cli {
             Cmd::InstallSkills(args) => subcmd::install_skills::run(args),
             Cmd::Merge(args) => merge::run(args),
             Cmd::List(args) => subcmd::list::run(args),
+            Cmd::Hom(args) => subcmd::hom::run(args),
         }
     }
 }

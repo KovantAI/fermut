@@ -14,6 +14,7 @@
 # Sibling actions in this repo, released under the same tags:
 #   KovantAI/fermut/sweep  whole-tree run, optionally one shard of a matrix
 #   KovantAI/fermut/merge  combine shard reports and gate
+#   KovantAI/fermut/trend  combine shard reports, record history, gate on regressions
 #
 # Composite rather than a reusable workflow so the caller keeps its own job:
 # `services:`, `container:` and private-registry install steps cannot be passed

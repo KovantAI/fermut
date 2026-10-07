@@ -130,6 +130,17 @@ pub struct Config {
     /// are separate fixed costs the budget does not cover. `None` = run the
     /// whole catalogue. Set via `--max-time`.
     pub max_time_secs: Option<u64>,
+    /// Experiment hook: when `Some(path)`, the pytest runner drops `-x` and
+    /// records, per mutant, the FULL set of covering tests that fail (the
+    /// mutant's kill-set `K(m)`), writing one JSON object per mutant to `path`
+    /// as JSONL. Off by default — recording drops the `-x` short-circuit, so a
+    /// killed mutant runs *every* selected test instead of stopping at the
+    /// first, which is markedly slower. Needed to measure higher-order /
+    /// subsuming-mutant structure (an SSHOM is defined by kill-set containment),
+    /// which fermut's normal Killed/Survived verdict discards. Pair with
+    /// `--no-cache`: a cache hit skips the run and records no kill-set. Set via
+    /// `--record-kill-sets`.
+    pub record_kill_sets: Option<PathBuf>,
 }
 
 /// Default for [`Config::cache_audit_rate`].

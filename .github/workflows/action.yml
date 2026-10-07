@@ -1,6 +1,6 @@
 name: Action self-test
 
-# Exercises the composite actions (`KovantAI/fermut`, `/sweep`, `/merge`) against
+# Exercises the composite actions (`KovantAI/fermut`, `/sweep`, `/merge`, `/trend`) against
 # examples/sample, using a fermut binary built from this commit so a change to
 # the CLI and a change to the action are tested together.
 
@@ -11,6 +11,7 @@ on:
       - "action.yml"
       - "sweep/**"
       - "merge/**"
+      - "trend/**"
       - "scripts/action/**"
       - ".github/workflows/action.yml"
       - "examples/sample/**"
@@ -19,6 +20,7 @@ on:
       - "action.yml"
       - "sweep/**"
       - "merge/**"
+      - "trend/**"
       - "scripts/action/**"
       - ".github/workflows/action.yml"
       - "examples/sample/**"
@@ -83,7 +85,8 @@ jobs:
           test -s "$JSON"
 
   shard:
-    needs: build
+    # After warm, so the shards restore its coverage DB instead of rebuilding.
+    needs: [build, warm]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -118,6 +121,38 @@ jobs:
         env:
           SCORED: ${{ steps.fermut.outputs.scored }}
         run: test "$SCORED" -gt 0
+
+  trend:
+    needs: [build, shard]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - *bin
+      - *path
+      - id: fermut
+        uses: ./trend
+        with:
+          working-directory: ${{ env.SAMPLE }}
+          fermut-version: project
+          artifact-name: selftest
+          fail-on-regression: "1"
+          max-errored: "0"
+          # A per-run namespace: the history starts empty, so the run is
+          # deterministic and never compares against another commit's sample.
+          cache-key-prefix: selftest-${{ github.run_id }}
+      - name: Assert trend outputs
+        env:
+          RECORDED: ${{ steps.fermut.outputs.recorded }}
+          SCORED: ${{ steps.fermut.outputs.scored }}
+          DELTA: ${{ steps.fermut.outputs.delta }}
+          HISTORY: ${{ steps.fermut.outputs.history }}
+        run: |
+          echo "recorded=$RECORDED scored=$SCORED delta=$DELTA"
+          test "$RECORDED" = true
+          test "$SCORED" -gt 0
+          test -z "$DELTA"
+          test "$(wc -l < "$HISTORY")" -eq 1
+          jq -e '.killed + .survived > 0 and .git_sha != null' "$HISTORY"
 
   pr:
     if: github.event_name == 'pull_request'

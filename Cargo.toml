@@ -17,6 +17,8 @@ include = [
     "examples/github-actions/pr-gate.yml",
     # `fermut install-skills` embeds these via include_bytes!.
     "plugins/fermut/skills/*/SKILL.md",
+    # The pytest runner embeds the result-reporter plugin via include_str!.
+    "python/pytest_fermut/_fermut_reporter.py",
     "/README.md",
     "/LICENSE-MIT",
     "/LICENSE-APACHE",

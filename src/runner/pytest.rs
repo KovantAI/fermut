@@ -12,7 +12,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,6 +24,7 @@ use super::exit::{
     PYTEST_USAGE_ERROR,
 };
 use super::process_group::{kill_group, with_new_process_group};
+use super::pytest_result::{RunResult, REPORTER_MODULE, RESULT_ENV};
 use super::{
     build_mirror, configure_mirror_cmd, mirror_pythonpath, run_baseline_with_timeout, run_patched,
     BaselineStatus, Runner,
@@ -70,6 +71,10 @@ pub struct PytestRunner {
     /// Mutant files are made relative to this so the sidecar survives
     /// moves/checkouts.
     key_base: PathBuf,
+    /// Load fermut's reporter plugin into each per-mutant run and read its
+    /// structured result (see [`super::pytest_result`]) instead of parsing
+    /// stdout. Off → the exit-code + `-rfE` path only.
+    plugin: bool,
 }
 
 /// Construction parameters for [`PytestRunner`], bundled so the runner is
@@ -92,6 +97,7 @@ pub struct PytestConfig {
     pub kill_set_sink: Arc<Mutex<Vec<super::kill_sets::KillSetRecord>>>,
     pub learn_killer: bool,
     pub key_base: PathBuf,
+    pub plugin: bool,
 }
 
 impl PytestRunner {
@@ -113,6 +119,7 @@ impl PytestRunner {
             kill_set_sink,
             learn_killer,
             key_base,
+            plugin,
         } = config;
         Self {
             tests,
@@ -131,6 +138,7 @@ impl PytestRunner {
             kill_set_sink,
             learn_killer,
             key_base,
+            plugin,
         }
     }
 
@@ -155,6 +163,12 @@ impl PytestRunner {
     /// silently stop ordering from learning for the rest of the run.
     fn record_killer(&self, output: &str, file: &str, op: &'static str) -> Option<String> {
         let nodeid = crate::kill_order::parse_first_failed(output)?;
+        Some(self.learn_killer_id(nodeid, file, op))
+    }
+
+    /// Under smart ordering, queue `nodeid` as the `(file, op)` killer for the
+    /// kill-order sidecar. Returns it for the outcome to carry.
+    fn learn_killer_id(&self, nodeid: String, file: &str, op: &'static str) -> String {
         if self.smart_order {
             lock_recover(&self.kill_sink).push(crate::kill_order::KillRecord {
                 file: file.to_string(),
@@ -162,7 +176,7 @@ impl PytestRunner {
                 nodeid: nodeid.clone(),
             });
         }
-        Some(nodeid)
+        nodeid
     }
 
     /// Cold-start breadth ordering of the coverage-selected node ids: with smart
@@ -200,10 +214,11 @@ impl PytestRunner {
     }
 
     /// Assemble the per-mutant test command inside `mirror`: base flags, the
-    /// coverage/smart-ordering test selection (or whole-dir sweep), working
-    /// directory, PYTHONPATH/pyc env, and stdio. Returns the ready-to-spawn
-    /// `Command` (stdout piped when capturing to learn the killer) plus the
-    /// sole selected node id, when exactly one test was selected.
+    /// reporter plugin, the coverage/smart-ordering test selection (or
+    /// whole-dir sweep), working directory, PYTHONPATH/pyc env, and stdio.
+    /// Returns the ready-to-spawn `Command` (stdout piped when capturing to
+    /// learn the killer), the sole selected node id when exactly one test was
+    /// selected, and the result file the reporter plugin writes to.
     ///
     /// `only` replaces the coverage selection with that one node id — the
     /// cache audit re-running just the recorded killer.
@@ -214,7 +229,7 @@ impl PytestRunner {
         key_file: &str,
         key_op: &'static str,
         only: Option<&str>,
-    ) -> Result<(Command, Option<String>)> {
+    ) -> Result<MutantCommand> {
         let mut cmd = self.framework_command();
         cmd.arg("--tb=no").arg("-q");
         // `-x` stops at the first failing test — all a Killed/Survived verdict
@@ -223,6 +238,12 @@ impl PytestRunner {
         // killed mutant instead of short-circuiting).
         if !self.record_kill_sets {
             cmd.arg("-x");
+        }
+        // A fresh file per run: a process leaked by an earlier run can still
+        // hold its own (already unlinked) file open, but never this one.
+        let result = self.plugin.then(|| next_result_path(&mirror.plugin_dir));
+        if result.is_some() {
+            cmd.arg("-p").arg(REPORTER_MODULE);
         }
         if let Some(seed) = self.hypothesis_seed {
             cmd.arg(format!("--hypothesis-seed={seed}"));
@@ -256,10 +277,13 @@ impl PytestRunner {
                 })
             }),
         };
+        // With the plugin the killer comes from its result file, so stdout is
+        // never captured for it.
+        let capture_killer = (self.smart_order || self.learn_killer) && !self.plugin;
         let (capture, sole) = match select_args(
             ordered.as_deref(),
             self.smart_order,
-            self.learn_killer,
+            capture_killer,
             &self.kill_order,
             key_file,
             key_op,
@@ -290,6 +314,10 @@ impl PytestRunner {
             }
         };
         configure_mirror_cmd(&mut cmd, mirror)?;
+        if let Some(path) = &result {
+            cmd.env("PYTHONPATH", plugin_pythonpath(mirror)?);
+            cmd.env(RESULT_ENV, path);
+        }
         // Per-mutant pytest output is noise on the terminal (each killed
         // mutant would stream `FAILED … / 1 failed`, reading as breakage
         // when it's mutants dying as intended). Discard it — except when
@@ -301,7 +329,7 @@ impl PytestRunner {
             Stdio::null()
         };
         cmd.stdout(stdout_cfg).stderr(Stdio::null());
-        Ok((cmd, sole))
+        Ok(MutantCommand { cmd, sole, result })
     }
 
     /// Record this mutant's full kill-set (the covering tests that failed) into
@@ -370,7 +398,10 @@ impl PytestRunner {
         key_op: &'static str,
     ) -> bool {
         let probe = || -> Result<bool> {
-            let (mut cmd, _) = self.build_mutant_command(mirror, mutant, key_file, key_op, None)?;
+            let MutantCommand {
+                mut cmd, result, ..
+            } = self.build_mutant_command(mirror, mutant, key_file, key_op, None)?;
+            let _cleanup = result.map(ResultFile);
             cmd.arg("--collect-only");
             let log = tempfile::NamedTempFile::new().context("creating collection probe log")?;
             cmd.stdout(log.as_file().try_clone()?)
@@ -392,14 +423,20 @@ impl PytestRunner {
     /// selected test and it *failed* (exit 1) — that test. Anomalous exits
     /// become `error` (excluded from the score).
     ///
-    /// `import_broke` is the verdict of [`Self::probe_collection_failure`] for
-    /// an exit-4 run: when the mutant broke a selected module's import, pytest
-    /// reports a usage error (node ids can't resolve) rather than exit 2, and
-    /// that is a kill, not an anomaly.
+    /// `reported` is the reporter plugin's result for the run, when it loaded;
+    /// its first failed test names the killer ahead of any stdout parsing.
+    ///
+    /// `import_broke` says whether an exit-4 run failed because the mutant
+    /// broke a selected module's (or a conftest's) import — from `reported`, or
+    /// [`Self::probe_collection_failure`] without it. pytest then reports a
+    /// usage error (node ids can't resolve) rather than exit 2, and that is a
+    /// kill, not an anomaly.
+    #[allow(clippy::too_many_arguments)]
     fn classify_run(
         &self,
         mutant: &Arc<Mutant>,
         waited: (Option<ExitStatus>, Option<String>),
+        reported: Option<&RunResult>,
         import_broke: bool,
         sole: Option<String>,
         key_file: &str,
@@ -412,10 +449,15 @@ impl PytestRunner {
                 // pytest couldn't collect). When capturing, learn which test
                 // did it and record it for next time's ordering.
                 ExitVerdict::Killed => {
-                    let parsed = output.and_then(|out| self.record_killer(&out, key_file, key_op));
-                    // Exit 2 (collection error) or a signal has no killing
-                    // *test* to name, so the sole id is used on exit 1 only.
-                    let killer = parsed.or_else(|| sole.filter(|_| status.code() == Some(1)));
+                    let killer = reported
+                        .and_then(RunResult::killer)
+                        .map(|id| self.learn_killer_id(id.to_string(), key_file, key_op))
+                        .or_else(|| {
+                            output.and_then(|out| self.record_killer(&out, key_file, key_op))
+                        })
+                        // Exit 2 (collection error) or a signal has no killing
+                        // *test* to name, so the sole id is used on exit 1 only.
+                        .or_else(|| sole.filter(|_| status.code() == Some(1)));
                     MutantOutcome::killed_by(mutant.clone(), killer)
                 }
                 // The mutant broke a selected module's import: no killer test
@@ -432,6 +474,68 @@ impl PytestRunner {
             (None, _) => MutantOutcome::timed_out(mutant.clone()),
         }
     }
+}
+
+/// A per-mutant command ready to spawn, from [`PytestRunner::build_mutant_command`].
+struct MutantCommand {
+    cmd: Command,
+    /// The one selected node id, when exactly one test was selected.
+    sole: Option<String>,
+    /// Where the reporter plugin writes this run's result (plugin on).
+    result: Option<PathBuf>,
+}
+
+/// A per-run reporter result file, deleted when dropped so a long run doesn't
+/// accumulate one file per mutant in the worker's plugin directory.
+struct ResultFile(PathBuf);
+
+impl ResultFile {
+    fn read(&self) -> Option<RunResult> {
+        RunResult::read(&self.0)
+    }
+}
+
+impl Drop for ResultFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Read a run's reporter result. When the plugin was requested and the run
+/// exited on its own yet left no usable result, the plugin failed to load in
+/// this environment: warn once per process (the run still gets a verdict via
+/// the exit-code fallback) so a silently degraded run is visible.
+fn read_reported(result: Option<&ResultFile>, exited: bool) -> Option<RunResult> {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let file = result?;
+    let reported = file.read();
+    if reported.is_none() && exited && !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            "fermut's pytest reporter plugin produced no result; falling back to \
+             exit codes and output parsing (disable it with --no-pytest-plugin)"
+        );
+    }
+    reported
+}
+
+/// A result-file path unique across every run in this process.
+fn next_result_path(dir: &std::path::Path) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    dir.join(format!(
+        "result-{}.jsonl",
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+/// The mirror's PYTHONPATH with the reporter plugin's directory appended, so
+/// `-p _fermut_reporter` resolves without installing anything in the target
+/// venv. Appended last: the module name is fermut-specific and must not change
+/// how any project import resolves.
+fn plugin_pythonpath(mirror: &super::Mirror) -> Result<std::ffi::OsString> {
+    let base = mirror_pythonpath(mirror)?;
+    let mut paths: Vec<PathBuf> = std::env::split_paths(&base).collect();
+    paths.push(mirror.plugin_dir.clone());
+    std::env::join_paths(paths).context("joining PYTHONPATH")
 }
 
 /// Whether to capture the per-mutant pytest stdout to learn the killing test.
@@ -460,12 +564,14 @@ enum Selection {
 /// Decide the per-mutant selection. Pure — no mirror, no spawn — so the arg
 /// wiring (smart reordering, the `-rfE` capture flag, and the sweep fallback)
 /// is unit-tested without launching pytest. `ids` is the coverage selection;
-/// `None` or empty falls back to [`Selection::Sweep`].
+/// `None` or empty falls back to [`Selection::Sweep`]. `capture_killer` asks
+/// for the killer from stdout (smart ordering or the killer-keyed cache want
+/// it, and the reporter plugin isn't supplying it).
 #[must_use]
 fn select_args(
     ids: Option<&[String]>,
     smart_order: bool,
-    learn_killer: bool,
+    capture_killer: bool,
     kill_order: &crate::kill_order::KillOrder,
     key_file: &str,
     key_op: &str,
@@ -477,7 +583,7 @@ fn select_args(
             } else {
                 ids.to_vec()
             };
-            let capture = should_capture(smart_order || learn_killer, ordered.len());
+            let capture = should_capture(capture_killer, ordered.len());
             let mut args = ordered;
             if capture {
                 // `-rfE` prints a `FAILED`/`ERROR <nodeid>` summary line so a
@@ -654,20 +760,38 @@ impl Runner for PytestRunner {
     fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
         run_patched(&self.tests, self.isolation, mutant, |mirror| {
             let (key_file, key_op) = self.kill_key(mutant);
-            let (mut cmd, sole) =
-                self.build_mutant_command(mirror, mutant, &key_file, key_op, None)?;
+            let MutantCommand {
+                mut cmd,
+                sole,
+                result,
+            } = self.build_mutant_command(mirror, mutant, &key_file, key_op, None)?;
+            let result = result.map(ResultFile);
             let child = cmd.spawn().context("spawning test runner")?;
             let waited = wait_draining_stdout(child, self.timeout, kill_group)?;
+            let reported = read_reported(result.as_ref(), waited.0.is_some());
             // Exit 4 is ambiguous under node-id selection (see `exit.rs`). The
-            // mutant is still applied here, so re-collect once to tell a broken
-            // import (kill) from a stale node id (anomaly). Rare path: the
-            // common exits never pay for it.
+            // reporter plugin saw whether test code failed to import; without
+            // its result (plugin off or failed to load) the mutant is still
+            // applied here, so re-collect once to tell a broken import (kill)
+            // from a stale node id (anomaly). Rare path: the common exits never
+            // pay for it.
             let import_broke = matches!(&waited, (Some(s), _) if s.code() == Some(PYTEST_USAGE_ERROR))
-                && self.probe_collection_failure(mirror, mutant, &key_file, key_op);
+                && match &reported {
+                    Some(r) => r.import_broke(),
+                    None => self.probe_collection_failure(mirror, mutant, &key_file, key_op),
+                };
             if self.record_kill_sets {
                 self.record_kill_set(mutant, &waited, import_broke, &key_file, key_op);
             }
-            Ok(self.classify_run(mutant, waited, import_broke, sole, &key_file, key_op))
+            Ok(self.classify_run(
+                mutant,
+                waited,
+                reported.as_ref(),
+                import_broke,
+                sole,
+                &key_file,
+                key_op,
+            ))
         })
     }
 
@@ -677,11 +801,24 @@ impl Runner for PytestRunner {
         // disagreement either way, and the engine then re-runs the mutant fully.
         run_patched(&self.tests, self.isolation, mutant, |mirror| {
             let (key_file, key_op) = self.kill_key(mutant);
-            let (mut cmd, sole) =
-                self.build_mutant_command(mirror, mutant, &key_file, key_op, Some(killer))?;
+            let MutantCommand {
+                mut cmd,
+                sole,
+                result,
+            } = self.build_mutant_command(mirror, mutant, &key_file, key_op, Some(killer))?;
+            let result = result.map(ResultFile);
             let child = cmd.spawn().context("spawning audit run")?;
             let waited = wait_draining_stdout(child, self.timeout, kill_group)?;
-            Ok(self.classify_run(mutant, waited, false, sole, &key_file, key_op))
+            let reported = read_reported(result.as_ref(), waited.0.is_some());
+            Ok(self.classify_run(
+                mutant,
+                waited,
+                reported.as_ref(),
+                false,
+                sole,
+                &key_file,
+                key_op,
+            ))
         })
         .map(Some)
     }
@@ -758,7 +895,7 @@ mod tests {
         let sel = select_args(
             Some(&sids(&["t::a", "t::b"])),
             true,
-            false,
+            true,
             &ko,
             "src/f.py",
             "op",
@@ -771,14 +908,7 @@ mod tests {
         // One selected test → nothing to reorder next run, so no capture and no
         // `-rfE` (piping + summary would be pure overhead).
         let ko = KillOrder::default();
-        let sel = select_args(
-            Some(&sids(&["t::only"])),
-            true,
-            false,
-            &ko,
-            "src/f.py",
-            "op",
-        );
+        let sel = select_args(Some(&sids(&["t::only"])), true, true, &ko, "src/f.py", "op");
         assert_ids(sel, &["t::only"], false);
     }
 
@@ -808,7 +938,7 @@ mod tests {
         let sel = select_args(
             Some(&sids(&["t::a", "t::b", "t::c"])),
             true,
-            false,
+            true,
             &ko,
             "src/f.py",
             "op",
@@ -1151,6 +1281,7 @@ mod tests {
             kill_set_sink: Arc::new(Mutex::new(Vec::new())),
             learn_killer: false,
             key_base: PathBuf::from("."),
+            plugin: false,
         })
     }
 
@@ -1246,18 +1377,99 @@ mod tests {
         output: Option<&str>,
         sole: Option<&str>,
     ) -> (MutantOutcome, usize) {
+        classify_reported(smart_order, code, output, None, false, sole)
+    }
+
+    #[cfg(unix)]
+    fn classify_reported(
+        smart_order: bool,
+        code: i32,
+        output: Option<&str>,
+        reported: Option<&RunResult>,
+        import_broke: bool,
+        sole: Option<&str>,
+    ) -> (MutantOutcome, usize) {
         let tmp = tempfile::tempdir().unwrap();
         let r = runner(smart_order, breadth_ctx(tmp.path()));
         let m = Arc::new(mutant_in(tmp.path()));
         let out = r.classify_run(
             &m,
             (exited(code), output.map(str::to_string)),
-            false,
+            reported,
+            import_broke,
             sole.map(str::to_string),
             "foo.py",
             "op",
         );
         (out, r.take_kill_records().len())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reported_killer_names_the_kill_and_is_learned() {
+        let reported = RunResult {
+            failures: vec!["tests/t.py::b".into(), "tests/t.py::c".into()],
+            ..RunResult::default()
+        };
+        let (o, recorded) = classify_reported(true, 1, None, Some(&reported), false, None);
+        assert_eq!(o.killer(), Some("tests/t.py::b"));
+        assert_eq!(recorded, 1, "smart ordering learns the reported killer");
+        // The plugin's killer wins over a sole id (they agree in practice; the
+        // report is the observed fact).
+        let (o, _) = classify_reported(false, 1, None, Some(&reported), false, Some("t::x"));
+        assert_eq!(o.killer(), Some("tests/t.py::b"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reported_run_without_failures_falls_back_to_sole_on_exit_1() {
+        let reported = RunResult::default();
+        let (o, _) = classify_reported(false, 1, None, Some(&reported), false, Some("t::only"));
+        assert_eq!(o.killer(), Some("t::only"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_4_is_a_kill_only_when_import_broke() {
+        let (o, _) = classify_reported(false, 4, None, None, true, None);
+        assert!(matches!(o, MutantOutcome::Killed { .. }));
+        assert_eq!(o.killer(), None, "collection failed before any test ran");
+        let (o, _) = classify_reported(false, 4, None, None, false, None);
+        assert!(matches!(o, MutantOutcome::Error { .. }));
+    }
+
+    #[test]
+    fn plugin_pythonpath_appends_plugin_dir_after_mirror() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tests = tmp.path().join("tests");
+        std::fs::create_dir_all(&tests).unwrap();
+        std::fs::write(tmp.path().join("pyproject.toml"), "").unwrap();
+        let mirror = crate::runner::build_mirror(&tests, IsolationMode::Copy).unwrap();
+        assert!(
+            mirror.plugin_dir.join("_fermut_reporter.py").is_file(),
+            "the mirror ships the reporter module"
+        );
+        assert!(
+            !mirror.plugin_dir.starts_with(&mirror.root),
+            "the plugin dir lives outside the project copy"
+        );
+        let pp = plugin_pythonpath(&mirror).unwrap();
+        let paths: Vec<PathBuf> = std::env::split_paths(&pp).collect();
+        assert_eq!(paths.first(), Some(&mirror.root));
+        assert_eq!(paths.last(), Some(&mirror.plugin_dir));
+    }
+
+    #[test]
+    fn result_file_is_removed_on_drop_and_paths_are_unique() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = next_result_path(tmp.path());
+        let b = next_result_path(tmp.path());
+        assert_ne!(a, b);
+        std::fs::write(&a, "{\"v\":1,\"ev\":\"start\"}\n").unwrap();
+        let file = ResultFile(a.clone());
+        assert!(file.read().is_some());
+        drop(file);
+        assert!(!a.exists());
     }
 
     #[cfg(unix)]

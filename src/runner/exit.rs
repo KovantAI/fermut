@@ -86,10 +86,18 @@ pub(crate) const PYTEST_USAGE_ERROR: i32 = 4;
 /// `ERROR collecting <file>` section — so any of these counts: that section,
 /// a short-summary `ERROR <file> - <exc>` line, or an `N error(s) in` tally.
 ///
+/// A conftest that imports the mutated code fails before any collection, with
+/// `ImportError while loading conftest '<path>'.` (pytest 7–9 print that
+/// header for any exception, not only `ImportError`) and no node-id error.
+/// That is a kill too: the mutant broke the import of test code.
+///
 /// A module that was *already* broken on the clean tree would match too — the
 /// same caveat as exit 2, which fermut already scores as a kill; the baseline
 /// check is what guards against it.
 pub(crate) fn is_collection_failure(output: &str) -> bool {
+    if output.contains("ImportError while loading conftest") {
+        return true;
+    }
     let unresolved = output.contains("found no collectors for");
     let collect_errored = output.lines().any(|l| {
         l.contains("ERROR collecting")
@@ -188,6 +196,22 @@ ERROR: not found: /proj/tests/b_test.py::nope
     fn collection_failure_detects_import_breakage_under_node_ids() {
         assert!(is_collection_failure(BROKEN_IMPORT_TB_NO));
         assert!(is_collection_failure(BROKEN_IMPORT_TB));
+    }
+
+    // pytest 9.1.1, `--collect-only -x --tb=no -q`, when `tests/conftest.py`
+    // imports a module the mutant made raise at import time.
+    const BROKEN_CONFTEST: &str = "\
+ImportError while loading conftest '/proj/tests/conftest.py'.
+tests/conftest.py:1: in <module>
+    import pkg.mod
+pkg/mod.py:1: in <module>
+    X = 1 / 0
+E   ZeroDivisionError: division by zero
+";
+
+    #[test]
+    fn collection_failure_detects_broken_conftest_import() {
+        assert!(is_collection_failure(BROKEN_CONFTEST));
     }
 
     #[test]

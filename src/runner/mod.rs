@@ -14,6 +14,7 @@ pub(crate) mod exit;
 pub mod kill_sets;
 pub(crate) mod process_group;
 pub mod pytest;
+pub(crate) mod pytest_result;
 pub mod python;
 pub mod unittest;
 
@@ -131,12 +132,20 @@ pub(crate) const SANITIZED_ENV_VARS: &[&str] = &[
     "PYTHONINSPECT",
 ];
 
+/// Set on every suite run fermut spawns. The `pytest --fermut` front-end
+/// (`python/pytest_fermut/plugin.py`) stays inert when it sees this, so a
+/// project with `--fermut` in its pytest `addopts` can't recurse into another
+/// mutation run from inside fermut's own baseline, coverage, or mutant runs.
+pub(crate) const CHILD_ENV: &str = "FERMUT_CHILD";
+
 /// Strip [`SANITIZED_ENV_VARS`] from `cmd` so every suite run is reproducible
-/// from the project alone, independent of the caller's shell.
+/// from the project alone, independent of the caller's shell, and mark it as
+/// a fermut child ([`CHILD_ENV`]).
 pub(crate) fn sanitize_python_env(cmd: &mut std::process::Command) {
     for var in SANITIZED_ENV_VARS {
         cmd.env_remove(var);
     }
+    cmd.env(CHILD_ENV, "1");
 }
 
 /// Apply the environment every per-mutant framework command against a mirror
@@ -313,6 +322,7 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
             // Only coverage-selected runs can name a killer the cache can use.
             learn_killer: cfg.cache && cfg.coverage.is_some(),
             key_base: key_base.clone(),
+            plugin: cfg.pytest_plugin,
         }))
     };
     match cfg.runner {
@@ -339,6 +349,10 @@ pub(crate) struct Mirror {
     pub root: PathBuf,
     pub tests: PathBuf,
     pub project_root: PathBuf,
+    /// Directory beside (not inside) the project copy holding fermut's pytest
+    /// reporter plugin and its per-run result files. Kept out of `root` so it
+    /// can't be collected, imported by the project, or swept into a test path.
+    pub plugin_dir: PathBuf,
 }
 
 /// Build a mirror at `tests`'s project root, drop it, return wall-clock
@@ -396,11 +410,18 @@ impl Mirror {
         copy_dir_all(&project_root, &root, mode)?;
         let tests_rel = tests.strip_prefix(&project_root).unwrap_or(tests);
         let tests_in_mirror = root.join(tests_rel);
+        let plugin_dir = workdir.path().join("fermut-plugin");
+        std::fs::create_dir_all(&plugin_dir)
+            .with_context(|| format!("mkdir -p {}", plugin_dir.display()))?;
+        let module = plugin_dir.join(format!("{}.py", pytest_result::REPORTER_MODULE));
+        std::fs::write(&module, pytest_result::REPORTER_SOURCE)
+            .with_context(|| format!("writing {}", module.display()))?;
         Ok(Self {
             _workdir: workdir,
             root,
             tests: tests_in_mirror,
             project_root,
+            plugin_dir,
         })
     }
 }
@@ -610,7 +631,7 @@ fn clone_file(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_patch, copy_dir_all, sanitize_python_env, tail_lines, Mirror, PatchGuard,
+        apply_patch, copy_dir_all, sanitize_python_env, tail_lines, Mirror, PatchGuard, CHILD_ENV,
         SANITIZED_ENV_VARS,
     };
 
@@ -633,6 +654,11 @@ mod tests {
         assert_eq!(
             envs.get("PYTHONPATH"),
             Some(&Some(std::ffi::OsString::from("/mirror")))
+        );
+        // Marked as a fermut child so `pytest --fermut` can't recurse.
+        assert_eq!(
+            envs.get(CHILD_ENV),
+            Some(&Some(std::ffi::OsString::from("1")))
         );
     }
 

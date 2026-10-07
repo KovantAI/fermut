@@ -53,6 +53,7 @@ fermut run [PATH] [flags...]
 | `--baseline-timeout <SECS>` | `300`                            | Wall-clock cap for the baseline run. Separate from `--timeout` (which bounds a single mutant) because the baseline runs the whole suite. A suite that exceeds it is killed and the run aborts. Raise for large suites. |
 | `--no-smart-order`          | on                               | Disable smart test ordering. On by default, timeout or not — ordering only permutes the selected set, so the score and `--fail-on-regression` gate stay order-invariant. See [Smart test ordering](#smart-test-ordering). |
 | `--smart-order`             | off                              | Force smart test ordering on over `smart_order = false` in config. Conflicts with `--no-smart-order`. |
+| `--no-pytest-plugin`        | on                               | Don't load fermut's reporter plugin into per-mutant pytest/rstest runs; infer outcomes from exit codes and output instead. See [Result reporter plugin](#result-reporter-plugin). |
 | `--max-time <SECS>`         | off (whole catalogue)            | Wall-clock ceiling on the testing phase. Evaluates highest-value mutants first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` (excluded from the score) instead of run — in-flight mutants finish. A predictable time ceiling for PR gates. See [Time-boxed runs](#time-boxed-runs-max-time). |
 | `--fail-on-regression <PTS>`| off                              | Exit non-zero when score dropped more than `PTS` vs the most recent prior entry on the same git branch. Requires history. Ignored in `--watch`. |
 | `--trend-branch <NAME>`     | none                             | Restrict the `--trend` markdown block's "previous run" lookup to entries recorded on this branch. Requires `--trend`. |
@@ -119,13 +120,36 @@ command line. A test-shuffling plugin (`pytest-randomly`,
 disable the plugin for fermut runs (e.g. `pytest_args = ["-p",
 "no:randomly"]`) if you want the `-x` short-circuit.
 
-Learning the killer also relies on parsing pytest's `FAILED`/`ERROR`
-summary lines, which fermut reads uncolored (it pipes stdout, so pytest
-drops color by default). Forcing color on regardless — `PY_COLORS=1`,
-`force_color`, or `--color=yes` in `addopts` — wraps those lines in ANSI
-escapes and the killer isn't recorded. This only forfeits the next run's
-ordering speedup, never a verdict; drop the forced color for fermut runs
-to keep the learning working.
+The killing test comes from fermut's [result reporter
+plugin](#result-reporter-plugin). With `--no-pytest-plugin`, fermut parses
+pytest's `FAILED`/`ERROR` summary lines instead, reading them uncolored (it
+pipes stdout, so pytest drops color by default). Forcing color on regardless
+(`PY_COLORS=1`, `force_color`, or `--color=yes` in `addopts`) wraps those
+lines in ANSI escapes, so the killer isn't recorded. That only forfeits the
+next run's ordering speedup, never a verdict.
+
+## Result reporter plugin { #result-reporter-plugin }
+
+Every per-mutant pytest (or rstest) run loads a small fermut plugin with
+`-p _fermut_reporter`. fermut puts it on the run's `PYTHONPATH` from a
+directory beside the worker's mirror, so nothing is installed in your venv
+and `PYTEST_DISABLE_PLUGIN_AUTOLOAD` doesn't affect it. The plugin writes
+what happened to a per-run JSON-lines file, and fermut reads it:
+
+- **Which test killed the mutant**: the first failed test, used by smart
+  ordering and the killer-keyed cache. No stdout capture.
+- **Whether the mutant broke an import.** Under coverage-driven node-id
+  selection, a mutant that breaks test code's import makes pytest exit 4,
+  the same code as a stale node id. The plugin tells them apart: a test
+  module that failed to collect, a conftest that failed to import the mutated
+  code, or project code raising while pytest configures itself (for example,
+  a `filterwarnings` entry naming a warning class in the package under test)
+  all count as kills.
+
+The exit code still decides every other verdict. If the plugin produces no
+result, for example because it couldn't load, fermut warns once and falls
+back to exit codes, a `--collect-only` re-run for exit 4, and output parsing.
+`--no-pytest-plugin` (or `pytest_plugin = false`) forces that fallback.
 
 ## Time-boxed runs (`--max-time`) { #time-boxed-runs-max-time }
 

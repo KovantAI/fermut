@@ -345,6 +345,175 @@ fn import_breaking_mutant_is_killed_under_node_id_selection() {
     assert!(guard_killed, "guard mutant on line 2 must be killed: {raw}");
 }
 
+/// Run `fermut coverage` then `fermut run --json` on `proj` (plus `extra`
+/// args), returning the report's `outcomes` array.
+fn run_outcomes(proj: &std::path::Path, extra: &[&str]) -> Vec<serde_json::Value> {
+    let report = proj.join("report.json");
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("run")
+        .arg(proj.join("src"))
+        .arg("--tests")
+        .arg(proj.join("tests"))
+        .arg("--coverage")
+        .arg(proj.join(".coverage"))
+        .arg("--no-ty-filter")
+        .arg("--no-cache")
+        .arg("--no-history")
+        .arg("--fail-under")
+        .arg("0")
+        .arg("--json")
+        .arg(&report)
+        .args(extra)
+        .assert()
+        .success();
+    let raw = std::fs::read_to_string(&report).expect("report written");
+    let json: serde_json::Value = serde_json::from_str(&raw).expect("report is JSON");
+    json["outcomes"].as_array().expect("outcomes array").clone()
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn conftest_import_break_is_killed_and_plugin_matches_fallback() {
+    // A conftest that imports the mutated module fails before pytest starts a
+    // session (exit 4, no node-id error). That must be a kill, both through
+    // the reporter plugin (`conftest_error` event) and through the
+    // `--no-pytest-plugin` fallback (the `--collect-only` probe). The two
+    // paths must agree on every verdict and both name the killing test.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n",
+    );
+    write("src/pkg/__init__.py", "");
+    write(
+        "src/pkg/registry.py",
+        "def check(name):\n    if not name:\n        raise ValueError(\"empty name\")\n    \
+         return name\n\n\ndef double(x):\n    return x * 2\n\n\nDEFAULT = check(\"default\")\n",
+    );
+    write("tests/conftest.py", "import pkg.registry  # noqa: F401\n");
+    // Two tests cover `double`, so the killer can't be read off a sole id.
+    write(
+        "tests/test_registry.py",
+        "from pkg.registry import check, double\n\n\ndef test_check():\n    \
+         assert check(\"a\") == \"a\"\n\n\ndef test_double():\n    assert double(3) == 6\n\n\n\
+         def test_double_again():\n    assert double(1) + double(2) == 6\n",
+    );
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(proj)
+        .assert()
+        .success();
+
+    let verdicts = |outcomes: &[serde_json::Value]| -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = outcomes
+            .iter()
+            .map(|o| (o["mutant"]["id"].to_string(), o["status"].to_string()))
+            .collect();
+        v.sort();
+        v
+    };
+    let with_plugin = run_outcomes(proj, &[]);
+    let fallback = run_outcomes(proj, &["--no-pytest-plugin"]);
+
+    for (label, outcomes) in [("plugin", &with_plugin), ("fallback", &fallback)] {
+        let errored: Vec<_> = outcomes.iter().filter(|o| o["status"] == "error").collect();
+        assert!(
+            errored.is_empty(),
+            "{label}: conftest import breaks must not be errors: {errored:#?}"
+        );
+        let guard_killed = outcomes
+            .iter()
+            .any(|o| o["status"] == "killed" && o["mutant"]["line"] == 2);
+        assert!(
+            guard_killed,
+            "{label}: guard mutant on line 2 must be killed"
+        );
+        let double_killer = outcomes.iter().find_map(|o| {
+            (o["status"] == "killed" && o["mutant"]["line"] == 8)
+                .then(|| o["killer"].as_str().map(str::to_string))
+                .flatten()
+        });
+        assert!(
+            double_killer.is_some_and(|k| k.starts_with("tests/test_registry.py::test_double")),
+            "{label}: a killed `double` mutant names its killing test"
+        );
+    }
+    assert_eq!(
+        verdicts(&with_plugin),
+        verdicts(&fallback),
+        "the reporter plugin must not change any verdict"
+    );
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn pytest_fermut_front_end_runs_and_gates() {
+    // `pytest --fermut` (python/pytest_fermut/plugin.py) against the real
+    // binary: green suite → `fermut coverage` + `fermut run` → survivors in the
+    // terminal summary and a failed session; a met `--fermut-min-score` passes.
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    let plugin_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("python");
+    let fermut = assert_cmd::cargo::cargo_bin("fermut");
+    let pytest = |extra: &[&str]| {
+        let mut cmd = std::process::Command::new("python");
+        cmd.args([
+            "-m",
+            "pytest",
+            "-p",
+            "pytest_fermut.plugin",
+            "-p",
+            "no:cacheprovider",
+        ])
+        .args([
+            "--fermut",
+            "--fermut-arg=--no-cache",
+            "--fermut-arg=--no-history",
+        ])
+        .args(extra)
+        .current_dir(&sample)
+        .env("PYTHONPATH", &plugin_src)
+        .env("FERMUT_BIN", &fermut)
+        .env_remove("FERMUT_CHILD");
+        cmd.output().expect("spawn python -m pytest")
+    };
+
+    let gated = pytest(&[]);
+    let out = String::from_utf8_lossy(&gated.stdout);
+    assert_eq!(
+        gated.status.code(),
+        Some(1),
+        "survivors fail the session:\n{out}"
+    );
+    assert!(out.contains("= fermut ="), "{out}");
+    assert!(out.contains("surviving mutants"), "{out}");
+    assert!(out.contains("mutation gate failed"), "{out}");
+    assert!(
+        sample.join(".coverage").is_file(),
+        "`fermut coverage` built the per-test coverage DB first"
+    );
+
+    let passed = pytest(&["--fermut-min-score=50"]);
+    let out = String::from_utf8_lossy(&passed.stdout);
+    assert_eq!(
+        passed.status.code(),
+        Some(0),
+        "a met min score passes:\n{out}"
+    );
+    assert!(out.contains("mutation score"), "{out}");
+    assert!(!out.contains("mutation gate failed"), "{out}");
+}
+
 #[test]
 #[ignore = "requires pytest + coverage on PATH; enable once env is set up"]
 fn baseline_reports_grade_and_anchors_trend() {

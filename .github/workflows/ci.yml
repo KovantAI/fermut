@@ -81,6 +81,25 @@ jobs:
       - run: pip install pytest coverage pytest-cov ty rstest
       - run: cargo test --all-features --locked --test e2e -- --include-ignored
 
+  python-plugin:
+    # The pytest plugins shipped in the wheel (python/pytest_fermut): the
+    # `pytest --fermut` front-end and the per-run reporter fermut injects into
+    # its own pytest runs. Tested against a fake fermut binary, across the
+    # pytest majors fermut supports.
+    name: pytest plugin (pytest ${{ matrix.pytest }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pytest: ["7", "8", "9"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: pip install "pytest==${{ matrix.pytest }}.*" pytest-cov
+      - run: python -m pytest python/tests -p no:cacheprovider
+
   coverage:
     # Rust line coverage via cargo-llvm-cov. Runs the full suite including the
     # #[ignore]'d e2e tests (which spawn the `fermut` binary) so subprocess

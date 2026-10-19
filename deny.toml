@@ -5,6 +5,16 @@
 version = 2
 # v2 defaults: RustSec vulnerabilities and yanked crates fail the check;
 # unmaintained/unsound warn. The advisory DB is fetched fresh each run.
+# zip 8.x arrives via ruff_db/ty_vendored (git dep), which pins `zip = "8.0"`
+# even on ruff main, so the >=9 fix is unreachable. All three advisories are in
+# `ZipArchive::extract`/`ZipStreamReader::extract`; ruff only reads its embedded
+# typeshed zip from memory and writes it at build time, never extracts to disk.
+# Drop these once ruff moves to zip >=9.
+ignore = [
+    { id = "RUSTSEC-2026-0367", reason = "zip extract() only; unused via ruff_db" },
+    { id = "RUSTSEC-2026-0368", reason = "zip extract() only; unused via ruff_db" },
+    { id = "RUSTSEC-2026-0369", reason = "zip extract() only; unused via ruff_db" },
+]
 
 [licenses]
 version = 2

@@ -792,7 +792,9 @@ pub(crate) struct DashboardArgs {
     #[arg(default_value = ".")]
     pub(crate) path: std::path::PathBuf,
 
-    /// Custom path to the history log. Defaults to `<path>/.fermut/history.jsonl`.
+    /// Custom path to the history log. Defaults to `.fermut/history.jsonl`
+    /// under the project root (nearest ancestor of `<path>` with
+    /// `pyproject.toml`/`setup.cfg`).
     #[arg(long)]
     pub(crate) history_path: Option<std::path::PathBuf>,
 

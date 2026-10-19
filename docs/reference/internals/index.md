@@ -115,7 +115,7 @@ both built from the same crate root. The module structure:
   injected JSONL reporter when the pytest plugin is on. The same runner
   drives `rstest` (`runner = "rstest"`), swapping only the executable.
 - `UnittestRunner` — invokes `<python> -m unittest discover -s
-  <mirrored-tests> -p <unittest_pattern>` (default `test_*.py`).
+  <mirrored-tests> -p <unittest_pattern>` (default `test*.py`).
 
 `build(cfg)` returns a `Box<dyn Runner>` based on `cfg.runner`. To add
 a new runner, implement the trait and add a `RunnerKind` variant — the

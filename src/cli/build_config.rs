@@ -481,7 +481,7 @@ pub(crate) fn discover_coverage_db(project_root: &Path) -> Option<PathBuf> {
 ///
 /// The returned path is just *an* offending file for the warning message, not
 /// necessarily the newest — the walk short-circuits on the first one found.
-fn newer_source_than_coverage(
+pub(crate) fn newer_source_than_coverage(
     coverage: &Path,
     source_root: &Path,
     tests: Option<&Path>,

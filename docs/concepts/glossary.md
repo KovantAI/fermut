@@ -44,11 +44,10 @@ A mutant whose patched code behaves identically to the original at
 runtime, even though the source is textually different. Example:
 `x + 0` → `x - 0`. No test can kill it — there's no observable
 difference to assert against. fermut runs a layered detector on
-survivors (AST patterns + CPython bytecode by default, with opt-in
-hypothesis probe and LLM judge); provably-equivalent mutants become
+survivors (AST patterns + CPython bytecode; the hypothesis probe and
+LLM judge are not wired in yet); provably-equivalent mutants become
 the `Equivalent` outcome and drop out of the score denominator, and
-likely-equivalent ones surface as suggestions for inline-ignore
-review. Domain-restricted equivalences the detector can't see still
+likely-equivalent ones stay plain survivors. Domain-restricted equivalences the detector can't see still
 need a manual `# fermut: ignore` marker. See
 [equivalent mutants walkthrough](../guides/equivalent-mutants.md).
 

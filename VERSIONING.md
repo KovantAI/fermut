@@ -35,11 +35,12 @@ Stable:
 
 - Subcommand names (`run`, `list`, `show`, `clean`, `completions`).
 - Existing flag names, short forms, value parsers, and defaults.
-- Exit codes: `0` success (no survivors, or the score clears
-  `--fail-under`; always `0` with `--no-fail`); `1` the gate failed
-  (survivors, score below `--fail-under`, a regression past
-  `--fail-on-regression`, or a scoreless run) **or** a runtime error
-  occurred; `2` command-line usage error (from clap). A runtime error is
+- Exit codes: `0` success (no survivors, the score clears
+  `--fail-under`, a scoreless run with no errors, or any finished run
+  under `--no-fail`); `1` the gate failed (survivors, score below
+  `--fail-under`, a regression past `--fail-on-regression`, or a
+  scoreless run where mutants errored) **or** a runtime error occurred
+  (even with `--no-fail`); `2` command-line usage error (from clap). A runtime error is
   currently not distinguishable from a failed gate by exit code; read
   stderr or the JSON report.
 - The structure of `--help` output is **not** stable — only the

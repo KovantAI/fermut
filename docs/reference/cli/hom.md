@@ -38,8 +38,9 @@ filter flags, and the rest). The flags below are specific to `hom`:
    function), have non-overlapping ranges, and share at least one killing test
    (`K(f1) ∩ K(f2) ≠ ∅`). An SSHOM can't exist without a shared killing test,
    so dropping the other pairs loses nothing.
-3. Applies both edits, then runs the tests that cover either mutant, without
-   `-x`.
+3. Applies both edits and runs two stages, both with `-x`: first the shared
+   killing tests (`K(f1) ∩ K(f2)`), then the remaining tests that cover
+   either mutant. The second stage is skipped when there are none.
 4. Classifies each pair as `sshom`, `decoupled` (`K(h) = ∅`) or
    `non-subsuming`.
 

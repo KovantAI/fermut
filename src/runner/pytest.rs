@@ -10,7 +10,7 @@
 //! one implementation drives either; only the program name differs.
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -43,8 +43,8 @@ pub struct PytestRunner {
     extra_args: Vec<String>,
     isolation: IsolationMode,
     coverage: Option<Arc<CoverageContexts>>,
-    /// Interpreter to run the framework with. `Some` → `<python> -m <exe>`;
-    /// `None` → bare `<exe>` resolved from `PATH` (historical behavior).
+    /// Interpreter to run the framework with. `Some` → `<python> -m <exe>`
+    /// (rstest: the binary beside it); `None` → bare `<exe>` from `PATH`.
     python: Option<PathBuf>,
     /// Framework executable / module name: `pytest` or the `rstest` drop-in.
     exe: &'static str,
@@ -198,19 +198,8 @@ impl PytestRunner {
         }
     }
 
-    /// Base command that launches the framework. With a configured interpreter
-    /// we go through `<python> -m <exe>` so the run uses *that* interpreter's
-    /// framework (and its venv's installed packages) with no reliance on `PATH`.
-    /// Without one we keep spawning a bare `<exe>` console script from PATH.
     fn framework_command(&self) -> Command {
-        match &self.python {
-            Some(py) => {
-                let mut cmd = Command::new(py);
-                cmd.arg("-m").arg(self.exe);
-                cmd
-            }
-            None => Command::new(self.exe),
-        }
+        framework_command(self.python.as_deref(), self.exe)
     }
 
     /// Assemble the per-mutant test command inside `mirror`: base flags, the
@@ -847,6 +836,35 @@ impl Runner for PytestRunner {
     }
 }
 
+/// Base command that launches the framework. With a configured interpreter
+/// we go through `<python> -m <exe>` so the run uses *that* interpreter's
+/// framework (and its venv's installed packages) with no reliance on `PATH`.
+/// Without one we keep spawning a bare `<exe>` console script from PATH.
+///
+/// rstest is a native binary with no importable `rstest` module, so
+/// `-m rstest` can't work: use the `rstest` next to the interpreter (the
+/// venv's `bin/`/`Scripts/`) when present, else the one on PATH.
+pub(crate) fn framework_command(python: Option<&Path>, exe: &str) -> Command {
+    if exe == "rstest" {
+        let beside = python.and_then(Path::parent).map(|d| {
+            d.join("rstest")
+                .with_extension(std::env::consts::EXE_EXTENSION)
+        });
+        return match beside.filter(|p| p.is_file()) {
+            Some(p) => Command::new(p),
+            None => Command::new("rstest"),
+        };
+    }
+    match python {
+        Some(py) => {
+            let mut cmd = Command::new(py);
+            cmd.arg("-m").arg(exe);
+            cmd
+        }
+        None => Command::new(exe),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1283,6 +1301,31 @@ mod tests {
             key_base: PathBuf::from("."),
             plugin: false,
         })
+    }
+
+    #[test]
+    fn rstest_launches_binary_not_python_module() {
+        let tmp = tempfile::tempdir().unwrap();
+        let py = tmp.path().join("python");
+        let cov = Arc::new(CoverageContexts::default());
+        let mut r = runner(false, cov);
+        r.exe = "rstest";
+        r.python = Some(py.clone());
+        // No venv binary beside the interpreter → PATH lookup, never `-m`.
+        let cmd = r.framework_command();
+        assert_eq!(cmd.get_program(), "rstest");
+        assert_eq!(cmd.get_args().count(), 0);
+        let bin = tmp
+            .path()
+            .join("rstest")
+            .with_extension(std::env::consts::EXE_EXTENSION);
+        std::fs::write(&bin, "").unwrap();
+        assert_eq!(r.framework_command().get_program(), bin.as_os_str());
+        // pytest keeps `<python> -m pytest`.
+        r.exe = "pytest";
+        let cmd = r.framework_command();
+        assert_eq!(cmd.get_program(), py.as_os_str());
+        assert_eq!(cmd.get_args().collect::<Vec<_>>(), ["-m", "pytest"]);
     }
 
     fn selected() -> Vec<String> {

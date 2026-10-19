@@ -27,7 +27,7 @@ Precedence is the standard **CLI flag > env var > config file > built-in default
 | `GH_TOKEN`           | Read by `gh` for `fermut pr-comment`. Required in CI; `${{ secrets.GITHUB_TOKEN }}` is sufficient.                                    |
 | `GITHUB_REPOSITORY`  | Default for `fermut pr-comment --repo`. Always set on GHA runners.                                                                   |
 | `PR_NUMBER`          | First fallback for `fermut pr-comment --pr` when the flag is omitted. Checked before `GITHUB_REF`.                                     |
-| `GITHUB_REF`         | Second fallback for `fermut pr-comment --pr`: parsed when it is a `refs/pull/<N>/merge` ref. Always set on GHA runners.               |
+| `GITHUB_REF`         | Second fallback for `fermut pr-comment --pr`: parsed when it is a `refs/pull/<N>/merge` or `refs/pull/<N>/head` ref. Always set on GHA runners.               |
 | `GITHUB_ACTIONS`     | When `"true"`, `fermut run` emits `::error` / `::warning` annotations. `--annotate` turns them on outside GHA; there is no flag to turn them off inside GHA. |
 
 ## See also

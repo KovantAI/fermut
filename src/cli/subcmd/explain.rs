@@ -138,6 +138,10 @@ pub struct CoverageSignal {
     pub covered: bool,
     pub tests: Vec<String>,
     pub note: String,
+    /// Set when the coverage file could not be loaded; `covered` is then
+    /// meaningless.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -191,16 +195,7 @@ pub(crate) fn build_explain_report(opts: &ExplainOpts) -> Result<ExplainReport> 
     let m = outcome.mutant();
     let enclosing = enclosing_symbol(m);
 
-    // Same discovery as `run`: no `--coverage` → pick up the project-root
-    // `.coverage` DB if one exists.
-    let discovered = opts
-        .coverage
-        .clone()
-        .or_else(|| crate::cli::build_config::discover_coverage_db(&opts.project_root));
-    let coverage = match &discovered {
-        Some(p) => Some(build_coverage_signal(p, m)?),
-        None => None,
-    };
+    let coverage = resolve_coverage(opts.coverage.as_deref(), opts.tests.as_deref(), m)?;
     let test_matches = match (&opts.tests, &enclosing) {
         (Some(dir), Some(sym)) => Some(build_test_matches(dir, &sym.name)?),
         _ => None,
@@ -286,6 +281,34 @@ fn build_source_context(m: &Mutant, context_lines: usize) -> SourceContext {
     out
 }
 
+/// Coverage signal for `m`. An explicit `--coverage` is always reported (a
+/// load failure surfaces as `error`). Without one, discover the project-root
+/// `.coverage` like `run` does — and like `run`, drop it silently when it is
+/// stale or unusable (e.g. recorded without per-test contexts) rather than
+/// claim the line is untested.
+fn resolve_coverage(
+    explicit: Option<&Path>,
+    tests: Option<&Path>,
+    m: &Mutant,
+) -> Result<Option<CoverageSignal>> {
+    if let Some(p) = explicit {
+        return build_coverage_signal(p, m).map(Some);
+    }
+    let start = m.file.parent().map(Path::to_path_buf);
+    let root = match start.as_deref().and_then(crate::runner::find_project_root) {
+        Some(r) => r,
+        None => std::env::current_dir()?,
+    };
+    let Some(db) = crate::cli::build_config::discover_coverage_db(&root) else {
+        return Ok(None);
+    };
+    if crate::cli::build_config::newer_source_than_coverage(&db, &root, tests, &root).is_some() {
+        return Ok(None);
+    }
+    let sig = build_coverage_signal(&db, m)?;
+    Ok(sig.error.is_none().then_some(sig))
+}
+
 fn build_coverage_signal(coverage_path: &Path, m: &Mutant) -> Result<CoverageSignal> {
     let cwd = std::env::current_dir()?;
     let project_root = crate::runner::find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
@@ -296,6 +319,7 @@ fn build_coverage_signal(coverage_path: &Path, m: &Mutant) -> Result<CoverageSig
                 covered: false,
                 tests: Vec::new(),
                 note: format!("could not load coverage: {e}"),
+                error: Some(e.to_string()),
             });
         }
     };
@@ -306,12 +330,14 @@ fn build_coverage_signal(coverage_path: &Path, m: &Mutant) -> Result<CoverageSig
             note:
                 "tests executed this line but did not distinguish the mutation; strengthen their assertions"
                     .to_string(),
+            error: None,
         }),
         _ => Ok(CoverageSignal {
             covered: false,
             tests: Vec::new(),
             note: "no test executes this line or the statement around it; add one that exercises it at all"
                 .to_string(),
+            error: None,
         }),
     }
 }
@@ -532,7 +558,9 @@ fn print_hint(r: &ExplainReport) {
 /// Coverage signal — which tests executed the line, or that none did.
 fn print_coverage(r: &ExplainReport) {
     let Some(c) = &r.coverage else { return };
-    if c.covered {
+    if let Some(e) = &c.error {
+        println!("\ncoverage : could not load coverage: {e}");
+    } else if c.covered {
         println!("\ncoverage : {} test(s) executed this line:", c.tests.len());
         for t in c.tests.iter().take(10) {
             println!("  - {t}");
@@ -950,15 +978,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn coverage_signal_reads_sqlite_db() {
-        // Regression: explain used to call `from_json` only, so a `.coverage`
-        // SQLite DB failed to parse and was silently reported as uncovered.
-        let tmp = tempfile::tempdir().unwrap();
-        let src = tmp.path().join("calc.py");
-        std::fs::write(&src, "def f(x):\n    return x >= 1\n").unwrap();
-        let db = tmp.path().join(".coverage");
-        let conn = rusqlite::Connection::open(&db).unwrap();
+    /// Write a minimal coverage.py SQLite DB recording `src` line 2 under
+    /// `context` (`""` = recorded without per-test contexts).
+    fn write_cov_db(db: &Path, src: &Path, context: &str) {
+        let conn = rusqlite::Connection::open(db).unwrap();
         conn.execute_batch(
             "CREATE TABLE file (id integer primary key, path text);
              CREATE TABLE context (id integer primary key, context text);
@@ -971,8 +994,8 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO context (id, context) VALUES (1, 'tests/test_calc.py::test_f|run')",
-            [],
+            "INSERT INTO context (id, context) VALUES (1, ?1)",
+            [context],
         )
         .unwrap();
         // numbits: line 2 → byte 0, bit 2.
@@ -981,7 +1004,17 @@ mod tests {
             [vec![0b100u8]],
         )
         .unwrap();
-        drop(conn);
+    }
+
+    #[test]
+    fn coverage_signal_reads_sqlite_db() {
+        // Regression: explain used to call `from_json` only, so a `.coverage`
+        // SQLite DB failed to parse and was silently reported as uncovered.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("calc.py");
+        std::fs::write(&src, "def f(x):\n    return x >= 1\n").unwrap();
+        let db = tmp.path().join(".coverage");
+        write_cov_db(&db, &src, "tests/test_calc.py::test_f|run");
 
         let sig = build_coverage_signal(&db, &make_mutant(src, 2)).unwrap();
         assert!(
@@ -990,6 +1023,42 @@ mod tests {
             sig.note
         );
         assert!(sig.covered, "line 2 is covered: {:?}", sig.tests);
+    }
+
+    #[test]
+    fn auto_discovered_coverage_without_contexts_is_dropped() {
+        // A plain `pytest --cov` DB has no per-test contexts. Auto-discovery
+        // must not turn that into a false "NO test executes" verdict; an
+        // explicit `--coverage` still reports the load error.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pyproject.toml"), "").unwrap();
+        let src = tmp.path().join("calc.py");
+        std::fs::write(&src, "def f(x):\n    return x >= 1\n").unwrap();
+        let db = tmp.path().join(".coverage");
+        write_cov_db(&db, &src, "");
+        // Keep the DB fresh so the staleness guard isn't what drops it.
+        for f in [&src, &tmp.path().join("pyproject.toml")] {
+            filetime::set_file_mtime(f, filetime::FileTime::from_unix_time(1_000, 0)).unwrap();
+        }
+        let m = make_mutant(src, 2);
+        assert!(resolve_coverage(None, None, &m).unwrap().is_none());
+        let explicit = resolve_coverage(Some(&db), None, &m).unwrap().unwrap();
+        assert!(explicit.error.is_some(), "explicit load error must surface");
+    }
+
+    #[test]
+    fn auto_discovered_stale_coverage_is_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pyproject.toml"), "").unwrap();
+        let src = tmp.path().join("calc.py");
+        std::fs::write(&src, "def f(x):\n    return x >= 1\n").unwrap();
+        let db = tmp.path().join(".coverage");
+        write_cov_db(&db, &src, "tests/test_calc.py::test_f|run");
+        let m = make_mutant(src, 2);
+        // Fresh: loads. Then backdate the DB below the source: dropped.
+        assert!(resolve_coverage(None, None, &m).unwrap().unwrap().covered);
+        filetime::set_file_mtime(&db, filetime::FileTime::from_unix_time(1_000, 0)).unwrap();
+        assert!(resolve_coverage(None, None, &m).unwrap().is_none());
     }
 
     #[test]

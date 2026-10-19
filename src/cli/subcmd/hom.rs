@@ -27,7 +27,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -449,14 +449,7 @@ fn any_test_fails(
     timeout: Duration,
     tests: &[String],
 ) -> Result<bool> {
-    let mut cmd = match python {
-        Some(py) => {
-            let mut c = Command::new(py);
-            c.arg("-m").arg(exe);
-            c
-        }
-        None => Command::new(exe),
-    };
+    let mut cmd = crate::runner::pytest::framework_command(python, exe);
     cmd.arg("-x").arg("--tb=no").arg("-q");
     for t in tests {
         cmd.arg(t);

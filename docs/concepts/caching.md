@@ -184,7 +184,6 @@ The structural AST hash makes cache hits identical across:
 
 - Whitespace or comment edits *below* a mutant — same AST, same byte
   offset → hit.
-- Local dev → CI hand-off.
 - Agent run #1 → agent run #2 on the same commit.
 - Cache restored from `actions/cache` in a fresh GHA runner.
 

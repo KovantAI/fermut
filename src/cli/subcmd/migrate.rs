@@ -289,7 +289,7 @@ fn translate_mutmut_key(key: &str, raw: &str, out: &mut Translation) {
             if let Some(p) = take_single_path(
                 raw,
                 key,
-                "fermut takes one source root — run fermut once per extra root (`fermut run <root>`) if you need them mutated too.",
+                "fermut takes one source root — run fermut once per extra root (`fermut run <root> --json <root>.json`) if you need them mutated too; give each run its own `--json` report, since runs share `.fermut/last.json`.",
                 out,
             ) {
                 out.config.source_root = Some(p);

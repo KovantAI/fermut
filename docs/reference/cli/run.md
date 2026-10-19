@@ -27,7 +27,7 @@ fermut run [PATH] [flags...]
 | `--sample-seed <N>`         | `0`                              | Seed for `--sample` selection.                                       |
 | `--shard <i/n>`             | off                              | Distributed exec: process only the i-th of n disjoint slices.        |
 | `--runner pytest\|rstest\|unittest` | `pytest`                 | Pick the Python test runner. `rstest` is a pytest-CLI-compatible drop-in. |
-| `--python <PATH>`           | auto-discover                    | Interpreter (path) or virtualenv (dir) to run the tests with (pytest, rstest or unittest) — fermut invokes `<python> -m pytest`, no PATH reliance. Omitted → auto-discovers an active venv / nearby `.venv`, else a bare `pytest` on PATH. See [Choosing the interpreter](#python-interpreter). |
+| `--python <PATH>`           | auto-discover                    | Interpreter (path) or virtualenv (dir) to run the tests with (pytest, rstest or unittest) — fermut launches the runner through that interpreter, no PATH reliance. Omitted → auto-discovers an active venv / nearby `.venv`; else pytest/rstest fall back to the bare executable on PATH and unittest to `python3`/`python`. See [Choosing the interpreter](#python-interpreter). |
 | `--isolation auto\|copy\|hardlink\|reflink` | `auto` | How worker mirrors are populated. See [Isolation modes](#isolation-modes). |
 | `--annotate`                | auto in GHA                      | Emit `::error` / `::warning` annotations for CI.                     |
 | `--watch`                   | off                              | Re-run on every `.py` change until Ctrl+C.                            |
@@ -339,8 +339,10 @@ The interpreter is part of the cache key and the history config hash, so
 switching interpreters never reuses another's cached verdicts or marks the
 runs as directly comparable.
 
-`--python` applies to every runner. `pytest` and `rstest` run
-`<python> -m pytest`/`rstest`, and `unittest` runs `<python> -m unittest`.
+`--python` applies to every runner. `pytest` runs `<python> -m pytest` and
+`unittest` runs `<python> -m unittest`. `rstest` is a native binary with no
+Python module, so fermut runs the `rstest` beside the interpreter (the venv's
+`bin/`), falling back to `rstest` on `PATH`.
 With no venv found, `unittest` falls back to the `python3` (or `python`) on
 `PATH`.
 

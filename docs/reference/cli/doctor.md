@@ -22,7 +22,7 @@ a preflight.
 | `config`       | warn     | Missing `fermut.toml` / `[tool.fermut]` — `fermut init` generates one.                            |
 | `venv`         | info     | The project venv found by the same walk `run` uses (`$VIRTUAL_ENV`, else a nearby `.venv`). Every tool below is probed in its `bin/` first, then on `PATH`. Skipped when none is found. |
 | `python`       | required | `python3` (else `python`) ≥ 3.10, venv first, then `PATH`.                                        |
-| `pytest`       | required | Configured runner binary — `pytest`, or `rstest` when `runner = "rstest"`. `unittest` is stdlib and always passes. |
+| `pytest` / `rstest` / `runner` | required | Configured runner — the check is named `pytest`, `rstest` (when `runner = "rstest"`), or `runner` (unittest). `unittest` is stdlib and always passes. |
 | `coverage`     | required | `coverage` binary.                                                                                |
 | `pytest-cov`   | required | `pytest_cov` importable from the resolved Python. Required to produce per-test contexts.          |
 | `coverage-data`| warn/fail| The `coverage = "…"` file from config, or the `.coverage` DB `run` would auto-discover at the project root: present and valid for either format — a `.coverage` SQLite DB with a populated `context` table, or a JSON export with a `"contexts"` field. |

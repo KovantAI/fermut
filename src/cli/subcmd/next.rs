@@ -672,7 +672,7 @@ pub(crate) struct NextArgs {
 
     /// Cap the output at this many estimated tokens: emit the
     /// highest-ranked survivors that fit, drop the rest (count logged to
-    /// stderr). Overrides `--limit`. The single top target is always
+    /// stderr). Conflicts with `--limit`/`--all`. The single top target is always
     /// included. For agents budgeting context window.
     #[arg(long, value_name = "N", conflicts_with_all = ["limit", "all"])]
     pub(crate) max_tokens: Option<usize>,

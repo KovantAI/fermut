@@ -53,10 +53,9 @@ perturbation. The perturbation is the *mutant*.
 
 ## A complete worked example
 
-The smallest illustration. Source:
+The smallest illustration. Source, `src/age.py`:
 
 ```python
-# src/age.py
 def is_adult(age: int) -> bool:
     return age >= 18
 ```
@@ -210,9 +209,9 @@ Quick-reference table. Full alphabetical lookup in
 | [Survived](glossary.md#survived)     | The mutant changed observable behavior, but the test suite passed anyway. **What you want fewer of.**     |
 | [Killed](glossary.md#killed)       | The mutant changed behavior, and the test suite caught it. **What you want more of.**                     |
 | [Timed out](glossary.md#timed-out)    | pytest ran longer than `--timeout` against this mutant. Usually means the mutant introduced an infinite loop. Counted as killed for scoring purposes. |
-| [Skipped](glossary.md#skipped)      | A filter (ty, ruff, coverage, diff-only, sample, ops allowlist, inline ignore marker) refused this mutant before pytest ran. Not counted toward the score. |
+| [Skipped](glossary.md#skipped)      | A filter (ty, ruff, coverage, diff-only, sample, ops allowlist). Inline-ignored mutants are never generated, so they don't appear at all refused this mutant before pytest ran. Not counted toward the score. |
 | [Errored](glossary.md#errored)      | pytest crashed in a non-test-failure way (collection error, import error). Investigated, but not counted toward the score. |
-| [Equivalent](glossary.md#equivalent-mutant)   | A mutant that produces semantically identical code. A layered detector (AST patterns + CPython bytecode by default) auto-promotes provably-equivalent survivors to the `equivalent` outcome and drops them from the score; likely-equivalent ones surface for inline-ignore review. |
+| [Equivalent](glossary.md#equivalent-mutant)   | A mutant that produces semantically identical code. A layered detector (AST patterns + CPython bytecode by default) auto-promotes provably-equivalent survivors to the `equivalent` outcome and drops them from the score; likely-equivalent ones stay plain survivors. |
 | [Filter chain](glossary.md#filter-chain) | The composable stack of pre-flight checks every mutant runs through before pytest sees it.                  |
 
 ## The filter chain
@@ -231,7 +230,7 @@ Order is cheap → expensive:
 | operator       | in-memory   | Apply `--ops` allowlist and `--skip-ops` denylist                  |
 | shard          | in-memory   | Keep only this shard's mutants under `--shard i/n`                 |
 | sample         | in-memory   | Random subset via `--sample <ratio>`                               |
-| diff-only / since | git read | Drop mutants on lines unchanged since the merge-base (working tree, so uncommitted edits count) |
+| diff-only / since | git read | Drop mutants on lines unchanged since the base: the merge-base for `--diff-only`, the given commit or date for `--since` (working tree, so uncommitted edits count) |
 | coverage       | file read   | Drop mutants on lines no test executes (per-test contexts required) |
 | ruff           | subprocess  | Drop mutants that introduce new ruff lints (optional)              |
 | ty             | in-process  | Drop mutants that introduce new ty diagnostics (embedded checker; subprocess fallback) |

@@ -15,6 +15,7 @@ Accepts the full `FilterArgs` set from [`fermut run`](run.md), plus the
 | `--ops <list>`       | Allowlist operators (comma-separated kebab-case names).                         |
 | `--skip-ops <list>`  | Denylist operators. Wins over `--ops`.                                          |
 | `--experimental`     | Include the experimental operator set.                                          |
+| `--operators <profile>` | Compare / `and`-`or` operator set (`default`, `minimal`, `full`). See [Operator profiles](../operators/profiles.md). |
 | `--no-ty-filter`     | Skip the ty pre-filter — show every generated mutant, including type-invalid ones ty would drop. |
 | `--ruff-filter`      | Enable the ruff lint pre-filter (requires `ruff` on PATH).                       |
 | `--diff-only [base]` | Restrict to lines changed vs `base` (default `main`).                            |

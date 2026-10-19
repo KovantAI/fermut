@@ -401,6 +401,7 @@ fn tool_baseline(args: &Value) -> Result<Value> {
             no_coverage: false,
             experimental: false,
             parity: false,
+            operators: None,
             exclude: Vec::new(),
         },
     };
@@ -485,6 +486,7 @@ fn tool_run(args: &Value) -> Result<Value> {
         no_coverage: false,
         experimental: false,
         parity: false,
+        operators: None,
         exclude: Vec::new(),
     };
     // Build the runtime config the same way `fermut run` does, so a project's
@@ -640,6 +642,32 @@ mod tests {
         let payload: Value = serde_json::from_str(text).unwrap();
         assert_eq!(payload["total"], 1); // two boundary survivors → one cluster
         assert_eq!(payload["survivors"][0]["cluster_size"], 2);
+    }
+
+    #[test]
+    fn next_folds_subsumed_survivors_into_subsumed_ids() {
+        // `a < b`: `>` (mask neg|pos) subsumes `>=` (all regions) at site 5.
+        let tmp = tempfile::tempdir().unwrap();
+        let report = tmp.path().join("r.json");
+        std::fs::write(
+            &report,
+            r#"{"outcomes":[
+                {"status":"survived","mutant":{"id":"a.py@7:compare-op-swap:<->>=","file":"a.py","operator":"compare-op-swap","range":[7,8],"original":"<","replacement":">=","line":1,"site":{"start":5,"mask":7,"minimal":false}}},
+                {"status":"survived","mutant":{"id":"a.py@7:compare-op-swap:<->>","file":"a.py","operator":"compare-op-swap","range":[7,8],"original":"<","replacement":">","line":1,"site":{"start":5,"mask":5,"minimal":false}}}
+            ]}"#,
+        )
+        .unwrap();
+        let result = tools_call(
+            &json!({"name": "fermut_next", "arguments": {"report": report.display().to_string()}}),
+        )
+        .unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(payload["total"], 1);
+        let top = &payload["survivors"][0];
+        assert_eq!(top["replacement"], ">");
+        assert_eq!(top["subsumed_ids"][0], "a.py@7:compare-op-swap:<->>=");
+        assert_eq!(top["sibling_ids"].as_array().unwrap().len(), 0);
     }
 
     #[test]

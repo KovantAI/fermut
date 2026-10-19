@@ -211,6 +211,18 @@ pub fn run(opts: RunOpts) -> Result<()> {
         let (report, current_entry) = crate::engine::run(&cfg)?;
         on_report(&report, &prior_snapshot)?;
         let mut gate_failed = false;
+        // `--only-dominators`: an inferred kill that didn't reproduce means
+        // the recorded kill-sets are stale, so every other inference this run
+        // is suspect too. The bad ones were re-run; fail so it gets noticed.
+        if report.inferred_audit_failures > 0 {
+            eprintln!(
+                "{} inferred kill(s) did not reproduce against their killing test: \
+                 .fermut/dominators.json is stale. Re-record kill-sets \
+                 (`--record-kill-sets`) and re-run `fermut subsume`.",
+                report.inferred_audit_failures
+            );
+            gate_failed = true;
+        }
         if let Some(threshold) = fail_on_regression {
             if !cfg.history {
                 eprintln!(
@@ -382,6 +394,7 @@ mod tests {
             replacement: "-".into(),
             line: 1,
             stmt_line: 1,
+            site: None,
         }
     }
 

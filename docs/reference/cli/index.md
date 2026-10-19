@@ -33,6 +33,7 @@ fermut [-v|-vv|-q] <subcommand> [flags...]
 | **[`merge`](merge.md)**             | Combine JSON reports from sharded runs.                                        |
 | **[`trend`](trend.md)**             | Visualize the mutation-score history.                                          |
 | **[`score`](score.md)**             | Emit the agent reward signal (score + delta + survivor diff) for the latest run. |
+| **[`subsume`](subsume.md)**         | Find dominator mutants in recorded kill-sets; print the dominator score.        |
 | **[`dashboard`](dashboard.md)**     | Generate a self-contained HTML dashboard (trend + survivor drill-down).        |
 | **[`doctor`](doctor.md)**           | Diagnose environment + config.                                                 |
 | **[`pr-comment`](pr-comment.md)**   | Post (and stickily update) a Markdown report to a PR.                          |

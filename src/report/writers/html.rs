@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 
 use super::html_escape;
 use crate::report::diff::unified_diff_for;
+use crate::report::fold::FoldIndex;
 use crate::report::{MutantOutcome, Report};
 
 impl Report {
@@ -18,6 +19,7 @@ impl Report {
             by_file.entry(o.mutant().file.clone()).or_default().push(o);
         }
 
+        let folds = FoldIndex::new(&self.outcomes);
         let mut body = String::new();
         body.push_str(&format!(
             "<h1>fermut report</h1><div class='summary'>\
@@ -56,6 +58,9 @@ impl Report {
             body.push_str("<ul class='mutants'>");
             for o in outcomes {
                 let m = o.mutant();
+                if folds.is_folded(&m.id) {
+                    continue;
+                }
                 let cls = match o {
                     MutantOutcome::Killed { .. } => "killed",
                     MutantOutcome::Survived { .. } => "survived",
@@ -64,13 +69,16 @@ impl Report {
                     MutantOutcome::Error { .. } => "error",
                     MutantOutcome::Equivalent { .. } => "equivalent",
                 };
-                let label = format!(
+                let mut label = format!(
                     "line {} · {} · <code>{}</code> → <code>{}</code>",
                     m.line,
                     m.operator.name(),
                     html_escape(&m.original),
                     html_escape(&m.replacement)
                 );
+                if o.inferred_from().is_some() {
+                    label.push_str(" · <i>inferred from a dominator, not run</i>");
+                }
                 body.push_str(&format!(
                     "<li class='m {cls}'><span class='tag'>{}</span> {label}",
                     o.status_label()
@@ -85,6 +93,24 @@ impl Report {
                             html_escape(&diff)
                         ));
                     }
+                }
+                let sub = folds.subsumed(&m.id);
+                if !sub.is_empty() {
+                    body.push_str(
+                        "<div class='folded'>also killed by a test that kills this one:\
+                         <ul class='mutants'>",
+                    );
+                    for s in sub {
+                        body.push_str(&format!(
+                            "<li class='m survived'><span class='tag'>survived</span> \
+                             line {} · {} · <code>{}</code> → <code>{}</code></li>",
+                            s.line,
+                            s.operator.name(),
+                            html_escape(&s.original),
+                            html_escape(&s.replacement)
+                        ));
+                    }
+                    body.push_str("</ul></div>");
                 }
                 body.push_str("</li>");
             }
@@ -120,6 +146,7 @@ summary { cursor: pointer; padding: .4em 0; }
 .tag { display: inline-block; min-width: 70px; font-weight: 700; text-transform: uppercase; font-size: 10.5px; letter-spacing: .04em; }
 code { background: rgba(0,0,0,0.05); padding: 0 .3em; border-radius: 3px; }
 .diff { margin-top: .3em; }
+.folded { margin-top: .3em; font-family: -apple-system, system-ui, sans-serif; font-size: 12px; color: #555; }
 .diff pre { background: #fafafa; padding: .6em .9em; border-radius: 4px; overflow-x: auto; font-size: 12px; line-height: 1.4; }
 "#;
 
@@ -134,6 +161,19 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         r.write_html(tmp.path()).unwrap();
         std::fs::read_to_string(tmp.path()).unwrap()
+    }
+
+    #[test]
+    fn html_nests_subsumed_survivors_under_their_dominator() {
+        let html = read(&Report::new(crate::report::testing::folded_pair()));
+        let folded = html.find("class='folded'").expect("folded block");
+        let ge = html.find("<code>&gt;=</code>").unwrap();
+        assert!(folded < ge, "`>=` should render inside the folded block");
+        assert_eq!(
+            html.matches("<code>&gt;=</code>").count(),
+            1,
+            "rendered once"
+        );
     }
 
     #[test]
@@ -227,6 +267,7 @@ mod tests {
             replacement: "-".into(),
             line: 1,
             stmt_line: 1,
+            site: None,
         };
         let r = Report::new(vec![MutantOutcome::survived(m)]);
         let h = read(&r);

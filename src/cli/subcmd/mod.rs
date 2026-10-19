@@ -20,5 +20,6 @@ pub mod pr_comment;
 pub mod run;
 pub mod score;
 pub mod show;
+pub mod subsume;
 pub mod suggest;
 pub mod trend;

@@ -4,6 +4,7 @@
 //! - `visitor` — AST traversal that emits candidate `Mutant`s for each
 //!   operator on a single Python source file.
 //! - `loader` — walks a source tree, opens each `.py` file, runs the visitor.
+//! - `region` — ROR / logical region model behind the `--operators` profiles.
 //! - `encoding` — handles UTF-8 BOM stripping and PEP 263 encoding directives.
 
 pub mod encoding;
@@ -11,6 +12,7 @@ pub mod ignore;
 mod lexeme;
 pub mod loader;
 pub mod operators;
+pub mod region;
 mod text_range_serde;
 pub mod visitor;
 
@@ -51,6 +53,25 @@ pub struct Mutant {
     /// by an older version), which disables the fallback.
     #[serde(default)]
     pub stmt_line: u32,
+    /// Region-model tag for mutants of a predicate site the static
+    /// subsumption model covers (single-op ordering compare, 2-operand
+    /// `and`/`or` in truth position). `None` everywhere else. See
+    /// [`region`] and the `--operators` profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<SiteTag>,
+}
+
+/// Where a mutant sits in the region model of its predicate site.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteTag {
+    /// Start offset of the `Compare` / `BoolOp` node. Groups the mutants of
+    /// one predicate: op-swap mutants' `range` is the operator token, while
+    /// constant/operand-drop mutants replace the whole node, so `range` can't.
+    pub start: u32,
+    /// Regions where this mutant's truth differs from the original's.
+    pub mask: region::DiffMask,
+    /// In the site's minimal (dominator) set: no sibling candidate subsumes it.
+    pub minimal: bool,
 }
 
 impl Mutant {
@@ -86,6 +107,7 @@ mod tests {
             replacement: "<".into(),
             line: 14,
             stmt_line: 14,
+            site: None,
         }
     }
 

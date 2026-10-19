@@ -646,6 +646,24 @@ pub(crate) fn operator_hint(op: Operator) -> &'static str {
             "`and`↔`or` swap. Tests likely cover both-true and both-false; add a case \
              where exactly one operand is true."
         }
+        Operator::RelationalToEquality => {
+            "ordering compare replaced with `!=`/`==`. The tests never take the side of \
+             the bound the original rejects (or never hit the bound). Add a case on the \
+             other side of the comparison and assert the result."
+        }
+        Operator::CompareToConst | Operator::RegionRest => {
+            "comparison replaced with a constant. The tests only exercise one outcome \
+             of it. Add a case where the comparison goes the other way."
+        }
+        Operator::BoolOperandDrop => {
+            "`and`/`or` replaced with one operand. The dropped operand never decides \
+             the outcome in the tests. Add a case where only that operand changes the \
+             result."
+        }
+        Operator::BoolOpToConst => {
+            "`and`/`or` replaced with a constant. The tests never take the branch where \
+             the condition goes the other way. Add a case for it."
+        }
         Operator::NotInsertion => {
             "extra `not` survived. Tests likely don't check the negative path. Add a \
              test that exercises the false branch."
@@ -780,7 +798,10 @@ pub(crate) fn operator_slug(op: Operator) -> &'static str {
         Operator::BoundaryShift => "boundary",
         Operator::CompareOpSwap => "compare",
         Operator::ArithOpSwap => "arith",
-        Operator::BoolOpSwap => "bool_logic",
+        Operator::BoolOpSwap | Operator::BoolOperandDrop | Operator::BoolOpToConst => "bool_logic",
+        Operator::RelationalToEquality | Operator::CompareToConst | Operator::RegionRest => {
+            "compare"
+        }
         Operator::NotInsertion => "negation",
         Operator::ReturnValueToNone | Operator::AssignValueToNone => "return_value",
         Operator::ConstantReplace
@@ -919,6 +940,7 @@ mod tests {
             replacement: ">".into(),
             line,
             stmt_line: line,
+            site: None,
         }
     }
 

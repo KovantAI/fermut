@@ -33,11 +33,12 @@
 # entry, appends it to `.fermut/history.jsonl`, writes the trend to the job
 # summary, and gates on a score drop vs the previous run on the same branch.
 #
-# History persists in the Actions cache. Only the default branch saves it, so
-# a run on another branch is compared against the default branch's history
-# but never forks it. The cache evicts entries unused for 7 days: schedule at
-# least weekly, or set `history-cache: "false"` and persist `history-path`
-# yourself (commit it, or keep it on a branch). Every run also uploads the
+# History persists in the Actions cache. Only the default branch saves it; a
+# run on another branch restores it but the regression gate compares only
+# entries on the same branch, so it has no prior to gate against. The cache
+# evicts entries unused for 7 days: schedule at least weekly, or set
+# `history-cache: "false"` and persist `history-path` yourself (commit it, or
+# keep it on a branch). A run whose record step succeeds also uploads the
 # history in the `<artifact-name>-trend` artifact.
 #
 # Refuses to record a point with no scored mutants (a vacuous 100%), with more

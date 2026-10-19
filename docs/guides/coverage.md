@@ -181,9 +181,9 @@ For each mutant:
    *Continuation lines* below.
 3. If **no test** touched either line → the mutant is skipped (it would
    always survive — there's nothing to kill it).
-4. Otherwise, narrow the pytest invocation to **only those tests**
-   via `-k` or `--last-failed-no-failures none` plus an explicit
-   nodeID list.
+4. Otherwise, narrow the pytest invocation to **only those tests** by
+   passing their node ids as positional arguments
+   (`pytest … tests/test_a.py::test_x tests/test_b.py::test_y`).
 
 Mutants dropped at step 3 appear in the JSON report as outcome
 `skipped` with `filter: "coverage"`, alongside skips from the ty /

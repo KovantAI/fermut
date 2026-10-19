@@ -162,7 +162,9 @@ gave up before getting a clean fail.
 Three outcomes are excluded from both sides of the ratio:
 
 - **Skipped** — a filter (ty, ruff, coverage, diff-only, sample, op
-  allowlist, inline ignore) dropped the mutant before pytest ran.
+  allowlist) dropped the mutant before pytest ran. (Inline-ignored
+  mutants and docstrings are never generated, so they aren't counted
+  anywhere.)
   Not evidence for or against test quality.
 - **Errored** — pytest crashed in a non-test-failure way (collection
   error, import error). Investigate the crash; don't count it.
@@ -209,7 +211,7 @@ Quick-reference table. Full alphabetical lookup in
 | [Survived](glossary.md#survived)     | The mutant changed observable behavior, but the test suite passed anyway. **What you want fewer of.**     |
 | [Killed](glossary.md#killed)       | The mutant changed behavior, and the test suite caught it. **What you want more of.**                     |
 | [Timed out](glossary.md#timed-out)    | pytest ran longer than `--timeout` against this mutant. Usually means the mutant introduced an infinite loop. Counted as killed for scoring purposes. |
-| [Skipped](glossary.md#skipped)      | A filter (ty, ruff, coverage, diff-only, sample, ops allowlist). Inline-ignored mutants are never generated, so they don't appear at all refused this mutant before pytest ran. Not counted toward the score. |
+| [Skipped](glossary.md#skipped)      | A filter (ty, ruff, coverage, diff-only, sample, ops allowlist) refused this mutant before pytest ran. Not counted toward the score. (Inline-ignored mutants are never generated.) |
 | [Errored](glossary.md#errored)      | pytest crashed in a non-test-failure way (collection error, import error). Investigated, but not counted toward the score. |
 | [Equivalent](glossary.md#equivalent-mutant)   | A mutant that produces semantically identical code. A layered detector (AST patterns + CPython bytecode by default) auto-promotes provably-equivalent survivors to the `equivalent` outcome and drops them from the score; likely-equivalent ones stay plain survivors. |
 | [Filter chain](glossary.md#filter-chain) | The composable stack of pre-flight checks every mutant runs through before pytest sees it.                  |
@@ -242,7 +244,8 @@ type-hinted codebases — see [benchmarks](../reference/benchmarks.md).
 Catching them with a ~25ms type check is dramatically cheaper than
 catching them with a pytest run.
 
-Inline-ignore markers and the docstring auto-skip also act as filters.
+Inline-ignore markers and the docstring auto-skip work earlier: those
+mutants are never generated at all.
 See the [operators reference](../reference/operators/index.md) for the
 catalogue and the inline-ignore syntax, and the
 [filters guide](../guides/filters.md) for how to compose them.

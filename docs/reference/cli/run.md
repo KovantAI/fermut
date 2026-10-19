@@ -15,7 +15,7 @@ fermut run [PATH] [flags...]
 | `--no-ty-filter`            | off                              | Skip the ty pre-filter.                                             |
 | `--ruff-filter`             | off                              | Enable the ruff lint pre-filter.                                    |
 | `--tce`                     | off                              | Enable the TCE (bytecode-equivalence) pre-filter: drop mutants that `compile()` to a byte-identical code object. Requires `python3` (or `FERMUT_PYTHON`). Also `tce = true`. |
-| `--hypothesis-seed <N>`     | none                             | Pin Hypothesis seed across mutants. See [mutation testing concepts](../../concepts/mutation-testing.md#vocabulary). |
+| `--hypothesis-seed <N>`     | none                             | Pin Hypothesis seed across mutants. Ignored (with a warning) when the test interpreter can't import `hypothesis`, since pytest would reject the flag. See [mutation testing concepts](../../concepts/mutation-testing.md#vocabulary). |
 | `--pytest-arg <ARG>`        | none, repeatable                 | Forward arbitrary args to pytest.                                   |
 | `--no-cache`                | cache on                         | Disable the result cache.                                           |
 | `--cache-path <p>`          | `<project-root>/.fermut/cache.json`     | Custom cache file location. Project root = nearest `pyproject.toml`/`setup.cfg` ancestor. |
@@ -65,11 +65,14 @@ fermut run [PATH] [flags...]
 | `--no-fail`                 | off                              | Never exit non-zero because of the mutation result: write every report and exit 0 even with survivors. For report-only runs (trend shards, dashboard feeds). Replaces the `--fail-under 0` idiom. Mutually exclusive with `--fail-under` and `--fail-on-regression`. Also suppresses the exit for a scoreless / all-errored run, which is still reported as N/A. |
 
 Exit code: by default `1` when any mutant survives. With
-`--fail-under <SCORE>`, `1` only when the score is below `SCORE`. With
-`--fail-on-regression <PTS>`, also `1` when the score dropped more than `PTS`.
-`--no-fail` always exits `0` on the mutation result. A run that errors out
-(bad config, red baseline, git failure) also exits `1`; clap usage errors exit
-`2`. Wire the gate into CI to fail on mutation score.
+`--fail-under <SCORE>`, `1` only when the score is below `SCORE`. A scoreless
+run (nothing scored) exits `0` unless some mutant errored, then `1`. With
+`--fail-on-regression <PTS>`, also `1` when the score dropped more than `PTS`,
+and always `1` when combined with `--no-history` (the gate has nothing to read).
+Under `--only-dominators`, `1` when any audited inferred kill fails to
+reproduce (`.fermut/dominators.json` is stale). `--no-fail` always exits `0`
+on the mutation result. A run that errors out (bad config, red baseline, git
+failure) also exits `1`; clap usage errors exit `2`. Wire the gate into CI to fail on mutation score.
 
 ## Smart test ordering { #smart-test-ordering }
 
@@ -279,7 +282,8 @@ mutant to only the tests that exercised the mutated line.
 HEAD`, then diffs that commit against the **working tree** (`git diff
 <merge-base>`), so the line set is the branch's committed changes **plus
 uncommitted edits**. Changes that landed on `main` after the branch point are
-not included. Right tool for PR-time gates. If the merge base can't be
+not included. Right tool for PR-time gates. When `main` isn't a local ref
+but `origin/main` is (CI PR checkouts), fermut uses `origin/main`. If the merge base can't be
 resolved (a shallow clone, unrelated histories), fermut exits with an error
 instead of running zero mutants. Fetch full history (`fetch-depth: 0`) or
 pass `--no-diff-only`.
@@ -307,7 +311,10 @@ Then `git diff --unified=0 --relative <commit>` produces the line set.
 This diff **includes uncommitted working-tree changes** — editing a file
 locally re-runs its mutants without needing to commit.
 
-`--diff-only` and `--since` are mutually exclusive.
+`--diff-only` and `--since` are mutually exclusive on the command line.
+A CLI scope replaces the config's: `--since HEAD` works on a config that
+sets `diff_only = "main"`, and `--diff-only` overrides a config `since`.
+Setting both keys in the config is an error.
 
 ## Choosing the interpreter { #python-interpreter }
 

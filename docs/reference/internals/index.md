@@ -211,7 +211,7 @@ admit/reject verdict.
 
 | Want to add…                                  | Touch…                                                                      |
 |-----------------------------------------------|------------------------------------------------------------------------------|
-| A new mutation operator                        | `src/mutator/operators.rs` + `src/mutator/visitor.rs` (see [Adding an operator](adding-operators.md)). |
+| A new mutation operator                        | `src/mutator/operators.rs` + `src/mutator/visitor.rs`, plus the exhaustive matches in `cli/subcmd/explain.rs` and `cli/subcmd/next.rs` (see [Adding an operator](adding-operators.md)). |
 | A new filter (e.g. AST equivalence detection) | `src/filter/<name>.rs` + register in `filter::build_chain`.                  |
 | A new test runner                              | `src/runner/<name>.rs` + new `RunnerKind` variant.                            |
 | A new report writer                            | `src/report/writers/<name>.rs` (a `Report::write_<name>(&self, path)` impl) + a field and arm in `writers::ReportSinks::write_all` + the CLI flag. |

@@ -10,9 +10,13 @@ fermut coverage [PATH] [--source <dir>] [--tests <dir>] [--full] \
 ```
 
 With no `.coverage` yet, runs the full suite under coverage. With one
-present, runs **only the test files changed since it was written** and
-appends them in (purging their stale contexts first), so adding a test
-costs that file's runtime, not a full sweep. fermut reads the
+present, re-runs **only what changed since it was written**: changed test
+files, plus every test whose recorded coverage touches a changed or deleted
+source file. It purges those stale contexts first and appends the fresh
+data, so adding a test costs that file's runtime, not a full sweep. Deleted
+source files are pruned from the DB. A `.coverage` without fermut's
+fingerprint sidecar (e.g. from a bare `pytest --cov` run) triggers a full
+rebuild. fermut reads the
 `.coverage` SQLite directly — there is no `coverage json` export step.
 
 | Flag                 | Default                                  | Effect                                                                                          |
@@ -35,8 +39,8 @@ changed test files' contexts from the database, forcing their coverage
 to be rebuilt from scratch.
 
 Change detection is by file **content** hash — fermut stores each test
-file's hash in a `.coverage`-adjacent sidecar and re-measures a file
-only when its current content hashes differently. It deliberately does
+and source file's hash in a `.coverage`-adjacent sidecar
+(`*.fermut-fingerprints.json`) and re-measures only when a hash differs. It deliberately does
 **not** use modification time: a fresh CI checkout rewrites every
 mtime, which would force a full re-measure every run; content hashing
 is stable across checkouts. It acts at test-**file** granularity:

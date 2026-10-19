@@ -12,9 +12,8 @@ The two highest-leverage tracks left:
 
 - **Distribution — meet users where they already are.** Now that runs
   are quick, adoption is gated by setup friction, not speed. The
-  cluster (`pytest --fermut` has shipped): an **official `KovantAI/fermut@v1` GitHub
-  Action** (cache-restore + PR-comment in one step), a **pinned Docker
-  image** (ty + ruff + coverage preinstalled), a **VS Code plugin**
+  cluster (`pytest --fermut` and the official GitHub Action have shipped):
+  a **pinned Docker image** (ty + ruff + coverage preinstalled), a **VS Code plugin**
   (inline survivor decorations), plus a packaged **pre-commit hook** and
   a **Homebrew formula**. Each removes a reason a team bounces off.
   Detail under [Integrations and distribution](#integrations-and-distribution).
@@ -100,10 +99,11 @@ return is highest today.
   plugin: after a green session it refreshes coverage, runs fermut, lists
   survivors in pytest's summary and fails the session on a failed gate.
   See [pytest plugin](guides/pytest-plugin.md).
-- **Official GitHub Action.** `KovantAI/fermut@v1` with cache
-  restore + PR-comment in one step. Today users compose
-  `actions/cache` + `fermut pr-comment` themselves — see
-  [Integrations](guides/integrations.md).
+- **Official GitHub Action — shipped.** The repo root is a composite
+  action (`KovantAI/fermut@vX.Y.Z`) that restores the cache, runs the
+  diff-scoped gate and posts the sticky PR comment in one step, with
+  sibling `sweep/`, `merge/` and `trend/` actions for sharded sweeps and
+  history. See [GitHub Action](guides/github-action.md).
 - **Pre-commit hook.** Officially packaged `.pre-commit-hooks.yaml`
   in the repo. Today's pre-commit guide is local-only.
 - **Docker image.** Pinned-version image with ty + ruff + coverage

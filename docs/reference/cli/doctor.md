@@ -26,7 +26,7 @@ a preflight.
 | `coverage`     | required | `coverage` binary.                                                                                |
 | `pytest-cov`   | required | `pytest_cov` importable from the resolved Python. Required to produce per-test contexts.          |
 | `coverage-data`| warn/fail| The `coverage = "…"` file from config, or the `.coverage` DB `run` would auto-discover at the project root: present and valid for either format — a `.coverage` SQLite DB with a populated `context` table, or a JSON export with a `"contexts"` field. |
-| `ty`           | required | `ty` binary. Hard requirement unless `ty_filter = false` in `fermut.toml`.                        |
+| `ty`           | optional | `ty` binary. `run` uses the embedded checker, so a missing binary is `warn`; it is `fail` only with `FERMUT_TY_EMBEDDED=0`. |
 | `ruff`         | required | Only when `ruff_filter = true` in config.                                                         |
 | `gh`           | optional | Only needed for `fermut pr-comment`.                                                              |
 | `hypothesis`   | warn     | Project depends on Hypothesis but no `hypothesis_seed` pinned — survivors flicker between runs.    |

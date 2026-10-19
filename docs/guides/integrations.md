@@ -10,8 +10,13 @@ How to wire fermut into the systems that already build/test your code.
 > **[GitHub Action](github-action.md)**. The raw YAML here is for other
 > CI systems or for full control.
 
-The canonical PR-gate workflow. `fermut init --with-gha` drops this
-template at `.github/workflows/fermut.yml`:
+A PR-gate workflow with caching and a score trend. `fermut init
+--with-gha` writes a simpler variant at `.github/workflows/fermut.yml`
+(the same file as
+[`examples/github-actions/pr-gate.yml`](https://github.com/KovantAI/fermut/blob/main/examples/github-actions/pr-gate.yml)):
+it has no cache or history steps, no `--trend`, and adds
+`--hypothesis-seed` and a JSON report artifact. This version adds the
+result cache and reads the nightly history:
 
 ```yaml
 name: Mutation
@@ -20,6 +25,12 @@ on:
   pull_request:
     paths:
       - "**/*.py"
+      - "pyproject.toml"
+      - "fermut.toml"
+
+permissions:
+  contents: read
+  pull-requests: write   # sticky PR comment
 
 jobs:
   gate:
@@ -33,8 +44,16 @@ jobs:
           python-version: "3.12"
       - run: |
           uv sync
+          uv pip install pytest-cov   # `fermut coverage` runs `pytest --cov` in this venv
           uv tool install fermut
       - run: uv tool run fermut coverage --source src --tests tests/
+      - name: restore nightly history (read-only)
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: .fermut/history.jsonl
+          key: fermut-history-main
+          restore-keys: |
+            fermut-history-main-
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
           path: .fermut/cache.json
@@ -67,6 +86,9 @@ Key points:
   merge base.
 - `actions/cache` keyed on lockfile + sources persists the result
   cache across PRs.
+- `actions/cache/restore` loads the history the nightly job saved, so
+  `--trend` has earlier runs to compare against. It never saves, so PR
+  runs don't overwrite the main-branch history.
 - `pr-comment` posts a sticky comment that updates in place on
   re-runs.
 
@@ -138,8 +160,9 @@ one `fermut.toml`; the difference is CLI flags on the `run` step.
 fermut init --profile pr-gate --with-gha --force
 ```
 
-This generates `.github/workflows/fermut.yml` (the PR gate from the
-section above). Add a second file alongside it:
+This generates `.github/workflows/fermut.yml` (the simpler PR gate
+described at the top of the section above; swap in that section's YAML
+if you want caching and the history restore). Add a second file alongside it:
 
 ```yaml
 # .github/workflows/fermut-nightly.yml
@@ -167,6 +190,7 @@ jobs:
           python-version: "3.12"
       - run: |
           uv sync
+          uv pip install pytest-cov
           uv tool install fermut
       - run: uv tool run fermut coverage --source src --tests tests/
 
@@ -222,7 +246,8 @@ How the override pattern works:
 
 History persistence shared across both jobs:
 
-- PR jobs read `fermut-history-main` (read-only, no save step), so
+- PR jobs restore `fermut-history-main` with `actions/cache/restore`
+  (read-only, no save step; see the PR-gate YAML above), so
   the PR comment's `--trend` block shows the delta against the last
   main-branch run.
 - The nightly job saves a fresh history entry under

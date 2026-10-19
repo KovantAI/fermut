@@ -180,8 +180,8 @@ The most common surprises, in roughly the order people hit them:
   suite that has never been mutation-tested" note above the
   "What can go wrong" header.
 - **Run is much slower than the wall-clock table.** Check that
-  `ty` is installed and on `$PATH`, and that coverage is being
-  honored (the `.coverage` DB has per-test contexts).
+  the ty filter isn't disabled (`ty_filter = false` / `--no-ty-filter`),
+  and that coverage is being honored (the `.coverage` DB has per-test contexts).
 - **`pytest` fails to collect before fermut even starts.** A previous
   mutation tool may have left a top-level `mutants/` (mutmut) or
   similar directory containing duplicate test-module basenames. The
@@ -264,13 +264,14 @@ fermut trend
 history: /work/project/.fermut/history.jsonl (5 entries)
 
 score: ▅▆▇▇▇   62.5% → 92.0%  (+29.5 pts)
+streak: ↑ improving (4 runs in a row)
 
-  timestamp              score  killed  survived  timeout    delta git
-  2026-05-01T10:00:00    62.5%      10        6        0         — main@aaa1111
-  2026-05-03T10:00:00    71.4%      15        6        0      +8.9 main@bbb2222
-  2026-05-10T10:00:00    80.0%      20        5        0      +8.6 main@ccc3333
-  2026-05-20T10:00:00    85.7%      24        4        0      +5.7 main@ddd4444
-  2026-06-01T10:00:00    92.0%      46        4        0      +6.3 features/coverage@eee5555
+  timestamp              score  kill  surv    to      delta git
+  2026-05-01T10:00:00    62.5%    10     6     0          — main@aaa1111
+  2026-05-03T10:00:00    71.4%    15     6     0       +8.9 main@bbb2222
+  2026-05-10T10:00:00    80.0%    20     5     0       +8.6 main@ccc3333
+  2026-05-20T10:00:00    85.7%    24     4     0       +5.7 main@ddd4444
+  2026-06-01T10:00:00    92.0%    46     4     0       +6.3 features/coverage@eee5555
 ```
 
 After a handful of inner-loop iterations, run `fermut trend --limit 10`

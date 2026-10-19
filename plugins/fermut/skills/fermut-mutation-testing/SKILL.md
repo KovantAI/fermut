@@ -44,14 +44,14 @@ Before invoking fermut, verify:
    Symptom if you skip this: `pytest --collect-only` reports `N errors during collection` and coverage gen produces no contexts. The errors usually look like `ModuleNotFoundError: No module named 'msgraph'`.
 
 3. **Tooling on PATH**:
-   - `ty` (Astral's type-checker — fermut's default pre-filter; without it on PATH, you must pass `--no-ty-filter`)
+   - `ty` (Astral's type-checker — fermut's default pre-filter). It runs in-process, so the binary is optional; it's only needed with `FERMUT_TY_EMBEDDED=0`. `fermut doctor` still flags a missing binary.
    - `pytest-cov` installed in the project venv. Add it explicitly — it transitively installs `coverage`:
      ```bash
      uv add --dev pytest-cov     # or: pip install pytest-cov
      ```
    - Verify `coverage >= 7` is reachable from the venv (pytest-cov pulls it).
 
-4. **Project venv**: fermut spawns `pytest` directly, so the venv's `bin/` must be on PATH when fermut runs. Find the venv first — **do not assume it lives at `$PWD/.venv`**. Many projects keep it elsewhere (`.venv`, `venv`, a uv/conda shared dir, a sibling `../.venvs/<name>`). Locate the one with `pytest`, then set it once:
+4. **Project venv**: fermut runs `<python> -m pytest` with `--python`, else an active `$VIRTUAL_ENV`, else a nearby `.venv`; only with none of those does it spawn a bare `pytest` from PATH. The commands below prepend `$VENV` to PATH as a belt-and-braces fallback; `--python "$VENV/python"` works too (see pitfall 8). Find the venv first — **do not assume it lives at `$PWD/.venv`**. Many projects keep it elsewhere (`.venv`, `venv`, a uv/conda shared dir, a sibling `../.venvs/<name>`). Locate the one with `pytest`, then set it once:
    ```bash
    VENV=/abs/path/to/the/venv/bin   # the dir containing pytest — MUST be absolute
    ```
@@ -63,7 +63,7 @@ Before invoking fermut, verify:
 
 ## Coverage setup (critical — easy to get wrong)
 
-Mutation testing wants per-test line attribution so it knows *which* tests to re-run per mutant. fermut reads coverage.json from coverage.py.
+Mutation testing wants per-test line attribution so it knows *which* tests to re-run per mutant. fermut reads either coverage.py's `.coverage` SQLite DB directly (what `fermut coverage` writes, and what the [guide](https://fermut.readthedocs.io/guides/claude-code-skill/) uses) or a `coverage json --show-contexts` export. This skill uses the JSON export throughout; both work for `run` and `explain`.
 
 ### .coveragerc
 
@@ -237,7 +237,7 @@ def stat(skip):
 PATH="$VENV:$PATH" <fermut> next .fermut/last.json --all      # or --limit N for the top N
 ```
 
-Each entry carries `id`, `file`, `line`, `operator`, `cluster_size`, `ease` (high/medium/low), `estimated_gain_pts`, the operator `hint`, and `sibling_ids` (other survivors one test likely also kills). Work the list top-down: fixing rank 1 is the highest reward per test. Feed the chosen `id` straight into Stage 6's `explain`. On a huge survivor set, `--max-tokens N` returns only the highest-value clusters that fit a context budget (it logs how many it dropped to stderr).
+Each entry carries `id`, `file`, `line`, `operator`, `cluster_size`, `ease` (high/medium/low), `min_gain_pts` / `max_gain_pts` (score points if only the representative dies / if the whole cluster dies), the operator `hint`, and `sibling_ids` (other survivors one test likely also kills). Work the list top-down: fixing rank 1 is the highest reward per test. Feed the chosen `id` straight into Stage 6's `explain`. On a huge survivor set, `--max-tokens N` returns only the highest-value clusters that fit a context budget (it logs how many it dropped to stderr).
 
 `next` ranks whatever survivors are in the report — it doesn't know your Stage 4 skip set. If you've decided on a skip set, run `next` against a report produced *with* those `--skip-ops` (re-run, or use the Reference command); otherwise noise-op clusters like `constant-replace` you meant to ignore can rank as "fixable" and waste a kill attempt.
 
@@ -365,7 +365,7 @@ Per file: a focused batch of 6–15 tests typically kills 10–30 mutants. The k
 5. **`dynamic_context=test_function` produces wrong nodeid format** — use `pytest --cov-context=test` instead.
 6. **`--show-contexts` missing on `coverage json`** — fermut errors out.
 7. **Coverage filter drops everything when path mismatch** — verify mutant count via `jq '[.outcomes[] | select(.status != "skipped")] | length'`.
-8. **pytest binary not on PATH** — fermut spawns `pytest` directly. Prepend the venv bin (`PATH="$VENV:$PATH"`). The venv is often NOT at `$PWD/.venv`; locate the dir holding `pytest` and use its **absolute** path (a relative one breaks because fermut chdirs). See pre-flight item 4. **Restricted sandboxes/CI** (harness forbids modifying `PATH` — some agent sandboxes deny any `PATH=` assignment, and may deny invoking `pytest`/`coverage` directly even by absolute path): pass `--python <venv-or-interpreter>` to **both** `fermut run` and `fermut coverage` so fermut runs `<python> -m pytest` itself with an absolute interpreter — no PATH, and no direct pytest/coverage call of your own. The whole loop then becomes:
+8. **pytest binary not on PATH** — fermut found no `--python`, `$VIRTUAL_ENV` or nearby `.venv`, so it fell back to a bare `pytest`. Prepend the venv bin (`PATH="$VENV:$PATH"`). The venv is often NOT at `$PWD/.venv`; locate the dir holding `pytest` and use its **absolute** path (a relative one breaks because fermut chdirs). See pre-flight item 4. **Restricted sandboxes/CI** (harness forbids modifying `PATH` — some agent sandboxes deny any `PATH=` assignment, and may deny invoking `pytest`/`coverage` directly even by absolute path): pass `--python <venv-or-interpreter>` to **both** `fermut run` and `fermut coverage` so fermut runs `<python> -m pytest` itself with an absolute interpreter — no PATH, and no direct pytest/coverage call of your own. The whole loop then becomes:
 
 ```bash
 FERMUT=fermut               # installed on PATH; or an abs path to target/debug/fermut for a source build

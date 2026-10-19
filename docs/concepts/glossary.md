@@ -63,7 +63,8 @@ the source tree — see
 
 Composable stack of pre-flight checks every mutant runs through
 before pytest sees it. Order is cheap → expensive: experimental →
-operator → sample → diff-only → coverage → ruff → ty. Skipping a
+parity → profile → operator → shard → sample → diff-only → since →
+coverage → ruff → ty → tce. Skipping a
 mutant via a filter is dramatically cheaper than running pytest
 against it. See
 [filter chain overview](mutation-testing.md#the-filter-chain).
@@ -75,7 +76,9 @@ inputs each run unless given a fixed seed. Mutation testing relies
 on deterministic test outcomes — a flaky test that passes on the
 original but fails on a mutant due to a different random draw will
 falsely "kill" the mutant. fermut's `pr-gate` and `library` profiles
-pin the Hypothesis seed in `pyproject.toml`. Ignore this entry if
+write `hypothesis_seed = 12345` into the generated `fermut.toml` when
+Hypothesis is a declared dependency; without Hypothesis installed the
+seed is ignored. Ignore this entry if
 your test suite doesn't import `hypothesis`.
 
 ## Inline ignore marker
@@ -129,7 +132,7 @@ overlapping operators. fermut ships a
 ## Mutation score
 
 `detected / (detected + survived)` where `detected = killed + timeout`.
-Skipped and errored mutants don't appear in either side of the ratio.
+Skipped, errored and equivalent mutants don't appear in either side of the ratio.
 Timeouts count as detected (the mutant changed behavior enough to
 wedge the test, the runner just gave up before getting a clean fail).
 See [mutation score on the concept page](mutation-testing.md#the-mutation-score).
@@ -145,8 +148,8 @@ with `--skip-ops`, enable experimental with `--experimental`. See
 ## Profile
 
 A named starter template for `fermut.toml`. Four profiles ship:
-`pr-gate` (narrow ops, diff-only, fast), `nightly` (every op,
-no filters, slower), `local` (25% sample, dev loop), `library`
+`pr-gate` (narrow ops, diff-only, fast), `nightly` (every op incl.
+experimental, no coverage, slower), `local` (25% sample, dev loop), `library`
 (every stable op, no experimental). Pick with
 `fermut init --profile <name>`. Profiles are templates, not modes —
 after `init` the config is plain text and you hand-edit. See

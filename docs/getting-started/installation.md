@@ -93,18 +93,17 @@ of this page is the prerequisites table, optional tools, and the
 |--------------------------------------------|----------|-----------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | Python ≥ 3.10                              | required | Running your tests under mutation                                     | `brew install python` or `uv python install 3.12`                                                                    |
 | `pytest`                                   | required | Test runner fermut invokes (stdlib `unittest` works for legacy suites; pytest is the supported path) | `uv add --dev pytest`                                                                                                |
-| `coverage` + `pytest-cov`                  | required | Per-test coverage filter — fermut refuses runs without it (see below) | `uv add --dev coverage pytest-cov`                                                                                   |
-| `ty`                                       | required | Type-aware mutant pre-filter (20–40% of naive mutants dropped in ~25 ms before pytest sees them) | `uv tool install ty`                                                                                                 |
+| `coverage` + `pytest-cov`                  | required | Per-test coverage filter — without it every mutant runs the full suite (see below) | `uv add --dev coverage pytest-cov`                                                                                   |
+| `ty` *(optional)*                          | optional | Type-aware mutant pre-filter (20–40% of naive mutants dropped before pytest sees them). Runs embedded in fermut; the binary is only the fallback, or needed with `FERMUT_TY_EMBEDDED=0` | `uv tool install ty`                                                                                                 |
 | `ruff` *(optional)*                        | optional | Lint-based pre-filter, off by default                                 | `uv tool install ruff`                                                                                               |
 | `gh` *(optional)*                          | optional | `fermut pr-comment` (preinstalled on every GitHub Actions runner)     | <https://cli.github.com>                                                                                             |
 
-All four required tools must be on the **same `PATH`** as `fermut`
-— i.e. inside the activated project venv (or behind `uv run`). A
-fresh shell without venv activation is the #1 cause of `fermut
-doctor` failures on macOS, where the system `python3` is 3.9 and
-nothing in the project venv is reachable.
+fermut finds the project venv on its own (`--python`, `$VIRTUAL_ENV`,
+or a `.venv` in the project or above) and runs tools from it first,
+then `PATH`. If none is found it falls back to `PATH`, where on macOS
+the system `python3` may be 3.9 with none of the project's packages.
 
-### Why coverage, pytest-cov, and ty are required (not "nice to have")
+### Why coverage and pytest-cov are required, and what ty adds
 
 - **`coverage` + `pytest-cov`** drive per-test selection. fermut runs
   only the tests whose execution touched the mutated line, not the
@@ -117,19 +116,21 @@ nothing in the project venv is reachable.
   Generate the coverage data the easy way with
   [`fermut coverage`](../reference/cli/coverage.md) — it sets the
   context flag for you and refreshes incrementally as tests change.
-  `fermut run` refuses to start when `--coverage` is configured but
-  the coverage data lacks per-test contexts; if you genuinely want to
-  opt out, drop `coverage = "…"` from `fermut.toml` and accept the
-  slowdown.
+  `fermut run` refuses to start only when coverage is configured but
+  the file is missing or lacks per-test contexts. With no coverage key
+  and no `.coverage` at the project root, it runs without coverage
+  (every mutant runs the full suite).
 - **`ty`** is the type-aware pre-filter. On type-hinted codebases
   20–40% of naive mutants are type-invalid and get dropped in
   ~25 ms each before pytest sees them
-  ([benchmarks](../reference/benchmarks.md)). On by default;
+  ([benchmarks](../reference/benchmarks.md)). On by default and
+  checked in-process, so the `ty` binary isn't needed;
   `--no-ty-filter` opts out for older untyped suites.
 
-`fermut doctor` reports each of the four as a hard check — a
-missing tool surfaces as `[fail]`, not `[warn]`. Run it after
-installation to confirm the venv resolves all four before you spend
+`fermut doctor` reports Python, the test runner and coverage as hard
+checks (`[fail]` when missing). A missing `ty` binary is a `[warn]`,
+because `run` uses the embedded checker; it is a `[fail]` only with
+`FERMUT_TY_EMBEDDED=0`. Run it after installation, before you spend
 time generating coverage.
 
 `fermut doctor` checks the toolchain programmatically — see the
@@ -213,7 +214,7 @@ fermut --version
 fermut doctor                            # or: uv run fermut doctor
 ```
 
-`doctor` checks Python, the test runner, `ty`, `ruff`, and coverage,
+`doctor` checks Python, the test runner, coverage, `ty`, and `ruff` (only when `ruff_filter = true`),
 and prints a one-line remediation per failure. If `python` or
 `pytest` fails the check, confirm the project venv is on `PATH`
 (`which python` should point inside `.venv/`); a system Python 3.9

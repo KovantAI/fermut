@@ -40,8 +40,12 @@ fermut run src/ --tests tests/ \
     --diff-only HEAD \
     --coverage .coverage \
     --json .fermut/last.json \
-    --no-history --quiet
+    --history-path .fermut/agent-history.jsonl --quiet
 ```
+
+`--history-path` keeps the noisy iteration runs out of the shared
+`.fermut/history.jsonl` while still recording them, so `fermut score` /
+`fermut trend` (pointed at the same file) have something to compare.
 
 Stderr prints one progress line. Score and survivors land in
 `.fermut/last.json`.
@@ -56,15 +60,16 @@ jq '[.outcomes[] | select(.status == "survived")]
 
 Returns:
 ```json
-{ "id": "src/auth.py@812:boundary-shift:age >= 18->age > 18", "file": "src/auth.py",
+{ "id": "/abs/repo/src/auth.py@812:boundary-shift:>=->>", "file": "/abs/repo/src/auth.py",
   "line": 42, "operator": "boundary-shift",
-  "original": "age >= 18", "replacement": "age > 18" }
+  "original": ">=", "replacement": ">" }
 ```
 
 The `id` grammar is `<file>@<byte-offset>:<operator>:<original>-><replacement>`.
-**Caveat for agents that store ids across runs:** `<file>` is whatever path
-fermut was invoked with — an absolute path when you run `fermut run /abs/src`
-(the common case), so ids captured on one machine/checkout won't match another.
+`original` / `replacement` are the operator token only, not the whole
+expression. **Caveat for agents that store ids across runs:** `<file>` is
+always the absolute path (even for `fermut run src/`), so ids captured on one
+machine/checkout won't match another.
 Don't persist ids as cross-machine keys; re-read them from each run's JSON, or
 key your own state on the stable `file` + `line` + `operator` fields instead.
 
@@ -75,8 +80,8 @@ hint + pytest skeleton.
 
 **5. Re-run, watch the score delta** — only `auth.py`'s mutants
 re-evaluate (cache hit on the rest). Boundary mutant moves from
-`survived` → `killed`. `fermut trend --limit 2 --format json` shows
-`+0.7 pts`.
+`survived` → `killed`. `fermut score --history-path .fermut/agent-history.jsonl` reports
+`"delta": 0.7`.
 
 Loop on step 1 until the score clears the target or every survivor
 is justified as equivalent / acceptable. The whole cycle stays
@@ -86,7 +91,7 @@ under 10 seconds on warm cache for repos in the 500-mutant range.
 
 ```mermaid
 flowchart LR
-    A[edit source / tests] --> B[fermut run --diff-only HEAD --json out.json --no-history --quiet]
+    A[edit source / tests] --> B[fermut run --diff-only HEAD --json out.json --history-path .fermut/agent-history.jsonl --quiet]
     B --> C{any SURVIVED?}
     C -- yes --> F[parse out.json → pick survivor]
     F --> G[write killing test]
@@ -97,9 +102,10 @@ flowchart LR
     E --> Z[fermut pr-comment --markdown report.md]
 ```
 
-Two distinct runs: the inner loop uses `--no-history --quiet` (iterations
-are noisy, history is for the gate); the gate run drops those and adds
-`--trend` + `--markdown` for the PR comment. Don't mix them.
+Two distinct runs: the inner loop records to a scratch history
+(`--history-path .fermut/agent-history.jsonl --quiet`) so its noisy iterations stay out of the
+shared log but `fermut score` still has a delta to read; the gate run uses
+the default history and adds `--trend` + `--markdown` for the PR comment. Don't mix them.
 
 Key invariants:
 
@@ -213,12 +219,13 @@ behavior).
 
 ## Trend tracking is the agent's feedback signal
 
-`fermut trend` reads `.fermut/history.jsonl` and prints the per-run
-table. For an agent, the useful comparison is **score delta vs the
+`fermut trend` reads the history log (`.fermut/history.jsonl` by default;
+pass `--history-path .fermut/agent-history.jsonl` for the inner-loop scratch log) and prints the
+per-run table. For an agent, the useful comparison is **score delta vs the
 previous iteration** — not the absolute score:
 
 ```sh
-fermut trend --limit 3 --format json
+fermut trend --history-path .fermut/agent-history.jsonl --limit 3 --format json
 ```
 
 ```json
@@ -241,7 +248,7 @@ Both signals are derived for you by **[`fermut score`](../reference/cli/score.md
 no jq, no hand-rolled history diff:
 
 ```sh
-fermut score --format json
+fermut score --history-path .fermut/agent-history.jsonl --format json
 ```
 
 ```json
@@ -289,15 +296,21 @@ The recommended invocation for an agent inner loop:
 ```sh
 fermut run src/ \
     --tests tests/ \
-    --diff-only HEAD                 # only mutants on lines edited since last commit
-    --coverage .coverage             # narrow tests per mutant (auto-discovered at root if omitted)
-    --json   .fermut/last.json       # parse this
-    --no-history                     # iterations are noisy; gate the gate, not the loop
-    --quiet                          # one line of progress in stderr at most
+    --diff-only HEAD \
+    --coverage .coverage \
+    --json .fermut/last.json \
+    --history-path .fermut/agent-history.jsonl \
+    --quiet
 ```
 
+- `--diff-only HEAD`: only mutants on lines edited since the last commit.
+- `--coverage .coverage`: narrow tests per mutant (auto-discovered at the root if omitted).
+- `--json`: the report to parse.
+- `--history-path`: a scratch history, so `fermut score --history-path .fermut/agent-history.jsonl` sees each iteration without polluting the shared log.
+- `--quiet`: at most one progress line on stderr.
+
 Once the agent decides to record progress (e.g. before committing), drop
-`--no-history` and add `--trend` to the run that will produce the PR
+the scratch `--history-path` and add `--trend` to the run that will produce the PR
 report:
 
 ```sh
@@ -385,12 +398,12 @@ The shape of one outcome:
 {
   "status": "survived",
   "mutant": {
-    "id": "src/auth.py@812:boundary-shift:age >= 18->age > 18",
-    "file": "src/auth.py",
+    "id": "/abs/repo/src/auth.py@812:boundary-shift:>=->>",
+    "file": "/abs/repo/src/auth.py",
     "line": 42,
     "operator": "boundary-shift",
-    "original": "age >= 18",
-    "replacement": "age > 18",
+    "original": ">=",
+    "replacement": ">",
     "range": [812, 820]
   }
 }

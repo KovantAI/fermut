@@ -8,8 +8,11 @@ fermut merge <input.json> [<input.json> ...] \
     [--history <p>] [--config-hash <hex>] [--project <dir>]
 ```
 
-Deduplicates by `mutant.id` (harmless for clean shards; safety net for
-accidental overlap). With no output flag, prints merged JSON to stdout.
+Deduplicates by `mutant.id` when the duplicates carry the same verdict
+(harmless for clean shards; safety net for accidental overlap). It errors
+out on conflicting verdicts for the same id, and when a mutant has no real
+verdict in any input (a shard is missing). With no output flag and no
+`--history`, prints merged JSON to stdout.
 
 | Flag                  | Default | Description                                                                                                                                                                             |
 | --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

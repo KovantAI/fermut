@@ -8,7 +8,7 @@ expect, where it lives in config.
 The order (cheap → expensive) is fixed:
 
 ```
-experimental → operator allow/deny → shard → sample → diff/since → coverage → ruff → ty
+experimental → parity → profile → operator allow/deny → shard → sample → diff-only/since → coverage → ruff → ty → tce
 ```
 
 `shard` only runs when `--shard i/n` is set (CI matrix split); it
@@ -89,6 +89,9 @@ scopes to every line this branch changed since it forked from `base` —
 committed **and** uncommitted edits — unaffected by `base` advancing
 after the fork. Untracked files (never `git add`ed) are not seen.
 
+If `base` doesn't exist as a local ref but `origin/<base>` does (a CI PR
+checkout has no local `main`), fermut uses `origin/<base>`.
+
 The merge base must be resolvable: on a shallow clone (`actions/checkout`
 default `fetch-depth: 1`) fermut exits with an error rather than running
 zero mutants. Use `fetch-depth: 0` in CI.
@@ -114,7 +117,10 @@ tree, so uncommitted edits are included — same as `--diff-only`. The
 difference is the anchor: `--since` is a fixed point (commit or date),
 `--diff-only` is the fork point from a branch.
 
-`--diff-only` and `--since` are mutually exclusive.
+`--diff-only` and `--since` are mutually exclusive on the command line.
+A CLI scope replaces the config's: `--since HEAD` works on a config that
+sets `diff_only = "main"`, and `--diff-only` overrides a config `since`.
+Setting both keys in the config is an error.
 
 ## `--exclude`
 

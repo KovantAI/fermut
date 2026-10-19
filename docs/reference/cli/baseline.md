@@ -18,9 +18,10 @@ fermut baseline [PATH] [--full] [--sample <RATIO>] [--top <N>] [--format human|j
 | `--format`         | `human` | `json` emits the same numbers for an agent or dashboard.                               |
 
 The filter flags shared with [`run`](run.md) (`--ops`, `--skip-ops`,
-`--exclude`, `--diff-only`, …) also apply. The coverage filter is always on:
-mutating code no test executes would mix two separate problems into one
-number.
+`--exclude`, `--diff-only`, …) also apply. The coverage filter is on by default (the
+discovered `.coverage`): mutating code no test executes would mix two
+separate problems into one number. An explicit `--coverage <path>` replaces
+that DB, and `--no-coverage` turns the filter off.
 
 ## Pipeline
 

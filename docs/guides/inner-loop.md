@@ -19,8 +19,10 @@ What each flag does:
   from `main`, so fermut only touches code you've changed on this
   branch. Massive scope reduction; most branches mutate a handful
   of lines instead of thousands.
-- **`--watch`** — re-runs on every `.py` file change until Ctrl+C.
-  Pair with your editor's save-on-blur for true continuous feedback.
+- **`--watch`** — re-runs on every `.py` change under the source root
+  (`src/` here) until Ctrl+C. Test files outside it aren't watched, so
+  after editing a test, save a source file or restart the command to
+  re-run. Pair with your editor's save-on-blur for continuous feedback.
 - **`--coverage .coverage`** — keeps per-mutant test selection
   on. Same database [First steps step 2](../getting-started/first-steps.md#2-get-an-honest-baseline)
   generates via `fermut coverage`. Per-mutant cost stays low. If the

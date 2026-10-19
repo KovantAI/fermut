@@ -46,6 +46,7 @@ jobs:
         run: |
           uv tool run fermut run src/ \
               --tests tests/ \
+              --no-diff-only \
               --coverage .coverage \
               --hypothesis-seed 1234 \
               --experimental \

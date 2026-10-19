@@ -48,10 +48,10 @@ TOML primitives: `string`, `bool`, `int`, `float`, `array<string>`.
 | `operators`        | `string`        | `"default"`                                     | Compare / `and`-`or` operator set: `default`, `minimal`, or `full`. CLI `--operators`. See [Operator profiles](operators/profiles.md). |
 | `ops`              | `array<string>` | (all)                                           | Allowlist operator names. See [Operators](operators/index.md).                                          |
 | `skip_ops`         | `array<string>` | `[]`                                            | Denylist operator names. Wins over `ops`.                                                          |
-| `diff_only`        | `string`        | none                                            | Restrict to lines changed vs base ref. Mutually exclusive with `since`.                            |
-| `since`            | `string`        | none                                            | Restrict to lines touched since commit or date. Mutually exclusive with `diff_only`.               |
+| `diff_only`        | `string`        | none                                            | Restrict to lines changed vs base ref. Falls back to `origin/<ref>` when `<ref>` doesn't exist locally (CI PR checkouts). Can't be combined with `since`; a CLI `--since` replaces it. |
+| `since`            | `string`        | none                                            | Restrict to lines touched since commit or date. Can't be combined with `diff_only`; a CLI `--diff-only` replaces it. |
 | `coverage`         | `string` (path) | auto-discovered `.coverage`                     | Path to a per-test-context coverage database. Enables coverage-based test selection. fermut sniffs the format — a coverage.py `.coverage` SQLite DB (e.g. `".coverage"`) or a legacy `coverage.json` export both work. When unset, fermut auto-discovers a `.coverage` SQLite DB at the project root; `--no-coverage` disables selection entirely. |
-| `hypothesis_seed`  | `int`           | none                                            | Pin Hypothesis seed across mutants (passes `--hypothesis-seed=<N>` to pytest).                     |
+| `hypothesis_seed`  | `int`           | none                                            | Pin Hypothesis seed across mutants (passes `--hypothesis-seed=<N>` to pytest). Ignored with a warning when `hypothesis` isn't importable. `init` writes it only when Hypothesis is a declared dependency. |
 | `pytest_args`      | `array<string>` | `[]`                                            | Extra args forwarded to pytest. Ignored by the unittest runner.                                    |
 | `cache`            | `bool`          | `true`                                          | Enable the per-mutant result cache. **Critical for fast iteration.**                              |
 | `cache_path`       | `string` (path) | `<project root>/.fermut/cache.json`             | Custom cache file location.                                                                       |
@@ -137,7 +137,7 @@ elided):
     timeout = 15
     coverage = ".coverage"
     diff_only = "main"
-    hypothesis_seed = 12345
+    hypothesis_seed = 12345   # only when Hypothesis is a dependency
     ops = ["arith-op-swap", "compare-op-swap", "boundary-shift", "return-value-to-none"]
     ```
 
@@ -173,7 +173,7 @@ elided):
     ty_filter = true
     timeout = 30
     experimental = false
-    hypothesis_seed = 12345
+    hypothesis_seed = 12345   # only when Hypothesis is a dependency
     ```
 
 ## Discovery

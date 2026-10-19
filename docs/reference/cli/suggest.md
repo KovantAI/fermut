@@ -21,7 +21,7 @@ fermut suggest <report.json> [SELECTOR] [--all-survivors] [--format human|json] 
 | `--out PATH`            | Append generated test(s) to this path instead of printing to stdout.                                                  |
 | `--apply`               | Append to the test file that already references the enclosing symbol. Falls back to `--out` when set.                 |
 | `--parallel N`          | Run up to N Anthropic calls concurrently. Default `1`. File writes stay serial; output order is deterministic.        |
-| `--tests <dir>`         | Tests directory mined for style samples + `--apply` discovery. Defaults to `tests/`.                                  |
+| `--tests <dir>`         | Tests directory mined for style samples + `--apply` discovery. Omitted → `tests/` when that directory exists, else none (no samples; `--apply` then needs `--out`). |
 | `--context N`           | Source lines per side of the mutant line included in the prompt. Default `8`.                                         |
 | `--sample-count K`      | How many existing test files to include in the prompt for style reference. Default `2`.                               |
 | `--model M`             | Anthropic model id. Default `claude-sonnet-4-6` (applied by the handler when omitted on the CLI; clap itself has no default). |
@@ -39,18 +39,18 @@ fermut suggest <report.json> [SELECTOR] [--all-survivors] [--format human|json] 
       "cached":         false,
       "response":       "...raw model text including the python fence...",
       "extracted_code": "def test_in_range_boundary():\n    ...\n",
-      "applied_to":     "tests/test_calc.py",
-      "error":          null
+      "applied_to":     "tests/test_calc.py"
     }
   ]
 }
 ```
 
 `entries` preserves the order of the surviving mutants in the input
-report, even under `--parallel N`. `response` / `extracted_code` are
-omitted only when the call failed (`error` populated instead).
-`applied_to` is `null` unless `--apply` or `--out` wrote the test to
-disk. The JSON shape is the contract for agent consumers — additions are
+report, even under `--parallel N`. Optional fields are omitted, never
+`null`: `error` appears only when the entry failed. A failed call omits
+`response` and `extracted_code`; a response with no python code block keeps
+`response` but omits `extracted_code`. `applied_to` appears only when
+`--apply` or `--out` wrote the test to disk. The JSON shape is the contract for agent consumers — additions are
 backwards-compatible; renames are not. See `VERSIONING.md`.
 
 ## Authentication
@@ -77,8 +77,10 @@ def test_in_range_includes_upper_bound():
     assert in_range(11, 0, 10) is False
 ```
 
-If the model response does not contain a `python` code block the
-command errors loudly rather than silently dropping the suggestion.
+If the model response does not contain a `python` code block, that entry
+gets an `error` ("model response did not contain a python code block"),
+printed to stderr; the suggestion is not dropped silently, and the other
+entries still run. The command still exits `0`.
 
 ## Caching
 

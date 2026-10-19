@@ -40,8 +40,10 @@ All of fermut's sidecar state lives in one `.fermut/` directory at the
 **project root** (nearest `pyproject.toml`/`setup.cfg`, so a
 `source_root = "src"` layout still anchors at the repo root, not under
 `src/`): `cache.json` (this cache), `history.jsonl` (trend log),
-`kill-order.json` (smart test ordering's kill history), and
-`ty-cache.json` (the ty pre-filter's baseline-diagnostic cache).
+`kill-order.json` (smart test ordering's kill history),
+`ty-cache.json` (the ty pre-filter's baseline-diagnostic cache), plus
+`dominators.json` and `llm-cache.json` once you use `fermut subsume`
+or the LLM-backed commands.
 fermut does not write a `.gitignore` for it — add `.fermut/` to your
 own `.gitignore` (or commit only `history.jsonl`, see
 [Projects](projects.md)).

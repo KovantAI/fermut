@@ -6,12 +6,16 @@ format-agnostic — it rejects either a `.coverage` SQLite DB or a
 
 - From `fermut run` (runtime path, whether the coverage file was
   auto-discovered, set via `coverage = "…"`, or passed with
-  `--coverage`): `<path> has no per-test contexts. Regenerate with
-  `pytest --cov=src --cov-context=test` …`.
-- From `fermut doctor` (the `coverage-data` pre-flight check on the
-  configured coverage file): `<path> has no per-test
-  contexts` — surfaced as a `[fail]` line alongside the other tooling
-  checks.
+  `--coverage`): ``coverage.json at <path> has no per-test contexts.
+  Regenerate with `pytest --cov=src --cov-context=test` (requires
+  pytest-cov) followed by `coverage json -o coverage.json --show-contexts`.``
+  The message says `coverage.json` even when `<path>` is a `.coverage`
+  SQLite DB; with a DB, the `pytest --cov-context=test` step alone is the
+  fix (no `coverage json` export needed).
+- From `fermut doctor` (the `coverage-data` pre-flight check):
+  `<path> (SQLite DB) has no per-test contexts` or
+  `<path> (JSON export) has no per-test contexts` — surfaced as a `[fail]`
+  line alongside the other tooling checks.
 
 **Cause.** Coverage was generated without per-test contexts, so the
 database only knows which lines ran — not which tests ran them. This

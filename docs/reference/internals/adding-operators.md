@@ -55,6 +55,16 @@ Add it to `Operator::all()` too. `from_name` (and so `--ops`,
 there. Then bump the expected total in the `all_covers_every_variant`
 test (currently 46).
 
+Three more `match` statements outside the mutator have no `_` arm, so
+the crate won't compile until each gets an arm for the new variant:
+
+- `operator_hint` in `src/cli/subcmd/explain.rs`: the one-line testing
+  hint `fermut explain` prints.
+- `operator_slug` in `src/cli/subcmd/explain.rs`: the short slug used in
+  generated test names.
+- `ease` in `src/cli/subcmd/next.rs`: the kill-ease bucket `fermut next`
+  ranks by.
+
 If this operator is high-noise and should be experimental, also add it
 to `is_experimental()`, prefix its name with `exp:`, and bump that
 test's experimental count. The other tiers work the same way:
@@ -141,8 +151,9 @@ test in `src/mutator/operators.rs` fails if `stable.md`'s table or a
 "N stable" claim disagrees with the enum. Operator visibility in docs
 is the contract; people will set `--ops` against your new name.
 
-That's the entire flow for a table-driven operator. Total diff is
-usually < 20 lines.
+That's the entire flow for a table-driven operator: `operators.rs`,
+`visitor.rs`, the three `match` arms in `explain.rs` / `next.rs`, and
+the docs table.
 
 ## Flavor 2: a bespoke operator
 
@@ -170,6 +181,10 @@ impl Operator {
     }
 }
 ```
+
+Also add it to `Operator::all()`, bump `all_covers_every_variant`, and
+add arms to `operator_hint` / `operator_slug` (`src/cli/subcmd/explain.rs`)
+and `ease` (`src/cli/subcmd/next.rs`).
 
 ### Step 2 — Implement the visitor handler
 

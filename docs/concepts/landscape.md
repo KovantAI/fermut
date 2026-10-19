@@ -110,7 +110,7 @@ fermut today does **not**:
 - **Have a VS Code extension or LSP integration.** mutmut has the
   community `mutmut-mode` for emacs; nothing for fermut. Roadmap.
 - **Have a `fermut bisect`** for finding the commit that introduced a
-  surviving mutant. Roadmap.
+  surviving mutant.
 
 If any of those is a hard requirement, mutmut or cosmic-ray may be a
 better fit today.
@@ -160,7 +160,7 @@ the full-suite-per-mutant cost is already cheap and fermut's
 ty + coverage overhead doesn't pay off. The coverage filter (run
 only the tests crossing each mutated line) is the lever: uncovered-line
 mutants are *skipped*, not counted as survivors, which both cuts
-wall-clock and lifts the score. Coverage is opt-in (`--coverage`);
+wall-clock and lifts the score. Coverage is used whenever a `.coverage` DB with per-test contexts is at the project root (or `--coverage` points at one);
 mutmut has no equivalent. Scores across tools are **not directly
 comparable**.
 

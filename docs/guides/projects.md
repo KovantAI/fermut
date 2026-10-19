@@ -29,8 +29,9 @@ here is the absolute number, not the delta.
 fermut init --profile local --force
 # generate per-test coverage first — fermut uses it to skip irrelevant tests per mutant
 fermut coverage
-# or, manually: pytest --cov=src --cov-context=test && coverage json -o coverage.json --show-contexts
-fermut run src/ --tests tests/ --coverage .coverage --json baseline.json
+# or, manually: pytest --cov=src --cov-context=test   (writes .coverage)
+# --sample 1.0 overrides the local profile's `sample = 0.25`, so every mutant runs
+fermut run src/ --tests tests/ --coverage .coverage --sample 1.0 --json baseline.json
 ```
 
 See **[Coverage](coverage.md)** for `fermut coverage`, the
@@ -129,7 +130,10 @@ Profiles are not mutually exclusive — they're starter templates. After
 ## Step 3 — Wire CI in measure-only mode
 
 Start with `continue-on-error: true`. The job records mutation runs and
-posts a PR comment but **does not block merges yet**.
+posts a PR comment but **does not block merges yet**. This applies to the
+hand-written workflow below; `continue-on-error` also hides setup
+failures. With the [`KovantAI/fermut` action](github-action.md#rolling-it-out),
+use its `blocking: "false"` input instead, which only softens the gate.
 
 The workflow below has two output-related steps: `fermut run` writes
 `fermut-report.md` to disk, then a separate `fermut pr-comment` step at
@@ -249,17 +253,17 @@ nightly jobs, see
 
 Trend tracking is observational data. GitHub Actions runners are
 ephemeral, so `.fermut/history.jsonl` resets every run unless you
-persist it. The simplest pattern: `actions/cache` keyed on the branch
-ref, with a `main`-branch save-only step.
+persist it. The simplest pattern: restore with `actions/cache/restore`
+(which never saves), and save with a separate `main`-only
+`actions/cache/save` step.
 
 ```yaml
 - name: restore fermut history
-  uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+  uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
   with:
     path: .fermut/history.jsonl
-    key: fermut-history-${{ github.ref_name }}-${{ github.sha }}
+    key: fermut-history-main
     restore-keys: |
-      fermut-history-${{ github.ref_name }}-
       fermut-history-main-
 
 - name: run fermut
@@ -274,7 +278,9 @@ ref, with a `main`-branch save-only step.
 ```
 
 Only the `main`-branch job *saves* the cache; PR jobs are read-only,
-so feature branches don't fork their own history streams. Tune to
+so feature branches don't fork their own history streams. (The combined
+`actions/cache` would also save from PR jobs in its post-step, which is
+why the restore uses `actions/cache/restore`.) Tune to
 taste — some teams prefer committing `history.jsonl` to a side branch
 instead.
 

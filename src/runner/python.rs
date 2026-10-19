@@ -91,8 +91,16 @@ fn discover_dot_venv(scope: &Path) -> Option<PathBuf> {
 
 /// Map an explicit `--python` value to an interpreter path. A virtualenv
 /// directory resolves to its interpreter; anything else is taken verbatim.
+/// A relative path that exists (e.g. `--python .venv`) is anchored to the cwd
+/// first: the runner spawns from the mirror, where a relative path would
+/// resolve elsewhere. Bare names like `python3.12` don't exist in the cwd and
+/// stay as-is for a PATH lookup.
 fn resolve_explicit(p: &Path) -> PathBuf {
-    venv_python(p).unwrap_or_else(|| p.to_path_buf())
+    let p = match std::env::current_dir() {
+        Ok(cwd) if p.is_relative() && p.exists() => cwd.join(p),
+        _ => p.to_path_buf(),
+    };
+    venv_python(&p).unwrap_or(p)
 }
 
 /// `<venv>/bin/python[3]` (unix) or `<venv>/Scripts/python.exe` (Windows), if
@@ -212,6 +220,24 @@ mod tests {
         let py = make_venv(&venv);
         assert_eq!(resolve_python(&root, Some(&venv)), Some(py));
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn explicit_relative_venv_dir_is_anchored_to_cwd() {
+        // `--python .venv` must survive the runner spawning from the mirror.
+        let rel = PathBuf::from(format!(".fermut-py-rel-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&rel);
+        make_venv(&rel);
+        let got = resolve_python(Path::new("/scope"), Some(&rel)).unwrap();
+        assert!(got.is_absolute(), "{got:?}");
+        assert_eq!(
+            got,
+            std::env::current_dir()
+                .unwrap()
+                .join(&rel)
+                .join("bin/python")
+        );
+        fs::remove_dir_all(&rel).unwrap();
     }
 
     #[test]

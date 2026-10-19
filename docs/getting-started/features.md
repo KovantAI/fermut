@@ -28,8 +28,9 @@ guide or reference page.
   invocation. Typically removes 20–40% of naive mutants on type-hinted
   codebases.
 - **Per-mutant result cache.** Keyed on `(mutant.id, ast_hash(file), scope)`.
-  AST-structural hashing means reformat / comment edits don't
-  invalidate. `scope` covers the run-shape inputs that change the
+  The id embeds the mutant's byte offset, so an edit only invalidates
+  mutants in the edited file at or below the edit; mutants above it
+  keep their hits. `scope` covers the run-shape inputs that change the
   outcome without changing the AST: runner kind, timeout, hypothesis
   seed, pytest args, and the per-mutant test selection set when
   coverage-driven selection is on. Edits to one file only re-run

@@ -36,6 +36,7 @@ jobs:
           uv tool run fermut run src/ \
               --tests tests/ \
               --shard ${{ matrix.shard }}/8 \
+              --no-diff-only \
               --hypothesis-seed 1234 \
               --cache-path ".fermut/cache-${{ matrix.shard }}.json" \
               --json "shard-${{ matrix.shard }}.json"

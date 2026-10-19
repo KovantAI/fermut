@@ -327,10 +327,10 @@ Use this jq scenario calculator to predict the score under candidate skip sets b
 ```bash
 jq '
 def stat(skip):
-  [.outcomes[] | select((.status=="killed" or .status=="survived" or .status=="timeout") and (.mutant.operator as $o | (skip | index($o) | not)))] as $kept
+  [.outcomes[] | select((.status=="killed" or .status=="survived" or .status=="timed_out") and (.mutant.operator as $o | (skip | index($o) | not)))] as $kept
   | ($kept | map(select(.status=="killed")) | length) as $k
   | ($kept | map(select(.status=="survived")) | length) as $s
-  | ($kept | map(select(.status=="timeout")) | length) as $t
+  | ($kept | map(select(.status=="timed_out")) | length) as $t
   | {kept: ($k+$s+$t), killed: $k, survived: $s, score: (($k*1000/($k+$s+$t)|floor)/10)};
 {
   baseline: stat([]),

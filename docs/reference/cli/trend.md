@@ -9,7 +9,7 @@ fermut trend [PATH] [flags...]
 | Flag                          | Default                          | Effect                                                          |
 |-------------------------------|----------------------------------|-----------------------------------------------------------------|
 | `PATH`                        | `.`                              | Where to start the project-root walk.                            |
-| `--history-path <p>`          | `.fermut/history.jsonl`          | Custom log location.                                             |
+| `--history-path <p>`          | `<project root>/.fermut/history.jsonl` | Custom log location.                                             |
 | `--limit <N>`                 | `10`                             | Show only the last N entries (ignored when `--all`).             |
 | `--all`                       | off                              | Show every recorded entry.                                       |
 | `--branch <NAME>`             | none                             | Keep only entries recorded on this git branch. Useful in CI where feature-branch runs would otherwise dilute the main-branch trend. |
@@ -20,6 +20,7 @@ fermut trend [PATH] [flags...]
 | `--diff`                      | off                              | Expand the per-run survivor diff into full new-survivor / newly-killed mutant-id lists below the table. |
 | `--by file`                   | none                             | Aggregate the latest run's survivors. `file` groups by source file, prints counts + oldest survivor's age per group. |
 | `--format human\|json`        | `human`                          | `human` (table + sparkline) or `json`.                           |
+| `--strict`                    | off                              | Fail when the history log has a malformed (corrupt, unparseable) line instead of skipping it, so a CI step catches a truncated file. Lines from a newer schema are warned about, not failed. Doesn't affect `run --fail-on-regression`, which loads history separately. |
 
 Run history is appended by `fermut run` unless disabled with
 `--no-history`. `fermut clean` preserves `history.jsonl`.

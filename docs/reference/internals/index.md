@@ -15,10 +15,10 @@ to write a patch and want to know where it should live.
         candidate mutants (source patches)
                       │
                       ▼
-              ty pre-filter  ◄── drops mutants whose patched source
-                      │            introduces new ty diagnostics
+        filter chain  ◄── cheap → expensive: operator tiers, shard/sample,
+                      │     diff, coverage, ruff, ty, tce
                       ▼
-         test runner (pytest | unittest)  — parallel, isolated, timeout-bounded
+         test runner (pytest | rstest | unittest)  — parallel, isolated, timeout-bounded
                       │
                       ▼
                    report
@@ -35,20 +35,27 @@ both built from the same crate root. The module structure:
 | `config`      | Runtime `Config` struct, TOML schema, walk-up file loader.                            |
 | `mutator`     | AST visitor + operator catalog → `Mutant` candidates.                                  |
 | `emit`        | Splice a `Mutant`'s replacement bytes into the source range.                           |
-| `filter`      | `Filter` trait + composable filter chain (experimental, op, sample, diff, coverage, ruff, ty). |
-| `runner`      | `Runner` trait + pytest / unittest implementations. Worker mirror management.          |
+| `filter`      | `Filter` trait + composable filter chain (experimental, parity, profile, operator, shard, sample, diff-only, since, coverage, ruff, ty, tce). |
+| `runner`      | `Runner` trait + pytest (also drives rstest) / unittest implementations. Worker mirror management. |
 | `engine`      | Top-level orchestration: parse → mutate → filter → run → report. Parallel via rayon. |
-| `cache`       | `(mutant.id, ast_hash(file), scope) → outcome` cache. Reformat-resilient.              |
+| `cache`       | `(mutant.id, ast_hash(file), scope) → outcome` cache, plus killer-scoped lookup for kills. |
+| `ast_hash`    | Structural AST hash per file (and per top-level scope for `cache_scope = "scope"`).    |
 | `history`     | `.fermut/history.jsonl` append + load, plus the `sparkline` helper shared with `trend`. |
 | `report`      | Outcome types + writers (json / junit / html / markdown). GHA annotation output.       |
 | `watch`       | File-system watch loop for `--watch` mode.                                              |
+| `equiv`       | Post-run equivalent-mutant detection (AST patterns + CPython bytecode identity).        |
+| `kill_order`  | Smart test ordering: kill history (`.fermut/kill-order.json`) + coverage-breadth prior. |
+| `subsume`     | Dominator / subsumption analysis behind `fermut subsume` and `--only-dominators`.      |
+| `test_tree`   | Test-suite fingerprinting for cache invalidation.                                       |
+| `llm`         | Model client used by `suggest`, `autofix` and `explain`.                                |
+| `sync`, `util` | Small shared helpers (poison-recovering locks, search utilities).                    |
 
 ## Data flow per `fermut run`
 
 1. **`engine::run(cfg)`** is the entry point. Everything below is what
    it orchestrates.
 
-2. **Parse + collect.** `mutator::collect_from_tree(source_root)` walks
+2. **Parse + collect.** `mutator::collect_from_tree(source_root, exclude)` walks
    `.py` files under the source root, parses each with
    `ruff_python_parser`, runs the visitor over each AST, and emits a
    `Vec<Mutant>`. One `Mutant` = one specific operator application at
@@ -56,13 +63,16 @@ both built from the same crate root. The module structure:
    replacement bytes.
 
 3. **Build filter chain.** `filter::build_chain(cfg)` returns a
-   `Vec<Box<dyn Filter>>` in cost order. Stages: experimental →
-   operator allow/deny → sample → diff-only / since → coverage → ruff →
-   ty. Each filter exposes `name()` and `evaluate(&Mutant) -> Decision`
-   (admit / reject).
+   `Vec<Box<dyn Filter>>` in cost order (`CANONICAL_ORDER` in
+   `src/filter/mod.rs`): experimental → parity → profile → operator
+   allow/deny → shard → sample → diff-only → since → coverage → ruff →
+   ty → tce. Each filter exposes `name()` and `admits(&Mutant) ->
+   Result<bool>`; the first `false` names the rejecting filter.
 
-4. **Hash files once.** Every unique source file gets one `sha256`
-   computed upfront. The cache key is `(mutant.id, file_hash)`.
+4. **Hash files once.** Every unique source file gets one structural
+   `ast_hash` computed upfront. The cache key is
+   `(mutant.id, ast_hash, scope)`, where `scope` folds in run-shape
+   inputs and the test fingerprint (see [Caching](../../concepts/caching.md)).
 
 5. **Open the result cache.** `Cache::load(path)` reads
    `.fermut/cache.json` if it exists. Defaults to empty.
@@ -72,13 +82,15 @@ both built from the same crate root. The module structure:
 
     a. Run the filter chain. First reject wins → outcome = `Skipped`.
 
-    b. Cache lookup with `(mutant.id, file_hash)`. Cached non-skip
-       outcomes are reused.
+    b. Cache lookup with `(mutant.id, ast_hash, scope)`, then the
+       killer-scoped lookup for kills. Cached non-skip outcomes are
+       reused.
 
     c. Cache miss → call `runner.run(mutant)`. Returns `Killed` /
-       `Survived` / `TimedOut` / `Errored`.
+       `Survived` / `TimedOut` / `Error`. Survivors then go through the
+       equivalence detector and may become `Equivalent`.
 
-    d. Cache the outcome (unless `Skipped` or `Errored`).
+    d. Cache the outcome (unless `Skipped` or `Error`).
 
 7. **Save cache.** On rayon join, `Cache::save(path)` writes back.
 
@@ -97,10 +109,13 @@ both built from the same crate root. The module structure:
 
 `runner::Runner` is a trait. Implementations:
 
-- `PytestRunner` — invokes `pytest -x --tb=no -q [--hypothesis-seed=N]
-  [<extra args>] <mirrored-tests>` per mutant.
-- `UnittestRunner` — invokes `python -m unittest discover -s
-  <mirrored-tests> -p 'test_*.py'`.
+- `PytestRunner` — invokes `<python> -m pytest --tb=no -q -x
+  [-p <reporter>] [--hypothesis-seed=N] [<extra args>] <node ids | tests dir>`
+  per mutant. `-x` is dropped under `--record-kill-sets`; `-p` loads the
+  injected JSONL reporter when the pytest plugin is on. The same runner
+  drives `rstest` (`runner = "rstest"`), swapping only the executable.
+- `UnittestRunner` — invokes `<python> -m unittest discover -s
+  <mirrored-tests> -p <unittest_pattern>` (default `test_*.py`).
 
 `build(cfg)` returns a `Box<dyn Runner>` based on `cfg.runner`. To add
 a new runner, implement the trait and add a `RunnerKind` variant — the
@@ -125,52 +140,55 @@ A `Filter` is small:
 ```rust
 pub trait Filter: Send + Sync {
     fn name(&self) -> &'static str;
-    fn evaluate(&self, mutant: &Mutant) -> Result<Decision>;
-}
-
-pub enum Decision {
-    Admit,
-    Reject(&'static str),  // reason — surfaced in skipped outcome
+    /// Ok(true) if the mutant should be tested, Ok(false) to drop it.
+    fn admits(&self, mutant: &Mutant) -> Result<bool>;
 }
 ```
 
-Adding a filter is one struct + one match arm in
-`filter::build_chain`. Tests live next to the filter implementation;
+A rejected mutant becomes `Skipped { filter: name() }`. Adding a filter
+is one struct + one `chain.push` in `filter::build_chain`, at its cost
+position, plus its name in `CANONICAL_ORDER` (the chain-order tests
+enforce it). Tests live next to the filter implementation;
 the engine tests are coarse end-to-end.
 
 ## Cache
 
-Format: a JSON file with a single top-level object mapping mutant id +
-file hash to outcome.
+Format: a JSON object whose `entries` map is keyed by mutant id alone;
+the hash and scope live inside each entry.
 
 ```json
 {
-  "version": 1,
   "entries": {
-    "src/auth.py@812:boundary-shift:age >= 18->age > 18|sha256:abcd...": {
-      "status": "survived",
-      ...
+    "src/auth.py@812:boundary-shift:>=->>": {
+      "file_hash": "…",
+      "scope": "…",
+      "outcome": { "status": "survived", "mutant": { … } },
+      "equiv_checked": true,
+      "killer_scope": "…",
+      "mac": "…"
     }
   }
 }
 ```
 
-The version field is bumped when the on-disk schema changes.
-Older readers fail closed (treat cache as empty); newer readers handle
-forward-compatibility with `#[serde(default)]` on new fields.
+`killer_scope` appears only on kills with a known killer; `mac` only
+when `FERMUT_CACHE_KEY` is set. There is no version field: new fields
+are added with `#[serde(default)]`, and a file that fails to parse is
+quarantined to `cache.corrupt-<pid>` and the run starts empty.
 
-Skipped + Errored outcomes are **not** cached:
+Skipped + Error outcomes are **not** cached:
 
 - Skipped — the filter chain may differ between runs (different
   `--ops`, `--coverage`, etc.), so reusing a skip would be wrong.
-- Errored — typically transient (flaky import, missing env var).
+- Error — typically transient (flaky import, missing env var).
 
 ### ty verdict cache
 
 A second, independent cache lives at `.fermut/ty-cache.json`,
-maintained by `src/filter/ty.rs`. Each `ty check` invocation costs
-~150-200ms (typeshed bootstrap + parse + inference); on warm runs
-ty dominates wall-time without this cache.
+maintained by `src/filter/ty.rs`. The default embedded checker pays
+the typeshed bootstrap once per worker; the subprocess fallback pays
+~150-200ms per `ty check`. Either way, on warm runs ty dominates
+wall-time without this cache.
 
 Key: `sha256(schema | ty_version | ast_hash(file) | range_start |
 range_end | replacement)`. Value: `admits` bool.
@@ -196,7 +214,7 @@ admit/reject verdict.
 | A new mutation operator                        | `src/mutator/operators.rs` + `src/mutator/visitor.rs` (see [Adding an operator](adding-operators.md)). |
 | A new filter (e.g. AST equivalence detection) | `src/filter/<name>.rs` + register in `filter::build_chain`.                  |
 | A new test runner                              | `src/runner/<name>.rs` + new `RunnerKind` variant.                            |
-| A new report writer                            | `src/report/writers/<name>.rs` + a `Report::write_<name>(&self, path)`.       |
+| A new report writer                            | `src/report/writers/<name>.rs` (a `Report::write_<name>(&self, path)` impl) + a field and arm in `writers::ReportSinks::write_all` + the CLI flag. |
 | A new CLI subcommand                            | `src/cli/subcmd/<name>.rs` + `Cmd` variant + dispatch arm.                    |
 | A new config key                               | `src/config/file.rs` (TOML schema), `src/config/mod.rs` (`Config` struct), `src/cli/build_config.rs` (CLI ⊕ file ⊕ default precedence). |
 

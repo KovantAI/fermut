@@ -14,6 +14,7 @@ fermut run [PATH] [flags...]
 | `--timeout <s>`             | `30`                             | Per-mutant test timeout.                                            |
 | `--no-ty-filter`            | off                              | Skip the ty pre-filter.                                             |
 | `--ruff-filter`             | off                              | Enable the ruff lint pre-filter.                                    |
+| `--tce`                     | off                              | Enable the TCE (bytecode-equivalence) pre-filter: drop mutants that `compile()` to a byte-identical code object. Requires `python3` (or `FERMUT_PYTHON`). Also `tce = true`. |
 | `--hypothesis-seed <N>`     | none                             | Pin Hypothesis seed across mutants. See [mutation testing concepts](../../concepts/mutation-testing.md#vocabulary). |
 | `--pytest-arg <ARG>`        | none, repeatable                 | Forward arbitrary args to pytest.                                   |
 | `--no-cache`                | cache on                         | Disable the result cache.                                           |
@@ -26,7 +27,7 @@ fermut run [PATH] [flags...]
 | `--sample-seed <N>`         | `0`                              | Seed for `--sample` selection.                                       |
 | `--shard <i/n>`             | off                              | Distributed exec: process only the i-th of n disjoint slices.        |
 | `--runner pytest\|rstest\|unittest` | `pytest`                 | Pick the Python test runner. `rstest` is a pytest-CLI-compatible drop-in. |
-| `--python <PATH>`           | auto-discover                    | Interpreter (path) or virtualenv (dir) to run pytest with — fermut invokes `<python> -m pytest`, no PATH reliance. Omitted → auto-discovers an active venv / nearby `.venv`, else a bare `pytest` on PATH. See [Choosing the interpreter](#python-interpreter). |
+| `--python <PATH>`           | auto-discover                    | Interpreter (path) or virtualenv (dir) to run the tests with (pytest, rstest or unittest) — fermut invokes `<python> -m pytest`, no PATH reliance. Omitted → auto-discovers an active venv / nearby `.venv`, else a bare `pytest` on PATH. See [Choosing the interpreter](#python-interpreter). |
 | `--isolation auto\|copy\|hardlink\|reflink` | `auto` | How worker mirrors are populated. See [Isolation modes](#isolation-modes). |
 | `--annotate`                | auto in GHA                      | Emit `::error` / `::warning` annotations for CI.                     |
 | `--watch`                   | off                              | Re-run on every `.py` change until Ctrl+C.                            |
@@ -44,7 +45,7 @@ fermut run [PATH] [flags...]
 | `--diff-only [base]`        | off                              | Restrict to lines changed vs base ref (default `main`).               |
 | `--since <SPEC>`            | off                              | Restrict to lines touched since commit or date. See [Incremental runs](#incremental-runs-since). |
 | `--no-diff-only`            | off                              | Override `diff_only`/`since` from config — force full sweep. Mutually exclusive with `--diff-only` and `--since`. |
-| `--coverage [path]`         | auto-discover `.coverage`        | Per-mutant test selection from coverage contexts. Accepts a `.coverage` SQLite DB or a `coverage.json` export (format sniffed). When unset, fermut auto-discovers `.coverage` at the project root. See [Coverage](#coverage-integration). |
+| `--coverage [path]`         | flag absent: auto-discover `.coverage`; bare `--coverage`: `coverage.json` | Per-mutant test selection from coverage contexts. Accepts a `.coverage` SQLite DB or a `coverage.json` export (format sniffed). Auto-discovery of `.coverage` at the project root happens only when the flag is absent; a bare `--coverage` with no path means `coverage.json`. See [Coverage](#coverage-integration). |
 | `--no-coverage`             | off                              | Override `coverage` from config — disable coverage filtering for this run. Mutually exclusive with `--coverage`. |
 | `--exclude <GLOB>`          | none, repeatable                 | Glob patterns excluding paths from mutation collection (relative to source root). Example: `--exclude 'alembic/**' --exclude 'tests/integration/**'`. When passed at least once, replaces config `exclude` (no merge). |
 | `--no-equiv-detect`         | detector on                      | Skip the equivalent-mutant detector (AST patterns + CPython bytecode). Survivors are not post-processed; equivalents stay counted. |
@@ -56,13 +57,19 @@ fermut run [PATH] [flags...]
 | `--smart-order`             | off                              | Force smart test ordering on over `smart_order = false` in config. Conflicts with `--no-smart-order`. |
 | `--no-pytest-plugin`        | on                               | Don't load fermut's reporter plugin into per-mutant pytest/rstest runs; infer outcomes from exit codes and output instead. See [Result reporter plugin](#result-reporter-plugin). |
 | `--max-time <SECS>`         | off (whole catalogue)            | Wall-clock ceiling on the testing phase. Evaluates highest-value mutants first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` (excluded from the score) instead of run — in-flight mutants finish. A predictable time ceiling for PR gates. See [Time-boxed runs](#time-boxed-runs-max-time). |
-| `--only-dominators`         | off                              | [experimental] Run dominator mutants from `.fermut/dominators.json` and infer the kills they imply; for nightly sweeps, refused with `--diff-only`/`--since`. See [`fermut subsume`](subsume.md#fermut-run-only-dominators-experimental). |
-| `--audit-inferred <RATE>`   | `0.05`                           | With `--only-dominators`: fraction of inferred kills re-run against their killing test; any that survives fails the run. |
+| `--record-kill-sets <PATH>` | off                              | [experimental] Write each mutant's full kill-set (every covering test that fails) to `PATH` as JSONL, the input to [`subsume`](subsume.md) and [`hom`](hom.md). Drops pytest's `-x`, so it is much slower. Pytest/rstest only. Pair with `--no-cache`: a cache hit runs nothing and records nothing. |
+| `--only-dominators`         | off                              | [experimental] Run dominator mutants from `.fermut/dominators.json` and infer the kills they imply; for nightly sweeps, refused with `--diff-only`/`--since`/`--record-kill-sets`. See [`fermut subsume`](subsume.md#fermut-run-only-dominators-experimental). |
+| `--audit-inferred <RATE>`   | `0.05`                           | Requires `--only-dominators` (the parser rejects it otherwise). Under `--only-dominators`: fraction of inferred kills re-run against their killing test; any that survives fails the run. |
 | `--fail-on-regression <PTS>`| off                              | Exit non-zero when score dropped more than `PTS` vs the most recent prior entry on the same git branch. Requires history. Ignored in `--watch`. |
 | `--trend-branch <NAME>`     | none                             | Restrict the `--trend` markdown block's "previous run" lookup to entries recorded on this branch. Requires `--trend`. |
+| `--no-fail`                 | off                              | Never exit non-zero because of the mutation result: write every report and exit 0 even with survivors. For report-only runs (trend shards, dashboard feeds). Replaces the `--fail-under 0` idiom. Mutually exclusive with `--fail-under` and `--fail-on-regression`. Also suppresses the exit for a scoreless / all-errored run, which is still reported as N/A. |
 
-Exit code is non-zero when any mutant survives — wire that into CI to
-gate on mutation score.
+Exit code: by default `1` when any mutant survives. With
+`--fail-under <SCORE>`, `1` only when the score is below `SCORE`. With
+`--fail-on-regression <PTS>`, also `1` when the score dropped more than `PTS`.
+`--no-fail` always exits `0` on the mutation result. A run that errors out
+(bad config, red baseline, git failure) also exits `1`; clap usage errors exit
+`2`. Wire the gate into CI to fail on mutation score.
 
 ## Smart test ordering { #smart-test-ordering }
 
@@ -85,8 +92,8 @@ layers:
    `(file, operator)`** is lifted ahead of the breadth order. History
    dominates once a killer is known; breadth fills the no-history gap.
 
-It's **on by default** (except when a per-mutant timeout is set — see the
-caveat below) and self-training: each run records which test killed which
+It's **on by default**, including under a per-mutant timeout (see below),
+and self-training: each run records which test killed which
 mutant into `.fermut/kill-order.json` (advisory — losing it only costs a
 slow run), and later runs read it to order. The win is proportional to
 tests-selected-per-mutant; a mutant covered by one test gains nothing.
@@ -268,10 +275,14 @@ mutant to only the tests that exercised the mutated line.
 
 ## Incremental runs (`--since`)
 
-`--diff-only main` is branch-relative — a three-dot diff (`git diff
-main...HEAD`) against the merge base with `main`, so it scopes to this
-branch's **committed** changes only (uncommitted edits are not included;
-use `--since` for those). Right tool for PR-time gates.
+`--diff-only main` is branch-relative. fermut resolves `git merge-base main
+HEAD`, then diffs that commit against the **working tree** (`git diff
+<merge-base>`), so the line set is the branch's committed changes **plus
+uncommitted edits**. Changes that landed on `main` after the branch point are
+not included. Right tool for PR-time gates. If the merge base can't be
+resolved (a shallow clone, unrelated histories), fermut exits with an error
+instead of running zero mutants. Fetch full history (`fetch-depth: 0`) or
+pass `--no-diff-only`.
 
 For "what's changed since I last ran fermut?", "only test the last
 week", or "run against a specific tag", use `--since`:
@@ -301,7 +312,7 @@ locally re-runs its mutants without needing to commit.
 ## Choosing the interpreter { #python-interpreter }
 
 The pytest runner needs a Python interpreter that has `pytest` installed.
-By default fermut spawns a bare `pytest` resolved from `PATH` — which
+With no `--python` and no venv found, fermut spawns a bare `pytest` resolved from `PATH` — which
 breaks in environments that won't let you put a venv's `bin/` on `PATH`
 (locked-down agent sandboxes, some CI), and is ambiguous when several
 interpreters are around.
@@ -328,8 +339,10 @@ The interpreter is part of the cache key and the history config hash, so
 switching interpreters never reuses another's cached verdicts or marks the
 runs as directly comparable.
 
-(`--python` applies to the pytest runner; the `unittest` runner is
-unaffected.)
+`--python` applies to every runner. `pytest` and `rstest` run
+`<python> -m pytest`/`rstest`, and `unittest` runs `<python> -m unittest`.
+With no venv found, `unittest` falls back to the `python3` (or `python`) on
+`PATH`.
 
 ## Isolation modes
 

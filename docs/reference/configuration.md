@@ -1,12 +1,12 @@
 # Configuration reference
 
-fermut reads its persistent config from one of two files, in this order
-of preference:
+fermut reads its persistent config from one of two files:
 
-1. **`fermut.toml`** — standalone file. Preferred. Any ancestor of the
-   source path.
-2. **`pyproject.toml`** with a `[tool.fermut]` table — useful when you
+1. **`fermut.toml`**: a standalone file. Preferred.
+2. **`pyproject.toml`** with a `[tool.fermut]` table. Useful when you
    already maintain a `pyproject.toml` and want to avoid a second file.
+
+The nearest directory wins: see [Discovery](#discovery).
 
 Precedence is **CLI args > env vars > config file > built-in defaults**.
 Only a few env vars feed the merge today (`FERMUT_ISOLATION` is the
@@ -38,9 +38,11 @@ TOML primitives: `string`, `bool`, `int`, `float`, `array<string>`.
 | `jobs`             | `int`           | logical CPU count                               | Parallel workers (one mutant per worker at a time).                                              |
 | `timeout`          | `int` (s)       | `30`                                            | Per-mutant test timeout.                                                                          |
 | `runner`           | `string`        | `"pytest"`                                      | `"pytest"`, `"rstest"` (pytest-compatible drop-in), or `"unittest"`.                              |
-| `python`           | `string` (path) | auto-discover                                   | Interpreter or virtualenv dir to run pytest with (`<python> -m pytest`). CLI `--python`. See [Choosing the interpreter](cli/run.md#python-interpreter). |
+| `unittest_pattern` | `string` (glob) | `"test*.py"`                                    | File glob passed to `python -m unittest discover -p` (the `unittest` runner only). Set e.g. `"*_test.py"` for that naming convention. Ignored by pytest/rstest. |
+| `python`           | `string` (path) | auto-discover                                   | Interpreter or virtualenv dir to run the tests with (`<python> -m pytest`, `-m rstest` or `-m unittest`). CLI `--python`. See [Choosing the interpreter](cli/run.md#python-interpreter). |
 | `ty_filter`        | `bool`          | `true`                                          | Enable the ty pre-filter.                                                                         |
 | `ruff_filter`      | `bool`          | `false`                                         | Enable the ruff lint pre-filter.                                                                  |
+| `tce`              | `bool`          | `false`                                         | Enable the TCE (bytecode-equivalence) pre-filter: drop mutants that `compile()` to a byte-identical code object. CLI `--tce`. |
 | `experimental`     | `bool`          | `false`                                         | Include experimental operators.                                                                   |
 | `parity`           | `bool`          | `false`                                         | Include parity operators — for cross-tool comparison only (very noisy), never normal scoring. CLI `--parity`. See [Parity operators](operators/parity.md). |
 | `operators`        | `string`        | `"default"`                                     | Compare / `and`-`or` operator set: `default`, `minimal`, or `full`. CLI `--operators`. See [Operator profiles](operators/profiles.md). |
@@ -52,10 +54,10 @@ TOML primitives: `string`, `bool`, `int`, `float`, `array<string>`.
 | `hypothesis_seed`  | `int`           | none                                            | Pin Hypothesis seed across mutants (passes `--hypothesis-seed=<N>` to pytest).                     |
 | `pytest_args`      | `array<string>` | `[]`                                            | Extra args forwarded to pytest. Ignored by the unittest runner.                                    |
 | `cache`            | `bool`          | `true`                                          | Enable the per-mutant result cache. **Critical for fast iteration.**                              |
-| `cache_path`       | `string` (path) | `<source_root>/.fermut/cache.json`              | Custom cache file location.                                                                       |
+| `cache_path`       | `string` (path) | `<project root>/.fermut/cache.json`             | Custom cache file location.                                                                       |
 | `cache_audit_rate` | `float` (0–1)   | `0.05`                                          | Fraction of killer-keyed cache hits re-run against their killing test each run (at least one when any occur). `0` disables. See [Caching](../concepts/caching.md#killed-verdicts-keyed-on-the-killing-test). |
 | `history`          | `bool`          | `true`                                          | Append a summary entry to the history log on every run.                                            |
-| `history_path`     | `string` (path) | `<source_root>/.fermut/history.jsonl`           | Custom history log location.                                                                      |
+| `history_path`     | `string` (path) | `<project root>/.fermut/history.jsonl`          | Custom history log location. Project root = nearest ancestor of `source_root` with `pyproject.toml` / `setup.cfg`. |
 | `sample`           | `float`         | `1.0`                                           | Test only this fraction of mutants (0.0–1.0), deterministic per `sample_seed`.                     |
 | `sample_seed`      | `int`           | `0`                                             | Seed for `sample` selection.                                                                       |
 | `shard`            | `string`        | none                                            | `"i/n"` — process only the i-th of n disjoint slices. Both 1-based.                                |
@@ -68,7 +70,7 @@ TOML primitives: `string`, `bool`, `int`, `float`, `array<string>`.
 | `baseline_timeout` | `int`           | `300`                                           | Wall-clock cap (seconds) for the baseline run. Separate from `timeout` (which bounds a single mutant's coverage-selected subset) because the baseline runs the whole suite. A suite exceeding it is killed and the run aborts. CLI `--baseline-timeout` overrides. |
 | `smart_order`      | `bool`          | `true`                                          | Run the most likely killer first so pytest's `-x` short-circuits sooner: the cold-start breadth prior (most targeted coverage-selected test — fewest of the mutated file's lines) sets the order, then a historically-killing test (per `(file, operator)`, learned into `.fermut/kill-order.json`) is lifted ahead of it. Advisory — only permutes the selected set, so it never moves the mutation score (it can flip `killed`↔`timed_out`, but both count as detected and no `survived` is created or removed), only speed. Stays on under a `timeout`, where killer-first ordering helps most. CLI `--no-smart-order` / `--smart-order` override. See [Smart test ordering](cli/run.md#smart-test-ordering). |
 | `pytest_plugin`    | `bool`          | `true`                                          | Load fermut's result reporter plugin (`-p _fermut_reporter`, injected via `PYTHONPATH`) into per-mutant pytest/rstest runs, so fermut knows the killing test and whether a mutant broke an import (exit 4) without parsing output. The exit code still decides other verdicts; with no result fermut falls back to exit codes and output parsing. CLI `--no-pytest-plugin` overrides. See [Result reporter plugin](cli/run.md#result-reporter-plugin). |
-| `kill_order_path`  | `path`          | `.fermut/kill-order.json`                       | Location of the advisory smart-ordering sidecar. Relative paths resolve against the config file's directory. Advisory — losing or relocating it only costs a slow run. |
+| `kill_order_path`  | `path`          | `<project root>/.fermut/kill-order.json`        | Location of the advisory smart-ordering sidecar. Relative paths resolve against the config file's directory. Advisory — losing or relocating it only costs a slow run. |
 | `max_time`         | `int`           | unset (whole catalogue)                         | Wall-clock ceiling (seconds) on the testing phase. Mutants are evaluated highest-value first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` and excluded from the score. Bounds the testing phase only — not baseline, generation, or the `ty` pre-filter. CLI `--max-time` overrides. See [Time-boxed runs](cli/run.md#time-boxed-runs-max-time). |
 
 ## Examples
@@ -176,10 +178,14 @@ elided):
 
 ## Discovery
 
-`fermut.toml` is searched in every ancestor of the source-root path,
-nearest-first. The first match wins. If no `fermut.toml` is found,
-`pyproject.toml` files are searched in the same walk for a
-`[tool.fermut]` table.
+fermut walks up from the source-root path, nearest directory first. In each
+directory it checks `fermut.toml` first, then a `pyproject.toml` that has a
+`[tool.fermut]` table. The first match wins. A `pyproject.toml` without
+`[tool.fermut]` is skipped and the walk continues. So a nearer `pyproject.toml
+[tool.fermut]` beats a `fermut.toml` further up, and within one directory
+`fermut.toml` wins.
+
+Set `FERMUT_NO_CONFIG=1` to skip discovery entirely.
 
 To force a specific config file when both exist, pass `path` to point at
 the directory containing the file you want. (A dedicated `--config

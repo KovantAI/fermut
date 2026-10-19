@@ -127,7 +127,7 @@ name hints at which:
 | `arith-op-swap`       | Weak assertion that wouldn't catch an arithmetic substitution.    |
 | `compare-op-swap`     | Missing test for the inverse comparison case.                     |
 | `bool-op-swap`        | Test only exercises the "true" path of an `and` / `or`.            |
-| `return-to-none`      | Function's return value is never asserted against.                |
+| `return-value-to-none` | Function's return value is never asserted against.                |
 | `constant-replace`    | Magic number not pinned by a test.                                |
 
 ## When to ignore instead of kill

@@ -121,7 +121,7 @@ inputs:
     required: false
     default: "fermut-report"
   args:
-    description: 'Extra arguments appended to `fermut run`, e.g. "--ops arith,compare --timeout 20".'
+    description: 'Extra arguments appended to `fermut run`, e.g. "--ops arith-op-swap,compare-op-swap --timeout 20".'
     required: false
     default: ""
 

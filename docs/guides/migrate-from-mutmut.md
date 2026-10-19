@@ -89,7 +89,7 @@ differs:
 |-------------------------|----------------------------------------------|
 | `# pragma: no mutate`   | `# fermut: ignore`                           |
 | (line-level only)       | `# fermut: ignore[arith-op-swap]` (op-scoped) |
-| (no module-level form)  | `# fermut: ignore-file` at top of file       |
+| (no module-level form)  | no file marker — list the file in `exclude`  |
 
 fermut's marker is also operator-scopable — `# fermut: ignore[arith-op-swap]`
 silences only that operator on the line, where mutmut's pragma is

@@ -13,12 +13,12 @@ specifically to make those loops fast and reliable.
 
 | Need an agent has                                                          | What fermut gives it                                                                                                                              |
 |----------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------|
-| Short iteration cycles (write → measure → write)                            | Per-mutant result cache keyed on `(mutant.id, ast_hash(file), scope)`. AST-structural hashing means reformat / comment edits don't invalidate. See [Cache strategy](#cache-strategy). |
+| Short iteration cycles (write → measure → write)                            | Per-mutant result cache keyed on `(mutant.id, ast_hash(file), scope)`. Note the mutant id embeds the byte offset, so any edit that shifts bytes (including a comment) re-runs the mutants below it. See [Cache strategy](#cache-strategy). |
 | Machine-readable output                                                    | `--format json`, `--json <path>`, `--junit`, structured fields in every report writer.                                                            |
 | Deterministic results across runs                                          | Pinnable Hypothesis seed, deterministic `--sample`, content-hash cache keys. Two runs of the same commit produce the same survivor list.            |
 | Knowing *which test to write next*                                          | `fermut next` ranks survivors by cluster leverage + kill-ease and names the single best target; survivor JSON lines carry file:line, operator, original → replacement for the concrete assertion. |
 | Knowing *if my work is helping*                                             | `.fermut/history.jsonl` + `fermut trend`. Score delta vs the previous iteration is the agent's reward signal.                                       |
-| Targeting only the code the agent just touched                              | `--diff-only` for branch-relative diffs (three-dot, **committed** only), `--since <SPEC>` for "since I last ran" (two-dot, **includes uncommitted** edits). |
+| Targeting only the code the agent just touched                              | `--diff-only` for branch-relative diffs (merge base → working tree), `--since <SPEC>` for "since I last ran" (fixed point → working tree). Both **include uncommitted** edits. |
 | Narrowing tests per mutant so each iteration runs in seconds, not minutes  | Coverage-driven test selection from `.coverage` (per-test contexts). fermut reads coverage.py's native `.coverage` SQLite DB directly and auto-discovers it at the project root; `pytest --cov=src --cov-context=test` is all it takes. |
 | Failing loud when the environment is broken                                 | `fermut doctor` returns exit code 1 with a remediation hint per failed check.                                                                       |
 
@@ -29,12 +29,15 @@ seconds in steady state.
 
 **1. Edit one file** — say `src/auth.py`, tightening a boundary check.
 
-**2. Run fermut, write JSON** — `--since HEAD` scopes mutants to
-just-edited files; cache reuses verdicts for everything else.
+**2. Run fermut, write JSON** — `--diff-only HEAD` scopes mutants to
+lines edited since the last commit; cache reuses verdicts for everything
+else. (`--diff-only HEAD` behaves like `--since HEAD` but also overrides a
+`diff_only = "main"` key from a `pr-gate` config; `--since` would collide
+with that key and error out.)
 
 ```sh
 fermut run src/ --tests tests/ \
-    --since HEAD \
+    --diff-only HEAD \
     --coverage .coverage \
     --json .fermut/last.json \
     --no-history --quiet
@@ -83,7 +86,7 @@ under 10 seconds on warm cache for repos in the 500-mutant range.
 
 ```mermaid
 flowchart LR
-    A[edit source / tests] --> B[fermut run --since HEAD --json out.json --no-history --quiet]
+    A[edit source / tests] --> B[fermut run --diff-only HEAD --json out.json --no-history --quiet]
     B --> C{any SURVIVED?}
     C -- yes --> F[parse out.json → pick survivor]
     F --> G[write killing test]
@@ -101,7 +104,7 @@ are noisy, history is for the gate); the gate run drops those and adds
 Key invariants:
 
 1. **Don't re-run the full sweep every iteration.** Use `--diff-only`
-   (CI workflow) or `--since HEAD~1` (local), so the agent only burns
+   (CI workflow) or `--diff-only HEAD~1` (local), so the agent only burns
    wall-clock on lines it changed.
 2. **Always read `out.json`, not stdout.** Stdout is for humans. JSON is
    stable across releases per the [versioning policy](https://github.com/KovantAI/fermut/blob/main/VERSIONING.md).
@@ -286,7 +289,7 @@ The recommended invocation for an agent inner loop:
 ```sh
 fermut run src/ \
     --tests tests/ \
-    --since HEAD                     # only mutants in just-edited files
+    --diff-only HEAD                 # only mutants on lines edited since last commit
     --coverage .coverage             # narrow tests per mutant (auto-discovered at root if omitted)
     --json   .fermut/last.json       # parse this
     --no-history                     # iterations are noisy; gate the gate, not the loop
@@ -533,8 +536,8 @@ repo is expected — it isn't skipping the check.
 - **Disabling the cache.** `--no-cache` is for one-off debugging, not
   for the loop. Re-running every mutant every iteration is the dominant
   cost.
-- **Re-running the full sweep every iteration.** Use `--since HEAD` or
-  `--diff-only` so the cache hit ratio stays high.
+- **Re-running the full sweep every iteration.** Use `--diff-only HEAD` or
+  `--diff-only main` so the cache hit ratio stays high.
 - **Reading stdout instead of JSON.** Stdout formatting is human-tuned;
   no API guarantee. For `explain` / `suggest`, pass `--format json` —
   the schema is part of the versioned contract.
@@ -586,4 +589,7 @@ timeout = 15
 ```
 
 Use `fermut init --profile pr-gate` to get a config close to this — then
-hand-edit.
+hand-edit. Note `pr-gate` also writes `diff_only = "main"`: pass
+`--diff-only <ref>` to re-scope a run, `--no-diff-only` for a full sweep.
+`--since` on top of that key is rejected (`--diff-only` and `--since` are
+mutually exclusive).

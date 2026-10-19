@@ -191,7 +191,13 @@ pub(crate) fn build_explain_report(opts: &ExplainOpts) -> Result<ExplainReport> 
     let m = outcome.mutant();
     let enclosing = enclosing_symbol(m);
 
-    let coverage = match &opts.coverage {
+    // Same discovery as `run`: no `--coverage` → pick up the project-root
+    // `.coverage` DB if one exists.
+    let discovered = opts
+        .coverage
+        .clone()
+        .or_else(|| crate::cli::build_config::discover_coverage_db(&opts.project_root));
+    let coverage = match &discovered {
         Some(p) => Some(build_coverage_signal(p, m)?),
         None => None,
     };
@@ -283,7 +289,7 @@ fn build_source_context(m: &Mutant, context_lines: usize) -> SourceContext {
 fn build_coverage_signal(coverage_path: &Path, m: &Mutant) -> Result<CoverageSignal> {
     let cwd = std::env::current_dir()?;
     let project_root = crate::runner::find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
-    let ctx = match CoverageContexts::from_json(coverage_path, &cwd, &project_root) {
+    let ctx = match CoverageContexts::from_path(coverage_path, &cwd, &project_root) {
         Ok(c) => c,
         Err(e) => {
             return Ok(CoverageSignal {
@@ -945,6 +951,48 @@ mod tests {
     }
 
     #[test]
+    fn coverage_signal_reads_sqlite_db() {
+        // Regression: explain used to call `from_json` only, so a `.coverage`
+        // SQLite DB failed to parse and was silently reported as uncovered.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("calc.py");
+        std::fs::write(&src, "def f(x):\n    return x >= 1\n").unwrap();
+        let db = tmp.path().join(".coverage");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE file (id integer primary key, path text);
+             CREATE TABLE context (id integer primary key, context text);
+             CREATE TABLE line_bits (file_id integer, context_id integer, numbits blob);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO file (id, path) VALUES (1, ?1)",
+            [src.display().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO context (id, context) VALUES (1, 'tests/test_calc.py::test_f|run')",
+            [],
+        )
+        .unwrap();
+        // numbits: line 2 → byte 0, bit 2.
+        conn.execute(
+            "INSERT INTO line_bits (file_id, context_id, numbits) VALUES (1, 1, ?1)",
+            [vec![0b100u8]],
+        )
+        .unwrap();
+        drop(conn);
+
+        let sig = build_coverage_signal(&db, &make_mutant(src, 2)).unwrap();
+        assert!(
+            !sig.note.contains("could not load coverage"),
+            "SQLite DB must load: {}",
+            sig.note
+        );
+        assert!(sig.covered, "line 2 is covered: {:?}", sig.tests);
+    }
+
+    #[test]
     fn locate_accepts_printed_offset_form() {
         // The `file:line@offset` form printed by `run`/`show` (the `@offset`
         // is not in this mutant's id) must select via the describe() fallback.
@@ -1163,9 +1211,11 @@ pub(crate) struct ExplainArgs {
     #[arg(long, num_args = 0..=1, default_missing_value = "tests")]
     pub(crate) tests: Option<std::path::PathBuf>,
 
-    /// Path to a `coverage.json` (with contexts). When present, the
-    /// explanation includes whether any test executed the mutant line
-    /// and which tests they were.
+    /// Coverage data with per-test contexts: coverage.py's `.coverage`
+    /// SQLite DB or a `coverage json --show-contexts` export (format is
+    /// sniffed). Without the flag, a `.coverage` DB at the project root is
+    /// auto-discovered. When present, the explanation includes whether any
+    /// test executed the mutant line and which tests they were.
     #[arg(long, num_args = 0..=1, default_missing_value = "coverage.json")]
     pub(crate) coverage: Option<std::path::PathBuf>,
 

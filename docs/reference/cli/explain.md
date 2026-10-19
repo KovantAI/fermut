@@ -16,7 +16,7 @@ fermut explain <report.json> <SELECTOR> [--format human|json] [--context N] \
 | `--format human\|json`    | Output format. `human` (default) prints the terminal-laid-out view. `json` emits the structured `ExplainReport`. |
 | `--context N`             | Source lines to show on each side of the mutant line. Default `5`.                                              |
 | `--tests <dir>`           | Tests directory to grep for the enclosing symbol. `--tests` with no value uses `tests/`.                        |
-| `--coverage <file>`       | Coverage data with per-test contexts — either coverage.py's native `.coverage` SQLite DB or a `coverage.json` export (the format is sniffed). When present, shows whether any test executed the mutant line. Defaults to auto-discovering `.coverage` at the project root. |
+| `--coverage <file>`       | Coverage data with per-test contexts — either coverage.py's native `.coverage` SQLite DB or a `coverage.json` export (the format is sniffed). When present, shows whether any test executed the mutant line. Without the flag, `.coverage` at the project root is auto-discovered; a bare `--coverage` means `coverage.json`. |
 | `--llm`                   | Append an LLM-generated prose explanation + killing test below the heuristic block. Requires `ANTHROPIC_API_KEY`. |
 | `--model M`               | Anthropic model id. Default `claude-sonnet-4-6` (applied by the handler when omitted on the CLI; clap itself has no default). |
 | `--no-cache`              | Skip the `.fermut/llm-cache.json` lookup and write.                                                              |

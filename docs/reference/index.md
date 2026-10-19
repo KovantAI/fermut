@@ -6,8 +6,8 @@ every key, every operator.
 - **[CLI](cli/index.md)** — every subcommand, every flag, every default.
 - **[Configuration](configuration.md)** — every `fermut.toml` key
   with type, default, and effect.
-- **[Operators](operators/index.md)** — full mutation catalogue (26
-  stable + 4 experimental + 3 parity) with examples.
+- **[Operators](operators/index.md)** — full mutation catalogue (30
+  stable + 8 experimental + 3 parity + 5 profile-gated) with examples.
 - **[Environment variables](environment-variables.md)** — every var
   fermut reads from the process environment.
 - **[Shell completion](shell-completion/index.md)** — install

@@ -20,26 +20,25 @@ a preflight.
 | Check          | Status   | Notes                                                                                             |
 |----------------|----------|---------------------------------------------------------------------------------------------------|
 | `config`       | warn     | Missing `fermut.toml` / `[tool.fermut]` — `fermut init` generates one.                            |
-| `python`       | required | `python3` ≥ 3.10 on `PATH`.                                                                       |
-| `pytest`       | required | Pytest binary on `PATH` (when configured runner is pytest).                                       |
-| `coverage`     | required | `coverage` binary on `PATH`.                                                                      |
-| `pytest-cov`   | required | `pytest_cov` importable from the `python3` on `PATH`. Required to produce per-test contexts.      |
-| `coverage-data`| info     | When `coverage = "…"` is wired in config: the file is present and valid for either format — a `.coverage` SQLite DB with a populated `context` table, or a JSON export with a `"contexts"` field.                |
-| `ty`           | required | `ty` binary on `PATH`. Hard requirement unless `ty_filter = false` in `fermut.toml`.              |
+| `venv`         | info     | The project venv found by the same walk `run` uses (`$VIRTUAL_ENV`, else a nearby `.venv`). Every tool below is probed in its `bin/` first, then on `PATH`. Skipped when none is found. |
+| `python`       | required | `python3` (else `python`) ≥ 3.10, venv first, then `PATH`.                                        |
+| `pytest`       | required | Configured runner binary — `pytest`, or `rstest` when `runner = "rstest"`. `unittest` is stdlib and always passes. |
+| `coverage`     | required | `coverage` binary.                                                                                |
+| `pytest-cov`   | required | `pytest_cov` importable from the resolved Python. Required to produce per-test contexts.          |
+| `coverage-data`| warn/fail| The `coverage = "…"` file from config, or the `.coverage` DB `run` would auto-discover at the project root: present and valid for either format — a `.coverage` SQLite DB with a populated `context` table, or a JSON export with a `"contexts"` field. |
+| `ty`           | required | `ty` binary. Hard requirement unless `ty_filter = false` in `fermut.toml`.                        |
 | `ruff`         | required | Only when `ruff_filter = true` in config.                                                         |
 | `gh`           | optional | Only needed for `fermut pr-comment`.                                                              |
 | `hypothesis`   | warn     | Project depends on Hypothesis but no `hypothesis_seed` pinned — survivors flicker between runs.    |
 | `tests`        | required | When `tests = "…"` is wired: the path resolves to an existing directory.                          |
 | `legacy-artifacts` | warn | Detects leftover dirs from prior mutation tools (`mutants/`, `.mutmut-cache`, `cosmic-ray-data/`, `.cache/mutpy/`). `mutants/tests/` breaks pytest collection. |
 
-> **uv / Poetry / per-project venv?** `doctor` resolves every tool
-> from the current shell's `PATH`. It does not auto-discover a
-> `.venv` next to `pyproject.toml`. Activate the project venv
-> (`source .venv/bin/activate`, `poetry shell`) or invoke as `uv run
-> fermut doctor` before relying on the result — a system `python3`
-> on macOS will otherwise fail the ≥ 3.10 check even when the
-> project's actual interpreter is 3.12, and `pytest-cov` won't be
-> importable.
+> **uv / Poetry / per-project venv?** No need to activate it. `doctor`
+> resolves the project venv the same way `run` does (`$VIRTUAL_ENV`, else a
+> `.venv` found walking up from the project) and probes tools inside it
+> before `PATH`. The `venv` row shows which `bin/` was used. If it reads
+> "none found", tools come from `PATH` only. Activate the venv, or create
+> `.venv` next to `pyproject.toml`.
 
 See **[Troubleshooting](../troubleshooting/index.md)** for the
 symptoms `doctor` catches.

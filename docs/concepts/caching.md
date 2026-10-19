@@ -19,8 +19,10 @@ After every successful mutant evaluation, fermut writes one entry to
   (e.g. `src/calculator.py@216:boundary-shift:<=-><`).
 - `ast_hash(source_file)` is the **AST-structural** hash of the
   file containing the mutant. Whitespace, comments, and pure
-  formatting changes don't change the AST, so a `ruff format` pass
-  doesn't invalidate the cache. With `cache_scope = "scope"`, this
+  formatting changes don't change the AST hash. They *do* move byte
+  offsets, though, and the byte offset is part of `mutant.id`, so any
+  edit that shifts bytes **above** a mutant changes its id and misses
+  (see [Why AST-hash](#why-ast-hash-not-mtime-or-raw-bytes)). With `cache_scope = "scope"`, this
   narrows to the enclosing top-level def/class instead of the whole
   file, so sibling-function edits keep cache hits intact (see
   [`cache_scope`](../reference/configuration.md#schema)).
@@ -37,9 +39,12 @@ After every successful mutant evaluation, fermut writes one entry to
 All of fermut's sidecar state lives in one `.fermut/` directory at the
 **project root** (nearest `pyproject.toml`/`setup.cfg`, so a
 `source_root = "src"` layout still anchors at the repo root, not under
-`src/`): `cache.json` (this cache), `history.jsonl` (trend log), and
-`ty-cache.json` (the ty pre-filter's baseline-diagnostic cache). The
-whole directory is gitignored by default.
+`src/`): `cache.json` (this cache), `history.jsonl` (trend log),
+`kill-order.json` (smart test ordering's kill history), and
+`ty-cache.json` (the ty pre-filter's baseline-diagnostic cache).
+fermut does not write a `.gitignore` for it — add `.fermut/` to your
+own `.gitignore` (or commit only `history.jsonl`, see
+[Projects](projects.md)).
 
 On the next `run`:
 
@@ -49,7 +54,9 @@ On the next `run`:
    cached entry, the cached outcome is reused — **no pytest
    invocation**.
 3. If either component mismatches, the entry is ignored and the
-   mutant re-runs. Stale entries are overwritten on the next save.
+   mutant re-runs; the new outcome overwrites the entry for that id.
+   Entries whose id no longer exists (the mutant moved or vanished)
+   are never pruned — they accumulate until `fermut clean`.
 
 Result: editing one function in one file only pays for mutants
 inside that function (under `cache_scope = "scope"`) or that file
@@ -175,22 +182,27 @@ AST being identical.
 
 The structural AST hash makes cache hits identical across:
 
-- Reformats, whitespace edits, comment edits — same AST → same hash.
+- Whitespace or comment edits *below* a mutant — same AST, same byte
+  offset → hit.
 - Local dev → CI hand-off.
 - Agent run #1 → agent run #2 on the same commit.
 - Cache restored from `actions/cache` in a fresh GHA runner.
 
+It does **not** survive edits that shift bytes above a mutant —
+including a reformat or a comment added near the top of a file. The
+mutant id embeds the byte offset, so every mutant below the edit gets
+a new id and re-runs (the old entries stay in the file as orphans).
+
 The cost is one parse + hash per source file per run. On a typical
-project this is in single-digit milliseconds. The legacy raw-byte
-hash is still exported as `cache::hash_file` for callers that need
-byte identity (and for the test suite).
+project this is in single-digit milliseconds.
 
-## Version field
+## File format and compatibility
 
-The cache file carries a `version` integer. Older readers fail closed
-(treat the cache as empty). Newer readers handle forward-compat with
-`#[serde(default)]` on new fields. You won't normally notice this —
-worst case is a one-time cache-miss after upgrading fermut.
+`cache.json` has no version field. New entry fields are added with
+`#[serde(default)]`, so older entries load and simply miss when a new
+key component doesn't match. A file that fails to parse is moved
+aside to `cache.corrupt-<pid>` with a warning, and the run starts from
+an empty cache.
 
 ## Where next
 

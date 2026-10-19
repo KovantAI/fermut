@@ -29,11 +29,13 @@ Older Python mutation-testing tool, distributor-based model
 
 ## `--diff-only`
 
-CLI flag and config key. Restricts mutation to lines in
-`git diff <base>...HEAD`. Default base is the `pr-gate` profile's
-`diff_only = "main"`. Requires git history — on a shallow clone
-(`fetch-depth: 1` in CI, `git clone --depth 1` locally) the diff
-comes back empty and zero mutants run. See
+CLI flag and config key. Restricts mutation to lines changed since
+the merge-base of `<base>` and `HEAD`, diffed against the working
+tree (so uncommitted edits to tracked files count). Default base is
+the `pr-gate` profile's `diff_only = "main"`. Requires git history:
+on a shallow clone (`fetch-depth: 1` in CI, `git clone --depth 1`
+locally) the base can't be resolved and the run fails with a git
+error. See
 [diff-only-empty troubleshooting](../reference/troubleshooting/diff-only-empty.md).
 
 ## Equivalent mutant
@@ -81,7 +83,9 @@ your test suite doesn't import `hypothesis`.
 
 Comment on a source line that tells fermut to skip mutations on that
 line: `# fermut: ignore` (skips all ops) or
-`# fermut: ignore [op-name]` (skips one op). Use for equivalent
+`# fermut: ignore[op-name]` (skips one op; no space before `[` —
+`# fermut: ignore [op-name]` is read as a bare `ignore` and skips
+every op). Use for equivalent
 mutants and for lines where mutation produces noise without signal.
 See [inline ignore reference](../reference/operators/inline-ignore.md).
 
@@ -102,8 +106,8 @@ score. **What you want more of.**
 ## Mutant
 
 One specific application of one operator to one specific source
-location. Identified by `mutant.id`, a stable hash so caching works
-across runs.
+location. Identified by [`mutant.id`](#mutant-id), a deterministic
+string (not a hash) so caching works across runs.
 
 ## `mutant.id` { #mutant-id }
 
@@ -200,8 +204,9 @@ Astral's fast Python type checker (Rust-based). fermut's ty filter
 rejects mutants that introduce *new* type errors — e.g. swapping a
 numeric op into a string context. Drops 20–40% of naive mutants on
 type-hinted codebases at ~25ms each, much cheaper than running
-pytest ([benchmarks](../reference/benchmarks.md)). Requires
-`ty` on `$PATH`. See [ty-not-found troubleshooting](../reference/troubleshooting/ty-not-found.md).
+pytest ([benchmarks](../reference/benchmarks.md)). Runs in-process
+by default (embedded checker); the `ty` binary is only needed when
+`FERMUT_TY_EMBEDDED=0` or the embedded checker can't be built. See [ty-not-found troubleshooting](../reference/troubleshooting/ty-not-found.md).
 
 ## uv
 

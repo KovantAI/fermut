@@ -202,7 +202,7 @@ Inputs shared by `KovantAI/fermut` and `sweep` (`merge` takes only
 | `cache` | `true` | Cache verdicts and the coverage DB |
 | `cache-key-hash` / `cache-key-prefix` | auto / `fermut` | Cache key control |
 | `artifact-name` | `fermut-report` | Report artifact name |
-| `args` | — | Extra `fermut run` flags, e.g. `--ops arith,compare` |
+| `args` | — | Extra `fermut run` flags, e.g. `--ops arith-op-swap,compare-op-swap` |
 
 PR gate only: `base-ref` (default `origin/<PR base>`), `comment`
 (default `true`), `github-token`, `warm-only`. Sweep only: `shard`.

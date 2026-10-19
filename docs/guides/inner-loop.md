@@ -30,10 +30,12 @@ What each flag does:
 Together: sub-second feedback on whether the test you just wrote
 actually kills the mutant you intended.
 
-> **Needs git history.** `--diff-only` computes a merge base via
-> `git diff main...HEAD`. On a shallow clone (`git clone --depth 1`
-> or CI checkout with `fetch-depth: 1`) the merge base isn't
-> reachable and zero mutants run. Re-clone with full history. See
+> **Needs git history.** `--diff-only` resolves the merge base of
+> `main` and `HEAD` (`git merge-base`), then diffs it against the
+> working tree — uncommitted edits are included. On a shallow clone
+> (`git clone --depth 1` or CI checkout with `fetch-depth: 1`) the
+> merge base isn't reachable and fermut exits with an error. Re-clone
+> with full history. See
 > [diff-only empty](../reference/troubleshooting/diff-only-empty.md).
 
 ## Regenerating coverage

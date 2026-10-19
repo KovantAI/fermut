@@ -1150,7 +1150,7 @@ pub(crate) struct InitArgs {
     #[arg(long)]
     pub(crate) with_gha: bool,
 
-    /// Wire `coverage = "coverage.json"` into the config even when no
+    /// Wire `coverage = ".coverage"` into the config even when no
     /// coverage dependency is detected in the project. Use when you'll
     /// install `coverage` yourself — `init` prints the install command
     /// matching your package manager.

@@ -14,8 +14,8 @@ fermut is mutation testing built to be fast enough to actually run.
 The mutator is native Rust; the type-aware `ty` pre-filter discards
 type-invalid mutants in ~25 ms each before they cost a pytest run;
 content-hash caching means re-runs only pay for what changed. The
-test runner stays the one your team already trusts — `pytest` or
-`unittest`.
+test runner stays the one your team already trusts — `pytest`,
+`rstest` or `unittest`.
 
 New to mutation testing? Start with
 **[First steps](getting-started/first-steps.md)** for a five-minute

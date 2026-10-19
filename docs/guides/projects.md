@@ -68,7 +68,7 @@ optimize for different starting points:
     ```
 
     Defaults: diff-restricted to the merge base, per-test coverage
-    selection, narrow op set (arith / compare / boundary / return-to-none),
+    selection, narrow op set (arith / compare / boundary / return-value-to-none),
     `--timeout 15`, Hypothesis seed pinned.
 
     Best first profile for most teams. Doesn't surface existing
@@ -233,8 +233,11 @@ CLI reference. The most common shapes:
 | Job                | Trigger        | Profile (config)    | CLI overrides                                                                 |
 |--------------------|----------------|---------------------|------------------------------------------------------------------------------|
 | PR gate            | every PR       | `pr-gate`           | `--coverage .coverage --markdown report.md --trend`                           |
-| Nightly sweep      | cron / manual  | `pr-gate` (default) | `--experimental --ops "" --timeout 60` (overrides the narrow op set)          |
-| Sharded full sweep | push to main   | `pr-gate`           | `--shard <i>/<n> --json shard-<i>.json` per matrix entry, plus a merge job   |
+| Nightly sweep      | cron / manual  | `pr-gate` (default) | `--no-diff-only --experimental --ops "" --timeout 60` (whole tree, all ops)  |
+| Sharded full sweep | push to main   | `pr-gate`           | `--no-diff-only --shard <i>/<n> --json shard-<i>.json`, plus a merge job     |
+
+`pr-gate` writes `diff_only = "main"`; full sweeps need `--no-diff-only`
+or a run on `main` diffs against itself and mutates nothing.
 
 The "one config file + per-job overrides" pattern keeps everything in
 one place; the `--profile` template just opinionates the defaults.

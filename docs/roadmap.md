@@ -22,8 +22,9 @@ The two highest-leverage tracks left:
   operators on the same source to catch tests that pass under any single
   mutation but fail under interactions. No mainstream Python mutation
   tool ships this; it's a genuine capability edge, not just a speed or
-  polish win. Experimental / off by default (high noise, high signal).
-  Detail under [Engine and runtime](#engine-and-runtime).
+  polish win. The measurement half has shipped as the experimental
+  `fermut hom` subcommand; mutating with HOMs in `fermut run` is still
+  open. Detail under [Engine and runtime](#engine-and-runtime).
 
 Everything below is the full backlog; these two are where the marginal
 return is highest today.
@@ -52,28 +53,26 @@ return is highest today.
   **historical-killer** signal (the test that previously killed this
   `(file, operator)`, persisted in `.fermut/kill-order.json`). Default
   on (`--no-smart-order` to disable); it only permutes the selected set,
-  so it never changes a verdict — only speed. (The two signals ship on
-  separate feature branches pending merge to `main`.)
+  so it never changes a verdict — only speed. Both signals are on
+  `main`.
 - **Per-mutant coverage ordering (deeper) — open.** Sharpen the
   cold-start prior beyond breadth + history with a richer coverage
   signal — per-line hit weight, or call-graph proximity to the mutated
   line — to better predict the killer when no history exists.
-- **Time-boxed runs (`--max-time`).** Wall-clock ceiling for big
-  suites that can't run the full catalogue. Evaluates the
-  highest-value mutants first (coverage + smart ordering) and
-  reports the best survivors found within the budget. Predictable
-  PR-gate latency — a time ceiling beats a mutant ceiling for CI
-  trust.
+- **Time-boxed runs (`--max-time`) — shipped.** See
+  [the run reference](reference/cli/run.md#time-boxed-runs-max-time).
 - **Cross-run mutant cache.** Shareable cache across machines /
   CI runners. Cache server + content-addressed entries. Today's
   cache is local-only.
 - **Incremental mode.** Persistent daemon that watches the source
   tree and re-evaluates only affected mutants on each change. The
   inner-loop sibling of `--watch`.
-- **Higher-order mutants (experimental).** Combine two operators
-  on the same source. Catches tests that pass under any single
-  mutation but fail under interactions. Off by default — high
-  noise, high signal.
+- **Higher-order mutants — experiment shipped, `run` integration
+  open.** `fermut hom --kill-sets <jsonl>` (experimental) takes the
+  kill-sets from `fermut run --record-kill-sets`, builds second-order
+  mutants from killed first-order pairs, and reports which are strongly
+  subsuming (SSHOMs). Emitting HOMs as part of a normal `fermut run` is
+  not implemented.
 
 ## Operators for modern Python
 
@@ -139,8 +138,9 @@ uncovered); mutants left untested at the deadline are recorded as
 reports over what actually ran rather than masquerading as a full sweep.
 A predictable time ceiling for PR gates — a time cap beats a mutant cap
 for CI trust. See **[run reference](reference/cli/run.md#time-boxed-runs-max-time)**.
-Follow-ups still open: coverage-call-graph ordering and historical-killer
-ordering (below) sharpen the "highest-value first" signal.
+Follow-up still open: coverage-call-graph ordering would sharpen the
+"highest-value first" signal (historical-killer ordering has shipped as
+part of smart test ordering, above).
 
 ## Public PyPI — shipped
 
@@ -155,8 +155,8 @@ for the distribution contract.
 Open an issue with the use case. Items move based on:
 
 1. **Concrete blocker** — someone can't ship without it.
-2. **High leverage** — small change, large multiplier (e.g. ty
-   daemon mode).
+2. **High leverage** — small change, large multiplier (e.g. what
+   in-process ty did for the filter chain).
 3. **Contributor bandwidth** — items with a paired PR move first.
 
 See **[Internals](reference/internals/index.md)** and **[Adding an

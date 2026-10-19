@@ -447,7 +447,7 @@ fn absolutize(p: PathBuf) -> PathBuf {
 /// *and* sniffs as a real SQLite DB — guarding against a stray/empty `.coverage`
 /// that isn't a coverage database. Verifying it actually carries per-test
 /// contexts is left to `from_path`, which errors with the regeneration recipe.
-fn discover_coverage_db(project_root: &Path) -> Option<PathBuf> {
+pub(crate) fn discover_coverage_db(project_root: &Path) -> Option<PathBuf> {
     let candidate = project_root.join(".coverage");
     if !candidate.is_file() {
         return None;

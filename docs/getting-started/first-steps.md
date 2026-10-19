@@ -112,8 +112,9 @@ run (no cache, default profile, `ty` filter on):
 If your run is dramatically slower than this on first pass, the
 usual suspect is the coverage filter not being applied (no per-test
 contexts — see [coverage-rejected](../reference/troubleshooting/coverage-rejected.md)).
-A missing `ty` won't just slow the run — it aborts before any
-mutant is tested; see
+ty runs in-process by default, so the `ty` binary isn't needed for a
+normal run. If the embedded checker is unavailable and the binary is
+missing too, the run aborts before any mutant is tested; see
 [ty-not-found](../reference/troubleshooting/ty-not-found.md).
 Re-runs are much faster thanks to the AST-hash cache — typically
 80–95% cache hit on a no-source-change re-run.
@@ -167,9 +168,10 @@ The most common surprises, in roughly the order people hit them:
   pinned, or you have order-dependent tests. Pin
   `hypothesis_seed` in `fermut.toml`; investigate flaky tests.
   See [score swings](../reference/troubleshooting/score-swings.md).
-- **`--diff-only` produces zero mutants.** Shallow clone (`git
+- **`--diff-only` fails with a git error.** Shallow clone (`git
   clone --depth 1`, or CI checkout with `fetch-depth: 1`) means
-  the merge base isn't reachable. Re-clone with full history. See
+  the base or merge-base isn't reachable. Fetch full history. Zero
+  mutants with no error usually means you're on the base branch. See
   [diff-only empty](../reference/troubleshooting/diff-only-empty.md).
 - **Lots of timeouts.** Some tests don't terminate cleanly under
   arithmetic mutants (infinite loops on boundary-shifted

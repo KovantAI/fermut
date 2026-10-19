@@ -7,16 +7,17 @@ into three tiers: **stable** operators (always emitted),
 `experimental = true`), and **parity** operators (require `--parity`
 or `parity = true`, for cross-tool comparison only).
 
-- **[Stable operators](stable.md)** — 26 always-on operators with
+- **[Stable operators](stable.md)** — 30 always-on operators with
   examples.
-- **[Experimental operators](experimental.md)** — 4 higher-noise
+- **[Experimental operators](experimental.md)** — 8 higher-noise
   operators, off by default.
 - **[Parity operators](parity.md)** — 3 opt-in operators that broaden
   overlap with other tools (mutmut) for comparison only. Very noisy;
   never counted in normal scoring.
 - **[Operator profiles](profiles.md)** — `--operators minimal` swaps
   the easily killed compare and `and`/`or` mutants for the ones no other
-  mutant subsumes.
+  mutant subsumes. Its 5 profile-gated operators are emitted only under
+  that profile.
 - **[Selecting operators](selecting.md)** — `--ops` allowlist,
   `--skip-ops` denylist, when to narrow.
 - **[Docstring skip](docstring-skip.md)** — docstrings and other

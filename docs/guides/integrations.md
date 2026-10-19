@@ -81,6 +81,7 @@ For long-running nightly runs, parallelize via `--shard`:
 jobs:
   shard:
     strategy:
+      fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
     runs-on: ubuntu-latest
@@ -96,11 +97,20 @@ jobs:
 
   merge:
     needs: shard
+    if: always()            # shards exit 1 on survivors; merge must still run
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-      - run: fermut merge shard-*.json --markdown report.md
+        with:
+          path: shards
+          merge-multiple: true   # flatten shard-N/ dirs into shards/
+      - run: fermut merge shards/shard-*.json --markdown report.md
 ```
+
+A complete version (checkout, install, per-shard cache) lives in
+[`examples/github-actions/sharded-matrix.yml`](https://github.com/KovantAI/fermut/blob/main/examples/github-actions/sharded-matrix.yml).
+If `fermut.toml` sets `diff_only` (the `pr-gate` profile does), add
+`--no-diff-only` to the shard `run` so the sweep covers the whole tree.
 
 Shards are deterministic per `mutant.id` — no coordination, no
 overlap.
@@ -172,6 +182,7 @@ jobs:
           uv tool run fermut run src/ \
               --tests tests/ \
               --coverage .coverage \
+              --no-diff-only \
               --ops "" \
               --experimental \
               --timeout 60 \
@@ -202,7 +213,9 @@ How the override pattern works:
 - The nightly job's CLI flags **override** the config for that one
   run: `--ops ""` clears the narrow op allowlist, `--experimental`
   adds exception/loop ops, `--timeout 60` matches the looser nightly
-  budget. No `--diff-only` here — nightly mutates the whole tree.
+  budget. `--no-diff-only` clears the `diff_only = "main"` key the
+  `pr-gate` profile writes — without it, the nightly run on `main` diffs
+  `main` against itself, mutates nothing, and passes.
 - See [CLI overrides vs config](../reference/cli/run.md#cli-overrides-vs-config)
   for the precedence rules.
 
@@ -452,13 +465,18 @@ keep the scope tight:
   hooks:
     - id: fermut
       name: fermut (changed files)
-      entry: fermut run --since HEAD --quiet
+      entry: fermut run --diff-only origin/main --quiet
       language: system
       pass_filenames: false
       stages: [pre-push]
 ```
 
-`--since HEAD` keeps the cost proportional to the diff.
+`--diff-only origin/main` scopes to every line the branch changed since
+it forked from `main` — the commits being pushed plus any uncommitted
+edits — so cost stays proportional to the diff. (`--since HEAD` would
+only see uncommitted edits: on a clean tree at push time it finds zero
+mutants and tests nothing.) Run `git fetch` periodically so
+`origin/main` is current.
 
 ## Coding agents
 

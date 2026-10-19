@@ -129,6 +129,7 @@ nav:
           - fermut trend: reference/cli/trend.md
           - fermut score: reference/cli/score.md
           - fermut subsume: reference/cli/subsume.md
+          - fermut hom: reference/cli/hom.md
           - fermut dashboard: reference/cli/dashboard.md
           - fermut doctor: reference/cli/doctor.md
           - fermut pr-comment: reference/cli/pr-comment.md

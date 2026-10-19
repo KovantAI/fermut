@@ -18,7 +18,7 @@ Read **[Internals](index.md)** first if you haven't yet.
 |--------------|-------------------------------------------------------------------------------------------------------------|
 | Operator     | The closed enum `mutator::operators::Operator`. One variant per *kind* of mutation.                          |
 | Mutant       | One specific application of an operator: byte range + replacement bytes.                                     |
-| Visitor      | `mutator::visitor::Visitor`. Walks the ruff AST and pushes mutants.                                          |
+| Collector    | `mutator::visitor::Collector`. Walks the ruff AST and pushes mutants; `visit_expr` dispatches to `emit_*` helpers. |
 | Swap table   | A `&[(&str, &str)]` of `(original, replacement)` lexeme pairs. Drives the table-driven operators.            |
 | Lexeme       | The raw source text of a token (`"+"`, `"<="`, `"True"`). The visitor matches on lexemes to know which swap fires. |
 
@@ -50,8 +50,18 @@ impl Operator {
     }
 ```
 
+Add it to `Operator::all()` too. `from_name` (and so `--ops`,
+`--skip-ops` and inline-ignore parsing) only finds operators listed
+there. Then bump the expected total in the `all_covers_every_variant`
+test (currently 46).
+
 If this operator is high-noise and should be experimental, also add it
-to `is_experimental()`. Skip otherwise — stable is the default.
+to `is_experimental()`, prefix its name with `exp:`, and bump that
+test's experimental count. The other tiers work the same way:
+`is_parity()` (`parity:` prefix, only under `--parity`) and
+`is_minimal_only()` / `is_profile_gated()` (only under an operator
+profile that enables them). Skip all of these for a stable operator —
+stable is the default.
 
 ### Step 2 — Add a swap table (or extend an existing one)
 
@@ -72,61 +82,64 @@ pub const EXPONENT_TO_MOD_SWAPS: &[(&str, &str)] = &[("**", "%")];
 
 ### Step 3 — Wire the visitor
 
-Edit `src/mutator/visitor.rs`. Find where the existing arithmetic
-swaps fire (search `ARITH_SWAPS`) and add a parallel block for your
-new table:
+Edit `src/mutator/visitor.rs`. The arithmetic swaps fire in
+`Collector::emit_binop` (search `ARITH_SWAPS`); add a parallel block
+for your new table:
 
 ```rust
-fn visit_expr(&mut self, expr: &'ast Expr) {
-    match expr {
-        Expr::BinOp(b) => {
-            let lex = binop_lexeme(b.op);
-            if let Some(r) = self.op_range(b.range(), lex) {
-                for (orig, repl) in ARITH_SWAPS {
-                    if *orig == lex {
-                        self.push(Operator::ArithOpSwap, r, repl);
-                    }
-                }
-                // ↓ new ↓
-                for (orig, repl) in EXPONENT_TO_MOD_SWAPS {
-                    if *orig == lex {
-                        self.push(Operator::ExponentToMod, r, repl);
-                    }
-                }
+fn emit_binop(&mut self, b: &ast::ExprBinOp) {
+    let lex = binop_lexeme(b.op);
+    if let Some(r) = self.op_range_between(b.left.range().end(), b.right.range().start(), lex) {
+        for (orig, repl) in ARITH_SWAPS {
+            if *orig == lex {
+                self.push(Operator::ArithOpSwap, r, repl);
             }
         }
-        // ...
+        // ↓ new ↓
+        for (orig, repl) in EXPONENT_TO_MOD_SWAPS {
+            if *orig == lex {
+                self.push(Operator::ExponentToMod, r, repl);
+            }
+        }
     }
 }
 ```
+
+`op_range_between` finds the operator token in the gap between the
+two operands, so the mutant's range covers only the operator.
 
 Don't forget to import `EXPONENT_TO_MOD_SWAPS` at the top of the
 file.
 
 ### Step 4 — Test
 
-Add a test that asserts the visitor emits your mutant. The existing
-tests in `src/mutator/visitor.rs` show the pattern:
+Add a test to the `operator_emission_tests` module in
+`src/mutator/visitor.rs`. Its `ops_for(source)` and
+`contains(source, op)` helpers wrap `collect(Path, source)`:
 
 ```rust
 #[test]
-fn emits_exponent_to_mod() {
-    let mutants = collect_from_source("x = a ** b\n");
-    assert!(mutants.iter().any(|m| m.operator == Operator::ExponentToMod));
+fn exponent_to_mod_fires() {
+    assert!(contains("x = a ** b\n", Operator::ExponentToMod));
 }
 ```
 
 Run:
 
 ```sh
-cargo test --lib mutator::visitor
+cargo test --lib mutator
 ```
 
 ### Step 5 — Update docs
 
-Add a row to `docs/reference/operators/index.md` (or to the README's operator
-table if it still has one). Operator visibility in docs is the contract;
-people will set `--ops` against your new name.
+Add a row to the tier's table: `docs/reference/operators/stable.md`
+for a stable operator, `experimental.md` or `parity.md` otherwise. Also
+bump the operator counts in `docs/reference/operators/index.md`,
+`docs/reference/index.md` and the "Operator catalogue (stable)" row of
+`docs/concepts/landscape.md`. The `docs_stay_in_sync_with_operator_catalogue`
+test in `src/mutator/operators.rs` fails if `stable.md`'s table or a
+"N stable" claim disagrees with the enum. Operator visibility in docs
+is the contract; people will set `--ops` against your new name.
 
 That's the entire flow for a table-driven operator. Total diff is
 usually < 20 lines.
@@ -161,32 +174,24 @@ impl Operator {
 ### Step 2 — Implement the visitor handler
 
 In `src/mutator/visitor.rs`, find a similar bespoke operator (e.g.
-`DictItemDrop`) and crib its shape:
+`DictItemDrop`, emitted by `Collector::emit_dict`) and crib its shape.
+Add an `emit_*` helper and call it from the `visit_expr` dispatcher:
 
 ```rust
-fn visit_expr(&mut self, expr: &'ast Expr) {
-    match expr {
-        // ... existing arms ...
-        Expr::Dict(d) => {
-            for item in &d.items {
-                if let Some(key) = &item.key {
-                    if let Expr::StringLiteral(s) = key {
-                        // Replace the key with a typo'd version.
-                        let original = self.source_bytes_for(s.range());
-                        let mutated = typo(original);
-                        self.push(Operator::DictKeyTypo, s.range(), mutated);
-                    }
-                }
-            }
+fn emit_dict_key_typo(&mut self, d: &ast::ExprDict) {
+    for item in &d.items {
+        if let Some(Expr::StringLiteral(s)) = &item.key {
+            // Slice the original text straight out of the source.
+            let original = &self.source[s.range()];
+            let mutated = typo(original);
+            self.push(Operator::DictKeyTypo, s.range(), &mutated);
         }
     }
-    walk_expr(self, expr);
 }
 ```
 
-`source_bytes_for`, `push`, and the surrounding helpers are already
-in the visitor — see how other bespoke operators use them. The key
-constraints:
+`push` and the surrounding helpers already live on `Collector`. See
+how other bespoke operators use them. The key constraints:
 
 - **Byte ranges must be exact.** The emitter does a raw byte splice;
   one off-by-one and the patched file won't parse. Use the AST node's
@@ -204,7 +209,7 @@ Bespoke operators want tests that lock the AST shape:
 ```rust
 #[test]
 fn dict_key_typo_targets_string_keys() {
-    let mutants = collect_from_source(r#"x = {"foo": 1, 42: 2}"#);
+    let mutants = collect(Path::new("test.py"), r#"x = {"foo": 1, 42: 2}"#).unwrap();
     let dict_typo: Vec<_> = mutants
         .iter()
         .filter(|m| m.operator == Operator::DictKeyTypo)
@@ -217,8 +222,7 @@ fn dict_key_typo_targets_string_keys() {
 
 #[test]
 fn dict_key_typo_ignores_non_string_keys() {
-    let mutants = collect_from_source("x = {42: 1}");
-    assert!(!mutants.iter().any(|m| m.operator == Operator::DictKeyTypo));
+    assert!(!contains("x = {42: 1}", Operator::DictKeyTypo));
 }
 ```
 
@@ -231,9 +235,9 @@ end-to-end e2e harness in `tests/e2e.rs` continue to make sense.
 
 ### Step 5 — Update docs
 
-Same as the table-driven case. The operator goes into
-`docs/reference/operators/index.md`. If it's experimental, note it in the
-experimental section and make sure `is_experimental()` returns `true`.
+Same as the table-driven case: a row in `stable.md` (or
+`experimental.md` / `parity.md`) and the counts on the index pages.
+If it's experimental, make sure `is_experimental()` returns `true`.
 
 ## Choosing "stable" vs "experimental"
 
@@ -254,10 +258,13 @@ first; a future PR can graduate it.
 
 - Variant names are `UpperCamelCase` and end in a noun describing the
   *result* of the mutation. `ArithOpSwap`, not `MutateArithOps`.
-- The CLI / config name is `kebab-case`, matches the variant exactly
-  via the standard `kebab-case` serde transform.
-- Experimental operator names are prefixed `exp:` in their `name()`
-  output (`exp:exception-class-swap`).
+- The CLI / config name is the hand-written `kebab-case` string in
+  `Operator::name()`. It usually mirrors the variant, but not always
+  (`RelationalToEquality` → `ror-equality`, `BoolOpToConst` →
+  `bool-const`), so look it up there rather than deriving it.
+- Experimental operator names are prefixed `exp:` and parity names
+  `parity:` in their `name()` output (`exp:exception-class-swap`).
+  `from_name` accepts them with or without the prefix.
 
 ## Don't forget
 

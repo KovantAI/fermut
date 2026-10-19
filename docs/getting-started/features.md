@@ -15,8 +15,8 @@ guide or reference page.
 - **Inline ignore markers.** `# fermut: ignore[op-name]` on a line
   drops one or all operators from that line. Useful for
   known-equivalent mutants.
-- **Docstring auto-skip.** Module/class/function docstrings are never
-  mutated.
+- **Docstring auto-skip.** Docstrings and other bare string
+  statements (e.g. attribute docstrings) are never mutated.
 
 ## Speed
 

@@ -199,7 +199,7 @@ Inputs shared by `KovantAI/fermut` and `sweep` (`merge` takes only
 | `post-install-command` | — | E.g. create a test DB against your `services:` |
 | `fail-under` | from `fermut.toml` | Score threshold. When it is unset everywhere, any survivor fails |
 | `blocking` | `true` | `false` turns a failing gate into a warning |
-| `cache` | `true` | Cache verdicts and the coverage DB |
+| `cache` | `true` | Cache verdicts, smart-ordering kill history and the coverage DB |
 | `cache-key-hash` / `cache-key-prefix` | auto / `fermut` | Cache key control |
 | `artifact-name` | `fermut-report` | Report artifact name |
 | `args` | — | Extra `fermut run` flags, e.g. `--ops arith,compare` |

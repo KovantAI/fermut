@@ -122,6 +122,9 @@ struct Detection {
     runner: &'static str,
     ty_available: bool,
     coverage: CoverageDetection,
+    /// Hypothesis is a declared dependency. Profiles pin `hypothesis_seed` only
+    /// then — pytest rejects `--hypothesis-seed` without the plugin.
+    hypothesis: bool,
     package_manager: PackageManager,
     py_file_count: usize,
 }
@@ -204,7 +207,7 @@ fn print_detection_summary(detection: &Detection, opts: &InitOpts, size: RepoSiz
         if detection.ty_available {
             "on"
         } else {
-            "off (ty not on PATH)"
+            "off (FERMUT_TY_EMBEDDED=0 and ty not on PATH)"
         }
     );
     println!(
@@ -265,7 +268,7 @@ fn print_next_steps(detection: &Detection, wire_coverage: bool) {
         println!("  - no tests directory detected; set `tests = \"path/to/tests\"` in the config");
     }
     if !detection.ty_available {
-        println!("  - install ty for the type-aware mutant pre-filter:  uv tool install ty");
+        println!("  - install ty (or unset FERMUT_TY_EMBEDDED) for the type-aware mutant pre-filter:  uv tool install ty");
     }
     if wire_coverage {
         println!(
@@ -302,8 +305,12 @@ fn detect(start: &Path) -> Result<Detection> {
     } else {
         "unittest"
     };
-    let ty_available = which("ty").is_some();
+    // The embedded checker needs no binary; only FERMUT_TY_EMBEDDED=0 makes
+    // the filter depend on `ty` being on PATH.
+    let ty_available = which("ty").is_some() || !crate::filter::ty::env_disables_embedded();
     let coverage = detect_coverage(&project_root);
+    let hypothesis = pyproject_mentions(&project_root, &["hypothesis"])
+        || lockfile_mentions(&project_root, &["hypothesis"]);
     let package_manager = detect_package_manager(&project_root);
     let py_file_count = count_py_files(&source_root);
 
@@ -314,6 +321,7 @@ fn detect(start: &Path) -> Result<Detection> {
         runner,
         ty_available,
         coverage,
+        hypothesis,
         package_manager,
         py_file_count,
     })
@@ -502,7 +510,7 @@ fn render_config(d: &Detection, wire_coverage: bool, profile: Option<Profile>) -
     }
 
     if let Some(p) = profile {
-        write_profile_keys(&mut out, p);
+        write_profile_keys(&mut out, p, d.hypothesis);
     } else if let Some(ops) = RepoSize::classify(d.py_file_count).recommended_ops() {
         write_ops(&mut out, &ops);
     }
@@ -551,11 +559,13 @@ fn profile_timeout(profile: Option<Profile>) -> u64 {
     }
 }
 
-fn write_profile_keys(out: &mut String, p: Profile) {
+fn write_profile_keys(out: &mut String, p: Profile, hypothesis: bool) {
     match p {
         Profile::PrGate => {
             out.push_str("diff_only = \"main\"\n");
-            out.push_str("hypothesis_seed = 12345\n");
+            if hypothesis {
+                out.push_str("hypothesis_seed = 12345\n");
+            }
             write_ops(
                 out,
                 &[
@@ -576,7 +586,9 @@ fn write_profile_keys(out: &mut String, p: Profile) {
         }
         Profile::Library => {
             out.push_str("experimental = false\n");
-            out.push_str("hypothesis_seed = 12345\n");
+            if hypothesis {
+                out.push_str("hypothesis_seed = 12345\n");
+            }
         }
     }
 }
@@ -817,6 +829,7 @@ mod tests {
             runner: "pytest",
             ty_available: true,
             coverage: CoverageDetection::Absent,
+            hypothesis: true,
             package_manager: PackageManager::Pip,
             py_file_count: 10,
         }
@@ -900,6 +913,15 @@ mod tests {
         assert!(body.contains("experimental = false"));
         assert!(body.contains("hypothesis_seed = 12345"));
         assert!(body.contains("timeout = 30"));
+    }
+
+    #[test]
+    fn profiles_skip_hypothesis_seed_without_hypothesis() {
+        let mut d = fake_detection();
+        d.hypothesis = false;
+        for p in [Profile::PrGate, Profile::Library] {
+            assert!(!render_config(&d, false, Some(p)).contains("hypothesis_seed"));
+        }
     }
 
     #[test]

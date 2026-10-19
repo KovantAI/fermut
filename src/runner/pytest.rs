@@ -121,6 +121,16 @@ impl PytestRunner {
             key_base,
             plugin,
         } = config;
+        // pytest rejects `--hypothesis-seed` outright ("unrecognized
+        // arguments") when the Hypothesis plugin isn't installed, which would
+        // abort the baseline. Probe once and drop the seed instead.
+        let hypothesis_seed = hypothesis_seed.filter(|_| {
+            let ok = hypothesis_importable(python.as_deref());
+            if !ok {
+                tracing::warn!("hypothesis not installed; ignoring hypothesis_seed");
+            }
+            ok
+        });
         Self {
             tests,
             timeout,
@@ -836,6 +846,18 @@ impl Runner for PytestRunner {
     }
 }
 
+/// Whether the test interpreter can `import hypothesis`. A probe that can't
+/// even spawn answers `true`: keep the seed and let the baseline report the
+/// real interpreter problem.
+fn hypothesis_importable(python: Option<&Path>) -> bool {
+    Command::new(super::python::interpreter(python))
+        .args(["-c", "import hypothesis"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_or(true, |s| s.success())
+}
+
 /// Base command that launches the framework. With a configured interpreter
 /// we go through `<python> -m <exe>` so the run uses *that* interpreter's
 /// framework (and its venv's installed packages) with no reliance on `PATH`.
@@ -1301,6 +1323,19 @@ mod tests {
             key_base: PathBuf::from("."),
             plugin: false,
         })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hypothesis_probe_follows_interpreter_exit_status() {
+        // `false` stands in for an interpreter without Hypothesis (import
+        // fails → non-zero), `true` for one with it.
+        assert!(!hypothesis_importable(Some(Path::new("false"))));
+        assert!(hypothesis_importable(Some(Path::new("true"))));
+        // Unspawnable interpreter → keep the seed; the baseline reports it.
+        assert!(hypothesis_importable(Some(Path::new(
+            "/nonexistent/python"
+        ))));
     }
 
     #[test]

@@ -258,9 +258,12 @@ fn fix_one(core: &Core, m: &Mutant) -> AutofixEntry {
         }
     };
 
-    // 2. pick a target file (inferred from the enclosing symbol, or --out)
-    let target_path = match infer_apply_target(m, &ctx)
-        .or_else(|e| core.out.map(|p| Ok(p.to_path_buf())).unwrap_or(Err(e)))
+    // 2. pick a target file: --out when given, else inferred from the
+    //    enclosing symbol
+    let target_path = match core
+        .out
+        .map(|p| Ok(p.to_path_buf()))
+        .unwrap_or_else(|| infer_apply_target(m, &ctx))
     {
         Ok(p) => p,
         Err(e) => return entry(summary, OUTCOME_ERROR, false, None, Some(e.to_string())),
@@ -653,6 +656,24 @@ mod tests {
         assert_eq!(report.entries[0].outcome, OUTCOME_STILL_SURVIVES);
         assert!(report.entries[0].kept);
         assert!(std::fs::read_to_string(&test_file).unwrap().len() > before.len());
+    }
+
+    #[test]
+    fn out_overrides_the_inferred_target() {
+        let (dir, m, test_file) = fixture();
+        let before = std::fs::read_to_string(&test_file).unwrap();
+        let runner = mock(true, true);
+        let tests_dir = dir.path().join("tests");
+        let forced = tests_dir.join("test_forced.py");
+        let mut c = core(&runner, &tests_dir, false);
+        c.out = Some(&forced);
+        let report = run_autofix(&c, std::slice::from_ref(&m));
+        assert_eq!(report.entries[0].outcome, OUTCOME_FIXED);
+        // Written to --out, not the inferred test_calc.py.
+        assert!(std::fs::read_to_string(&forced)
+            .unwrap()
+            .contains("fermut autofix"));
+        assert_eq!(std::fs::read_to_string(&test_file).unwrap(), before);
     }
 
     #[test]

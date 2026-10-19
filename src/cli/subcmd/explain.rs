@@ -54,6 +54,16 @@ pub struct ExplainOpts {
 /// Built with a caller-resolved `project_root` (via
 /// [`crate::cli::current_project_root`]) rather than reading the cwd here, so
 /// the conversion is pure and unit-testable.
+/// `--tests` when given, else `<project_root>/tests` when that directory
+/// exists. clap's `default_missing_value` only covers a bare `--tests`; an
+/// omitted flag would otherwise mean no style samples and no apply target.
+pub(crate) fn tests_or_default(tests: Option<PathBuf>, project_root: &Path) -> Option<PathBuf> {
+    tests.or_else(|| {
+        let dir = project_root.join("tests");
+        dir.is_dir().then_some(dir)
+    })
+}
+
 impl From<(ExplainArgs, PathBuf)> for ExplainOpts {
     fn from((a, project_root): (ExplainArgs, PathBuf)) -> Self {
         let ExplainArgs {
@@ -72,7 +82,7 @@ impl From<(ExplainArgs, PathBuf)> for ExplainOpts {
             report,
             target,
             context_lines: context,
-            tests,
+            tests: tests_or_default(tests, &project_root),
             coverage,
             llm,
             model,
@@ -948,6 +958,22 @@ mod tests {
         assert_eq!(opts.context_lines, 7, "context maps to context_lines");
         assert_eq!(opts.report, PathBuf::from("r.json"));
     }
+
+    #[test]
+    fn omitted_tests_defaults_to_existing_tests_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(tests_or_default(None, tmp.path()), None, "no tests/ → None");
+        std::fs::create_dir(tmp.path().join("tests")).unwrap();
+        assert_eq!(
+            tests_or_default(None, tmp.path()),
+            Some(tmp.path().join("tests"))
+        );
+        let explicit = PathBuf::from("spec");
+        assert_eq!(
+            tests_or_default(Some(explicit.clone()), tmp.path()),
+            Some(explicit)
+        );
+    }
     use crate::mutator::Operator;
     use ruff_text_size::TextRange;
     use std::path::PathBuf;
@@ -1276,7 +1302,7 @@ pub(crate) struct ExplainArgs {
     pub(crate) context: usize,
 
     /// Tests directory to grep for the enclosing symbol. Defaults to
-    /// `tests/` if it exists under cwd.
+    /// `tests/` when it exists under the current directory.
     #[arg(long, num_args = 0..=1, default_missing_value = "tests")]
     pub(crate) tests: Option<std::path::PathBuf>,
 

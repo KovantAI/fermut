@@ -157,14 +157,21 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     let (diff_base, since) = if f.no_diff_only {
         (None, None)
     } else {
-        let diff_base = f.diff_only.or_else(|| file.diff_only.clone());
-        let since = f.since.or_else(|| file.since.clone());
-        if diff_base.is_some() && since.is_some() {
-            return Err(anyhow::anyhow!(
-                "`--diff-only` and `--since` are mutually exclusive"
-            ));
+        match (f.diff_only, f.since) {
+            // A CLI scope replaces the config's (CLI > config), so
+            // `--since HEAD` works on a pr-gate config's `diff_only = "main"`.
+            // clap already rejects both flags together.
+            (Some(base), _) => (Some(base), None),
+            (None, Some(spec)) => (None, Some(spec)),
+            (None, None) => {
+                if file.diff_only.is_some() && file.since.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "config sets both `diff_only` and `since`; they are mutually exclusive"
+                    ));
+                }
+                (file.diff_only.clone(), file.since.clone())
+            }
         }
-        (diff_base, since)
     };
     // Inferred kills are for full nightly sweeps. A diff-scoped run is the PR
     // gate, which must score observed verdicts only — refuse even when the
@@ -963,6 +970,17 @@ mod tests {
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
         assert!(cfg.diff_base.is_none(), "diff_base = {:?}", cfg.diff_base);
         assert!(cfg.since.is_none());
+    }
+
+    #[test]
+    fn cli_since_overrides_config_diff_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "diff_only = \"main\"\n").unwrap();
+        let mut f = empty_filter();
+        f.since = Some("HEAD".into());
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
+        assert_eq!(cfg.since.as_deref(), Some("HEAD"));
+        assert!(cfg.diff_base.is_none());
     }
 
     #[test]

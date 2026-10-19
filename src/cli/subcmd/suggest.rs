@@ -91,7 +91,7 @@ impl From<(SuggestArgs, PathBuf)> for SuggestOpts {
             apply,
             out,
             model,
-            tests,
+            tests: super::explain::tests_or_default(tests, &project_root),
             context_lines: context,
             sample_count,
             no_cache,
@@ -959,7 +959,8 @@ pub(crate) struct SuggestArgs {
     #[arg(long)]
     pub(crate) model: Option<String>,
 
-    /// Tests directory to mine for style samples. Defaults to `tests/`.
+    /// Tests directory to mine for style samples (and the `--apply` target).
+    /// Defaults to `tests/` when it exists under the current directory.
     #[arg(long, num_args = 0..=1, default_missing_value = "tests")]
     pub(crate) tests: Option<std::path::PathBuf>,
 

@@ -4,6 +4,7 @@
 //! If you bump the pinned tag in `Cargo.toml`, re-verify against the
 //! corresponding `ruff_python_ast` source.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};

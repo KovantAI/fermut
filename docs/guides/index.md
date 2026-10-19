@@ -9,6 +9,8 @@ well — rolling out, integrating, tuning a filter.
   PR gate, sharded sweeps and cache warming in one reusable action.
 - **[Integrations](integrations.md)** — GitHub Actions, sharded
   full sweeps, pre-commit, ReadTheDocs.
+- **[pytest plugin](pytest-plugin.md)** — `pytest --fermut`: mutation
+  testing after a green suite, survivors in pytest's summary.
 - **[Working on projects](projects.md)** — gradual rollout
   playbook: measure-only → PR gate → tighten.
 - **[Tightening the inner loop](inner-loop.md)** — `--diff-only`,

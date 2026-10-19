@@ -61,6 +61,14 @@ pub struct Config {
     /// verdict, only speed. Default on; disable with `--no-smart-order` /
     /// `smart_order = false`.
     pub smart_order: bool,
+    /// Load fermut's reporter plugin (`-p _fermut_reporter`) into each
+    /// per-mutant pytest/rstest run and read its structured result: whether a
+    /// test module or conftest failed to import (an exit-4 kill) and which test
+    /// killed the mutant. Verdict-neutral — the exit code still decides the
+    /// verdict, and without a result the runner falls back to exit-code and
+    /// stdout parsing. Default on; disable with `--no-pytest-plugin` /
+    /// `pytest_plugin = false`.
+    pub pytest_plugin: bool,
     /// Fraction (0.0–1.0) of killer-keyed cache hits re-run each run against
     /// just the recorded killing test, to catch flaky or order-dependent kills
     /// (at least one hit is audited whenever any occur and the rate is > 0). A

@@ -12,8 +12,7 @@ The two highest-leverage tracks left:
 
 - **Distribution — meet users where they already are.** Now that runs
   are quick, adoption is gated by setup friction, not speed. The
-  cluster: a **`pytest-fermut` plugin** (run mutation testing without
-  leaving the pytest UX), an **official `KovantAI/fermut@v1` GitHub
+  cluster (`pytest --fermut` has shipped): an **official `KovantAI/fermut@v1` GitHub
   Action** (cache-restore + PR-comment in one step), a **pinned Docker
   image** (ty + ruff + coverage preinstalled), a **VS Code plugin**
   (inline survivor decorations), plus a packaged **pre-commit hook** and
@@ -98,9 +97,10 @@ return is highest today.
 
 ## Integrations and distribution
 
-- **`pytest-fermut` plugin.** Driving fermut from a pytest entry
-  point so users don't leave the pytest UX to run mutation
-  testing.
+- **`pytest --fermut` — shipped.** The fermut wheel registers a pytest
+  plugin: after a green session it refreshes coverage, runs fermut, lists
+  survivors in pytest's summary and fails the session on a failed gate.
+  See [pytest plugin](guides/pytest-plugin.md).
 - **Official GitHub Action.** `KovantAI/fermut@v1` with cache
   restore + PR-comment in one step. Today users compose
   `actions/cache` + `fermut pr-comment` themselves — see

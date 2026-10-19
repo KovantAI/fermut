@@ -316,6 +316,7 @@ mod chain_order_tests {
             cache_audit_rate: 0.0,
             cache_path: PathBuf::from(".fermut/cache.json"),
             smart_order: false,
+            pytest_plugin: false,
             kill_order_path: PathBuf::from(".fermut/kill-order.json"),
             history: false,
             history_path: PathBuf::from(".fermut/history.jsonl"),

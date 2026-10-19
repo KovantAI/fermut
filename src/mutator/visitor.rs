@@ -736,12 +736,8 @@ impl<'a> Collector<'a> {
                     None
                 }
             };
-            let lhs_end = if i == 0 {
-                c.left.range().end()
-            } else {
-                c.comparators[i - 1].range().end()
-            };
-            let Some(r) = self.op_range_between(lhs_end, c.comparators[i].range().start(), lex)
+            let lhs_end = c.operands[i].range().end();
+            let Some(r) = self.op_range_between(lhs_end, c.operands[i + 1].range().start(), lex)
             else {
                 continue;
             };
@@ -1000,7 +996,7 @@ impl<'a> Collector<'a> {
     ///
     /// [`mark_truth_positions_stmt`]: Self::mark_truth_positions_stmt
     fn mark_truth_positions_expr(&mut self, expr: &Expr) {
-        let generators = match expr {
+        let generators: &[ast::Comprehension] = match expr {
             Expr::If(i) => {
                 self.truth_positions.insert(i.test.range());
                 return;

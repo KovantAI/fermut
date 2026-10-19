@@ -25,7 +25,7 @@ The bundled sample lives in `examples/sample/`. Smoke-test mutation generation:
 
 ```sh
 cargo run -- list examples/sample/src
-# 99-ish mutants across the bundled calculator.py
+# 45 mutants across the bundled calculator.py
 ```
 
 ## Required toolchain
@@ -34,8 +34,8 @@ cargo run -- list examples/sample/src
 |------|---------|-----|
 | Rust | **1.83+** (MSRV declared in `Cargo.toml`) | Build the crate. CI's `msrv` job enforces this. |
 | Python | 3.10+ | Target language; the bundled sample's tests need it. |
-| `pytest` *or* stdlib `unittest` | latest | Only required when you actually run mutants. Both runners are supported. |
-| `ty` | latest | Only required when running with the ty filter enabled (default for `fermut run`). |
+| `pytest`, `rstest` *or* stdlib `unittest` | latest | Only required when you actually run mutants. All three runners are supported. |
+| `ty` | latest | Optional: the ty filter (on by default) runs in-process. The binary is only needed with `FERMUT_TY_EMBEDDED=0` or when the embedded checker can't be built. |
 | `ruff` | latest | Only required when running with `--ruff-filter`. |
 
 ## Repository layout
@@ -48,8 +48,8 @@ src/
 ├── config/            runtime Config + TOML schema + walk-up loader
 ├── mutator/           AST visitor + operator catalog
 ├── emit.rs            byte-range source splice
-├── filter/            Filter trait + 8 implementations
-├── runner/            Runner trait + pytest + unittest
+├── filter/            Filter trait + 11 implementations
+├── runner/            Runner trait + pytest (also drives rstest) + unittest
 ├── engine.rs          parallel orchestration
 ├── cache.rs           per-mutant result cache
 ├── report/            outcome types + writers + GHA annotations
@@ -91,7 +91,10 @@ when navigating an unfamiliar area.
      `self.push(Operator::Yours, range, "replacement")`.
 6. Add a test in `src/mutator/visitor.rs::operator_emission_tests` proving
    the new operator fires on a representative Python snippet.
-7. Update the operator table in `README.md`.
+7. Add a row to `docs/reference/operators/stable.md` (or `experimental.md` /
+   `parity.md`) and bump the operator counts; the
+   `docs_stay_in_sync_with_operator_catalogue` test checks them. See
+   [Adding an operator](docs/reference/internals/adding-operators.md).
 
 ## Adding a new filter
 
@@ -101,17 +104,19 @@ when navigating an unfamiliar area.
 3. Wire any CLI flags through `cli/mod.rs::FilterArgs` and
    `cli/build_config.rs`. Add equivalent `FileConfig` fields in
    `src/config/file.rs`.
-4. Add unit tests for the filter's `admits()` logic.
-5. Document in `README.md` under "Filters".
+4. Add its name to `CANONICAL_ORDER` in `src/filter/mod.rs` (the chain-order
+   tests enforce it), and unit tests for the filter's `admits()` logic.
+5. Document it in `docs/guides/filters.md`.
 
 ## Adding a new test runner
 
 1. Create `src/runner/<name>.rs` implementing the `Runner` trait. Use
-   `super::prepare_mirror` for the per-mutant project mirror.
+   `super::with_worker_mirror` and `super::apply_patch` for the per-worker
+   project mirror.
 2. Add a variant to `RunnerKind` in `src/config/mod.rs` (and the
    corresponding `RunnerCli` value-enum in `src/cli/mod.rs`).
 3. Wire dispatch in `src/runner/mod.rs::build`.
-4. Document in `README.md` under "Test runners".
+4. Document it in `docs/reference/cli/run.md` (the `--runner` flag).
 
 ## Style
 
@@ -184,5 +189,5 @@ For security issues, **do not** open a public issue. See
 
 ## License
 
-By contributing, you agree your changes are licensed under the same MIT
-license as the rest of fermut.
+By contributing, you agree your changes are dual-licensed under the same
+terms as the rest of fermut: MIT OR Apache-2.0, at the user's option.

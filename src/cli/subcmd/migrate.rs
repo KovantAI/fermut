@@ -289,7 +289,7 @@ fn translate_mutmut_key(key: &str, raw: &str, out: &mut Translation) {
             if let Some(p) = take_single_path(
                 raw,
                 key,
-                "fermut takes one source root — review and add inline `# fermut: ignore-file` markers for the rest if needed.",
+                "fermut takes one source root — run fermut once per extra root (`fermut run <root> --json <root>.json`) if you need them mutated too; give each run its own `--json` report so the per-root results stay separate.",
                 out,
             ) {
                 out.config.source_root = Some(p);
@@ -322,7 +322,7 @@ fn translate_mutmut_key(key: &str, raw: &str, out: &mut Translation) {
         }
         "use_coverage" | "mutate_only_covered_lines" => {
             if as_bool(raw) == Some(true) {
-                out.config.coverage = Some(PathBuf::from("coverage.json"));
+                out.config.coverage = Some(PathBuf::from(".coverage"));
             }
         }
         // Known mutmut keys without an equivalent — surface them so the
@@ -958,7 +958,7 @@ y = 2
         assert_eq!(tx.config.tests, Some(PathBuf::from("tests")));
         assert_eq!(tx.config.runner, Some("pytest"));
         assert_eq!(tx.config.pytest_args, vec!["-x", "-q"]);
-        assert_eq!(tx.config.coverage, Some(PathBuf::from("coverage.json")));
+        assert_eq!(tx.config.coverage, Some(PathBuf::from(".coverage")));
         assert!(tx.unmapped.is_empty());
     }
 
@@ -980,7 +980,7 @@ y = 2
         assert_eq!(tx.config.source_root, Some(PathBuf::from("src/")));
         assert_eq!(tx.config.tests, Some(PathBuf::from("tests/")));
         assert_eq!(tx.config.pytest_args, vec!["-x", "-q", "-m", "not slow"]);
-        assert_eq!(tx.config.coverage, Some(PathBuf::from("coverage.json")));
+        assert_eq!(tx.config.coverage, Some(PathBuf::from(".coverage")));
         assert!(tx.unmapped.is_empty(), "unmapped: {:?}", tx.unmapped);
     }
 
@@ -1180,7 +1180,7 @@ name = "celery4"
             runner: Some("pytest"),
             pytest_args: vec!["-x".into(), "-q".into()],
             timeout: Some(60),
-            coverage: Some(PathBuf::from("coverage.json")),
+            coverage: Some(PathBuf::from(".coverage")),
             isolation: Some("copy"),
             exclude: vec!["migrations/**".into(), "legacy/*.py".into()],
         };
@@ -1190,7 +1190,7 @@ name = "celery4"
         assert!(body.contains("runner = \"pytest\""));
         assert!(body.contains("pytest_args = [\"-x\", \"-q\"]"));
         assert!(body.contains("timeout = 60"));
-        assert!(body.contains("coverage = \"coverage.json\""));
+        assert!(body.contains("coverage = \".coverage\""));
         assert!(body.contains("isolation = \"copy\""));
         assert!(body.contains("exclude = [\"migrations/**\", \"legacy/*.py\"]"));
     }

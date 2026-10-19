@@ -15,7 +15,7 @@ Built for an agent picking its next target, so JSON is the default format.
 | `REPORT`               | —       | Path to a JSON report produced by `fermut run --json …`.         |
 | `--limit <N>`          | `1`     | Number of ranked survivors to emit. `1` is the single best target. |
 | `--all`                | off     | Emit every ranked survivor instead of `--limit`.                 |
-| `--max-tokens <N>`     | off     | Cap output at an estimated token budget. Emits the highest-ranked survivors that fit; drops the rest (count logged to stderr). Overrides `--limit`. |
+| `--max-tokens <N>`     | off     | Cap output at an estimated token budget. Emits the highest-ranked survivors that fit; drops the rest (count logged to stderr). Conflicts with `--limit` and `--all`. |
 | `--format json\|human` | `json`  | `json` emits the ranked list; `human` prints a readable summary. |
 
 ## How ranking works
@@ -130,7 +130,7 @@ fermut next .fermut/last.json --max-tokens 2000
   stdout stays a clean JSON array. Loop — kill the emitted clusters,
   re-run, ask `next` again — or raise `--max-tokens`.
 
-`--max-tokens` overrides `--limit` and conflicts with `--all`.
+`--max-tokens` conflicts with `--limit` and `--all`: pass only one of them.
 
 ## In the agent loop
 

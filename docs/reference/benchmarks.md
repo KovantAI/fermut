@@ -86,8 +86,9 @@ fermut-only.
 
 All ten re-measured same-session on one machine (2026-06-12) with the
 `coverage_prep` / `mutation_run` split. `cov_prep` is the one-time
-coverage-gen cost; `mutation` is the mutation work; `Cold total` is
-their sum (first-contact wall-clock).
+coverage-gen cost; `mutation` is the mutation work; `Cold total` is the
+measured first-contact wall-clock, which runs ~3–5 s above the sum of
+the two phases (time spent outside them).
 
 | Repo (ref)             | Mutants | Score   | cov_prep | mutation | Cold total |
 |------------------------|---------|---------|----------|----------|------------|
@@ -99,8 +100,8 @@ their sum (first-contact wall-clock).
 | click 8.1.7            | 7052    | 82.9    | ~20s     | ~211s    | ~235s      |
 | starlette 0.52.1       | 8061    | 81.3    | ~18s     | ~317s    | ~340s      |
 | jinja2 3.1.6           | 10087   | 78.7    | ~49s     | ~243s    | ~296s      |
-| werkzeug 3.1.8         | 15354   | 73.5    | ~17s     | ~316s    | ~338s      |
 | trio v0.33.0           | 12375   | ~54‡    | ~31s     | ~1220s   | ~1255s     |
+| werkzeug 3.1.8         | 15354   | 73.5    | ~17s     | ~316s    | ~338s      |
 
 † markupsafe's `100.0` is **real** (killed 155 / skipped 111 /
 survived 0 / errored 0) — a tiny, exhaustively-tested library, not
@@ -156,7 +157,7 @@ the cold table above for absolute head-to-head numbers.
 | click | fails† | — | **DNF** |
 | starlette | fails† | — | **DNF** |
 
-- **mutmut warm** is ~15–30 % faster than cold (its source-line cache
+- **mutmut warm** is ~9–86 % faster than cold (about 25–30 % on pyjwt and typer) (its source-line cache
   short-circuits unchanged mutants). It works on most repos but
   **fails on click** (mutmut's own CLI imports click, so a mutated
   click breaks mutmut's bootstrap) and **starlette** (no verdicts
@@ -190,7 +191,7 @@ so the coverage_prep split doesn't apply to them.
 | pyjwt 2.13.0           | ~42s       | ~5.5s  | ~6s             |
 | more-itertools v10.5.0 | ~304s      | ~11s   | ~11s            |
 
-- **Warm is 8–26× faster than cold** — the per-mutant result cache
+- **Warm is ~8–28× faster than cold** — the per-mutant result cache
   short-circuits every unchanged mutant. (Earlier docs claimed the
   cache gave *no* speedup; that was a harness artifact — the `warm`
   scenario ran one pass without guaranteeing a hot cache, and a
@@ -287,7 +288,7 @@ and `benchmarks/configs/tools.toml`. Results land in
 - **Score parity.** The tools find different mutants because
   operator catalogues differ. Scores are **not** directly
   comparable. A fermut `100.0` on a well-tested repo is a red flag,
-  not a result — see the ✗ note above.
+  not a result — see the missing-`pytest` harness bug below.
 - **Benchmark-harness bugs found while validating these numbers**
   (these were harness/setup issues, not fermut runtime bugs). Now
   fixed: per-repo venvs could miss `pytest` (→ every mutant errors →

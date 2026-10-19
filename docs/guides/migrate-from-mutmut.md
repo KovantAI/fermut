@@ -61,7 +61,9 @@ to the same fermut output.
   pick the most important entry or fold the rest into `pytest_args`.
 - **`runner` disappears in 3.x.** mutmut 3 always shells out to
   `pytest` and exposes its CLI via `pytest_add_cli_args*`. The
-  migrator emits `runner = "pytest"` by default for any 3.x config.
+  migrator only writes a `runner` key when it translates a 1.x/2.x
+  `runner` command; a pure 3.x config gets none, and fermut's default
+  runner (pytest) applies.
 - **`type_check_command` is configurable in 3.x** (mypy, pyright,
   any process that prints diagnostics). fermut has no slot for an
   external type checker — it embeds `ty` directly — so the key lands
@@ -71,11 +73,13 @@ If your project was on 1.x/2.x and the team has been gradually
 porting keys to 3.x in the same `[tool.mutmut]` block, the migrator
 reads both halves and merges them. Keys are processed in sorted
 order, so when both spellings of the same knob are set to different
-values, the alphabetically later key wins — that is the 3.x spelling
-in every renamed pair (`source_paths` > `paths_to_mutate`,
-`pytest_add_cli_args_test_selection` > `tests_dir`,
-`mutate_only_covered_lines` > `use_coverage`, `type_check_command` >
-`mypy`). `pytest_add_cli_args` and `runner` are additive — both
+values, the alphabetically later key wins. That is the 3.x spelling
+for `source_paths` (beats `paths_to_mutate`), but the **1.x** spelling
+for the tests path: `tests_dir` sorts after
+`pytest_add_cli_args_test_selection`, so `tests_dir` wins. The coverage
+pair (`use_coverage` / `mutate_only_covered_lines`) isn't a conflict:
+either one set to `true` turns coverage on. `mypy` and
+`type_check_command` both go to manual review. `pytest_add_cli_args` and `runner` are additive — both
 contribute to the final `pytest_args` list. Conflicts are **not**
 flagged today, so prefer to delete the stale spelling before running
 migrate. (Tracking issue welcome if this hits you in practice.)
@@ -89,7 +93,7 @@ differs:
 |-------------------------|----------------------------------------------|
 | `# pragma: no mutate`   | `# fermut: ignore`                           |
 | (line-level only)       | `# fermut: ignore[arith-op-swap]` (op-scoped) |
-| (no module-level form)  | `# fermut: ignore-file` at top of file       |
+| (no module-level form)  | no file marker — list the file in `exclude`  |
 
 fermut's marker is also operator-scopable — `# fermut: ignore[arith-op-swap]`
 silences only that operator on the line, where mutmut's pragma is
@@ -165,7 +169,7 @@ A side-by-side example:
     [tool.fermut]
     source_root = "src"
     tests = "tests"
-    runner = "pytest"
+    runner = "pytest"        # 1.x only: translated from `runner`; 3.x emits no runner key
     pytest_args = ["-x", "-q"]
     coverage = ".coverage"   # or "coverage.json" for a manual JSON export
     ```
@@ -279,9 +283,10 @@ coverage = ".coverage"
 # Or, manually: pytest --cov=src --cov-context=test && coverage json -o
 # coverage.json --show-contexts  (then set coverage = "coverage.json").
 - run: fermut coverage
-- run: fermut run src/ --tests tests/ \
-        --diff-only origin/${{ github.base_ref }} \
-        --markdown fermut-report.md
+- run: |
+    fermut run src/ --tests tests/ \
+      --diff-only origin/${{ github.base_ref }} \
+      --markdown fermut-report.md
 - if: always() && hashFiles('fermut-report.md') != ''
   env:
     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

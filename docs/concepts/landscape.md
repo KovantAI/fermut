@@ -54,7 +54,7 @@ bottom for what fermut still doesn't do that the others do.
 | Diff-only mode                   | :material-check:{ .yes } `--diff-only main`                                                                     | partial (`mutmut run path`)                          | partial (manual filtering)                                 |
 | Coverage-based test selection    | :material-check:{ .yes } reads coverage.py's `.coverage` SQLite directly (auto-discovered at project root; per-test contexts via `--cov-context=test`) | :material-close:{ .no }                                                    | :material-close:{ .no }                                                          |
 | Hypothesis seed pinning          | :material-check:{ .yes } `--hypothesis-seed`                                                                    | :material-close:{ .no }                                                    | :material-close:{ .no }                                                          |
-| Result cache                     | :material-check:{ .yes } `(mutant.id, ast_hash(file), scope)` keyed (AST-structural, reformat-resilient)        | :material-check:{ .yes } keyed on source-line hash                          | :material-check:{ .yes } (database-backed)                                       |
+| Result cache                     | :material-check:{ .yes } `(mutant.id, ast_hash(file), scope)` keyed (AST-structural: code edits re-run the file; byte-offset ids mean even comment edits re-run mutants below them)        | :material-check:{ .yes } keyed on source-line hash                          | :material-check:{ .yes } (database-backed)                                       |
 | Distributed execution            | :material-check:{ .yes } `--shard i/n` (zero-coordination, GHA matrix)                                          | :material-close:{ .no }                                                    | :material-check:{ .yes } celery / sql worker pool                                  |
 | Watch mode                       | :material-check:{ .yes } `--watch`                                                                              | :material-close:{ .no }                                                    | :material-close:{ .no }                                                          |
 | Reports                          | JSON, JUnit XML, HTML, Markdown                                                          | text + HTML                                          | json / sqlite / cosmic-ray-html                            |
@@ -63,7 +63,7 @@ bottom for what fermut still doesn't do that the others do.
 | Curated profile templates        | :material-check:{ .yes } `fermut init --profile pr-gate\|nightly\|local\|library`                              | :material-close:{ .no }                                                    | :material-close:{ .no }                                                          |
 | Environment doctor               | :material-check:{ .yes } `fermut doctor`                                                                        | :material-close:{ .no }                                                    | :material-close:{ .no }                                                          |
 | Migration tooling                | :material-check:{ .yes } `fermut migrate {mutmut,cosmic-ray}` (config + pragma rewrite + unmapped-key report)   | :material-close:{ .no }                                                    | :material-close:{ .no }                                                          |
-| Test runners                     | pytest, unittest (trait-based, extensible)                                                | pytest, unittest                                     | pytest, unittest, nose                                     |
+| Test runners                     | pytest, rstest, unittest (trait-based, extensible)                                        | pytest, unittest                                     | pytest, unittest, nose                                     |
 | Worker isolation                  | Per-worker mirror, reflink/clonefile-aware, configurable (auto/copy/hardlink/reflink)    | edits file in place + restores                       | per-worker mutated copy                                    |
 | Distribution                     | PyPI                                                                                    | PyPI                                                 | PyPI                                                       |
 
@@ -110,7 +110,7 @@ fermut today does **not**:
 - **Have a VS Code extension or LSP integration.** mutmut has the
   community `mutmut-mode` for emacs; nothing for fermut. Roadmap.
 - **Have a `fermut bisect`** for finding the commit that introduced a
-  surviving mutant. Roadmap.
+  surviving mutant.
 
 If any of those is a hard requirement, mutmut or cosmic-ray may be a
 better fit today.
@@ -160,7 +160,7 @@ the full-suite-per-mutant cost is already cheap and fermut's
 ty + coverage overhead doesn't pay off. The coverage filter (run
 only the tests crossing each mutated line) is the lever: uncovered-line
 mutants are *skipped*, not counted as survivors, which both cuts
-wall-clock and lifts the score. Coverage is opt-in (`--coverage`);
+wall-clock and lifts the score. Coverage is used whenever a `.coverage` DB with per-test contexts is at the project root (or `--coverage` points at one);
 mutmut has no equivalent. Scores across tools are **not directly
 comparable**.
 

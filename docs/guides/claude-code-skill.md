@@ -155,7 +155,7 @@ Many Python projects gate test modules behind `[project.optional-dependencies]`.
 
 ### 3. Tooling on PATH
 
-- `ty` — fermut's default pre-filter. Without it: pass `--no-ty-filter`.
+- `ty` — fermut's default pre-filter runs in-process, so the `ty` binary is optional (only needed with `FERMUT_TY_EMBEDDED=0`). `fermut doctor` still reports it as a failure when missing.
 - `pytest-cov` — install explicitly; it transitively pulls in `coverage`:
   ```bash
   uv add --dev pytest-cov         # or: pip install pytest-cov
@@ -164,7 +164,7 @@ Many Python projects gate test modules behind `[project.optional-dependencies]`.
 
 ### 4. Project venv
 
-Locate `.venv/bin/pytest`. fermut spawns `pytest` directly, so the venv must be on PATH when fermut runs.
+fermut runs `<python> -m pytest` with the interpreter it resolves: `--python`, else an active `$VIRTUAL_ENV`, else a nearby `.venv`. Only when none is found does it fall back to a bare `pytest` on PATH. If your venv lives elsewhere, pass `--python /abs/path/to/venv`.
 
 ### 5. `--fail-under` — skip it in this loop
 
@@ -327,10 +327,10 @@ Use this jq scenario calculator to predict the score under candidate skip sets b
 ```bash
 jq '
 def stat(skip):
-  [.outcomes[] | select((.status=="killed" or .status=="survived" or .status=="timeout") and (.mutant.operator as $o | (skip | index($o) | not)))] as $kept
+  [.outcomes[] | select((.status=="killed" or .status=="survived" or .status=="timed_out") and (.mutant.operator as $o | (skip | index($o) | not)))] as $kept
   | ($kept | map(select(.status=="killed")) | length) as $k
   | ($kept | map(select(.status=="survived")) | length) as $s
-  | ($kept | map(select(.status=="timeout")) | length) as $t
+  | ($kept | map(select(.status=="timed_out")) | length) as $t
   | {kept: ($k+$s+$t), killed: $k, survived: $s, score: (($k*1000/($k+$s+$t)|floor)/10)};
 {
   baseline: stat([]),
@@ -473,9 +473,9 @@ Per-file batch: 6–15 tests typically kill 10–30 mutants. Keyword-dispatch (`
 5. **`dynamic_context = test_function` produces wrong nodeid format** — use `pytest --cov-context=test`.
 6. **`--show-contexts` missing on `coverage json`** — fermut errors out.
 7. **Coverage filter drops everything** — path mismatch; verify mutant count via `jq '[.outcomes[] | select(.status != "skipped")] | length' .fermut/last.json`.
-8. **pytest not on PATH** — prepend `$PWD/.venv/bin`.
+8. **`pytest was not found on PATH`** — fermut found no venv to use; pass `--python /abs/path/to/venv` (or activate the venv).
 9. **Skipping a 100% kill-rate op lowers overall score** — see Stage 4 math. `break-continue-swap` and `remove-decorator` are common offenders.
-10. **Passing `src/` as PATH** — double-`src` path bug; pass project root.
+10. **Passing `src/` as the target** — prefer the project root so source-root, tests, and coverage keys stay consistent (coverage cwd is auto-detected, so this is consistency, not a path-join bug).
 11. **Polling the bg fermut process** — don't; the harness notifies on completion.
 12. **Iter rerun unexpectedly slow (10+ min)** — broad cache miss from tests in a shared dir. One-time, not a bug. See Stage 7.
 13. **Wasting tokens on `explain --llm` / `suggest`** — both hit the Anthropic API (`suggest` always; `explain` only with `--llm`); when Claude drives, that call is redundant and weaker. Use plain `explain --format json`.

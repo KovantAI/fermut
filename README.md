@@ -36,11 +36,12 @@ slipped through. In short — it answers **"are my tests any good?"**
   IDs, `next`/`explain`/`score` subcommands built for a coding agent in the loop.
 - 🔁 **Incremental** — cache-friendly warm runs (~35× on unchanged code),
   `--diff-only` scopes mutation to lines changed vs `main`.
-- 🚦 **CI-ready** — non-zero exit when any mutant survives, wire it straight
+- 🚦 **CI-ready** — non-zero exit when any mutant survives (or, with
+  `--fail-under`, when the score drops below a threshold), wire it straight
   into a pull-request gate.
 
-Hot loop is native Rust; the test runner stays Python (`pytest` or
-`unittest`). Built on [Astral's `ruff_python_parser`](https://github.com/astral-sh/ruff)
+Hot loop is native Rust; the test runner stays Python (`pytest`, the
+pytest-compatible `rstest`, or `unittest`). Built on [Astral's `ruff_python_parser`](https://github.com/astral-sh/ruff)
 for mutant generation and [`ty`](https://github.com/astral-sh/ty) for
 type-awareness. Humans welcome too.
 

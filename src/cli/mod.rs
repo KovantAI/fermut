@@ -104,8 +104,10 @@ pub(crate) struct FilterArgs {
     #[arg(long, conflicts_with_all = ["diff_only", "since"])]
     pub no_diff_only: bool,
 
-    /// Path to a coverage.json (from `coverage json -o coverage.json`).
-    /// Drops mutants on lines no test executes. Defaults to `coverage.json`.
+    /// Coverage data with per-test contexts: a `.coverage` SQLite DB or a
+    /// `coverage json --show-contexts` export. Drops mutants on lines no test
+    /// executes. Without the flag, `.coverage` at the project root is
+    /// auto-discovered; a bare `--coverage` means `coverage.json`.
     #[arg(long, num_args = 0..=1, default_missing_value = "coverage.json", conflicts_with = "no_coverage")]
     pub coverage: Option<PathBuf>,
 

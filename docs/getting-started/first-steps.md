@@ -112,8 +112,9 @@ run (no cache, default profile, `ty` filter on):
 If your run is dramatically slower than this on first pass, the
 usual suspect is the coverage filter not being applied (no per-test
 contexts — see [coverage-rejected](../reference/troubleshooting/coverage-rejected.md)).
-A missing `ty` won't just slow the run — it aborts before any
-mutant is tested; see
+ty runs in-process by default, so the `ty` binary isn't needed for a
+normal run. If the embedded checker is unavailable and the binary is
+missing too, the run aborts before any mutant is tested; see
 [ty-not-found](../reference/troubleshooting/ty-not-found.md).
 Re-runs are much faster thanks to the AST-hash cache — typically
 80–95% cache hit on a no-source-change re-run.
@@ -167,9 +168,10 @@ The most common surprises, in roughly the order people hit them:
   pinned, or you have order-dependent tests. Pin
   `hypothesis_seed` in `fermut.toml`; investigate flaky tests.
   See [score swings](../reference/troubleshooting/score-swings.md).
-- **`--diff-only` produces zero mutants.** Shallow clone (`git
+- **`--diff-only` fails with a git error.** Shallow clone (`git
   clone --depth 1`, or CI checkout with `fetch-depth: 1`) means
-  the merge base isn't reachable. Re-clone with full history. See
+  the base or merge-base isn't reachable. Fetch full history. Zero
+  mutants with no error usually means you're on the base branch. See
   [diff-only empty](../reference/troubleshooting/diff-only-empty.md).
 - **Lots of timeouts.** Some tests don't terminate cleanly under
   arithmetic mutants (infinite loops on boundary-shifted
@@ -178,8 +180,8 @@ The most common surprises, in roughly the order people hit them:
   suite that has never been mutation-tested" note above the
   "What can go wrong" header.
 - **Run is much slower than the wall-clock table.** Check that
-  `ty` is installed and on `$PATH`, and that coverage is being
-  honored (the `.coverage` DB has per-test contexts).
+  the ty filter isn't disabled (`ty_filter = false` / `--no-ty-filter`),
+  and that coverage is being honored (the `.coverage` DB has per-test contexts).
 - **`pytest` fails to collect before fermut even starts.** A previous
   mutation tool may have left a top-level `mutants/` (mutmut) or
   similar directory containing duplicate test-module basenames. The
@@ -262,13 +264,14 @@ fermut trend
 history: /work/project/.fermut/history.jsonl (5 entries)
 
 score: ▅▆▇▇▇   62.5% → 92.0%  (+29.5 pts)
+streak: ↑ improving (4 runs in a row)
 
-  timestamp              score  killed  survived  timeout    delta git
-  2026-05-01T10:00:00    62.5%      10        6        0         — main@aaa1111
-  2026-05-03T10:00:00    71.4%      15        6        0      +8.9 main@bbb2222
-  2026-05-10T10:00:00    80.0%      20        5        0      +8.6 main@ccc3333
-  2026-05-20T10:00:00    85.7%      24        4        0      +5.7 main@ddd4444
-  2026-06-01T10:00:00    92.0%      46        4        0      +6.3 features/coverage@eee5555
+  timestamp              score  kill  surv    to      delta git
+  2026-05-01T10:00:00    62.5%    10     6     0          — main@aaa1111
+  2026-05-03T10:00:00    71.4%    15     6     0       +8.9 main@bbb2222
+  2026-05-10T10:00:00    80.0%    20     5     0       +8.6 main@ccc3333
+  2026-05-20T10:00:00    85.7%    24     4     0       +5.7 main@ddd4444
+  2026-06-01T10:00:00    92.0%    46     4     0       +6.3 features/coverage@eee5555
 ```
 
 After a handful of inner-loop iterations, run `fermut trend --limit 10`

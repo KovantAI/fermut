@@ -45,8 +45,9 @@ couldn't map, with a short reason. Common cases:
 
 - mutmut: `backup`, `dict_synonyms`, `also_copy`, `pre_mutation`,
   `post_mutation`, `simple_output`.
-- cosmic-ray: `excluded-modules`, `distributor`, `execution-engine`,
-  `interceptors`, `badge`.
+- cosmic-ray: `interceptors`, `badge`. (`excluded-modules` maps to
+  `exclude`; `distributor` and `execution-engine` have no analogue and are
+  explained in the migrator's notes rather than this list.)
 
 For the full mapping rationale see
 **[Migrate from mutmut](../../guides/migrate-from-mutmut.md)** and

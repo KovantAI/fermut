@@ -17,9 +17,10 @@ order of preference:
    file.
 
 Both are discovered by walking *up* from the source path, nearest
-ancestor first. The first `fermut.toml` wins; if none exists,
-`pyproject.toml` files are searched in the same walk for a
-`[tool.fermut]` table.
+directory first. In each directory fermut checks `fermut.toml`, then a
+`[tool.fermut]` table in `pyproject.toml`; the first hit wins. So a
+nearer `pyproject.toml` with `[tool.fermut]` beats a `fermut.toml`
+further up.
 
 Paths inside the config file resolve **relative to the config file's
 directory**, not the current working directory. Move the file, paths
@@ -63,7 +64,7 @@ write a `fermut.toml` tuned to one specific use case:
 | Profile     | Optimized for                       | Key choices                                                       |
 |-------------|-------------------------------------|-------------------------------------------------------------------|
 | `pr-gate`   | Pre-merge CI gate. Fail fast.       | `diff_only`, `coverage`, narrow ops, short timeout, seeded.       |
-| `nightly`   | Cron full sweep. Catch drift.       | All operators (incl. experimental), longer timeout, no filters.   |
+| `nightly`   | Cron full sweep. Catch drift.       | All operators (incl. experimental), 60 s timeout, no coverage.    |
 | `local`     | Dev loop. Sub-second cycle.         | `sample = 0.25`, all stable ops, cache on, no coverage.           |
 | `library`   | Library authors. Reproducible.      | All stable ops, seeded, moderate timeout.                          |
 

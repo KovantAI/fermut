@@ -35,8 +35,14 @@ Stable:
 
 - Subcommand names (`run`, `list`, `show`, `clean`, `completions`).
 - Existing flag names, short forms, value parsers, and defaults.
-- Exit codes (`0` success / no survivors; `1` survivors exist; `>1` infra
-  error).
+- Exit codes: `0` success (no survivors, the score clears
+  `--fail-under`, a scoreless run with no errors, or any finished run
+  under `--no-fail`); `1` the gate failed (survivors, score below
+  `--fail-under`, a regression past `--fail-on-regression`, or a
+  scoreless run where mutants errored) **or** a runtime error occurred
+  (even with `--no-fail`); `2` command-line usage error (from clap). A runtime error is
+  currently not distinguishable from a failed gate by exit code; read
+  stderr or the JSON report.
 - The structure of `--help` output is **not** stable — only the
   command/flag names are.
 
@@ -116,7 +122,7 @@ is documented but not version-locked. Don't parse them; consume the JSON.
 
 ### Mutant IDs
 
-Stable: the **format** of `Mutant.id` (`{file}@{byte_offset}:{orig}->{replacement}`).
+Stable: the **format** of `Mutant.id` (`{file}@{byte_offset}:{operator}:{orig}->{replacement}`).
 
 Caching, sharding, and `fermut show <id>` all depend on this. A
 breaking change here invalidates every existing cache file.

@@ -14,8 +14,8 @@ fermut is mutation testing built to be fast enough to actually run.
 The mutator is native Rust; the type-aware `ty` pre-filter discards
 type-invalid mutants in ~25 ms each before they cost a pytest run;
 content-hash caching means re-runs only pay for what changed. The
-test runner stays the one your team already trusts — `pytest` or
-`unittest`.
+test runner stays the one your team already trusts — `pytest`,
+`rstest` or `unittest`.
 
 New to mutation testing? Start with
 **[First steps](getting-started/first-steps.md)** for a five-minute
@@ -104,7 +104,7 @@ SURVIVED  src/auth.py:42 [boundary-shift] `age >= 18` → `age > 18`
 152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3 (coverage 3), equivalent: 0, errored: 0  | score: 94.6%
 ```
 
-`detected = killed + timeout` (here `141 / 149 = 94.6%`). Skipped and
+`detected = killed + timeout` (here `141 / 149 = 94.6%`). Skipped, errored and
 equivalent mutants don't count either way.
 See **[mutation score](concepts/mutation-testing.md#the-mutation-score)**
 for the formula.
@@ -114,7 +114,7 @@ CI as a gate.
 
 Once the bare run feels right, switch to a named profile if your
 use case matches one: `pr-gate` (PR CI gate), `nightly` (full
-sweep), `local` (dev loop with `--watch`), `library` (reproducible
+sweep), `local` (dev loop, 25% sample), `library` (reproducible
 across contributors). `fermut init --profile <name> --force`
 overwrites the auto-detected config. See
 **[First steps](getting-started/first-steps.md)** for the full

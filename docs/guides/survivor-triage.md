@@ -15,28 +15,40 @@ unkillable cases, see
 
 The detail view from `fermut show` is the unit of triage:
 
+`fermut show report.json` lists every outcome with its index; pass an
+index (or a mutant id) to see one. The index counts all outcomes, not
+just survivors:
+
 ```sh
-fermut show report.json 1
+fermut show report.json        # [  28] SURVIVED  /home/me/proj/src/auth/session.py:42@1187 [boundary-shift] `>` → `>=`
+fermut show report.json 28
 ```
 
 ```
-[1] SURVIVED  src/auth/session.py:42  boundary-shift
-    operator : boundary-shift
-    range    : src/auth/session.py:42:8-42:34
-    diff:
-    -     if now - created_at > MAX_AGE:
-    +     if now - created_at >= MAX_AGE:
+/home/me/proj/src/auth/session.py:42
+operator : boundary-shift
+status   : survived
+id       : /home/me/proj/src/auth/session.py@1187:boundary-shift:>->>=
+mutation : `>` → `>=`
+
+--- /home/me/proj/src/auth/session.py (original)
++++ /home/me/proj/src/auth/session.py (mutant)
+@@ -39,7 +39,7 @@
+ ...
+-    if now - created_at > MAX_AGE:
++    if now - created_at >= MAX_AGE:
+ ...
 ```
 
 Five things to read off the output:
 
 | Field        | What it tells you                                                                                                 |
 |--------------|-------------------------------------------------------------------------------------------------------------------|
-| File:line    | Where the mutation was applied. Open the file in your editor before doing anything else.                          |
+| File:line    | Where the mutation was applied (absolute path). Open the file in your editor before doing anything else.          |
 | Operator     | Which *kind* of mutation. The operator name is your hint for what kind of test would catch it.                     |
-| Range        | Exact source span. fermut points at the token, not just the line — useful when one line has multiple mutables.     |
-| Diff         | The actual change. Read this line carefully — the survivor question is "would my test notice this difference?"   |
-| Status       | Always `SURVIVED` in triage; if it's `Errored` or `TIMEOUT`, that's a different problem (see notes below).         |
+| Mutation     | The exact token change. The `@<offset>` in the id is the byte offset, so you can tell apart several mutables on one line. |
+| Diff         | The actual change in context. Read it carefully — the survivor question is "would my test notice this difference?" |
+| Status       | Always `survived` in triage; if it's `error` or `timeout`, that's a different problem (see notes below).         |
 
 ## The triage decision
 
@@ -127,7 +139,7 @@ name hints at which:
 | `arith-op-swap`       | Weak assertion that wouldn't catch an arithmetic substitution.    |
 | `compare-op-swap`     | Missing test for the inverse comparison case.                     |
 | `bool-op-swap`        | Test only exercises the "true" path of an `and` / `or`.            |
-| `return-to-none`      | Function's return value is never asserted against.                |
+| `return-value-to-none` | Function's return value is never asserted against.                |
 | `constant-replace`    | Magic number not pinned by a test.                                |
 
 ## When to ignore instead of kill
@@ -152,10 +164,10 @@ suite genuinely doesn't exercise.
 
 ## Surviving outcomes that aren't `SURVIVED`
 
-`fermut show` reports four outcomes you might mistake for "needs a
+`fermut show` reports three outcomes you might mistake for "needs a
 test":
 
-- **`Errored`** — pytest crashed before producing a verdict. Not a
+- **`ERROR`** — pytest crashed before producing a verdict. Not a
   test gap; usually a test-suite side effect on the source tree.
   See [errored outcomes](../reference/troubleshooting/errored-outcomes.md).
 - **`TIMEOUT`** — pytest ran longer than `--timeout`. Counts as

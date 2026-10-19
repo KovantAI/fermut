@@ -92,11 +92,17 @@ python extract_mutmut.py <mutmut-worktree> <mutmut-venv>/bin mutmut-<repo>.json
 # 2. generate fermut's mutants (catalogue view: --parity + tiny --sample is enough)
 fermut run <src> --tests tests --coverage .coverage --parity \
     --sample 0.003 --json gen-<repo>.json
-# 3. detection comparison + survivor diff
-python compare.py gen-<repo>.json mutmut-<repo>.json report.md
-# 4. operator-catalogue gap by kind
+# 3. operator-catalogue gap by kind (the sampled JSON is enough here)
 python map_operators.py gen-<repo>.json mutmut-<repo>.json operators.md
+# 4. detection comparison + survivor diff: needs verdicts, so re-run step 2
+#    WITHOUT --sample (full run) and compare that report
+fermut run <src> --tests tests --coverage .coverage --parity --json full-<repo>.json
+python compare.py full-<repo>.json mutmut-<repo>.json report.md
 ```
+
+A tiny `--sample` captures the full generated set (sampled-out mutants are
+written as `skipped`), which is all the catalogue view needs. Detection
+loss needs real verdicts, so it needs an unsampled run.
 
 ## Caveats
 

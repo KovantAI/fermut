@@ -13,7 +13,7 @@ markers).
 | `unary-op-swap`      | `-x` → `+x`, `not x` → `x`, `~x` → `x`                             |
 | `aug-assign-swap`    | `x += y` → `x -= y`, `//=` → `/=`, `&=` → `\|=`                    |
 | `constant-replace`   | `True` ↔ `False`, `""` → `"fermut"`                                |
-| `number-shift`       | `n` → `n+1`, `n` → `n-1` (decimal int / float literals only — hex `0xFF`, oct `0o77`, bin `0b11`, and complex `1j` literals are not mutated) |
+| `number-shift`       | `n` → `n+1`, `n` → `n-1` (int / float literals, including exponent floats; hex `0xFF`, oct `0o77`, bin `0b11` keep their base, e.g. `0xFF` → `0x100`; complex `1j` literals are not mutated) |
 | `return-value-to-none` | `return expr` → `return None`                                    |
 | `break-continue-swap` | `break` ↔ `continue`                                              |
 | `not-insertion`      | `if x:` → `if not (x):` (also `while`, `assert`)                   |

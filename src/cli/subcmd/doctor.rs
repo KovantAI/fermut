@@ -263,19 +263,15 @@ fn collect_checks(start: &Path) -> Vec<Check> {
         }
     }
 
-    // ---- ty (required by default; only skipped if explicitly disabled) ----
+    // ---- ty (on by default; only skipped if explicitly disabled) ----
     let ty_on = loaded
         .as_ref()
         .and_then(|c| c.file.ty_filter)
         .unwrap_or(true);
     if ty_on {
-        out.push(check_tool(
-            "ty",
-            &["ty", "--version"],
-            "type-aware mutant pre-filter",
-            "uv tool install ty",
-            /* required */ true,
-            vbin,
+        out.push(ty_check(
+            tool_version(&["ty", "--version"], vbin),
+            crate::filter::ty::env_disables_embedded(),
         ));
     } else {
         // Surface it as skipped instead of dropping the row — otherwise the
@@ -535,6 +531,27 @@ fn check_coverage_sqlite(path: &Path) -> Check {
     }
 }
 
+/// `run` type-checks in-process by default, so a missing `ty` binary only
+/// matters when `FERMUT_TY_EMBEDDED=0` forces the subprocess path (or as the
+/// fallback if the embedded build fails, hence the warning).
+fn ty_check(version: Option<String>, embedded_disabled: bool) -> Check {
+    const PURPOSE: &str = "type-aware mutant pre-filter";
+    const HINT: &str = "uv tool install ty";
+    match version {
+        Some(v) => Check::ok("ty", format!("{v} — {PURPOSE}")),
+        None if embedded_disabled => Check::fail(
+            "ty",
+            format!("not on PATH and FERMUT_TY_EMBEDDED=0 ({PURPOSE})"),
+            HINT,
+        ),
+        None => Check::warn(
+            "ty",
+            "binary not on PATH; run uses the embedded checker (binary is only the fallback)",
+            HINT,
+        ),
+    }
+}
+
 fn check_tool(
     name: &'static str,
     cmd: &[&str],
@@ -740,6 +757,13 @@ mod tests {
                 skip: 1,
             }
         );
+    }
+
+    #[test]
+    fn missing_ty_fails_only_when_embedded_disabled() {
+        assert_eq!(ty_check(None, false).status, Status::Warn);
+        assert_eq!(ty_check(None, true).status, Status::Fail);
+        assert_eq!(ty_check(Some("ty 0.1".into()), true).status, Status::Ok);
     }
 
     #[test]

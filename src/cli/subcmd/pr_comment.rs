@@ -25,6 +25,7 @@ pub(crate) fn pr_comment(opts: PrCommentArgs) -> Result<()> {
     let repo = resolve_repo(opts.repo.as_deref())?;
     let pr = resolve_pr(opts.pr)?;
     let marker = opts.marker.as_deref().unwrap_or(STICKY_MARKER);
+    let body = stamp_marker(body, marker);
 
     if opts.dry_run {
         println!("pr-comment plan:");
@@ -52,6 +53,17 @@ pub(crate) fn pr_comment(opts: PrCommentArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Discovery matches on the body's *prefix*, but the markdown report always
+/// starts with the default [`STICKY_MARKER`]. Prepend a custom marker so the
+/// next run's lookup finds this comment instead of creating another.
+fn stamp_marker(body: String, marker: &str) -> String {
+    if body.starts_with(marker) {
+        body
+    } else {
+        format!("{marker}\n{body}")
+    }
 }
 
 fn resolve_repo(arg: Option<&str>) -> Result<String> {
@@ -239,6 +251,17 @@ fn json_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stamp_marker_prefixes_custom_marker_only() {
+        let body = format!("{STICKY_MARKER}\n# report\n");
+        // Default marker already leads the report: body unchanged.
+        assert_eq!(stamp_marker(body.clone(), STICKY_MARKER), body);
+        // Custom marker must lead, or the startswith lookup never matches.
+        let stamped = stamp_marker(body.clone(), "<!-- shard-2 -->");
+        assert!(stamped.starts_with("<!-- shard-2 -->\n"));
+        assert!(stamped.ends_with(&body));
+    }
 
     #[test]
     fn pr_from_ref_parses_merge_and_head() {

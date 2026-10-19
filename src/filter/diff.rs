@@ -39,7 +39,7 @@ impl DiffFilter {
     /// `base` and `HEAD` (branch-divergence point), then diffed two-dot against
     /// the working tree so current, unstaged work is scoped in.
     pub fn from_git(base: &str, cwd: &Path) -> Result<Self> {
-        let merge_base = git_merge_base(base, cwd)?;
+        let merge_base = git_merge_base(&local_or_origin(base, cwd), cwd)?;
         let stdout = git_diff(&["--unified=0", "--relative", &merge_base], cwd)?;
         Ok(Self {
             changed: parse_unified_diff(&stdout, cwd),
@@ -71,6 +71,30 @@ impl Filter for DiffFilter {
             .get(&canonical)
             .map(|set| set.contains(&m.line))
             .unwrap_or(false))
+    }
+}
+
+/// `base` when it resolves locally, else `origin/<base>` when that does. A CI
+/// PR checkout has `origin/main` but no local `main`, so a config's
+/// `diff_only = "main"` would otherwise fail there.
+fn local_or_origin(base: &str, cwd: &Path) -> String {
+    let resolves = |r: &str| {
+        Command::new("git")
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{r}^{{commit}}"),
+            ])
+            .current_dir(cwd)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    let origin = format!("origin/{base}");
+    if !resolves(base) && resolves(&origin) {
+        origin
+    } else {
+        base.to_string()
     }
 }
 
@@ -333,6 +357,32 @@ mod tests {
             set,
             [2u32].into_iter().collect(),
             "diff-only should scope in the uncommitted edit to line 2"
+        );
+    }
+
+    /// A CI PR checkout has `origin/main` but no local `main`; a config's
+    /// `diff_only = "main"` must fall back to the remote-tracking ref.
+    #[test]
+    fn diff_only_falls_back_to_origin_when_base_missing_locally() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        git(cwd, &["init", "-q", "-b", "main"]);
+        git(cwd, &["config", "user.email", "t@t"]);
+        git(cwd, &["config", "user.name", "t"]);
+        std::fs::write(cwd.join("f.py"), "a\nb\nc\n").unwrap();
+        git(cwd, &["add", "."]);
+        git(cwd, &["commit", "-qm", "base"]);
+        git(cwd, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(cwd, &["checkout", "-qb", "feat"]);
+        git(cwd, &["branch", "-qD", "main"]);
+        std::fs::write(cwd.join("f.py"), "a\nB\nc\n").unwrap();
+
+        let filter = DiffFilter::from_git("main", cwd).unwrap();
+        let key = cwd.join("f.py");
+        let key = key.canonicalize().unwrap_or(key);
+        assert_eq!(
+            filter.changed.get(&key).cloned().unwrap_or_default(),
+            [2u32].into_iter().collect()
         );
     }
 

@@ -54,6 +54,16 @@ pub struct ExplainOpts {
 /// Built with a caller-resolved `project_root` (via
 /// [`crate::cli::current_project_root`]) rather than reading the cwd here, so
 /// the conversion is pure and unit-testable.
+/// `--tests` when given, else `<project_root>/tests` when that directory
+/// exists. clap's `default_missing_value` only covers a bare `--tests`; an
+/// omitted flag would otherwise mean no style samples and no apply target.
+pub(crate) fn tests_or_default(tests: Option<PathBuf>, project_root: &Path) -> Option<PathBuf> {
+    tests.or_else(|| {
+        let dir = project_root.join("tests");
+        dir.is_dir().then_some(dir)
+    })
+}
+
 impl From<(ExplainArgs, PathBuf)> for ExplainOpts {
     fn from((a, project_root): (ExplainArgs, PathBuf)) -> Self {
         let ExplainArgs {
@@ -72,7 +82,7 @@ impl From<(ExplainArgs, PathBuf)> for ExplainOpts {
             report,
             target,
             context_lines: context,
-            tests,
+            tests: tests_or_default(tests, &project_root),
             coverage,
             llm,
             model,
@@ -138,6 +148,10 @@ pub struct CoverageSignal {
     pub covered: bool,
     pub tests: Vec<String>,
     pub note: String,
+    /// Set when the coverage file could not be loaded; `covered` is then
+    /// meaningless.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -191,10 +205,7 @@ pub(crate) fn build_explain_report(opts: &ExplainOpts) -> Result<ExplainReport> 
     let m = outcome.mutant();
     let enclosing = enclosing_symbol(m);
 
-    let coverage = match &opts.coverage {
-        Some(p) => Some(build_coverage_signal(p, m)?),
-        None => None,
-    };
+    let coverage = resolve_coverage(opts.coverage.as_deref(), opts.tests.as_deref(), m)?;
     let test_matches = match (&opts.tests, &enclosing) {
         (Some(dir), Some(sym)) => Some(build_test_matches(dir, &sym.name)?),
         _ => None,
@@ -280,16 +291,45 @@ fn build_source_context(m: &Mutant, context_lines: usize) -> SourceContext {
     out
 }
 
+/// Coverage signal for `m`. An explicit `--coverage` is always reported (a
+/// load failure surfaces as `error`). Without one, discover the project-root
+/// `.coverage` like `run` does — and like `run`, drop it silently when it is
+/// stale or unusable (e.g. recorded without per-test contexts) rather than
+/// claim the line is untested.
+fn resolve_coverage(
+    explicit: Option<&Path>,
+    tests: Option<&Path>,
+    m: &Mutant,
+) -> Result<Option<CoverageSignal>> {
+    if let Some(p) = explicit {
+        return build_coverage_signal(p, m).map(Some);
+    }
+    let start = m.file.parent().map(Path::to_path_buf);
+    let root = match start.as_deref().and_then(crate::runner::find_project_root) {
+        Some(r) => r,
+        None => std::env::current_dir()?,
+    };
+    let Some(db) = crate::cli::build_config::discover_coverage_db(&root) else {
+        return Ok(None);
+    };
+    if crate::cli::build_config::newer_source_than_coverage(&db, &root, tests, &root).is_some() {
+        return Ok(None);
+    }
+    let sig = build_coverage_signal(&db, m)?;
+    Ok(sig.error.is_none().then_some(sig))
+}
+
 fn build_coverage_signal(coverage_path: &Path, m: &Mutant) -> Result<CoverageSignal> {
     let cwd = std::env::current_dir()?;
     let project_root = crate::runner::find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
-    let ctx = match CoverageContexts::from_json(coverage_path, &cwd, &project_root) {
+    let ctx = match CoverageContexts::from_path(coverage_path, &cwd, &project_root) {
         Ok(c) => c,
         Err(e) => {
             return Ok(CoverageSignal {
                 covered: false,
                 tests: Vec::new(),
                 note: format!("could not load coverage: {e}"),
+                error: Some(e.to_string()),
             });
         }
     };
@@ -300,12 +340,14 @@ fn build_coverage_signal(coverage_path: &Path, m: &Mutant) -> Result<CoverageSig
             note:
                 "tests executed this line but did not distinguish the mutation; strengthen their assertions"
                     .to_string(),
+            error: None,
         }),
         _ => Ok(CoverageSignal {
             covered: false,
             tests: Vec::new(),
             note: "no test executes this line or the statement around it; add one that exercises it at all"
                 .to_string(),
+            error: None,
         }),
     }
 }
@@ -526,7 +568,9 @@ fn print_hint(r: &ExplainReport) {
 /// Coverage signal — which tests executed the line, or that none did.
 fn print_coverage(r: &ExplainReport) {
     let Some(c) = &r.coverage else { return };
-    if c.covered {
+    if let Some(e) = &c.error {
+        println!("\ncoverage : could not load coverage: {e}");
+    } else if c.covered {
         println!("\ncoverage : {} test(s) executed this line:", c.tests.len());
         for t in c.tests.iter().take(10) {
             println!("  - {t}");
@@ -914,6 +958,22 @@ mod tests {
         assert_eq!(opts.context_lines, 7, "context maps to context_lines");
         assert_eq!(opts.report, PathBuf::from("r.json"));
     }
+
+    #[test]
+    fn omitted_tests_defaults_to_existing_tests_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(tests_or_default(None, tmp.path()), None, "no tests/ → None");
+        std::fs::create_dir(tmp.path().join("tests")).unwrap();
+        assert_eq!(
+            tests_or_default(None, tmp.path()),
+            Some(tmp.path().join("tests"))
+        );
+        let explicit = PathBuf::from("spec");
+        assert_eq!(
+            tests_or_default(Some(explicit.clone()), tmp.path()),
+            Some(explicit)
+        );
+    }
     use crate::mutator::Operator;
     use ruff_text_size::TextRange;
     use std::path::PathBuf;
@@ -942,6 +1002,89 @@ mod tests {
             stmt_line: line,
             site: None,
         }
+    }
+
+    /// Write a minimal coverage.py SQLite DB recording `src` line 2 under
+    /// `context` (`""` = recorded without per-test contexts).
+    fn write_cov_db(db: &Path, src: &Path, context: &str) {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE file (id integer primary key, path text);
+             CREATE TABLE context (id integer primary key, context text);
+             CREATE TABLE line_bits (file_id integer, context_id integer, numbits blob);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO file (id, path) VALUES (1, ?1)",
+            [src.display().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO context (id, context) VALUES (1, ?1)",
+            [context],
+        )
+        .unwrap();
+        // numbits: line 2 → byte 0, bit 2.
+        conn.execute(
+            "INSERT INTO line_bits (file_id, context_id, numbits) VALUES (1, 1, ?1)",
+            [vec![0b100u8]],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn coverage_signal_reads_sqlite_db() {
+        // Regression: explain used to call `from_json` only, so a `.coverage`
+        // SQLite DB failed to parse and was silently reported as uncovered.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("calc.py");
+        std::fs::write(&src, "def f(x):\n    return x >= 1\n").unwrap();
+        let db = tmp.path().join(".coverage");
+        write_cov_db(&db, &src, "tests/test_calc.py::test_f|run");
+
+        let sig = build_coverage_signal(&db, &make_mutant(src, 2)).unwrap();
+        assert!(
+            !sig.note.contains("could not load coverage"),
+            "SQLite DB must load: {}",
+            sig.note
+        );
+        assert!(sig.covered, "line 2 is covered: {:?}", sig.tests);
+    }
+
+    #[test]
+    fn auto_discovered_coverage_without_contexts_is_dropped() {
+        // A plain `pytest --cov` DB has no per-test contexts. Auto-discovery
+        // must not turn that into a false "NO test executes" verdict; an
+        // explicit `--coverage` still reports the load error.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pyproject.toml"), "").unwrap();
+        let src = tmp.path().join("calc.py");
+        std::fs::write(&src, "def f(x):\n    return x >= 1\n").unwrap();
+        let db = tmp.path().join(".coverage");
+        write_cov_db(&db, &src, "");
+        // Keep the DB fresh so the staleness guard isn't what drops it.
+        for f in [&src, &tmp.path().join("pyproject.toml")] {
+            filetime::set_file_mtime(f, filetime::FileTime::from_unix_time(1_000, 0)).unwrap();
+        }
+        let m = make_mutant(src, 2);
+        assert!(resolve_coverage(None, None, &m).unwrap().is_none());
+        let explicit = resolve_coverage(Some(&db), None, &m).unwrap().unwrap();
+        assert!(explicit.error.is_some(), "explicit load error must surface");
+    }
+
+    #[test]
+    fn auto_discovered_stale_coverage_is_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pyproject.toml"), "").unwrap();
+        let src = tmp.path().join("calc.py");
+        std::fs::write(&src, "def f(x):\n    return x >= 1\n").unwrap();
+        let db = tmp.path().join(".coverage");
+        write_cov_db(&db, &src, "tests/test_calc.py::test_f|run");
+        let m = make_mutant(src, 2);
+        // Fresh: loads. Then backdate the DB below the source: dropped.
+        assert!(resolve_coverage(None, None, &m).unwrap().unwrap().covered);
+        filetime::set_file_mtime(&db, filetime::FileTime::from_unix_time(1_000, 0)).unwrap();
+        assert!(resolve_coverage(None, None, &m).unwrap().is_none());
     }
 
     #[test]
@@ -1159,13 +1302,15 @@ pub(crate) struct ExplainArgs {
     pub(crate) context: usize,
 
     /// Tests directory to grep for the enclosing symbol. Defaults to
-    /// `tests/` if it exists under cwd.
+    /// `tests/` when it exists under the current directory.
     #[arg(long, num_args = 0..=1, default_missing_value = "tests")]
     pub(crate) tests: Option<std::path::PathBuf>,
 
-    /// Path to a `coverage.json` (with contexts). When present, the
-    /// explanation includes whether any test executed the mutant line
-    /// and which tests they were.
+    /// Coverage data with per-test contexts: coverage.py's `.coverage`
+    /// SQLite DB or a `coverage json --show-contexts` export (format is
+    /// sniffed). Without the flag, a `.coverage` DB at the project root is
+    /// auto-discovered. When present, the explanation includes whether any
+    /// test executed the mutant line and which tests they were.
     #[arg(long, num_args = 0..=1, default_missing_value = "coverage.json")]
     pub(crate) coverage: Option<std::path::PathBuf>,
 

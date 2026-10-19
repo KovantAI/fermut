@@ -157,14 +157,21 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     let (diff_base, since) = if f.no_diff_only {
         (None, None)
     } else {
-        let diff_base = f.diff_only.or_else(|| file.diff_only.clone());
-        let since = f.since.or_else(|| file.since.clone());
-        if diff_base.is_some() && since.is_some() {
-            return Err(anyhow::anyhow!(
-                "`--diff-only` and `--since` are mutually exclusive"
-            ));
+        match (f.diff_only, f.since) {
+            // A CLI scope replaces the config's (CLI > config), so
+            // `--since HEAD` works on a pr-gate config's `diff_only = "main"`.
+            // clap already rejects both flags together.
+            (Some(base), _) => (Some(base), None),
+            (None, Some(spec)) => (None, Some(spec)),
+            (None, None) => {
+                if file.diff_only.is_some() && file.since.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "config sets both `diff_only` and `since`; they are mutually exclusive"
+                    ));
+                }
+                (file.diff_only.clone(), file.since.clone())
+            }
         }
-        (diff_base, since)
     };
     // Inferred kills are for full nightly sweeps. A diff-scoped run is the PR
     // gate, which must score observed verdicts only — refuse even when the
@@ -447,7 +454,7 @@ fn absolutize(p: PathBuf) -> PathBuf {
 /// *and* sniffs as a real SQLite DB — guarding against a stray/empty `.coverage`
 /// that isn't a coverage database. Verifying it actually carries per-test
 /// contexts is left to `from_path`, which errors with the regeneration recipe.
-fn discover_coverage_db(project_root: &Path) -> Option<PathBuf> {
+pub(crate) fn discover_coverage_db(project_root: &Path) -> Option<PathBuf> {
     let candidate = project_root.join(".coverage");
     if !candidate.is_file() {
         return None;
@@ -481,7 +488,7 @@ fn discover_coverage_db(project_root: &Path) -> Option<PathBuf> {
 ///
 /// The returned path is just *an* offending file for the warning message, not
 /// necessarily the newest — the walk short-circuits on the first one found.
-fn newer_source_than_coverage(
+pub(crate) fn newer_source_than_coverage(
     coverage: &Path,
     source_root: &Path,
     tests: Option<&Path>,
@@ -963,6 +970,17 @@ mod tests {
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
         assert!(cfg.diff_base.is_none(), "diff_base = {:?}", cfg.diff_base);
         assert!(cfg.since.is_none());
+    }
+
+    #[test]
+    fn cli_since_overrides_config_diff_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "diff_only = \"main\"\n").unwrap();
+        let mut f = empty_filter();
+        f.since = Some("HEAD".into());
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
+        assert_eq!(cfg.since.as_deref(), Some("HEAD"));
+        assert!(cfg.diff_base.is_none());
     }
 
     #[test]

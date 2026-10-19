@@ -13,12 +13,12 @@ specifically to make those loops fast and reliable.
 
 | Need an agent has                                                          | What fermut gives it                                                                                                                              |
 |----------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------|
-| Short iteration cycles (write → measure → write)                            | Per-mutant result cache keyed on `(mutant.id, ast_hash(file), scope)`. AST-structural hashing means reformat / comment edits don't invalidate. See [Cache strategy](#cache-strategy). |
+| Short iteration cycles (write → measure → write)                            | Per-mutant result cache keyed on `(mutant.id, ast_hash(file), scope)`. Note the mutant id embeds the byte offset, so any edit that shifts bytes (including a comment) re-runs the mutants below it. See [Cache strategy](#cache-strategy). |
 | Machine-readable output                                                    | `--format json`, `--json <path>`, `--junit`, structured fields in every report writer.                                                            |
 | Deterministic results across runs                                          | Pinnable Hypothesis seed, deterministic `--sample`, content-hash cache keys. Two runs of the same commit produce the same survivor list.            |
 | Knowing *which test to write next*                                          | `fermut next` ranks survivors by cluster leverage + kill-ease and names the single best target; survivor JSON lines carry file:line, operator, original → replacement for the concrete assertion. |
 | Knowing *if my work is helping*                                             | `.fermut/history.jsonl` + `fermut trend`. Score delta vs the previous iteration is the agent's reward signal.                                       |
-| Targeting only the code the agent just touched                              | `--diff-only` for branch-relative diffs (three-dot, **committed** only), `--since <SPEC>` for "since I last ran" (two-dot, **includes uncommitted** edits). |
+| Targeting only the code the agent just touched                              | `--diff-only` for branch-relative diffs (merge base → working tree), `--since <SPEC>` for "since I last ran" (fixed point → working tree). Both **include uncommitted** edits. |
 | Narrowing tests per mutant so each iteration runs in seconds, not minutes  | Coverage-driven test selection from `.coverage` (per-test contexts). fermut reads coverage.py's native `.coverage` SQLite DB directly and auto-discovers it at the project root; `pytest --cov=src --cov-context=test` is all it takes. |
 | Failing loud when the environment is broken                                 | `fermut doctor` returns exit code 1 with a remediation hint per failed check.                                                                       |
 
@@ -29,16 +29,23 @@ seconds in steady state.
 
 **1. Edit one file** — say `src/auth.py`, tightening a boundary check.
 
-**2. Run fermut, write JSON** — `--since HEAD` scopes mutants to
-just-edited files; cache reuses verdicts for everything else.
+**2. Run fermut, write JSON** — `--diff-only HEAD` scopes mutants to
+lines edited since the last commit; cache reuses verdicts for everything
+else. (`--diff-only HEAD` behaves like `--since HEAD` but also overrides a
+`diff_only = "main"` key from a `pr-gate` config; `--since` would collide
+with that key and error out.)
 
 ```sh
 fermut run src/ --tests tests/ \
-    --since HEAD \
+    --diff-only HEAD \
     --coverage .coverage \
     --json .fermut/last.json \
-    --no-history --quiet
+    --history-path .fermut/agent-history.jsonl --quiet
 ```
+
+`--history-path` keeps the noisy iteration runs out of the shared
+`.fermut/history.jsonl` while still recording them, so `fermut score` /
+`fermut trend` (pointed at the same file) have something to compare.
 
 Stderr prints one progress line. Score and survivors land in
 `.fermut/last.json`.
@@ -53,15 +60,16 @@ jq '[.outcomes[] | select(.status == "survived")]
 
 Returns:
 ```json
-{ "id": "src/auth.py@812:boundary-shift:age >= 18->age > 18", "file": "src/auth.py",
+{ "id": "/abs/repo/src/auth.py@812:boundary-shift:>=->>", "file": "/abs/repo/src/auth.py",
   "line": 42, "operator": "boundary-shift",
-  "original": "age >= 18", "replacement": "age > 18" }
+  "original": ">=", "replacement": ">" }
 ```
 
 The `id` grammar is `<file>@<byte-offset>:<operator>:<original>-><replacement>`.
-**Caveat for agents that store ids across runs:** `<file>` is whatever path
-fermut was invoked with — an absolute path when you run `fermut run /abs/src`
-(the common case), so ids captured on one machine/checkout won't match another.
+`original` / `replacement` are the operator token only, not the whole
+expression. **Caveat for agents that store ids across runs:** `<file>` is
+always the absolute path (even for `fermut run src/`), so ids captured on one
+machine/checkout won't match another.
 Don't persist ids as cross-machine keys; re-read them from each run's JSON, or
 key your own state on the stable `file` + `line` + `operator` fields instead.
 
@@ -72,8 +80,8 @@ hint + pytest skeleton.
 
 **5. Re-run, watch the score delta** — only `auth.py`'s mutants
 re-evaluate (cache hit on the rest). Boundary mutant moves from
-`survived` → `killed`. `fermut trend --limit 2 --format json` shows
-`+0.7 pts`.
+`survived` → `killed`. `fermut score --history-path .fermut/agent-history.jsonl` reports
+`"delta": 0.7`.
 
 Loop on step 1 until the score clears the target or every survivor
 is justified as equivalent / acceptable. The whole cycle stays
@@ -83,7 +91,7 @@ under 10 seconds on warm cache for repos in the 500-mutant range.
 
 ```mermaid
 flowchart LR
-    A[edit source / tests] --> B[fermut run --since HEAD --json out.json --no-history --quiet]
+    A[edit source / tests] --> B[fermut run --diff-only HEAD --json out.json --history-path .fermut/agent-history.jsonl --quiet]
     B --> C{any SURVIVED?}
     C -- yes --> F[parse out.json → pick survivor]
     F --> G[write killing test]
@@ -94,14 +102,15 @@ flowchart LR
     E --> Z[fermut pr-comment --markdown report.md]
 ```
 
-Two distinct runs: the inner loop uses `--no-history --quiet` (iterations
-are noisy, history is for the gate); the gate run drops those and adds
-`--trend` + `--markdown` for the PR comment. Don't mix them.
+Two distinct runs: the inner loop records to a scratch history
+(`--history-path .fermut/agent-history.jsonl --quiet`) so its noisy iterations stay out of the
+shared log but `fermut score` still has a delta to read; the gate run uses
+the default history and adds `--trend` + `--markdown` for the PR comment. Don't mix them.
 
 Key invariants:
 
 1. **Don't re-run the full sweep every iteration.** Use `--diff-only`
-   (CI workflow) or `--since HEAD~1` (local), so the agent only burns
+   (CI workflow) or `--diff-only HEAD~1` (local), so the agent only burns
    wall-clock on lines it changed.
 2. **Always read `out.json`, not stdout.** Stdout is for humans. JSON is
    stable across releases per the [versioning policy](https://github.com/KovantAI/fermut/blob/main/VERSIONING.md).
@@ -210,12 +219,13 @@ behavior).
 
 ## Trend tracking is the agent's feedback signal
 
-`fermut trend` reads `.fermut/history.jsonl` and prints the per-run
-table. For an agent, the useful comparison is **score delta vs the
+`fermut trend` reads the history log (`.fermut/history.jsonl` by default;
+pass `--history-path .fermut/agent-history.jsonl` for the inner-loop scratch log) and prints the
+per-run table. For an agent, the useful comparison is **score delta vs the
 previous iteration** — not the absolute score:
 
 ```sh
-fermut trend --limit 3 --format json
+fermut trend --history-path .fermut/agent-history.jsonl --limit 3 --format json
 ```
 
 ```json
@@ -238,7 +248,7 @@ Both signals are derived for you by **[`fermut score`](../reference/cli/score.md
 no jq, no hand-rolled history diff:
 
 ```sh
-fermut score --format json
+fermut score --history-path .fermut/agent-history.jsonl --format json
 ```
 
 ```json
@@ -286,15 +296,21 @@ The recommended invocation for an agent inner loop:
 ```sh
 fermut run src/ \
     --tests tests/ \
-    --since HEAD                     # only mutants in just-edited files
-    --coverage .coverage             # narrow tests per mutant (auto-discovered at root if omitted)
-    --json   .fermut/last.json       # parse this
-    --no-history                     # iterations are noisy; gate the gate, not the loop
-    --quiet                          # one line of progress in stderr at most
+    --diff-only HEAD \
+    --coverage .coverage \
+    --json .fermut/last.json \
+    --history-path .fermut/agent-history.jsonl \
+    --quiet
 ```
 
+- `--diff-only HEAD`: only mutants on lines edited since the last commit.
+- `--coverage .coverage`: narrow tests per mutant (auto-discovered at the root if omitted).
+- `--json`: the report to parse.
+- `--history-path`: a scratch history, so `fermut score --history-path .fermut/agent-history.jsonl` sees each iteration without polluting the shared log.
+- `--quiet`: at most one progress line on stderr.
+
 Once the agent decides to record progress (e.g. before committing), drop
-`--no-history` and add `--trend` to the run that will produce the PR
+the scratch `--history-path` and add `--trend` to the run that will produce the PR
 report:
 
 ```sh
@@ -382,12 +398,12 @@ The shape of one outcome:
 {
   "status": "survived",
   "mutant": {
-    "id": "src/auth.py@812:boundary-shift:age >= 18->age > 18",
-    "file": "src/auth.py",
+    "id": "/abs/repo/src/auth.py@812:boundary-shift:>=->>",
+    "file": "/abs/repo/src/auth.py",
     "line": 42,
     "operator": "boundary-shift",
-    "original": "age >= 18",
-    "replacement": "age > 18",
+    "original": ">=",
+    "replacement": ">",
     "range": [812, 820]
   }
 }
@@ -533,8 +549,8 @@ repo is expected — it isn't skipping the check.
 - **Disabling the cache.** `--no-cache` is for one-off debugging, not
   for the loop. Re-running every mutant every iteration is the dominant
   cost.
-- **Re-running the full sweep every iteration.** Use `--since HEAD` or
-  `--diff-only` so the cache hit ratio stays high.
+- **Re-running the full sweep every iteration.** Use `--diff-only HEAD` or
+  `--diff-only main` so the cache hit ratio stays high.
 - **Reading stdout instead of JSON.** Stdout formatting is human-tuned;
   no API guarantee. For `explain` / `suggest`, pass `--format json` —
   the schema is part of the versioned contract.
@@ -586,4 +602,7 @@ timeout = 15
 ```
 
 Use `fermut init --profile pr-gate` to get a config close to this — then
-hand-edit.
+hand-edit. Note `pr-gate` also writes `diff_only = "main"`: pass
+`--diff-only <ref>` to re-scope a run, `--no-diff-only` for a full sweep.
+`--since` on top of that key is rejected (`--diff-only` and `--since` are
+mutually exclusive).

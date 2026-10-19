@@ -145,8 +145,9 @@ pub(crate) struct CleanArgs {
     pub(crate) path: std::path::PathBuf,
 
     /// Path of the history log to preserve. Overrides any value
-    /// resolved from the config file. Defaults to
-    /// `<path>/.fermut/history.jsonl`.
+    /// resolved from the config file. Defaults to `.fermut/history.jsonl`
+    /// under the project root (nearest ancestor of `<path>` with
+    /// `pyproject.toml`/`setup.cfg`).
     #[arg(long)]
     pub(crate) history_path: Option<std::path::PathBuf>,
 }

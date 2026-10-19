@@ -404,7 +404,7 @@ fn save_cache(path: &Path, cache: &TyCache) -> Result<()> {
 
 /// True when the user has set `FERMUT_TY_EMBEDDED=0`. Any other value
 /// (including unset, empty, or `1`) leaves the embedded path enabled.
-fn env_disables_embedded() -> bool {
+pub(crate) fn env_disables_embedded() -> bool {
     std::env::var("FERMUT_TY_EMBEDDED").ok().as_deref() == Some("0")
 }
 

@@ -85,9 +85,10 @@ keeps boundary-shift / compare-op-swap / etc. live on the same line;
 the bare `# fermut: ignore` switches them all off and can hide real
 gaps that show up later.
 
-Re-run fermut. The mutant is now `SKIPPED`, not `SURVIVED`, and the
-score reflects the unkillable mutant being removed from the
-denominator rather than counting against you.
+Re-run fermut. The ignored mutant is no longer generated at all, so it
+doesn't appear in the report (not even as skipped). The score reflects
+the unkillable mutant being removed from the denominator rather than
+counting against you.
 
 See the [inline-ignore reference](../reference/operators/inline-ignore.md)
 for the full syntax.
@@ -107,9 +108,7 @@ def with_processing_fee(amount: float) -> float:
 `fermut run` reports a survivor:
 
 ```
-[3] SURVIVED  src/billing.py:5  arith-op-swap
-    -     return amount + 0
-    +     return amount - 0
+SURVIVED  src/billing.py:5@213 [arith-op-swap] `+` → `-`
 ```
 
 Diff: `+` swapped to `-`. For every possible `amount`, `amount + 0`
@@ -138,8 +137,8 @@ def with_processing_fee(amount: float) -> float:
     return amount + 0    # fermut: ignore[arith-op-swap]
 ```
 
-Step 3: re-run. The mutant is now `SKIPPED`, not `SURVIVED`. The
-score moves up — not because tests changed, but because an
+Step 3: re-run. The mutant is no longer generated, so it drops out of
+the report entirely. The score moves up — not because tests changed, but because an
 unkillable mutant is no longer counted against you.
 
 ## When you're not sure
@@ -158,31 +157,27 @@ test.
 
 ## Auto-detection (the equivalent-mutant detector)
 
-fermut runs a layered detector pipeline on every `SURVIVED` mutant
-and removes provably-equivalent ones from the score denominator
-automatically. Survivors flagged as *likely* equivalent (high
-confidence but not proven) stay in the report as suggestions for
-your inline-ignore review — they aren't dropped silently.
+fermut runs a detector pipeline on every `SURVIVED` mutant and
+promotes **provably** equivalent ones to the `equivalent` outcome,
+which is excluded from the score denominator. Only a provable verdict
+changes the outcome; a *likely* verdict leaves the mutant as an
+ordinary `SURVIVED` with no extra marking in the report.
 
-The default pipeline, cheap-first:
+The pipeline, cheap-first:
 
 | Layer | Detector       | What it does                                                                                                  | Verdict it can emit            |
 |-------|----------------|---------------------------------------------------------------------------------------------------------------|--------------------------------|
-| 1     | AST patterns   | Pure-Rust rules over the mutant's operator + adjacent tokens. Catches `x +/- 0`, `x * 1`, `x // 1` identities. | provable / likely / silent     |
+| 1     | AST patterns   | Pure-Rust rules over the mutant's operator + adjacent tokens. Flags `x +/- 0`, `x * 1`, `x // 1` identities. | likely / silent (never changes the outcome on its own) |
 | 2     | CPython bytecode | Compiles original and mutated source with the active interpreter and compares code-object signatures. Catches `return` vs `return None`, byte-identical rewrites. | provable / silent              |
 
-Two more layers are opt-in:
+In practice, then, a survivor becomes `equivalent` only when its
+bytecode is identical to the original's. The worked example above
+(`amount + 0` → `amount - 0`) compiles to different bytecode, so it
+stays `SURVIVED` and needs the inline marker.
 
-| Layer | Detector            | Cost / setup                                                                                                                                    | Default |
-|-------|---------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|---------|
-| 3     | Hypothesis probe    | Differential property test via `hypothesis.given(from_type(...))`. Pass-on-N gives a 0.80 likely-equivalent signal that must stack with another layer to clear the pipeline threshold. Requires `hypothesis` installed. | off     |
-| 4     | LLM judge           | Model-judged equivalence with a strict JSON contract and calibrated confidence clamp. Runs last because it's the most expensive + least precise. Requires `ANTHROPIC_API_KEY`. | off     |
-
-The pipeline short-circuits on the first **provable** verdict.
-Otherwise the likely-equivalent confidences stack (capped at 1.0)
-and the mutant is flagged only when the combined confidence clears
-the threshold (0.85 by default) — one strong rule passes; two weak
-signals stack toward it.
+`src/equiv/` also contains a Hypothesis probe and an LLM judge
+(`probe.rs`, `llm.rs`). Neither is wired into the pipeline yet, and
+no flag enables them.
 
 Disable the whole pass with `--no-equiv-detect` or
 `equiv_detect = false`. Useful when you want to see the raw,
@@ -190,9 +185,8 @@ uncorrected `SURVIVED` set.
 
 For the detector internals — code layout, threshold tuning,
 per-rule precision/recall — read `src/equiv/` directly. Each
-detector lives in its own file (`patterns.rs`, `bytecode.rs`,
-`probe.rs`, `llm.rs`) with rationale in the module-level
-doc comment.
+detector lives in its own file (`patterns.rs`, `bytecode.rs`) with
+rationale in the module-level doc comment.
 
 The detector catches the most common families automatically; inline
 markers are still the right tool for domain-restricted equivalence

@@ -13,9 +13,10 @@ the job summary.
 | `KovantAI/fermut/trend` | Combine shard reports, record a score history, and gate on regressions |
 
 All four are released under the repository's tags. Pin to a release
-tag (or its commit SHA). With no `fermut-version` input, each action
-installs the fermut release that matches its own tag, so the actions and
-the CLI always move together.
+tag such as `@v0.5.0`. With no `fermut-version` input, each action
+installs the fermut release that matches a `vX.Y.Z` tag. Any other ref,
+including a commit SHA or a branch, installs the latest fermut from
+PyPI, so a SHA pin should also set `fermut-version` explicitly.
 
 ## PR gate
 
@@ -158,15 +159,21 @@ instead:
 - **A restored history with malformed lines.** Appending to it would
   hide the damage.
 
-`blocking: "false"` turns these refusals, and the gates, into warnings.
+`blocking: "false"` turns the first two refusals, and the gates, into
+warnings. A malformed history always fails the job, as does a merge that
+wrote no history entry.
 
-History lives in the Actions cache. Only the default branch saves it, so
-a run on any other branch is compared against the default branch's
-history without forking it. The cache evicts entries that go unused for
+History lives in the Actions cache. Only the default branch saves it.
+`delta` and the regression gate compare against the previous entry on
+the **same branch** (entries with no recorded branch match any branch).
+A run on another named branch restores the default branch's history but
+finds no earlier entry of its own, so `delta` is empty and
+`fail-on-regression` never fires there. The cache evicts entries that go unused for
 7 days, so schedule at least weekly. Alternatively, set
 `history-cache: "false"` and persist `history-path` yourself, for example
-by committing it. Every run also uploads the merged report and the
-history as the `<artifact-name>-trend` artifact.
+by committing it. A run that gets past the record step also uploads
+the merged report and the history as the `<artifact-name>-trend`
+artifact; a refused record fails before the upload.
 
 | Input | Default | Purpose |
 |---|---|---|
@@ -181,8 +188,10 @@ history as the `<artifact-name>-trend` artifact.
 | `limit` | `20` | Trend rows in the job summary |
 
 `trend` also takes `working-directory`, `artifact-name`, `blocking` and
-`fermut-version`. Besides the `merge` outputs, it outputs `delta` (points
-vs the previous run, empty when there is none) and `recorded`.
+`fermut-version`. It outputs `score`, `scored`, `killed`, `survived`,
+`errored` and `report-json` (no `report-markdown`), plus `delta`
+(points vs the previous run on the same branch, empty when there is
+none), `recorded`, and `history` (the history file path).
 
 ## Inputs
 
@@ -193,7 +202,7 @@ Inputs shared by `KovantAI/fermut` and `sweep` (`merge` takes only
 |---|---|---|
 | `working-directory` | `.` | Project root, for monorepos |
 | `source` / `tests` | from `fermut.toml` | Source root and test directory |
-| `fermut-version` | match action tag | A version, or `project` to use the fermut already in your environment |
+| `fermut-version` | match a `vX.Y.Z` action tag, else latest | A version, or `project` to use the fermut already in your environment |
 | `python-version` | runner default | Passed to `setup-uv` |
 | `install-command` | `uv sync --all-extras --dev` | Empty skips it (install in your own step) |
 | `post-install-command` | — | E.g. create a test DB against your `services:` |
@@ -202,7 +211,7 @@ Inputs shared by `KovantAI/fermut` and `sweep` (`merge` takes only
 | `cache` | `true` | Cache verdicts, smart-ordering kill history and the coverage DB |
 | `cache-key-hash` / `cache-key-prefix` | auto / `fermut` | Cache key control |
 | `artifact-name` | `fermut-report` | Report artifact name |
-| `args` | — | Extra `fermut run` flags, e.g. `--ops arith,compare` |
+| `args` | — | Extra `fermut run` flags, e.g. `--ops arith-op-swap,compare-op-swap` |
 
 PR gate only: `base-ref` (default `origin/<PR base>`), `comment`
 (default `true`), `github-token`, `warm-only`. Sweep only: `shard`.

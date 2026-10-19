@@ -36,11 +36,13 @@ jobs:
           uv tool run fermut run src/ \
               --tests tests/ \
               --shard ${{ matrix.shard }}/8 \
+              --no-diff-only \
               --hypothesis-seed 1234 \
               --cache-path ".fermut/cache-${{ matrix.shard }}.json" \
               --json "shard-${{ matrix.shard }}.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()  # shards with survivors exit 1; still upload
         with:
           name: shard-${{ matrix.shard }}
           path: shard-${{ matrix.shard }}.json

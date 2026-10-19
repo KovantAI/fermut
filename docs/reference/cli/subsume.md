@@ -17,7 +17,7 @@ fermut subsume kill-sets.jsonl
 | `--format human\|json` | Summary on stdout. `json` prints the `stats` object below.                 |
 
 `--record-kill-sets` is experimental. It drops pytest's `-x`, so every
-selected test runs on a killed mutant (about 1.15× a normal run on pyjwt).
+selected test runs on a killed mutant (about 3.8× a normal run on pyjwt: 236 s vs 62 s).
 Pass `--no-cache`: a cache hit runs nothing and records no kill-set.
 
 ## What it computes

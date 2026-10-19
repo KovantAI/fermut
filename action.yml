@@ -102,7 +102,7 @@ inputs:
     required: false
     default: "false"
   cache:
-    description: '"true" caches the verdict cache and the coverage DB across runs.'
+    description: '"true" caches the verdict cache, kill-order history and the coverage DB across runs.'
     required: false
     default: "true"
   cache-key-hash:
@@ -238,7 +238,9 @@ runs:
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
       if: steps.detect.outputs.go == 'true' && inputs.cache == 'true' && inputs.warm-only != 'true'
       with:
-        path: ${{ inputs.working-directory }}/.fermut/cache.json
+        path: |
+          ${{ inputs.working-directory }}/.fermut/cache.json
+          ${{ inputs.working-directory }}/.fermut/kill-order.json
         key: ${{ inputs.cache-key-prefix }}-verdicts-pr-${{ runner.os }}-${{ steps.key.outputs.hash }}
         restore-keys: |
           ${{ inputs.cache-key-prefix }}-verdicts-pr-${{ runner.os }}-

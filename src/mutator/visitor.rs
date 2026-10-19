@@ -46,7 +46,7 @@ pub fn collect(path: &Path, source: &str) -> Result<Vec<Mutant>> {
     }
     debug_assert!(
         {
-            let mut seen = HashSet::new();
+            let mut seen = std::collections::HashSet::new();
             collector.out.iter().all(|m| seen.insert(m.id.as_str()))
         },
         "duplicate mutant ids emitted for {}",
@@ -1105,7 +1105,7 @@ def f(brand, color, origin, a, b, c, xs, n, d):
             .collect();
         assert!(swaps.len() > 20, "corpus should exercise many sites");
 
-        let mut seen = HashSet::new();
+        let mut seen = std::collections::HashSet::new();
         for m in swaps {
             assert!(
                 starts.contains(&m.range.start()) && ends.contains(&m.range.end()),

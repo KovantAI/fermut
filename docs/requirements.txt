@@ -1,8 +1,7 @@
-# Pinned for reproducible Read the Docs builds.
-# Bump together to keep mkdocs-material + plugins compatible.
-mkdocs==1.6.1
-mkdocs-material==9.7.7
-pymdown-extensions==12.3
-# pymdownx >=10.14 handles Pygments 2.20 (older pymdownx broke on filename=None).
-# Pinned for reproducible RTD builds.
-pygments==2.20.0
+# Pinned for reproducible Read the Docs builds. The site is built with
+# Zensical (the Material for MkDocs team's successor), which reads mkdocs.yml.
+# Bump together: zensical pins its own floor on pymdown-extensions/pygments.
+zensical==0.0.71
+pymdown-extensions==12.1
+pygments==2.21.0
+markdown==3.11

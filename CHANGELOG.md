@@ -35,6 +35,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 - OSV scanner in CI, pinned CI requirements, coverage and OpenSSF badges
   (#151, #152, #156).
 - This changelog.
+- A `cargo-fuzz` target (`fuzz/`) for mutant generation, run on PRs via
+  ClusterFuzzLite. It checks that the visitor never panics and that every
+  mutant range is in bounds, aligned to UTF-8 boundaries, matches `original`,
+  and splices back into Python that parses.
+- An `embedded-ty` cargo feature, on by default. The fuzz build turns it off;
+  without it, the `ty` filter uses the subprocess path.
 
 ### Changed
 - Statements that are only a plain string or bytes literal (e.g. attribute

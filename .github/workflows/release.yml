@@ -125,8 +125,19 @@ jobs:
           merge-multiple: true
           path: dist
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: attest
         with:
           subject-path: "dist/*"
+      # Ship the Sigstore bundle as a release asset so consumers (and the
+      # Scorecard Signed-Releases check) can find the provenance next to the
+      # artifacts. publish-github's merge-multiple download picks it up.
+      - env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+        run: cp "$BUNDLE" "fermut-${GITHUB_REF_NAME}.intoto.jsonl"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: provenance
+          path: "fermut-${{ github.ref_name }}.intoto.jsonl"
 
   publish-github:
     # Repo write only — no OIDC token. Waits on attest so only attested

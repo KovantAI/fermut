@@ -13,7 +13,30 @@ pub mod sample;
 pub mod shard;
 pub mod tce;
 pub mod ty;
+#[cfg(feature = "embedded-ty")]
 pub mod ty_embedded;
+/// Stand-in when built without `embedded-ty`: construction always fails, so
+/// [`ty::TyFilter`] takes its subprocess fallback.
+#[cfg(not(feature = "embedded-ty"))]
+pub mod ty_embedded {
+    use std::path::Path;
+
+    use anyhow::{bail, Result};
+
+    pub enum EmbeddedTyChecker {}
+
+    impl EmbeddedTyChecker {
+        pub fn new(_project_path: &Path) -> Result<Self> {
+            bail!("fermut built without the `embedded-ty` feature")
+        }
+        pub fn error_count(&self, _path: &Path) -> Result<usize> {
+            match *self {}
+        }
+        pub fn check_patched(&mut self, _path: &Path, _patched: &str) -> Result<usize> {
+            match *self {}
+        }
+    }
+}
 
 use std::collections::HashSet;
 use std::path::Path;

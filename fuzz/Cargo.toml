@@ -1,0 +1,27 @@
+[package]
+name = "fermut-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# No embedded ty: the target never type-checks, and instrumenting ty
+# OOMs the sanitizer build.
+fermut = { path = "..", default-features = false }
+# Same tag as the main crate (keep in lockstep).
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1" }
+
+# Own workspace so the fuzz crate stays out of the main build / Cargo.lock.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "mutate"
+path = "fuzz_targets/mutate.rs"
+test = false
+doc = false
+bench = false

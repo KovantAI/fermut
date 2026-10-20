@@ -1,0 +1,40 @@
+name: fuzz
+
+# ClusterFuzzLite: fuzz the mutant generator (fuzz/fuzz_targets/) on PRs that
+# touch Rust code. Invariants live in the target: no visitor panic, in-bounds
+# UTF-8-aligned ranges, and every spliced mutant still parses.
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "fuzz/**"
+      - "Cargo.*"
+      - ".clusterfuzzlite/**"
+  workflow_dispatch:
+
+permissions: read-all
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr:
+    name: fuzz (address)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build fuzzers
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          language: rust
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          sanitizer: address
+      - name: Run fuzzers
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: 300
+          mode: code-change
+          sanitizer: address
+          output-sarif: true

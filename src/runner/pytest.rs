@@ -1365,7 +1365,10 @@ mod tests {
         r.python = Some(py.clone());
         // No venv binary beside the interpreter → PATH lookup, never `-m`.
         let cmd = r.framework_command();
-        assert_eq!(cmd.get_program(), "rstest");
+        assert_eq!(
+            cmd.get_program(),
+            crate::runner::python::absolute_program(Path::new("rstest")).as_os_str()
+        );
         assert_eq!(cmd.get_args().count(), 0);
         let bin = tmp
             .path()

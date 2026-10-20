@@ -241,6 +241,21 @@ impl<'a> Collector<'a> {
         if original == replacement {
             return;
         }
+        // A splice must not fuse word chars into one token: `if~x` ->
+        // `ifnot (~x)`, `return~x` -> `returnNone`, `if~x` -> `ifx`.
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let before = self.source[..usize::from(range.start())]
+            .chars()
+            .next_back();
+        let after = self.source[usize::from(range.end())..].chars().next();
+        let pad_l = before.is_some_and(is_word)
+            && replacement.chars().next().or(after).is_some_and(is_word);
+        let pad_r = after.is_some_and(is_word) && replacement.ends_with(is_word);
+        let replacement = &format!(
+            "{}{replacement}{}",
+            if pad_l { " " } else { "" },
+            if pad_r { " " } else { "" }
+        );
         // Operator is part of the id because two distinct operators can
         // legitimately propose the same (range, original, replacement)
         // tuple — e.g. NumberShift and NumberToZero both emit `1->0` on a
@@ -1796,6 +1811,19 @@ def f(brand, color, origin, a, b, c, xs, n, d):
         assert_eq!(guard.len(), 1);
         assert_eq!(guard[0].original, "n > 0");
         assert_eq!(guard[0].replacement, "not (n > 0)");
+    }
+
+    #[test]
+    fn replacement_never_fuses_with_adjacent_keyword() {
+        // Fuzz crash: `if~x` -> `ifnot (~x)`. Every mutant must still parse.
+        let src = "def f(x):\n    if~x:\n        return~x\n    while~x:\n        pass\n";
+        for m in collect(Path::new("test.py"), src).unwrap() {
+            let patched = crate::patch_source(src, m.range, &m.replacement);
+            assert!(
+                ruff_python_parser::parse_module(&patched).is_ok(),
+                "{m:?}:\n{patched}"
+            );
+        }
     }
 
     #[test]

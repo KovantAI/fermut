@@ -13,7 +13,7 @@ the job summary.
 | `KovantAI/fermut/trend` | Combine shard reports, record a score history, and gate on regressions |
 
 All four are released under the repository's tags. Pin to a release
-tag such as `@v0.5.0`. With no `fermut-version` input, each action
+tag such as `@v0.6.0`. With no `fermut-version` input, each action
 installs the fermut release that matches a `vX.Y.Z` tag. Any other ref,
 including a commit SHA or a branch, installs the latest fermut from
 PyPI, so a SHA pin should also set `fermut-version` explicitly.
@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@<sha>
         with:
           fetch-depth: 0     # optional: the action deepens a shallow clone itself
-      - uses: KovantAI/fermut@v0.5.0
+      - uses: KovantAI/fermut@v0.6.0
         with:
           fail-under: "80"
 ```
@@ -67,7 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@<sha>
-      - uses: KovantAI/fermut@v0.5.0
+      - uses: KovantAI/fermut@v0.6.0
         with:
           warm-only: "true"
 ```
@@ -83,7 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@<sha>
-      - uses: KovantAI/fermut@v0.5.0
+      - uses: KovantAI/fermut@v0.6.0
         with:
           warm-only: "true"
 
@@ -96,7 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@<sha>
-      - uses: KovantAI/fermut/sweep@v0.5.0
+      - uses: KovantAI/fermut/sweep@v0.6.0
         with:
           shard: ${{ matrix.shard }}/4
 
@@ -104,7 +104,7 @@ jobs:
     needs: shard
     runs-on: ubuntu-latest
     steps:
-      - uses: KovantAI/fermut/merge@v0.5.0
+      - uses: KovantAI/fermut/merge@v0.6.0
         with:
           fail-under: "70"
 ```
@@ -139,7 +139,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@<sha>
-      - uses: KovantAI/fermut/trend@v0.5.0
+      - uses: KovantAI/fermut/trend@v0.6.0
         with:
           fail-on-regression: "1"
 ```
@@ -232,7 +232,7 @@ with the credentials scoped to that step, and set `install-command: ""`:
   env:
     UV_INDEX_PRIVATE_PASSWORD: ${{ secrets.REGISTRY_TOKEN }}
   run: uv sync --dev
-- uses: KovantAI/fermut@v0.5.0
+- uses: KovantAI/fermut@v0.6.0
   with:
     install-command: ""
 ```

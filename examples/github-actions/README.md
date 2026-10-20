@@ -32,7 +32,7 @@ If you'd rather install from source, swap the install step for:
 ```yaml
 - uses: dtolnay/rust-toolchain@<sha>
   with: { toolchain: stable }
-- run: cargo install --git https://github.com/KovantAI/fermut --tag v0.5.0
+- run: cargo install --git https://github.com/KovantAI/fermut --tag v0.6.0
 ```
 
 ## Action SHAs

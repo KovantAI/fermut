@@ -14,6 +14,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   bans, and sources (flags any non-crates.io source beyond the pinned
   `astral-sh/ruff` git dependency).
 - This changelog.
+- A `cargo-fuzz` target (`fuzz/`) for mutant generation, run on PRs via
+  ClusterFuzzLite. It checks that the visitor never panics and that every
+  mutant range is in bounds, aligned to UTF-8 boundaries, matches `original`,
+  and splices back into Python that parses.
+- An `embedded-ty` cargo feature, on by default. The fuzz build turns it off;
+  without it, the `ty` filter uses the subprocess path.
 
 ## [0.3.0] - 2026-08-31
 

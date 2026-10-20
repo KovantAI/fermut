@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use ruff_python_ast::{
     self as ast,
+    token::{parenthesized_range, Tokens},
     visitor::source_order::{walk_expr, walk_stmt, SourceOrderVisitor},
-    Expr, Stmt,
+    AnyNodeRef, Expr, Stmt,
 };
 use ruff_python_parser::parse_module;
 use ruff_text_size::{Ranged, TextRange, TextSize};
@@ -37,6 +38,7 @@ pub fn collect(path: &Path, source: &str) -> Result<Vec<Mutant>> {
     let mut collector = Collector {
         file: path.to_path_buf(),
         source,
+        tokens: parsed.tokens(),
         line_starts: line_start_offsets(source),
         out: Vec::new(),
         ignores,
@@ -147,6 +149,7 @@ fn format_float(x: f64) -> String {
 struct Collector<'a> {
     file: PathBuf,
     source: &'a str,
+    tokens: &'a Tokens,
     /// See [`line_start_offsets`].
     line_starts: Vec<usize>,
     out: Vec<Mutant>,
@@ -233,6 +236,11 @@ impl<'a> Collector<'a> {
             return;
         }
         let original = &self.source[range];
+        // Identity mutant (e.g. `except Exception` -> `Exception`) is
+        // unkillable noise; drop it for every operator.
+        if original == replacement {
+            return;
+        }
         // Operator is part of the id because two distinct operators can
         // legitimately propose the same (range, original, replacement)
         // tuple — e.g. NumberShift and NumberToZero both emit `1->0` on a
@@ -271,6 +279,12 @@ impl<'a> Collector<'a> {
     /// it) so dropping a list element doesn't leave a stray `, ,`. Scans
     /// backwards first; falls back to forwards. Returns the extended range,
     /// bounded by `outer`.
+    /// `expr`'s range widened over any parentheses wrapping it inside `parent`.
+    /// AST ranges exclude them, so dropping `(x)` by its bare range leaves `()`.
+    fn paren_range(&self, expr: &Expr, parent: AnyNodeRef) -> TextRange {
+        parenthesized_range(expr.into(), parent, self.tokens).unwrap_or(expr.range())
+    }
+
     fn extend_to_consume_comma(&self, inner: TextRange, outer: TextRange) -> TextRange {
         let bytes = self.source.as_bytes();
         let inner_start: usize = inner.start().into();
@@ -928,7 +942,8 @@ impl<'a> Collector<'a> {
         }
         for arg in &*c.arguments.args {
             // Parity: drop the positional argument entirely.
-            let dr = self.extend_to_consume_comma(arg.range(), c.arguments.range());
+            let ar = self.paren_range(arg, (&c.arguments).into());
+            let dr = self.extend_to_consume_comma(ar, c.arguments.range());
             self.push(Operator::PositionalDrop, dr, "");
             // Skip `*args` splats — `f(None)` would drop the unpack
             // semantics — and values already `None`.
@@ -941,9 +956,10 @@ impl<'a> Collector<'a> {
 
     /// Drop each element of a list/set/tuple literal in turn (PositionalDrop).
     /// Shared by `Expr::List`/`Set`/`Tuple`, which differ only in node type.
-    fn emit_seq_drop(&mut self, elts: &[Expr], container: TextRange) {
+    fn emit_seq_drop(&mut self, elts: &[Expr], container: AnyNodeRef) {
         for elt in elts {
-            let r = self.extend_to_consume_comma(elt.range(), container);
+            let er = self.paren_range(elt, container);
+            let r = self.extend_to_consume_comma(er, container.range());
             self.push(Operator::PositionalDrop, r, "");
         }
     }
@@ -955,7 +971,10 @@ impl<'a> Collector<'a> {
                 Some(k) => k,
                 None => continue,
             };
-            let item_range = TextRange::new(key.range().start(), item.value.range().end());
+            let item_range = TextRange::new(
+                self.paren_range(key, d.into()).start(),
+                self.paren_range(&item.value, d.into()).end(),
+            );
             let r = self.extend_to_consume_comma(item_range, d.range());
             self.push(Operator::DictItemDrop, r, "");
         }
@@ -1139,9 +1158,9 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
             }
             // Parity: drop one element from a list/set/tuple literal (≥2 elts,
             // mirroring the dict-item-drop bound).
-            Expr::List(l) if l.elts.len() >= 2 => self.emit_seq_drop(&l.elts, l.range()),
-            Expr::Set(s) if s.elts.len() >= 2 => self.emit_seq_drop(&s.elts, s.range()),
-            Expr::Tuple(t) if t.elts.len() >= 2 => self.emit_seq_drop(&t.elts, t.range()),
+            Expr::List(l) if l.elts.len() >= 2 => self.emit_seq_drop(&l.elts, l.into()),
+            Expr::Set(s) if s.elts.len() >= 2 => self.emit_seq_drop(&s.elts, s.into()),
+            Expr::Tuple(t) if t.elts.len() >= 2 => self.emit_seq_drop(&t.elts, t.into()),
             Expr::Dict(d) if d.items.len() >= 2 => self.emit_dict(d),
             Expr::Slice(s) => self.emit_slice(s),
             _ => {}
@@ -1196,6 +1215,19 @@ mod operator_emission_tests {
             .filter(|m| m.operator == op)
             .map(|m| (u32::from(m.range.start()), m.original, m.replacement))
             .collect()
+    }
+
+    #[test]
+    fn exception_swap_skips_identity() {
+        // Fuzz find: `except Exception` -> `Exception` is an unkillable no-op.
+        assert!(!contains(
+            "try:\n    pass\nexcept Exception:\n    pass\n",
+            Operator::ExceptionClassSwap
+        ));
+        assert!(contains(
+            "try:\n    pass\nexcept ValueError:\n    pass\n",
+            Operator::ExceptionClassSwap
+        ));
     }
 
     #[test]
@@ -2320,6 +2352,27 @@ mod region_emission_tests {
                 "{} → {:?} doesn't parse:\n{patched}",
                 m.describe(),
                 m.replacement
+            );
+        }
+    }
+
+    #[test]
+    fn drop_mutants_parse_with_parenthesized_items() {
+        // Fuzz find: AST ranges exclude wrapping parens, so dropping
+        // `"k": (v)` by its bare range left a dangling `)`.
+        let src = "d = {\"a\": 1, \"s\": (\n    x if y\n    else z\n)}\n\
+                   l = [(a), (b)]\nt = ((a), b)\nf((a), b)\nd2 = {(k): 1, k2: 2}\n";
+        for m in all(src).into_iter().filter(|m| {
+            matches!(
+                m.operator,
+                Operator::DictItemDrop | Operator::PositionalDrop
+            )
+        }) {
+            let patched = crate::emit::patch_source(src, m.range, &m.replacement);
+            assert!(
+                ruff_python_parser::parse_module(&patched).is_ok(),
+                "{} doesn't parse:\n{patched}",
+                m.describe()
             );
         }
     }

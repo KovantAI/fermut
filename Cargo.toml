@@ -81,10 +81,17 @@ ruff_text_size     = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1"
 # `src/filter/ty_embedded.rs`; the subprocess fallback in
 # `src/filter/ty.rs` covers the cases where `ty_project` construction
 # fails (pre-release API surface).
-ruff_db            = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1", features = ["os"] }
-ruff_notebook      = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1" }
-ty_project         = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1" }
-ty_python_semantic = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1" }
+ruff_db            = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1", features = ["os"], optional = true }
+ruff_notebook      = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1", optional = true }
+ty_project         = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1", optional = true }
+ty_python_semantic = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1", optional = true }
+
+[features]
+default = ["embedded-ty"]
+# In-process ty checker. Off only for the fuzz build (fuzz/), where ty is dead
+# weight that blows the sanitizer build's memory; the subprocess `ty` fallback
+# covers it.
+embedded-ty = ["dep:ruff_db", "dep:ruff_notebook", "dep:ty_project", "dep:ty_python_semantic"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

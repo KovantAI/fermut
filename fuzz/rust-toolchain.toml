@@ -1,0 +1,3 @@
+# libFuzzer instrumentation (-Zsanitizer) needs nightly; overrides ../rust-toolchain.toml.
+[toolchain]
+channel = "nightly"

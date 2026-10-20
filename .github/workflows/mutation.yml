@@ -44,8 +44,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      # Non-blocking until the baseline survivors are killed (63.6% on
-      # 2026-10-20); flip to a fail-under once the suite can hold one.
       - uses: KovantAI/fermut@a0c243cd38ca742512b34e8578b03d8c58aed515 # v0.6.0
         with:
           source: ${{ env.SOURCE }}
@@ -54,7 +52,7 @@ jobs:
           python-version: "3.12"
           install-command: ${{ env.INSTALL }}
           cache-key-prefix: ${{ env.PREFIX }}
-          blocking: "false"
+          fail-under: "90"
 
   warm:
     # Builds the coverage DB once; the shards restore it instead of rebuilding.
@@ -104,4 +102,5 @@ jobs:
           # Bump when the sweep's shape (source, tests, args, shards) changes.
           config-hash: pytest_fermut-2shards-v1
           fail-on-regression: "2"
+          fail-under: "90"
           max-errored: "0"

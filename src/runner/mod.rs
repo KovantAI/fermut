@@ -406,11 +406,16 @@ impl Mirror {
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| tests.to_path_buf())
         });
-        let root = workdir.path().join("project");
+        // Resolved, so paths handed to pytest match its `getcwd()`. On macOS the
+        // temp dir sits behind the `/var` → `/private/var` symlink, and pytest
+        // would otherwise print ids for an absolute test path as
+        // `../../var/…/project/tests/…`, unique per mirror.
+        let base = workdir.path().canonicalize().context("resolving workdir")?;
+        let root = base.join("project");
         copy_dir_all(&project_root, &root, mode)?;
         let tests_rel = tests.strip_prefix(&project_root).unwrap_or(tests);
         let tests_in_mirror = root.join(tests_rel);
-        let plugin_dir = workdir.path().join("fermut-plugin");
+        let plugin_dir = base.join("fermut-plugin");
         std::fs::create_dir_all(&plugin_dir)
             .with_context(|| format!("mkdir -p {}", plugin_dir.display()))?;
         let module = plugin_dir.join(format!("{}.py", pytest_result::REPORTER_MODULE));
@@ -569,9 +574,6 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
     for entry in walker {
         let entry = entry?;
         let path = entry.path();
-        if path == src {
-            continue;
-        }
         let rel = path.strip_prefix(src).unwrap();
         let target = dst.join(rel);
         let file_type = entry
@@ -580,6 +582,7 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
         if file_type.is_dir() {
             std::fs::create_dir_all(&target)
                 .with_context(|| format!("create mirror dir {}", target.display()))?;
+            copy_native_extensions(path, &target, mode)?;
         } else if file_type.is_file() {
             // Skip stray compiled bytecode outside `__pycache__` (e.g. legacy
             // sidecar `.pyc`); same staleness hazard as above.
@@ -593,7 +596,38 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("create mirror dir {}", parent.display()))?;
             }
-            clone_file(path, &target, mode)?;
+            // A file deleted mid-walk (a filter's `<stem>_fermut_*.py` temp file,
+            // written beside the source while workers build mirrors) is no
+            // longer part of the project.
+            if let Err(e) = clone_file(path, &target, mode) {
+                if path.exists() {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Copy the compiled extension modules (`*.so`, `*.pyd`) directly in `dir`,
+/// even when `.gitignore` excludes them: a C extension built in place
+/// (`build_ext --inplace`, editable installs) is part of the importable
+/// package. Without it the mirror imports a different package than the one
+/// coverage was recorded against, and node ids parametrized on the extension
+/// (markupsafe's `[markupsafe._speedups]`) don't exist, so pytest exits 4.
+/// Only directories the walk mirrors are scanned, so ignored trees (venvs,
+/// build dirs) stay out.
+fn copy_native_extensions(dir: &Path, target: &Path, mode: IsolationMode) -> Result<()> {
+    let entries = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
+    for entry in entries {
+        let path = entry?.path();
+        let native = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("so") | Some("pyd")
+        );
+        let to = target.join(path.file_name().unwrap());
+        if native && path.is_file() && !to.exists() {
+            clone_file(&path, &to, mode)?;
         }
     }
     Ok(())
@@ -885,5 +919,30 @@ mod tests {
         let mirror = Mirror::build(&tests, IsolationMode::Auto).unwrap();
         let mirrored = mirror.root.join("app.py");
         assert_eq!(fs::read(&mirrored).unwrap(), fs::read(&src).unwrap());
+    }
+
+    /// pytest prints test ids relative to its resolved cwd, so a mirror path
+    /// behind a symlink (macOS `/var`) would leak the temp dir into every id.
+    #[test]
+    fn mirror_paths_are_resolved() {
+        let (_tmp, _root, tests, _src) = fake_project();
+        let mirror = Mirror::build(&tests, IsolationMode::Auto).unwrap();
+        assert_eq!(mirror.root, mirror.root.canonicalize().unwrap());
+        assert!(mirror.tests.starts_with(&mirror.root));
+    }
+
+    #[test]
+    fn mirror_copies_gitignored_native_extensions_but_not_ignored_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(src.join("pkg")).unwrap();
+        fs::create_dir_all(src.join("venv/lib")).unwrap();
+        fs::write(src.join(".gitignore"), "*.so\nvenv/\n").unwrap();
+        fs::write(src.join("pkg/_ext.cpython-313-darwin.so"), "elf").unwrap();
+        fs::write(src.join("venv/lib/dep.so"), "elf").unwrap();
+        let dst = tmp.path().join("dst");
+        copy_dir_all(&src, &dst, IsolationMode::Copy).unwrap();
+        assert!(dst.join("pkg/_ext.cpython-313-darwin.so").is_file());
+        assert!(!dst.join("venv").exists());
     }
 }

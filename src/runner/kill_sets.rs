@@ -1,17 +1,17 @@
-//! Per-mutant kill-set records for the higher-order-mutant experiment.
+//! Per-mutant kill-set records (`--record-kill-sets`), the input to
+//! `fermut subsume` and `--only-dominators`.
 //!
 //! Normal `fermut run` keeps only a Killed/Survived verdict per mutant — under
-//! `-x` that is all pytest reveals (it stops at the first failing test). The
-//! subsuming/higher-order-mutant theory needs the *kill-set* `K(m)`: the full
-//! set of covering tests that fail on the mutant. An SSHOM is defined purely by
-//! kill-set containment (`K(h) ⊆ K(f1) ∩ K(f2)`), so measuring whether SSHOMs
-//! exist in Python requires this data.
+//! `-x` that is all pytest reveals (it stops at the first failing test).
+//! Subsumption needs the *kill-set* `K(m)`: the full set of covering tests that
+//! fail on the mutant. Mutant `a` subsumes `b` when `K(a) ⊆ K(b)`.
 //!
 //! When `--record-kill-sets <path>` is set the pytest runner drops `-x`, runs
 //! every coverage-selected test, and emits one [`KillSetRecord`] per mutant it
-//! actually runs (cache hits are skipped — pair with `--no-cache`). The engine
-//! drains the records after the run and writes them as JSONL to `path`; an
-//! offline analysis step pairs FOMs and classifies SSHOMs from there.
+//! actually runs (cache hits are skipped — pair with `--no-cache`). Failures
+//! come from the reporter plugin's result, or the `-rfE` summary when the
+//! plugin is off or failed to load. The engine drains the records after the
+//! run and writes them as JSONL to `path`.
 
 use std::path::Path;
 

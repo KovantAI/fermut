@@ -84,7 +84,7 @@ impl UnittestRunner {
     /// with the mirror PYTHONPATH and the no-`.pyc` guard applied. Shared by the
     /// per-mutant run and the baseline so both resolve imports identically.
     fn discover_command(&self, mirror: &Mirror) -> Result<Command> {
-        let mut cmd = Command::new(&self.python);
+        let mut cmd = Command::new(super::python::absolute_program(&self.python));
         cmd.arg("-m")
             .arg("unittest")
             .arg("discover")
@@ -104,7 +104,7 @@ impl UnittestRunner {
     fn count_tests(&self, mirror: &Mirror) -> Option<usize> {
         let script = "import sys, unittest; \
              print(unittest.TestLoader().discover(sys.argv[1], pattern=sys.argv[2]).countTestCases())";
-        let mut cmd = Command::new(&self.python);
+        let mut cmd = Command::new(super::python::absolute_program(&self.python));
         cmd.arg("-c")
             .arg(script)
             .arg(&mirror.tests)

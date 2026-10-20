@@ -1,7 +1,9 @@
 # Read the Docs configuration for fermut.
 # Schema: https://docs.readthedocs.io/en/stable/config-file/v2.html
 #
-# Builds the mkdocs-material site under ./docs.
+# Builds the docs/ site with Zensical, which reads mkdocs.yml. Read the Docs
+# has no Zensical builder, so the build runs it and copies site/ into the
+# output directory, as in https://docs.readthedocs.com/platform/latest/intro/zensical.html
 
 version: 2
 
@@ -9,10 +11,12 @@ build:
   os: ubuntu-24.04
   tools:
     python: "3.12"
-
-mkdocs:
-  configuration: mkdocs.yml
-
-python:
-  install:
-    - requirements: docs/requirements.txt
+  jobs:
+    install:
+      - pip install -r docs/requirements.txt
+    build:
+      html:
+        - zensical build --strict
+    post_build:
+      - mkdir -p $READTHEDOCS_OUTPUT/html/
+      - cp --recursive site/* $READTHEDOCS_OUTPUT/html/

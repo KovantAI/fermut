@@ -157,3 +157,17 @@ jobs:
         with:
           key: msrv
       - run: cargo check --all-targets --all-features --locked
+
+  docs:
+    name: docs build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: install docs toolchain
+        run: pip install -r docs/requirements.txt
+      - name: build (strict)
+        # Fails on broken links and anchors, as on Read the Docs.
+        run: zensical build --strict

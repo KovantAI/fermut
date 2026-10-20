@@ -50,3 +50,9 @@ pub use cli::Cli;
 pub use config::IsolationMode;
 #[doc(hidden)]
 pub use runner::time_mirror_build;
+
+// Fuzz-only hooks for `fuzz/fuzz_targets/`; not a supported API.
+#[doc(hidden)]
+pub use emit::patch_source;
+#[doc(hidden)]
+pub use mutator::visitor::collect as collect_mutants;

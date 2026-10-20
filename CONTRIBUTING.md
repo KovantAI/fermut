@@ -95,6 +95,14 @@ when navigating an unfamiliar area.
    `parity.md`) and bump the operator counts; the
    `docs_stay_in_sync_with_operator_catalogue` test checks them. See
    [Adding an operator](docs/reference/internals/adding-operators.md).
+8. The `fuzz/` target checks every mutant splices back into parseable Python
+   (CI runs it via ClusterFuzzLite on PRs). To run it locally you need Linux,
+   because the macOS linker rejects the sanitizer build:
+
+   ```sh
+   docker run --rm -v "$PWD":/src -w /src/fuzz rustlang/rust:nightly \
+     sh -c 'cargo install cargo-fuzz && cargo fuzz run mutate -- -max_total_time=300'
+   ```
 
 ## Adding a new filter
 

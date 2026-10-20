@@ -1,0 +1,12 @@
+# Build context for .clusterfuzzlite/Dockerfile (COPY . $SRC/fermut).
+# Keep .git: build.sh seeds the corpus via `git ls-files '*.py'`.
+**/target
+.venv
+.cache
+.hypothesis
+.fermut
+**/__pycache__
+*.pyc
+benchmarks/fixtures
+fuzz/corpus
+site

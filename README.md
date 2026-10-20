@@ -7,7 +7,10 @@
 _Line coverage tells you which lines run. fermut tells you which lines your tests actually **check**._
 
 [![CI](https://github.com/KovantAI/fermut/actions/workflows/ci.yml/badge.svg)](https://github.com/KovantAI/fermut/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/KovantAI/fermut/graph/badge.svg)](https://codecov.io/gh/KovantAI/fermut)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/KovantAI/fermut/badge)](https://scorecard.dev/viewer/?uri=github.com/KovantAI/fermut)
 [![PyPI](https://img.shields.io/pypi/v/fermut.svg)](https://pypi.org/project/fermut/)
+[![Downloads](https://static.pepy.tech/badge/fermut/month)](https://pepy.tech/project/fermut)
 [![Python](https://img.shields.io/pypi/pyversions/fermut.svg)](https://pypi.org/project/fermut/)
 [![Docs](https://readthedocs.org/projects/fermut/badge/?version=latest)](https://fermut.readthedocs.io/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)

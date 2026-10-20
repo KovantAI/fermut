@@ -1,0 +1,18 @@
+# zip <9 is pulled in transitively by ruff_db + ty_vendored (astral-sh/ruff pins zip 8.x;
+# cannot bump until upstream does). All three advisories are in
+# ZipArchive::extract / ZipStreamReader::extract. ty_vendored's build script only
+# writes the typeshed archive (ZipWriter); ruff_db only reads it in memory.
+# Nothing calls extract() or writes archive entries to disk.
+# Re-check when bumping the ruff tag in Cargo.toml.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0367"
+reason = "zip extract() SUID/SGID bits; extract() not reachable (ruff_db reads vendored typeshed in memory)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0368"
+reason = "zip extract() symlink escape; extract() not reachable (ruff_db reads vendored typeshed in memory)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0369"
+reason = "zip extract() perms through symlinks; extract() not reachable (ruff_db reads vendored typeshed in memory)"

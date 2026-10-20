@@ -11,8 +11,13 @@
 # out: rc
 source "$(dirname "$0")/lib.sh"
 
-args=(--coverage .coverage --no-verify-baseline --no-history
+args=(--no-verify-baseline --no-history
       --json "$OUT/report.json" --markdown "$OUT/report.md")
+# `--no-coverage` in args conflicts with `--coverage`; let the caller's win.
+case " $EXTRA_ARGS " in
+  *" --no-coverage "*) ;;
+  *) args+=(--coverage .coverage) ;;
+esac
 if [ -n "$SOURCE" ]; then args=("$SOURCE" "${args[@]}"); fi
 if [ -n "$PY" ]; then args+=(--python "$PY"); fi
 if [ -n "$TESTS" ]; then args+=(--tests "$TESTS"); fi

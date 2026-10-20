@@ -18,6 +18,30 @@ installs the fermut release that matches a `vX.Y.Z` tag. Any other ref,
 including a commit SHA or a branch, installs the latest fermut from
 PyPI, so a SHA pin should also set `fermut-version` explicitly.
 
+## Permissions
+
+A job's `permissions` scope its `GITHUB_TOKEN`. Grant each job only what
+its action needs:
+
+| Action | Permissions | Why |
+|---|---|---|
+| `KovantAI/fermut` | `contents: read`, `pull-requests: write` | Posts the sticky PR comment. Without it (or on a fork PR, whose token is read-only) the comment is skipped with a warning and the report stays in the job summary |
+| `KovantAI/fermut` with `warm-only: "true"` | `contents: read` | Only builds and caches coverage |
+| `KovantAI/fermut/sweep` | `contents: read` | Runs mutants; never give these jobs a write scope |
+| `KovantAI/fermut/merge` | `contents: read` | Uses no token itself; reads only the shard artifacts of its own run |
+| `KovantAI/fermut/trend` | `contents: write` | Pushes the history to the `fermut-history` branch. It runs no tests, so the write token never meets mutated code |
+
+Set `contents: read` at the workflow level and raise it on the `trend`
+job alone. A job-level `permissions` block replaces the workflow-level
+one; scopes it leaves out become `none`, so list every scope the job
+needs.
+
+`trend` only pushes on the default branch. On any other branch it reads
+the history and `contents: read` is enough. If a ruleset blocks
+`GITHUB_TOKEN` from pushing to `fermut-history` and you can't exempt the
+branch, pass a token that may bypass it, such as a GitHub App token, as
+`token`.
+
 ## PR gate
 
 Mutates only the lines the PR changed. A PR that touches no Python
@@ -132,11 +156,17 @@ sharded sweep above and run it on a schedule:
 on:
   schedule:
     - cron: "0 3 * * *"
+
+permissions:
+  contents: read        # warm and shard jobs run mutated code: read-only
+
 jobs:
   # warm and shard jobs as above
   trend:
     needs: shard
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push the fermut-history branch
     steps:
       - uses: actions/checkout@<sha>
       - uses: KovantAI/fermut/trend@v0.6.0
@@ -163,17 +193,24 @@ instead:
 warnings. A malformed history always fails the job, as does a merge that
 wrote no history entry.
 
-History lives in the Actions cache. Only the default branch saves it.
+History lives on the `fermut-history` orphan branch, one file per run
+under `entries/` (`<timestamp>-<sha>.json`), so concurrent runs never
+conflict and nothing evicts it. Only runs on the default branch push to
+it, which is why the job needs `contents: write` (see
+[Permissions](#permissions)). If a ruleset covers every branch, exempt
+`fermut-history` or pass a token that may bypass it as `token`;
+otherwise the push is rejected. An unreachable branch fails the job
+rather than starting an empty trend.
+
 `delta` and the regression gate compare against the previous entry on
 the **same branch** (entries with no recorded branch match any branch).
 A run on another named branch restores the default branch's history but
 finds no earlier entry of its own, so `delta` is empty and
-`fail-on-regression` never fires there. The cache evicts entries that go unused for
-7 days, so schedule at least weekly. Alternatively, set
-`history-cache: "false"` and persist `history-path` yourself, for example
-by committing it. A run that gets past the record step also uploads
-the merged report and the history as the `<artifact-name>-trend`
-artifact; a refused record fails before the upload.
+`fail-on-regression` never fires there. Set `history-branch: ""` to
+persist `history-path` yourself instead. A run that gets past the
+record step also uploads the merged report and the history as the
+`<artifact-name>-trend` artifact; a refused record fails before the
+upload.
 
 | Input | Default | Purpose |
 |---|---|---|
@@ -181,9 +218,9 @@ artifact; a refused record fails before the upload.
 | `fail-under` | — | Absolute score floor. Unlike `merge`, survivors alone never fail a trend run |
 | `max-errored` | — | Refuse to record a run with more errored mutants than this |
 | `history-path` | `.fermut/history.jsonl` | History file, relative to `working-directory` |
-| `history-cache` | `true` | Restore and save the history through the Actions cache |
-| `default-branch` | repository default | The only branch whose runs save the history |
-| `cache-key-prefix` | `fermut` | History cache namespace. Change it to start a new trend |
+| `history-branch` | `fermut-history` | Orphan branch holding the history. Change it to start a new trend; empty disables persistence |
+| `default-branch` | repository default | The only branch whose runs push the history |
+| `token` | `github.token` | Reads and pushes `history-branch`. Needs `contents: write` on the default branch |
 | `config-hash` | — | Stamped into each entry. Change it when the sweep's shape changes, so `fermut trend` flags the break |
 | `limit` | `20` | Trend rows in the job summary |
 

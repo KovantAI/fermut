@@ -85,7 +85,7 @@ GitHub Actions runners are ephemeral, so `.fermut/history.jsonl`
 resets every run unless you persist it. For a sharded sweep, the
 [`KovantAI/fermut/trend`](github-action.md#score-trend) action does this
 for you: it merges the shards, records one entry, persists the history
-and gates on regressions. For a single `fermut run` job, the simplest
+on a `fermut-history` branch and gates on regressions. For a single `fermut run` job, the simplest
 pattern is:
 restore with `actions/cache/restore` (which never saves) and save with a
 separate `main`-only `actions/cache/save` step.

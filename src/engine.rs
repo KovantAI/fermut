@@ -185,6 +185,7 @@ fn evaluate_with_dominators(
                 mutant,
                 killer: Some(t),
                 inferred_from: None,
+                ..
             } => Some((mutant.id.clone(), t.clone())),
             _ => None,
         })
@@ -883,7 +884,7 @@ fn maybe_remap_equivalent(
 ) -> MutantOutcome {
     let Some(pipeline) = equiv else {
         if let MutantOutcome::Equivalent { mutant, .. } = outcome {
-            return MutantOutcome::Survived { mutant };
+            return MutantOutcome::survived(mutant);
         }
         return outcome;
     };
@@ -902,18 +903,18 @@ fn classify_survivor(
     outcome: MutantOutcome,
     file_sources: &HashMap<PathBuf, String>,
 ) -> MutantOutcome {
-    let MutantOutcome::Survived { mutant } = outcome else {
+    let MutantOutcome::Survived { mutant, .. } = &outcome else {
         return outcome;
     };
     let Some(source) = file_sources.get(&mutant.file) else {
-        return MutantOutcome::Survived { mutant };
+        return outcome;
     };
-    match pipeline.classify(&mutant, source) {
+    match pipeline.classify(mutant, source) {
         EquivVerdict::ProvablyEquivalent {
             reason,
             source: src,
-        } => MutantOutcome::equivalent(mutant, reason, src),
-        _ => MutantOutcome::Survived { mutant },
+        } => MutantOutcome::equivalent(mutant.clone(), reason, src),
+        _ => outcome,
     }
 }
 
@@ -940,7 +941,7 @@ fn remap_cached_outcome(
 ) -> (MutantOutcome, Option<bool>) {
     let Some(pipeline) = equiv else {
         if let MutantOutcome::Equivalent { mutant, .. } = outcome {
-            return (MutantOutcome::Survived { mutant }, None);
+            return (MutantOutcome::survived(mutant), None);
         }
         return (outcome, None);
     };
@@ -1257,7 +1258,7 @@ mod tests {
         let cached = MutantOutcome::equivalent(m.clone(), "stale reason", "stale-source");
         let result = maybe_remap_equivalent(cached, None, &HashMap::new());
         match result {
-            MutantOutcome::Survived { mutant } => assert_eq!(mutant.id, m.id),
+            MutantOutcome::Survived { mutant, .. } => assert_eq!(mutant.id, m.id),
             other => panic!("expected Survived, got {other:?}"),
         }
     }

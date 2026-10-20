@@ -8,6 +8,16 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+### Added
+- A timed-out mutant names the test it hung in (`hung_in` in the JSON
+  report, and in the console, Markdown, HTML and GitHub annotation output).
+  Needs the pytest reporter plugin (on by default).
+- Per-mutant timing in the JSON report: `duration_ms` (wall time) on every
+  outcome that ran a test, plus `test_ms` (time inside tests) from the pytest
+  reporter plugin.
+- Mutation-score badge for the pytest plugin, published weekly by the
+  `Mutation (pytest plugin)` workflow.
+
 ## [0.6.0] - 2026-10-20
 
 ### Added

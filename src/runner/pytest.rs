@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use wait_timeout::ChildExt;
@@ -32,7 +32,7 @@ use super::{
 use crate::config::IsolationMode;
 use crate::filter::coverage::CoverageContexts;
 use crate::mutator::Mutant;
-use crate::report::MutantOutcome;
+use crate::report::{MutantOutcome, Timing};
 use crate::sync::lock_recover;
 
 pub struct PytestRunner {
@@ -470,8 +470,20 @@ impl PytestRunner {
                     MutantOutcome::error(mutant.clone(), anomaly_message(TestTool::Pytest, code))
                 }
             },
-            (None, _) => MutantOutcome::timed_out(mutant.clone()),
+            (None, _) => MutantOutcome::timed_out_in(
+                mutant.clone(),
+                reported.and_then(|r| r.unfinished.clone()),
+            ),
         }
+    }
+}
+
+/// Timing for one run: `wall` from spawn to exit, plus the reporter plugin's
+/// test time when it loaded.
+fn run_timing(wall: Duration, reported: Option<&RunResult>) -> Timing {
+    Timing {
+        duration_ms: u64::try_from(wall.as_millis()).unwrap_or(u64::MAX),
+        test_ms: reported.map(|r| (r.test_secs * 1000.0).round() as u64),
     }
 }
 
@@ -765,8 +777,10 @@ impl Runner for PytestRunner {
                 result,
             } = self.build_mutant_command(mirror, mutant, &key_file, key_op, None)?;
             let result = result.map(ResultFile);
+            let started = Instant::now();
             let child = cmd.spawn().context("spawning test runner")?;
             let waited = wait_draining_stdout(child, self.timeout, kill_group)?;
+            let wall = started.elapsed();
             let reported = read_reported(result.as_ref(), waited.0.is_some());
             // Exit 4 is ambiguous under node-id selection (see `exit.rs`). The
             // reporter plugin saw whether test code failed to import; without
@@ -782,15 +796,17 @@ impl Runner for PytestRunner {
             if self.record_kill_sets {
                 self.record_kill_set(mutant, &waited, import_broke, &key_file, key_op);
             }
-            Ok(self.classify_run(
-                mutant,
-                waited,
-                reported.as_ref(),
-                import_broke,
-                sole,
-                &key_file,
-                key_op,
-            ))
+            Ok(self
+                .classify_run(
+                    mutant,
+                    waited,
+                    reported.as_ref(),
+                    import_broke,
+                    sole,
+                    &key_file,
+                    key_op,
+                )
+                .with_timing(run_timing(wall, reported.as_ref())))
         })
     }
 
@@ -806,18 +822,22 @@ impl Runner for PytestRunner {
                 result,
             } = self.build_mutant_command(mirror, mutant, &key_file, key_op, Some(killer))?;
             let result = result.map(ResultFile);
+            let started = Instant::now();
             let child = cmd.spawn().context("spawning audit run")?;
             let waited = wait_draining_stdout(child, self.timeout, kill_group)?;
+            let wall = started.elapsed();
             let reported = read_reported(result.as_ref(), waited.0.is_some());
-            Ok(self.classify_run(
-                mutant,
-                waited,
-                reported.as_ref(),
-                false,
-                sole,
-                &key_file,
-                key_op,
-            ))
+            Ok(self
+                .classify_run(
+                    mutant,
+                    waited,
+                    reported.as_ref(),
+                    false,
+                    sole,
+                    &key_file,
+                    key_op,
+                )
+                .with_timing(run_timing(wall, reported.as_ref())))
         })
         .map(Some)
     }
@@ -1497,6 +1517,41 @@ mod tests {
         // report is the observed fact).
         let (o, _) = classify_reported(false, 1, None, Some(&reported), false, Some("t::x"));
         assert_eq!(o.killer(), Some("tests/t.py::b"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_names_the_test_it_hung_in() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = runner(false, breadth_ctx(tmp.path()));
+        let m = Arc::new(mutant_in(tmp.path()));
+        let reported = RunResult {
+            unfinished: Some("tests/t.py::loops".into()),
+            ..RunResult::default()
+        };
+        let o = r.classify_run(
+            &m,
+            (None, None),
+            Some(&reported),
+            false,
+            None,
+            "foo.py",
+            "op",
+        );
+        assert_eq!(o.hung_in(), Some("tests/t.py::loops"));
+        let o = r.classify_run(&m, (None, None), None, false, None, "foo.py", "op");
+        assert!(matches!(o, MutantOutcome::TimedOut { hung_in: None, .. }));
+    }
+
+    #[test]
+    fn run_timing_takes_test_time_from_the_plugin_only() {
+        let reported = RunResult {
+            test_secs: 0.4567,
+            ..RunResult::default()
+        };
+        let t = run_timing(Duration::from_millis(1200), Some(&reported));
+        assert_eq!((t.duration_ms, t.test_ms), (1200, Some(457)));
+        assert_eq!(run_timing(Duration::from_millis(5), None).test_ms, None);
     }
 
     #[cfg(unix)]

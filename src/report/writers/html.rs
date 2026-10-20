@@ -79,6 +79,9 @@ impl Report {
                 if o.inferred_from().is_some() {
                     label.push_str(" · <i>inferred from a dominator, not run</i>");
                 }
+                if let Some(t) = o.hung_in() {
+                    label.push_str(&format!(" · timed out in <code>{}</code>", html_escape(t)));
+                }
                 body.push_str(&format!(
                     "<li class='m {cls}'><span class='tag'>{}</span> {label}",
                     o.status_label()

@@ -25,6 +25,7 @@ FAKE_FERMUT = textwrap.dedent(
         }}) + "\\n")
     if args[0] != "run":
         sys.exit(0)
+    print("fake-stdout")  # the plugin must discard fermut's human report
     mode = os.environ.get("FAKE_FERMUT_MODE", "pass")
     if mode == "crash":
         sys.stderr.write("Error: boom\\n")

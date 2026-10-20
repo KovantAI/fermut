@@ -19,3 +19,7 @@ benchmarks/parity/*.json
 
 # mkdocs build output
 /site
+
+# fermut
+.coverage
+.coverage.fermut-fingerprints.json

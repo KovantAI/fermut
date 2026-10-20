@@ -170,7 +170,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: install docs toolchain
-        run: pip install -r docs/requirements.txt
+        run: pip install --require-hashes -r docs/requirements.txt
       - name: build (strict)
         # Fails on broken links and anchors, as on Read the Docs.
         run: zensical build --strict

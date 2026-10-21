@@ -54,12 +54,30 @@ pub enum MutantOutcome {
         /// mutant's recorded kill-set. Counted in the score, reported apart.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         inferred_from: Option<String>,
+        /// How long the run took. Absent when unmeasured (a verdict cached
+        /// by an older fermut, or a runner that doesn't time runs).
+        #[serde(default, flatten)]
+        timing: Option<Timing>,
     },
     Survived {
         mutant: Arc<Mutant>,
+        /// How long the run took. Absent when unmeasured (a verdict cached
+        /// by an older fermut, or a runner that doesn't time runs).
+        #[serde(default, flatten)]
+        timing: Option<Timing>,
     },
     TimedOut {
         mutant: Arc<Mutant>,
+        /// Node id of the test that was running when the timeout hit: the
+        /// reporter plugin saw it begin and the run never finished. Absent
+        /// when the hang came before any test (collection, import) or the
+        /// plugin was off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hung_in: Option<String>,
+        /// How long the run took. Absent when unmeasured (a verdict cached
+        /// by an older fermut, or a runner that doesn't time runs).
+        #[serde(default, flatten)]
+        timing: Option<Timing>,
     },
     Skipped {
         mutant: Arc<Mutant>,
@@ -68,6 +86,10 @@ pub enum MutantOutcome {
     Error {
         mutant: Arc<Mutant>,
         message: String,
+        /// How long the run took. Absent when unmeasured (a verdict cached
+        /// by an older fermut, or a runner that doesn't time runs).
+        #[serde(default, flatten)]
+        timing: Option<Timing>,
     },
     /// Equivalent-mutant detector proved the mutation is a no-op. Excluded
     /// from the score denominator like `Skipped`. `source` identifies which
@@ -91,6 +113,7 @@ impl MutantOutcome {
             mutant: m.into(),
             killer: None,
             inferred_from: None,
+            timing: None,
         }
     }
     /// `Killed` with the killing test's node id recorded (`None` = unknown).
@@ -100,6 +123,7 @@ impl MutantOutcome {
             mutant: m.into(),
             killer,
             inferred_from: None,
+            timing: None,
         }
     }
     /// `Killed` by inference (`--only-dominators`): `killer` killed dominator
@@ -110,6 +134,7 @@ impl MutantOutcome {
             mutant: m.into(),
             killer: Some(killer),
             inferred_from: Some(from),
+            timing: None,
         }
     }
     /// The dominator a `Killed` outcome was inferred from, if it was.
@@ -128,10 +153,41 @@ impl MutantOutcome {
     }
     #[must_use]
     pub fn survived(m: impl Into<Arc<Mutant>>) -> Self {
-        Self::Survived { mutant: m.into() }
+        Self::Survived {
+            mutant: m.into(),
+            timing: None,
+        }
     }
     pub fn timed_out(m: impl Into<Arc<Mutant>>) -> Self {
-        Self::TimedOut { mutant: m.into() }
+        Self::timed_out_in(m, None)
+    }
+    /// `TimedOut` naming the test it hung in (`None` = unknown).
+    pub fn timed_out_in(m: impl Into<Arc<Mutant>>, hung_in: Option<String>) -> Self {
+        Self::TimedOut {
+            mutant: m.into(),
+            hung_in,
+            timing: None,
+        }
+    }
+    /// The test a `TimedOut` mutant hung in, when the runner saw it.
+    pub fn hung_in(&self) -> Option<&str> {
+        match self {
+            Self::TimedOut { hung_in, .. } => hung_in.as_deref(),
+            _ => None,
+        }
+    }
+    /// Attach the run's timing. A no-op on outcomes that never ran a test
+    /// (`skipped`, `equivalent`).
+    #[must_use]
+    pub fn with_timing(mut self, t: Timing) -> Self {
+        match &mut self {
+            Self::Killed { timing, .. }
+            | Self::Survived { timing, .. }
+            | Self::TimedOut { timing, .. }
+            | Self::Error { timing, .. } => *timing = Some(t),
+            Self::Skipped { .. } | Self::Equivalent { .. } => {}
+        }
+        self
     }
     pub fn skipped(m: impl Into<Arc<Mutant>>, filter: impl Into<String>) -> Self {
         Self::Skipped {
@@ -143,6 +199,7 @@ impl MutantOutcome {
         Self::Error {
             mutant: m.into(),
             message,
+            timing: None,
         }
     }
     pub fn equivalent(
@@ -160,8 +217,8 @@ impl MutantOutcome {
     pub fn mutant(&self) -> &Mutant {
         match self {
             Self::Killed { mutant, .. }
-            | Self::Survived { mutant }
-            | Self::TimedOut { mutant }
+            | Self::Survived { mutant, .. }
+            | Self::TimedOut { mutant, .. }
             | Self::Skipped { mutant, .. }
             | Self::Error { mutant, .. }
             | Self::Equivalent { mutant, .. } => mutant,
@@ -178,6 +235,21 @@ impl MutantOutcome {
             Self::Equivalent { .. } => "equivalent",
         }
     }
+}
+
+/// Per-mutant run timing, flattened into the outcome's JSON. Measured when the
+/// verdict was produced: a verdict replayed from the cache keeps the timing of
+/// the run that produced it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Timing {
+    /// Wall time of the test run, spawn to exit (or to the kill on a timeout).
+    pub duration_ms: u64,
+    /// Time inside tests as the pytest reporter plugin measured it: call phases
+    /// of passing tests plus every failed phase. Setup/teardown of passing
+    /// tests isn't reported, so it's fixture-light. `duration_ms - test_ms` is
+    /// roughly the process, import and collection overhead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_ms: Option<u64>,
 }
 
 fn round1(x: f64) -> f64 {
@@ -345,9 +417,21 @@ impl OperatorStat {
     }
 }
 
+/// Which slice of a `--shard i/n` run a report covers. Recorded so `fermut
+/// merge` can tell a missing or mismatched shard apart from a complete set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shard {
+    pub index: u32,
+    pub total: u32,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Report {
     pub outcomes: Vec<MutantOutcome>,
+    /// The shard this report covers; `None` for an unsharded run, a merged
+    /// report, or one written before fermut recorded it.
+    #[serde(default)]
+    pub shard: Option<Shard>,
     /// Set by the engine from the dominator store after the run; surfaces as
     /// `summary.dominator_score`. Not read back from a written report.
     #[serde(skip)]
@@ -368,10 +452,13 @@ impl Serialize for Report {
         #[derive(Serialize)]
         struct View<'a> {
             summary: Summary,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            shard: Option<Shard>,
             outcomes: &'a [MutantOutcome],
         }
         View {
             summary: self.summary(),
+            shard: self.shard,
             outcomes: &self.outcomes,
         }
         .serialize(serializer)
@@ -383,6 +470,7 @@ impl Report {
     pub fn new(outcomes: Vec<MutantOutcome>) -> Self {
         Self {
             outcomes,
+            shard: None,
             dominator_score: None,
             inferred_audit_failures: 0,
         }
@@ -532,14 +620,19 @@ impl Report {
         for o in &self.outcomes {
             match o {
                 MutantOutcome::Killed { .. } => {}
-                MutantOutcome::Survived { mutant } => {
+                MutantOutcome::Survived { mutant, .. } => {
                     println!("SURVIVED  {}", mutant.describe());
                 }
-                MutantOutcome::TimedOut { mutant } => {
-                    println!("TIMEOUT   {}", mutant.describe());
-                }
+                MutantOutcome::TimedOut {
+                    mutant, hung_in, ..
+                } => match hung_in {
+                    Some(t) => println!("TIMEOUT   {} (in {t})", mutant.describe()),
+                    None => println!("TIMEOUT   {}", mutant.describe()),
+                },
                 MutantOutcome::Skipped { .. } => {}
-                MutantOutcome::Error { mutant, message } => {
+                MutantOutcome::Error {
+                    mutant, message, ..
+                } => {
                     println!("ERROR     {} :: {message}", mutant.describe());
                 }
                 MutantOutcome::Equivalent {
@@ -709,6 +802,40 @@ mod tests {
 
     fn report(outcomes: Vec<MutantOutcome>) -> Report {
         Report::new(outcomes)
+    }
+
+    #[test]
+    fn timing_and_hung_in_are_flat_optional_json_fields() {
+        let timing = Timing {
+            duration_ms: 1500,
+            test_ms: Some(900),
+        };
+        let o =
+            MutantOutcome::timed_out_in(make_mutant(), Some("t.py::a".into())).with_timing(timing);
+        let v = serde_json::to_value(&o).unwrap();
+        assert_eq!(v["status"], "timed_out");
+        assert_eq!(v["hung_in"], "t.py::a");
+        assert_eq!(v["duration_ms"], 1500);
+        assert_eq!(v["test_ms"], 900);
+        let back: MutantOutcome = serde_json::from_value(v).unwrap();
+        assert!(matches!(
+            back,
+            MutantOutcome::TimedOut { hung_in: Some(_), timing: Some(t), .. } if t == timing
+        ));
+
+        // Unmeasured outcomes serialize exactly as before (cache MACs and old
+        // reports stay valid), and old JSON reads back with no timing.
+        let plain = serde_json::to_value(MutantOutcome::survived(make_mutant())).unwrap();
+        assert_eq!(plain.as_object().unwrap().len(), 2, "{plain}");
+        let back: MutantOutcome = serde_json::from_value(plain).unwrap();
+        assert!(matches!(back, MutantOutcome::Survived { timing: None, .. }));
+
+        // Never-run outcomes ignore timing.
+        let skipped = MutantOutcome::skipped(make_mutant(), "ty").with_timing(timing);
+        assert!(serde_json::to_value(skipped)
+            .unwrap()
+            .get("duration_ms")
+            .is_none());
     }
 
     #[test]

@@ -277,6 +277,7 @@ impl CoverageContexts {
                 }
             }
             if !per_line.is_empty() {
+                widen_import_time(&mut per_line);
                 map.insert(p, per_line);
             }
         }
@@ -336,6 +337,31 @@ impl CoverageContexts {
             file_test_breadth,
             node_root: canonical_project,
         }))
+    }
+}
+
+/// Widen lines that only ran at import time. `fermut coverage` records those
+/// under `<test module>|collect`, but Python imports each module once, so only
+/// the first test module to import a source file gets its import-time lines.
+/// On more-itertools `test_more.py` imports the whole package first, and the
+/// 19 module-level mutants in `recipes.py` that only `test_recipes.py` kills
+/// survived. So a line whose ids are all module ids (no `::`) also selects
+/// every test module that runs any of this file's lines at runtime.
+fn widen_import_time(per_line: &mut HashMap<u32, Vec<String>>) {
+    let runtime: BTreeSet<&str> = per_line
+        .values()
+        .flatten()
+        .filter_map(|id| id.split_once("::").map(|(file, _)| file))
+        .collect();
+    if runtime.is_empty() {
+        return;
+    }
+    let runtime: Vec<String> = runtime.into_iter().map(str::to_string).collect();
+    for ids in per_line.values_mut() {
+        if ids.iter().all(|id| !id.contains("::")) {
+            let widened: BTreeSet<String> = ids.drain(..).chain(runtime.iter().cloned()).collect();
+            ids.extend(widened);
+        }
     }
 }
 

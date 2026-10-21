@@ -58,3 +58,8 @@ python-packages = ["pytest_fermut"]
 # compiles. python/ (whose reporter the pytest runner include_str!s) is in the
 # sdist already via python-source.
 include = [{ path = "plugins/fermut/skills/*/SKILL.md", format = "sdist" }]
+
+[tool.ruff]
+target-version = "py310"
+# Doc snippets align their annotation comments on purpose; leave Markdown alone.
+extend-exclude = ["*.md"]

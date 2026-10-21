@@ -17,6 +17,7 @@ tabulated from fermut's own operator names.
 
 Usage: map_operators.py <fermut-report.json> <mutmut-extract.json> <out.md>
 """
+
 from __future__ import annotations
 
 import json
@@ -26,14 +27,14 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from compare import load_fermut, norm, rel  # noqa: E402
+from compare import load_fermut, norm, rel
 
 COMPARISON = {"==", "!=", "<", ">", "<=", ">=", "<>"}
 ARITH = {"+", "-", "*", "/", "//", "%", "**", "&", "|", "^", "<<", ">>", "~", "@"}
 AUGMENTED = {f"{op}=" for op in ARITH}
 BOOLOP = {"and", "or"}
-NUM_RE = re.compile(r"^-?\d[\d_]*\.?[\d_]*(e-?\d+)?j?$", re.I)
-STR_RE = re.compile(r'^[rbuf]*(["\']).*\1$', re.I | re.S)
+NUM_RE = re.compile(r"^-?\d[\d_]*\.?[\d_]*(e-?\d+)?j?$", re.IGNORECASE)
+STR_RE = re.compile(r'^[rbuf]*(["\']).*\1$', re.IGNORECASE | re.DOTALL)
 
 
 def _is_bool_flip(bl: str, al: str) -> bool:
@@ -42,7 +43,9 @@ def _is_bool_flip(bl: str, al: str) -> bool:
     return bl.replace("True", "False") == al or bl.replace("False", "True") == al
 
 
-def classify(before: str, after: str, before_line: str = "", after_line: str = "") -> str:
+def classify(
+    before: str, after: str, before_line: str = "", after_line: str = ""
+) -> str:
     b, a = before.strip(), after.strip()
     pair = {b, a}
     # mutmut's string operator wraps the literal in XX...XX (same convention as
@@ -89,14 +92,16 @@ def load_mutmut_raw(path: Path) -> list[dict]:
     for r in json.loads(path.read_text()):
         if r.get("parse_failed"):
             continue
-        out.append({
-            "file": rel(r["file"]),
-            "before_line": norm(r["before_line"]),
-            "after_line": norm(r["after_line"]),
-            "before": r["before"],
-            "after": r["after"],
-            "status": r["status"],
-        })
+        out.append(
+            {
+                "file": rel(r["file"]),
+                "before_line": norm(r["before_line"]),
+                "after_line": norm(r["after_line"]),
+                "before": r["before"],
+                "after": r["after"],
+                "status": r["status"],
+            }
+        )
     return out
 
 
@@ -108,8 +113,9 @@ def main() -> None:
     f_exact = {(r["file"], r["before_line"], r["after_line"]) for r in fermut}
     f_lines = {(r["file"], r["before_line"]) for r in fermut}
 
-    by_kind = defaultdict(lambda: {"total": 0, "exact": 0, "on_line": 0,
-                                   "none": 0, "examples": []})
+    by_kind = defaultdict(
+        lambda: {"total": 0, "exact": 0, "on_line": 0, "none": 0, "examples": []}
+    )
     for r in mutmut:
         k = classify(r["before"], r["after"], r["before_line"], r["after_line"])
         e = by_kind[k]
@@ -124,31 +130,40 @@ def main() -> None:
                 e["examples"].append(f"{r['before']!r}->{r['after']!r} @ {r['file']}")
 
     L = ["# Operator-catalogue gap: mutmut → fermut (pyjwt)\n"]
-    L.append("Each mutmut mutation classified by its before→after change, then "
-             "checked against fermut: **exact** = fermut made the identical "
-             "mutation; **on_line** = fermut mutated that line differently; "
-             "**none** = fermut produced nothing there.\n")
+    L.append(
+        "Each mutmut mutation classified by its before→after change, then "
+        "checked against fermut: **exact** = fermut made the identical "
+        "mutation; **on_line** = fermut mutated that line differently; "
+        "**none** = fermut produced nothing there.\n"
+    )
     L.append("| mutmut kind | total | fermut exact | on-line | none | exact% |")
     L.append("|---|--:|--:|--:|--:|--:|")
     for k in sorted(by_kind, key=lambda x: -by_kind[x]["total"]):
         e = by_kind[k]
         pct = 100 * e["exact"] // max(1, e["total"])
-        L.append(f"| {k} | {e['total']} | {e['exact']} | {e['on_line']} | "
-                 f"{e['none']} | {pct}% |")
+        L.append(
+            f"| {k} | {e['total']} | {e['exact']} | {e['on_line']} | "
+            f"{e['none']} | {pct}% |"
+        )
     L.append("")
 
     # Missing-operator candidates: kinds where fermut never produced an exact
     # match (and rarely even touched the line).
     L.append("## Operators fermut is missing or under-covers\n")
-    missing = [(k, e) for k, e in by_kind.items()
-               if e["exact"] == 0 and e["total"] >= 3]
+    missing = [
+        (k, e) for k, e in by_kind.items() if e["exact"] == 0 and e["total"] >= 3
+    ]
     if not missing:
-        L.append("None — every mutmut kind with >=3 instances has at least one "
-                 "exact fermut equivalent.")
+        L.append(
+            "None — every mutmut kind with >=3 instances has at least one "
+            "exact fermut equivalent."
+        )
     for k, e in sorted(missing, key=lambda x: -x[1]["total"]):
-        L.append(f"- **{k}** — {e['total']} mutmut mutations, 0 fermut exact "
-                 f"({e['on_line']} same-line different-op, {e['none']} untouched). "
-                 f"e.g. {'; '.join(e['examples'][:2])}")
+        L.append(
+            f"- **{k}** — {e['total']} mutmut mutations, 0 fermut exact "
+            f"({e['on_line']} same-line different-op, {e['none']} untouched). "
+            f"e.g. {'; '.join(e['examples'][:2])}"
+        )
     L.append("")
 
     # Synthesis: separate TRUE coverage holes (fermut mutates nothing on the
@@ -156,29 +171,39 @@ def main() -> None:
     # so detection is likely retained even without an exact-match operator).
     L.append("## Synthesis\n")
     total_none = sum(e["none"] for e in by_kind.values())
-    L.append(f"- **True coverage holes** (mutmut mutates a line fermut leaves "
-             f"untouched): {total_none} mutmut mutations across all kinds. "
-             f"Still dominated by `replace-with-None`: fermut's None ops now cover "
-             f"assignments, returns, and call arguments (`arg-to-none`), plus "
-             f"`none-to-value` for the reverse, but NOT whole-call results, bare "
-             f"attribute/name reads, or subscripts replaced with None.")
-    L.append("- **Redundantly covered** (fermut mutates the same line with a "
-             "*different* operator, so the line is still exercised): "
-             f"{sum(e['on_line'] for e in by_kind.values())} mutations. The big "
-             "one is `string case-swap` (UPPER/lower) — fermut has no case-swap, "
-             "but its `string-to-empty` + `string-sentinel` hit the same string "
-             "literals, so detection is largely retained.\n")
+    L.append(
+        f"- **True coverage holes** (mutmut mutates a line fermut leaves "
+        f"untouched): {total_none} mutmut mutations across all kinds. "
+        f"Still dominated by `replace-with-None`: fermut's None ops now cover "
+        f"assignments, returns, and call arguments (`arg-to-none`), plus "
+        f"`none-to-value` for the reverse, but NOT whole-call results, bare "
+        f"attribute/name reads, or subscripts replaced with None."
+    )
+    L.append(
+        "- **Redundantly covered** (fermut mutates the same line with a "
+        "*different* operator, so the line is still exercised): "
+        f"{sum(e['on_line'] for e in by_kind.values())} mutations. The big "
+        "one is `string case-swap` (UPPER/lower) — fermut has no case-swap, "
+        "but its `string-to-empty` + `string-sentinel` hit the same string "
+        "literals, so detection is largely retained.\n"
+    )
     L.append("**Operators fermut genuinely lacks (catalogue gaps):**")
-    L.append("1. `expression → None` beyond call arguments — `arg-to-none` now "
-             "covers call args, but mutmut also replaces whole-call results, "
-             "attribute/name reads, and subscripts with None (the residual "
-             "`replace-with-None` holes).")
-    L.append("2. `string case-swap` (UPPER / lower) — no fermut analog "
-             "(low marginal detection value; string-sentinel overlaps).\n")
-    L.append("**Operators fermut has that mutmut lacks (fermut advantages):** "
-             "`not-insertion` (150 — wraps booleans in `not(...)`), "
-             "`string-to-empty`, `boundary-shift`, `unary-op-swap`, "
-             "`slice-bound-drop`, `bytes-sentinel`.\n")
+    L.append(
+        "1. `expression → None` beyond call arguments — `arg-to-none` now "
+        "covers call args, but mutmut also replaces whole-call results, "
+        "attribute/name reads, and subscripts with None (the residual "
+        "`replace-with-None` holes)."
+    )
+    L.append(
+        "2. `string case-swap` (UPPER / lower) — no fermut analog "
+        "(low marginal detection value; string-sentinel overlaps).\n"
+    )
+    L.append(
+        "**Operators fermut has that mutmut lacks (fermut advantages):** "
+        "`not-insertion` (150 — wraps booleans in `not(...)`), "
+        "`string-to-empty`, `boundary-shift`, `unary-op-swap`, "
+        "`slice-bound-drop`, `bytes-sentinel`.\n"
+    )
 
     # fermut operator inventory (what fermut brings).
     L.append("## fermut operator inventory (executed mutants)\n")

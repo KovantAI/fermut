@@ -75,7 +75,11 @@ impl Report {
                 if folds.is_folded(&m.id) {
                     continue;
                 }
-                md.push_str(&format!("- {}\n", markdown_row(m)));
+                md.push_str(&format!("- {}", markdown_row(m)));
+                if let Some(t) = o.hung_in() {
+                    md.push_str(&format!(" — timed out in `{}`", t.replace('`', "'")));
+                }
+                md.push('\n');
                 let sub = folds.subsumed(&m.id);
                 if !sub.is_empty() {
                     md.push_str("  - also killed by a test that kills this one:\n");

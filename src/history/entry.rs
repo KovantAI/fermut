@@ -121,7 +121,7 @@ impl HistoryEntry {
             .outcomes
             .iter()
             .filter_map(|o| match o {
-                MutantOutcome::Survived { mutant } => Some(mutant.id.clone()),
+                MutantOutcome::Survived { mutant, .. } => Some(mutant.id.clone()),
                 _ => None,
             })
             .collect();

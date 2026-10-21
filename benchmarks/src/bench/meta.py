@@ -3,6 +3,7 @@
 Called by main after each scenario finishes so every result JSON carries
 enough provenance to be readable months later without diving into git.
 """
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -34,7 +35,10 @@ def tool_version(tool: ToolCfg, repo_name: str) -> str | None:
     try:
         out = subprocess.run(
             [str(exe), *parts[1:]],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
         )
         return (out.stdout.strip() or out.stderr.strip()) or None
     except Exception:  # noqa: BLE001
@@ -53,9 +57,11 @@ def repo_commit(repo: RepoCfg, worktree: Path) -> dict[str, str | None]:
     try:
         sha = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
-            cwd=worktree, text=True, timeout=10,
+            cwd=worktree,
+            text=True,
+            timeout=10,
         ).strip()
         out["head"] = sha
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110
         pass
     return out

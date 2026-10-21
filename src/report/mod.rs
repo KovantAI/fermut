@@ -417,9 +417,21 @@ impl OperatorStat {
     }
 }
 
+/// Which slice of a `--shard i/n` run a report covers. Recorded so `fermut
+/// merge` can tell a missing or mismatched shard apart from a complete set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shard {
+    pub index: u32,
+    pub total: u32,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Report {
     pub outcomes: Vec<MutantOutcome>,
+    /// The shard this report covers; `None` for an unsharded run, a merged
+    /// report, or one written before fermut recorded it.
+    #[serde(default)]
+    pub shard: Option<Shard>,
     /// Set by the engine from the dominator store after the run; surfaces as
     /// `summary.dominator_score`. Not read back from a written report.
     #[serde(skip)]
@@ -440,10 +452,13 @@ impl Serialize for Report {
         #[derive(Serialize)]
         struct View<'a> {
             summary: Summary,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            shard: Option<Shard>,
             outcomes: &'a [MutantOutcome],
         }
         View {
             summary: self.summary(),
+            shard: self.shard,
             outcomes: &self.outcomes,
         }
         .serialize(serializer)
@@ -455,6 +470,7 @@ impl Report {
     pub fn new(outcomes: Vec<MutantOutcome>) -> Self {
         Self {
             outcomes,
+            shard: None,
             dominator_score: None,
             inferred_audit_failures: 0,
         }

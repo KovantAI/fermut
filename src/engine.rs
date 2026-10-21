@@ -462,6 +462,9 @@ fn persist(
     }
 
     let mut report = Report::new(outcomes);
+    report.shard = cfg
+        .shard
+        .map(|(index, total)| crate::report::Shard { index, total });
     report.dominator_score = dominator_score(cfg, &report.outcomes);
 
     let entry = if cfg.history {

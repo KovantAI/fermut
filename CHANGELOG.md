@@ -8,6 +8,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+### Changed
+- `fermut merge --history` refuses to write an entry for a merge that scored
+  no mutants (N/A), instead of recording a vacuous 100%.
+
 ### Added
 - A timed-out mutant names the test it hung in (`hung_in` in the JSON
   report, and in the console, Markdown, HTML and GitHub annotation output).
@@ -15,6 +19,9 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 - Per-mutant timing in the JSON report: `duration_ms` (wall time) on every
   outcome that ran a test, plus `test_ms` (time inside tests) from the pytest
   reporter plugin.
+- `fermut merge --expect-shards N` and `--max-errored N`. Sharded reports
+  now record their slice (`"shard": {"index", "total"}`), so merge refuses
+  mixed shard counts and a missing shard index even without the flag.
 - Mutation-score badge for the pytest plugin, published weekly by the
   `Mutation (pytest plugin)` workflow.
 

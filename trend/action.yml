@@ -7,7 +7,7 @@
 #       runs-on: ubuntu-latest
 #       steps:
 #         - uses: actions/checkout@<sha>
-#         - uses: KovantAI/fermut@v0.6.0
+#         - uses: KovantAI/fermut@v0.6.1
 #           with:
 #             warm-only: "true"
 #     shard:
@@ -18,7 +18,7 @@
 #           shard: [1, 2, 3, 4]
 #       steps:
 #         - uses: actions/checkout@<sha>
-#         - uses: KovantAI/fermut/sweep@v0.6.0
+#         - uses: KovantAI/fermut/sweep@v0.6.1
 #           with:
 #             shard: ${{ matrix.shard }}/4
 #     trend:
@@ -28,7 +28,7 @@
 #         contents: write         # push the history branch
 #       steps:
 #         - uses: actions/checkout@<sha>
-#         - uses: KovantAI/fermut/trend@v0.6.0
+#         - uses: KovantAI/fermut/trend@v0.6.1
 #           with:
 #             fail-on-regression: "1"
 #

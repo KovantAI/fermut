@@ -8,6 +8,21 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-21
+
+### Added
+- A timed-out mutant names the test it hung in (`hung_in` in the JSON
+  report, and in the console, Markdown, HTML and GitHub annotation output).
+  Needs the pytest reporter plugin (on by default).
+- Per-mutant timing in the JSON report: `duration_ms` (wall time) on every
+  outcome that ran a test, plus `test_ms` (time inside tests) from the pytest
+  reporter plugin.
+- `fermut merge --expect-shards N` and `--max-errored N`. Sharded reports
+  now record their slice (`"shard": {"index", "total"}`), so merge refuses
+  mixed shard counts and a missing shard index even without the flag.
+- Mutation-score badge for the pytest plugin, published weekly by the
+  `Mutation (pytest plugin)` workflow.
+
 ### Changed
 - `fermut coverage` records import-time lines (module-level code, decorators,
   class bodies, default arguments) under `<test module>|collect`, so their
@@ -22,18 +37,27 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   `permissions: contents: write`. New `history-branch` and `token` inputs
   replace `history-cache` and `cache-key-prefix`.
 
-### Added
-- A timed-out mutant names the test it hung in (`hung_in` in the JSON
-  report, and in the console, Markdown, HTML and GitHub annotation output).
-  Needs the pytest reporter plugin (on by default).
-- Per-mutant timing in the JSON report: `duration_ms` (wall time) on every
-  outcome that ran a test, plus `test_ms` (time inside tests) from the pytest
-  reporter plugin.
-- `fermut merge --expect-shards N` and `--max-errored N`. Sharded reports
-  now record their slice (`"shard": {"index", "total"}`), so merge refuses
-  mixed shard counts and a missing shard index even without the flag.
-- Mutation-score badge for the pytest plugin, published weekly by the
-  `Mutation (pytest plugin)` workflow.
+### Fixed
+- Mutant replacements no longer fuse with an adjacent keyword or name
+  (`if~x` → `ifnot (~x)`, `return~x` → `returnNone`), which produced
+  unparseable mutants (#162).
+- Report JSON serializes the minimal-profile operators under their CLI names
+  (`ror-equality`, `ror-const`, `bool-const`); reports using the old names
+  still load (#162).
+- Programs (`pytest`, `rstest`, `--python`) are resolved against `PATH`
+  before changing into the mirror, so a relative `PATH` entry no longer
+  misses (#162).
+- Mirror paths are canonicalized, so pytest node ids no longer leak the
+  macOS `/var` → `/private/var` temp path (#162).
+- The mirror copies in-place compiled extensions (`*.so`, `*.pyd`) even when
+  gitignored; previously pytest could exit 4 on node ids parametrized on the
+  extension (#162).
+- A file deleted mid-copy (a filter's temp file) no longer fails the mirror
+  build (#162).
+- `--record-kill-sets` reads failures from the reporter plugin when it
+  loaded, falling back to the `-rfE` summary (#162).
+- The GitHub Action no longer passes `--coverage .coverage` when the caller
+  supplies `--no-coverage` (#163).
 
 ## [0.6.0] - 2026-10-20
 
@@ -135,7 +159,8 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 Baseline release. Earlier history is recorded in the git log and release notes.
 
-[Unreleased]: https://github.com/KovantAI/fermut/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/KovantAI/fermut/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/KovantAI/fermut/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/KovantAI/fermut/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/KovantAI/fermut/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/KovantAI/fermut/compare/v0.4.0...v0.4.1

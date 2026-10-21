@@ -17,12 +17,13 @@ is one `HistoryEntry`:
 | `killed`         | `int`          | Mutants the suite caught.                                                                           |
 | `survived`       | `int`          | Mutants that passed unchanged behavior — what you want fewer of.                                    |
 | `timed_out`      | `int`          | Mutants whose run exceeded `--timeout`. Counted as killed for scoring.                              |
-| `skipped`        | `int`          | Mutants rejected by a pre-filter (ty / ruff / coverage / diff / sample / ops / inline ignore). Not counted toward the score. |
+| `skipped`        | `int`          | Mutants rejected by a pre-filter (ty / ruff / coverage / diff / sample / ops). Not counted toward the score. Inline-ignored mutants are never generated, so they aren't counted here. |
 | `errored`        | `int`          | Mutants whose worker raised before producing a verdict (test runner crash, etc.).                   |
 | `equivalent`     | `int`          | Survivors the [equivalent-mutant detector](equivalent-mutants.md#auto-detection-the-equivalent-mutant-detector) reclassified as provably equivalent. Excluded from the score denominator. |
 | `total`          | `int` \| null  | Total mutants in this run. `null` on entries written before this field existed.                     |
 | `duration_ms`    | `int` \| null  | Wall-clock run time in milliseconds. `null` on older entries.                                       |
-| `config_hash`    | `string` \| null | Hex digest of the run-shape config (runner, timeout, hypothesis seed, pytest args, coverage on/off, operator allow/deny, experimental). Equal hashes → scores are directly comparable; a mismatch means the comparison crosses configurations, not just code. |
+| `fermut_version` | `string` \| null | fermut version (`CARGO_PKG_VERSION`) that produced the entry. Lets the trend attribute a score shift to a tool upgrade rather than a code change. `null` on entries written before this field existed. |
+| `config_hash`    | `string` \| null | Hex digest of the run-shape config (runner, timeout, hypothesis seed, pytest args, coverage on/off, operator allow/deny, experimental, parity, diff scope `--since`/`--diff-only`, `--sample`, `--exclude`, `--shard`, ruff/ty filters, equivalent-mutant detection, and the test-suite / coverage-file selection). Equal hashes → runs share the same shape *and* mutant universe, so scores are directly comparable; a mismatch means the comparison crosses configurations or scopes, not just code. |
 | `git_sha`        | `string` \| null | Short git sha, if the working tree is a git repo.                                                 |
 | `git_branch`     | `string` \| null | Current branch name, if discoverable.                                                              |
 | `survivor_ids`   | `array<string>` \| null | IDs of mutants that survived this run. Stored inline so `fermut trend --diff` can compute new-survivor / newly-killed diffs without a sidecar file. |
@@ -81,18 +82,21 @@ comment across re-runs instead of stacking new ones. See
 ## CI history persistence
 
 GitHub Actions runners are ephemeral, so `.fermut/history.jsonl`
-resets every run unless you persist it. The simplest pattern:
-`actions/cache` keyed on the branch ref, with a `main`-branch
-save-only step.
+resets every run unless you persist it. For a sharded sweep, the
+[`KovantAI/fermut/trend`](github-action.md#score-trend) action does this
+for you: it merges the shards, records one entry, persists the history
+on a `fermut-history` branch and gates on regressions. For a single `fermut run` job, the simplest
+pattern is:
+restore with `actions/cache/restore` (which never saves) and save with a
+separate `main`-only `actions/cache/save` step.
 
 ```yaml
 - name: restore fermut history
-  uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+  uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
   with:
     path: .fermut/history.jsonl
-    key: fermut-history-${{ github.ref_name }}-${{ github.sha }}
+    key: fermut-history-main
     restore-keys: |
-      fermut-history-${{ github.ref_name }}-
       fermut-history-main-
 
 - run: fermut run src/ --tests tests/ --markdown report.md --trend
@@ -105,8 +109,9 @@ save-only step.
     key: fermut-history-main-${{ github.sha }}
 ```
 
-Only `main` writes the cache — PR jobs are read-only so feature
-branches don't fork their own history streams. Tune to taste.
+Only `main` writes the cache. Don't use the combined `actions/cache`
+for the restore: its post-step saves on every job, PRs included, so
+feature branches would write their own history entries. Tune to taste.
 
 ## Using deltas as a signal
 

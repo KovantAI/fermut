@@ -7,13 +7,28 @@
 
 pub mod annotations;
 pub mod diff;
+pub mod fold;
 pub mod writers;
 
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize, Serializer};
 
 use crate::mutator::Mutant;
 
 pub use diff::unified_diff_for;
+pub use writers::ReportSinks;
+
+/// Read and deserialize a JSON report (from `fermut run --json`) off disk.
+/// The one place `show`/`explain`/`next`/`suggest`/`autofix`/`dashboard`/
+/// `merge`/`mcp` load a report, so the read + parse error context stays
+/// identical everywhere instead of being copy-pasted per call site.
+pub fn load(path: &std::path::Path) -> Result<Report> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading report {}", path.display()))?;
+    serde_json::from_str(&text).with_context(|| format!("parsing report {}", path.display()))
+}
 
 #[derive(Copy, Clone, Debug)]
 #[non_exhaustive]
@@ -27,54 +42,173 @@ pub enum ReportFormat {
 #[non_exhaustive]
 pub enum MutantOutcome {
     Killed {
-        mutant: Mutant,
+        mutant: Arc<Mutant>,
+        /// Node id of the test that killed the mutant, when the runner could
+        /// tell (pytest with coverage selection). Additive optional field —
+        /// absent from the JSON when unknown. Also keys the killer-scoped
+        /// verdict cache (see `crate::cache`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        killer: Option<String>,
+        /// Set when the kill was inferred, not observed (`--only-dominators`):
+        /// the id of the dominator whose killing test `killer` is in this
+        /// mutant's recorded kill-set. Counted in the score, reported apart.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inferred_from: Option<String>,
+        /// How long the run took. Absent when unmeasured (a verdict cached
+        /// by an older fermut, or a runner that doesn't time runs).
+        #[serde(default, flatten)]
+        timing: Option<Timing>,
     },
     Survived {
-        mutant: Mutant,
+        mutant: Arc<Mutant>,
+        /// How long the run took. Absent when unmeasured (a verdict cached
+        /// by an older fermut, or a runner that doesn't time runs).
+        #[serde(default, flatten)]
+        timing: Option<Timing>,
     },
     TimedOut {
-        mutant: Mutant,
+        mutant: Arc<Mutant>,
+        /// Node id of the test that was running when the timeout hit: the
+        /// reporter plugin saw it begin and the run never finished. Absent
+        /// when the hang came before any test (collection, import) or the
+        /// plugin was off.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hung_in: Option<String>,
+        /// How long the run took. Absent when unmeasured (a verdict cached
+        /// by an older fermut, or a runner that doesn't time runs).
+        #[serde(default, flatten)]
+        timing: Option<Timing>,
     },
     Skipped {
-        mutant: Mutant,
+        mutant: Arc<Mutant>,
         filter: String,
     },
     Error {
-        mutant: Mutant,
+        mutant: Arc<Mutant>,
         message: String,
+        /// How long the run took. Absent when unmeasured (a verdict cached
+        /// by an older fermut, or a runner that doesn't time runs).
+        #[serde(default, flatten)]
+        timing: Option<Timing>,
     },
     /// Equivalent-mutant detector proved the mutation is a no-op. Excluded
     /// from the score denominator like `Skipped`. `source` identifies which
     /// detector layer found it (e.g. `"bytecode-identity"`, `"arith-zero"`).
     Equivalent {
-        mutant: Mutant,
+        mutant: Arc<Mutant>,
         reason: String,
         source: String,
     },
 }
 
 impl MutantOutcome {
-    pub fn killed(m: Mutant) -> Self {
-        Self::Killed { mutant: m }
+    // Constructors take `impl Into<Arc<Mutant>>` so both an owned `Mutant`
+    // (one Arc allocation) and an existing `Arc<Mutant>` (a refcount bump) are
+    // accepted. The hot loop passes `Arc<Mutant>`, so per-outcome construction
+    // and every `MutantOutcome::clone()` (cache insert / cache-hit lookup) is a
+    // bump rather than a deep copy of the four heap fields.
+    #[must_use]
+    pub fn killed(m: impl Into<Arc<Mutant>>) -> Self {
+        Self::Killed {
+            mutant: m.into(),
+            killer: None,
+            inferred_from: None,
+            timing: None,
+        }
     }
-    pub fn survived(m: Mutant) -> Self {
-        Self::Survived { mutant: m }
+    /// `Killed` with the killing test's node id recorded (`None` = unknown).
+    #[must_use]
+    pub fn killed_by(m: impl Into<Arc<Mutant>>, killer: Option<String>) -> Self {
+        Self::Killed {
+            mutant: m.into(),
+            killer,
+            inferred_from: None,
+            timing: None,
+        }
     }
-    pub fn timed_out(m: Mutant) -> Self {
-        Self::TimedOut { mutant: m }
+    /// `Killed` by inference (`--only-dominators`): `killer` killed dominator
+    /// `from` this run and is in the mutant's recorded kill-set.
+    #[must_use]
+    pub fn killed_inferred(m: impl Into<Arc<Mutant>>, killer: String, from: String) -> Self {
+        Self::Killed {
+            mutant: m.into(),
+            killer: Some(killer),
+            inferred_from: Some(from),
+            timing: None,
+        }
     }
-    pub fn skipped(m: Mutant, filter: impl Into<String>) -> Self {
+    /// The dominator a `Killed` outcome was inferred from, if it was.
+    pub fn inferred_from(&self) -> Option<&str> {
+        match self {
+            Self::Killed { inferred_from, .. } => inferred_from.as_deref(),
+            _ => None,
+        }
+    }
+    /// The killing test's node id, for a `Killed` outcome whose runner knew it.
+    pub fn killer(&self) -> Option<&str> {
+        match self {
+            Self::Killed { killer, .. } => killer.as_deref(),
+            _ => None,
+        }
+    }
+    #[must_use]
+    pub fn survived(m: impl Into<Arc<Mutant>>) -> Self {
+        Self::Survived {
+            mutant: m.into(),
+            timing: None,
+        }
+    }
+    pub fn timed_out(m: impl Into<Arc<Mutant>>) -> Self {
+        Self::timed_out_in(m, None)
+    }
+    /// `TimedOut` naming the test it hung in (`None` = unknown).
+    pub fn timed_out_in(m: impl Into<Arc<Mutant>>, hung_in: Option<String>) -> Self {
+        Self::TimedOut {
+            mutant: m.into(),
+            hung_in,
+            timing: None,
+        }
+    }
+    /// The test a `TimedOut` mutant hung in, when the runner saw it.
+    pub fn hung_in(&self) -> Option<&str> {
+        match self {
+            Self::TimedOut { hung_in, .. } => hung_in.as_deref(),
+            _ => None,
+        }
+    }
+    /// Attach the run's timing. A no-op on outcomes that never ran a test
+    /// (`skipped`, `equivalent`).
+    #[must_use]
+    pub fn with_timing(mut self, t: Timing) -> Self {
+        match &mut self {
+            Self::Killed { timing, .. }
+            | Self::Survived { timing, .. }
+            | Self::TimedOut { timing, .. }
+            | Self::Error { timing, .. } => *timing = Some(t),
+            Self::Skipped { .. } | Self::Equivalent { .. } => {}
+        }
+        self
+    }
+    pub fn skipped(m: impl Into<Arc<Mutant>>, filter: impl Into<String>) -> Self {
         Self::Skipped {
-            mutant: m,
+            mutant: m.into(),
             filter: filter.into(),
         }
     }
-    pub fn error(m: Mutant, message: String) -> Self {
-        Self::Error { mutant: m, message }
+    pub fn error(m: impl Into<Arc<Mutant>>, message: String) -> Self {
+        Self::Error {
+            mutant: m.into(),
+            message,
+            timing: None,
+        }
     }
-    pub fn equivalent(m: Mutant, reason: impl Into<String>, source: impl Into<String>) -> Self {
+    pub fn equivalent(
+        m: impl Into<Arc<Mutant>>,
+        reason: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
         Self::Equivalent {
-            mutant: m,
+            mutant: m.into(),
             reason: reason.into(),
             source: source.into(),
         }
@@ -82,9 +216,9 @@ impl MutantOutcome {
 
     pub fn mutant(&self) -> &Mutant {
         match self {
-            Self::Killed { mutant }
-            | Self::Survived { mutant }
-            | Self::TimedOut { mutant }
+            Self::Killed { mutant, .. }
+            | Self::Survived { mutant, .. }
+            | Self::TimedOut { mutant, .. }
             | Self::Skipped { mutant, .. }
             | Self::Error { mutant, .. }
             | Self::Equivalent { mutant, .. } => mutant,
@@ -103,6 +237,21 @@ impl MutantOutcome {
     }
 }
 
+/// Per-mutant run timing, flattened into the outcome's JSON. Measured when the
+/// verdict was produced: a verdict replayed from the cache keeps the timing of
+/// the run that produced it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Timing {
+    /// Wall time of the test run, spawn to exit (or to the kill on a timeout).
+    pub duration_ms: u64,
+    /// Time inside tests as the pytest reporter plugin measured it: call phases
+    /// of passing tests plus every failed phase. Setup/teardown of passing
+    /// tests isn't reported, so it's fixture-light. `duration_ms - test_ms` is
+    /// roughly the process, import and collection overhead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_ms: Option<u64>,
+}
+
 fn round1(x: f64) -> f64 {
     (x * 10.0).round() / 10.0
 }
@@ -116,6 +265,10 @@ pub struct Counts {
     pub errored: usize,
     #[serde(default)]
     pub equivalent: usize,
+    /// Of `killed`, how many were inferred rather than observed
+    /// (`--only-dominators`).
+    #[serde(default)]
+    pub inferred_killed: usize,
 }
 
 impl Counts {
@@ -123,13 +276,59 @@ impl Counts {
         self.killed + self.survived + self.timed_out + self.skipped + self.errored + self.equivalent
     }
 
-    pub fn mutation_score(&self) -> f64 {
-        let detected = self.killed + self.timed_out;
-        let denom = detected + self.survived;
-        if denom == 0 {
-            return 100.0;
+    /// Denominator of the mutation score: mutants that produced a real verdict
+    /// (`killed`, `timed_out`, `survived`). Skipped, errored and equivalent
+    /// mutants are excluded. Zero means the score is *undefined*, not perfect.
+    pub fn scored(&self) -> usize {
+        self.killed + self.timed_out + self.survived
+    }
+
+    /// Mutation score in percent, or `None` when nothing was scored. A zero
+    /// denominator makes the ratio undefined — an all-errored or all-skipped
+    /// run has no score, which is not the same as 100%. Prefer this wherever
+    /// "nothing to score" must be told apart from a genuine perfect run (gates,
+    /// N/A reporting); use [`mutation_score`](Self::mutation_score) only where a
+    /// bare `f64` is required and the empty-denominator floor is acceptable.
+    pub fn mutation_score_opt(&self) -> Option<f64> {
+        let scored = self.scored();
+        if scored == 0 {
+            return None;
         }
-        100.0 * (detected as f64) / (denom as f64)
+        let detected = self.killed + self.timed_out;
+        Some(100.0 * (detected as f64) / (scored as f64))
+    }
+
+    /// Score over observed verdicts only (inferred kills dropped from both
+    /// sides). `None` when nothing was inferred, or nothing was observed.
+    pub fn observed_score_opt(&self) -> Option<f64> {
+        if self.inferred_killed == 0 {
+            return None;
+        }
+        let scored = self.scored() - self.inferred_killed;
+        (scored > 0).then(|| {
+            let detected = self.killed - self.inferred_killed + self.timed_out;
+            100.0 * detected as f64 / scored as f64
+        })
+    }
+
+    /// Percent score with the historical empty-denominator floor of `100.0`.
+    /// Retained for the JSON summary and history schema, which carry a bare
+    /// `f64`. New gate/reporting logic should use
+    /// [`mutation_score_opt`](Self::mutation_score_opt) instead.
+    pub fn mutation_score(&self) -> f64 {
+        self.mutation_score_opt().unwrap_or(100.0)
+    }
+
+    /// Human display of the score: a one-decimal percent, or `N/A` when
+    /// nothing was scored (a zero denominator is undefined, not 100%). Use
+    /// this for any surface a person reads (`show`, HTML/Markdown reports); the
+    /// bare floored [`mutation_score`](Self::mutation_score) stays only for the
+    /// JSON/history schema.
+    pub fn score_label(&self) -> String {
+        match self.mutation_score_opt() {
+            Some(s) => format!("{s:.1}%"),
+            None => "N/A".to_string(),
+        }
     }
 }
 
@@ -138,6 +337,11 @@ impl Counts {
 /// from `outcomes`. `mutation_score` is rounded to one decimal to match the
 /// human summary line (`score: 86.4%`). Skipped and equivalent mutants are
 /// excluded from the score denominator (see [`Counts::mutation_score`]).
+///
+/// `mutation_score` carries the floored `100.0` when nothing was scored, so a
+/// consumer must read `scored` to tell a genuine perfect run from a vacuous
+/// N/A: `scored == 0` means the score is undefined, not 100% (see
+/// [`Counts::mutation_score_opt`]).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Summary {
     pub total: usize,
@@ -148,11 +352,95 @@ pub struct Summary {
     pub equivalent: usize,
     pub errored: usize,
     pub mutation_score: f64,
+    /// Denominator of `mutation_score` — mutants with a real verdict
+    /// (`killed + timed_out + survived`). `0` means `mutation_score` is a
+    /// vacuous floor, not a genuine 100%. Optional for back-compat with reports
+    /// written before this field existed.
+    #[serde(default)]
+    pub scored: usize,
+    /// Dominator mutation score in percent (`fermut subsume`): killed dominator
+    /// classes over those plus survivors. Present only when a fresh
+    /// `.fermut/dominators.json` covers every scored mutant of this run; see
+    /// [`crate::subsume::report_dominator_score`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dominator_score: Option<f64>,
+    /// Distinct test-writing targets among `survived` once survivors another
+    /// co-located survivor subsumes are folded under it (see
+    /// [`fold`]). Equals `survived` when nothing folds. Presentation only:
+    /// the score still counts every survivor.
+    #[serde(default)]
+    pub survivor_targets: usize,
+    /// Of `killed`, how many were inferred from a dominator rather than run
+    /// (`--only-dominators`). Absent when zero.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub inferred_killed: usize,
+    /// The score over observed verdicts only: inferred kills removed from
+    /// both numerator and denominator. Present only when `inferred_killed > 0`,
+    /// so an inferred score is never read without its observed counterpart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_score: Option<f64>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// Per-operator verdict breakdown for one run. Only real verdicts are counted;
+/// skipped/errored/equivalent mutants say nothing about an operator's value.
+/// Used to surface "noise" operators whose survivors swamp their kills —
+/// candidates for `skip_ops`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperatorStat {
+    pub operator: &'static str,
+    pub killed: usize,
+    pub survived: usize,
+    pub timed_out: usize,
+}
+
+impl OperatorStat {
+    /// Mutants that produced a real verdict for this operator.
+    pub fn scored(&self) -> usize {
+        self.killed + self.survived + self.timed_out
+    }
+
+    /// Detected mutants (killed or timed out — both count as caught).
+    pub fn detected(&self) -> usize {
+        self.killed + self.timed_out
+    }
+
+    /// True when survivors meet or exceed detections and there is at least one
+    /// survivor — the operator produced at least as much noise as signal this
+    /// run. Mirrors the `survived >= killed` rule projects hand-tune into
+    /// `skip_ops` (e.g. `constant-replace`, `keyword-arg-drop`).
+    pub fn is_noisy(&self) -> bool {
+        self.survived > 0 && self.survived >= self.detected()
+    }
+}
+
+/// Which slice of a `--shard i/n` run a report covers. Recorded so `fermut
+/// merge` can tell a missing or mismatched shard apart from a complete set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Shard {
+    pub index: u32,
+    pub total: u32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Report {
     pub outcomes: Vec<MutantOutcome>,
+    /// The shard this report covers; `None` for an unsharded run, a merged
+    /// report, or one written before fermut recorded it.
+    #[serde(default)]
+    pub shard: Option<Shard>,
+    /// Set by the engine from the dominator store after the run; surfaces as
+    /// `summary.dominator_score`. Not read back from a written report.
+    #[serde(skip)]
+    pub dominator_score: Option<f64>,
+    /// Inferred kills (`--only-dominators`) that the audit re-ran and that
+    /// did not die. Non-zero fails `fermut run`. Not read back from a
+    /// written report.
+    #[serde(skip)]
+    pub inferred_audit_failures: usize,
 }
 
 // Hand-written so JSON output carries a derived `summary` object alongside
@@ -164,10 +452,13 @@ impl Serialize for Report {
         #[derive(Serialize)]
         struct View<'a> {
             summary: Summary,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            shard: Option<Shard>,
             outcomes: &'a [MutantOutcome],
         }
         View {
             summary: self.summary(),
+            shard: self.shard,
             outcomes: &self.outcomes,
         }
         .serialize(serializer)
@@ -175,8 +466,14 @@ impl Serialize for Report {
 }
 
 impl Report {
+    #[must_use]
     pub fn new(outcomes: Vec<MutantOutcome>) -> Self {
-        Self { outcomes }
+        Self {
+            outcomes,
+            shard: None,
+            dominator_score: None,
+            inferred_audit_failures: 0,
+        }
     }
 
     /// Headline counts + score for this run. Mirrors the human summary line.
@@ -191,6 +488,11 @@ impl Report {
             equivalent: c.equivalent,
             errored: c.errored,
             mutation_score: round1(c.mutation_score()),
+            scored: c.scored(),
+            dominator_score: self.dominator_score,
+            survivor_targets: fold::fold(&fold::survivors(&self.outcomes)).len(),
+            inferred_killed: c.inferred_killed,
+            observed_score: c.observed_score_opt().map(round1),
         }
     }
 
@@ -200,6 +502,13 @@ impl Report {
             .any(|o| matches!(o, MutantOutcome::Survived { .. }))
     }
 
+    /// True when the run scored no mutant — the denominator is zero, so the
+    /// mutation score is undefined (reported N/A) rather than 100%. Callers gate
+    /// and display this case explicitly instead of trusting a floored percent.
+    pub fn is_scoreless(&self) -> bool {
+        self.counts().scored() == 0
+    }
+
     /// Decide whether the run should exit non-zero.
     ///
     /// With `fail_under` set, round the mutation score to the precision used
@@ -207,10 +516,24 @@ impl Report {
     /// threshold, so a printed `80.0%` never fails against a `--fail-under 80`
     /// due to f64 rounding while sub-decimal thresholds stay honoured exactly.
     /// Without it, any survivor fails the run.
+    ///
+    /// A zero denominator is *not* a passing 100%. When nothing was scored the
+    /// run fails if any mutant errored — an all-errored run otherwise collapses
+    /// to a vacuous 100% and slips through — regardless of whether a threshold
+    /// was set. It passes only when there was genuinely nothing to score and
+    /// nothing errored (e.g. a diff touching no mutable lines), which is a
+    /// legitimate N/A rather than a fake perfect score. When there *is* a real
+    /// score, a threshold gate compares against it and the default gate fails on
+    /// any survivor.
     pub fn should_fail(&self, fail_under: Option<f64>) -> bool {
-        match fail_under {
-            Some(threshold) => round1(self.counts().mutation_score()) < threshold,
-            None => self.has_survivors(),
+        let c = self.counts();
+        match c.mutation_score_opt() {
+            Some(score) => match fail_under {
+                Some(threshold) => round1(score) < threshold,
+                None => self.has_survivors(),
+            },
+            // Scoreless: fail iff something errored, in both gate modes.
+            None => c.errored > 0,
         }
     }
 
@@ -218,7 +541,12 @@ impl Report {
         let mut c = Counts::default();
         for o in &self.outcomes {
             match o {
-                MutantOutcome::Killed { .. } => c.killed += 1,
+                MutantOutcome::Killed { inferred_from, .. } => {
+                    c.killed += 1;
+                    if inferred_from.is_some() {
+                        c.inferred_killed += 1;
+                    }
+                }
                 MutantOutcome::Survived { .. } => c.survived += 1,
                 MutantOutcome::TimedOut { .. } => c.timed_out += 1,
                 MutantOutcome::Skipped { .. } => c.skipped += 1,
@@ -246,6 +574,38 @@ impl Report {
         v
     }
 
+    /// Per-operator verdict breakdown, noisiest (most survivors) first. Only
+    /// operators that produced at least one real verdict appear. Lets a caller
+    /// (or the human summary) surface `is_noisy` operators as `skip_ops`
+    /// candidates without re-scanning `outcomes`.
+    pub fn operator_stats(&self) -> Vec<OperatorStat> {
+        let mut map: std::collections::BTreeMap<&'static str, OperatorStat> =
+            std::collections::BTreeMap::new();
+        for o in &self.outcomes {
+            let name = o.mutant().operator.name();
+            let e = map.entry(name).or_insert(OperatorStat {
+                operator: name,
+                killed: 0,
+                survived: 0,
+                timed_out: 0,
+            });
+            match o {
+                MutantOutcome::Killed { .. } => e.killed += 1,
+                MutantOutcome::Survived { .. } => e.survived += 1,
+                MutantOutcome::TimedOut { .. } => e.timed_out += 1,
+                // Skipped/Error/Equivalent carry no operator-value signal.
+                _ => {}
+            }
+        }
+        let mut v: Vec<OperatorStat> = map.into_values().filter(|s| s.scored() > 0).collect();
+        v.sort_by(|a, b| {
+            b.survived
+                .cmp(&a.survived)
+                .then_with(|| a.operator.cmp(b.operator))
+        });
+        v
+    }
+
     pub fn print(&self, fmt: ReportFormat) {
         match fmt {
             ReportFormat::Json => {
@@ -260,14 +620,19 @@ impl Report {
         for o in &self.outcomes {
             match o {
                 MutantOutcome::Killed { .. } => {}
-                MutantOutcome::Survived { mutant } => {
+                MutantOutcome::Survived { mutant, .. } => {
                     println!("SURVIVED  {}", mutant.describe());
                 }
-                MutantOutcome::TimedOut { mutant } => {
-                    println!("TIMEOUT   {}", mutant.describe());
-                }
+                MutantOutcome::TimedOut {
+                    mutant, hung_in, ..
+                } => match hung_in {
+                    Some(t) => println!("TIMEOUT   {} (in {t})", mutant.describe()),
+                    None => println!("TIMEOUT   {}", mutant.describe()),
+                },
                 MutantOutcome::Skipped { .. } => {}
-                MutantOutcome::Error { mutant, message } => {
+                MutantOutcome::Error {
+                    mutant, message, ..
+                } => {
                     println!("ERROR     {} :: {message}", mutant.describe());
                 }
                 MutantOutcome::Equivalent {
@@ -293,8 +658,11 @@ impl Report {
                 format!("{} ({})", c.skipped, parts.join(", "))
             }
         };
+        // `score_label`, not the floored `mutation_score`: an all-skipped run
+        // (e.g. a `--max-time` budget that expired before any mutant ran) has a
+        // zero denominator and reads `N/A`, never a vacuous `100.0%`.
         println!(
-            "\n{} mutants — killed: {}, survived: {}, timeout: {}, skipped: {}, equivalent: {}, errored: {}  | score: {:.1}%",
+            "\n{} mutants — killed: {}, survived: {}, timeout: {}, skipped: {}, equivalent: {}, errored: {}  | score: {}",
             c.total(),
             c.killed,
             c.survived,
@@ -302,8 +670,35 @@ impl Report {
             skipped,
             c.equivalent,
             c.errored,
-            c.mutation_score()
+            c.score_label()
         );
+        // Inferred kills (`--only-dominators`) are in `killed` and the score;
+        // never print that score without the observed-only one beside it.
+        if c.inferred_killed > 0 {
+            let observed = c
+                .observed_score_opt()
+                .map_or_else(|| "N/A".to_string(), |s| format!("{s:.1}%"));
+            println!(
+                "{} of the kills inferred from dominators, not run  | observed-only score: {observed}",
+                c.inferred_killed
+            );
+        }
+        // Flag operators that produced at least as many survivors as kills:
+        // they cost test time for little signal, and are the usual `skip_ops`
+        // candidates. Only shown when there is something to act on.
+        let noisy: Vec<&str> = self
+            .operator_stats()
+            .iter()
+            .filter(|s| s.is_noisy())
+            .map(|s| s.operator)
+            .collect();
+        if !noisy.is_empty() {
+            println!(
+                "noisy operators (survivors ≥ kills): {} — add to `skip_ops` if their \
+                 survivors aren't observably wrong",
+                noisy.join(", ")
+            );
+        }
     }
 }
 
@@ -314,6 +709,83 @@ mod tests {
     use ruff_text_size::TextRange;
     use std::path::PathBuf;
 
+    #[test]
+    fn killed_and_timed_out_score_identically() {
+        // The invariant that makes smart ordering verdict-neutral even under a
+        // per-mutant timeout (finding #1): `timed_out` and `killed` are both
+        // *detected*, so moving a mutant between the two leaves the score and
+        // its denominator untouched. Reordering can only ever flip these two
+        // (never produce/remove a `survived`), so it can't move the score.
+        let with_kill = Counts {
+            killed: 3,
+            timed_out: 0,
+            survived: 2,
+            ..Default::default()
+        };
+        // Same set, but one detection landed as a timeout instead of a kill —
+        // exactly what reordering the selected tests under a timeout can do.
+        let with_timeout = Counts {
+            killed: 2,
+            timed_out: 1,
+            survived: 2,
+            ..Default::default()
+        };
+        assert_eq!(with_kill.scored(), with_timeout.scored());
+        assert_eq!(
+            with_kill.mutation_score_opt(),
+            with_timeout.mutation_score_opt(),
+            "shifting a detection killed↔timed_out must not move the score"
+        );
+    }
+
+    #[test]
+    fn operator_stats_ranks_and_flags_noisy_operators() {
+        fn m(op: Operator) -> Mutant {
+            Mutant {
+                id: "x".into(),
+                file: PathBuf::from("t.py"),
+                operator: op,
+                range: TextRange::new(0u32.into(), 1u32.into()),
+                original: "+".into(),
+                replacement: "-".into(),
+                line: 1,
+                stmt_line: 1,
+                site: None,
+            }
+        }
+        let r = Report::new(vec![
+            MutantOutcome::killed(m(Operator::ArithOpSwap)), // 2 killed, 0 surv → signal
+            MutantOutcome::killed(m(Operator::ArithOpSwap)),
+            MutantOutcome::survived(m(Operator::ConstantReplace)), // 0 killed, 2 surv → noise
+            MutantOutcome::survived(m(Operator::ConstantReplace)),
+            MutantOutcome::killed(m(Operator::CompareOpSwap)), // 1 killed, 1 surv → noise (>=)
+            MutantOutcome::survived(m(Operator::CompareOpSwap)),
+            MutantOutcome::skipped(m(Operator::BoundaryShift), "ty"), // no verdict → excluded
+        ]);
+        let stats = r.operator_stats();
+        let names: Vec<&str> = stats.iter().map(|s| s.operator).collect();
+        // Sorted by survivors desc; boundary-shift excluded (only skipped).
+        assert_eq!(
+            names,
+            vec!["constant-replace", "compare-op-swap", "arith-op-swap"]
+        );
+        let noisy: Vec<&str> = stats
+            .iter()
+            .filter(|s| s.is_noisy())
+            .map(|s| s.operator)
+            .collect();
+        assert_eq!(noisy, vec!["constant-replace", "compare-op-swap"]);
+        let arith = stats
+            .iter()
+            .find(|s| s.operator == "arith-op-swap")
+            .unwrap();
+        assert!(
+            !arith.is_noisy(),
+            "an all-killed operator is signal, not noise"
+        );
+        assert_eq!(arith.killed, 2);
+    }
+
     fn make_mutant() -> Mutant {
         Mutant {
             id: "id-1".into(),
@@ -323,11 +795,80 @@ mod tests {
             original: "+".into(),
             replacement: "-".into(),
             line: 2,
+            stmt_line: 2,
+            site: None,
         }
     }
 
     fn report(outcomes: Vec<MutantOutcome>) -> Report {
         Report::new(outcomes)
+    }
+
+    #[test]
+    fn timing_and_hung_in_are_flat_optional_json_fields() {
+        let timing = Timing {
+            duration_ms: 1500,
+            test_ms: Some(900),
+        };
+        let o =
+            MutantOutcome::timed_out_in(make_mutant(), Some("t.py::a".into())).with_timing(timing);
+        let v = serde_json::to_value(&o).unwrap();
+        assert_eq!(v["status"], "timed_out");
+        assert_eq!(v["hung_in"], "t.py::a");
+        assert_eq!(v["duration_ms"], 1500);
+        assert_eq!(v["test_ms"], 900);
+        let back: MutantOutcome = serde_json::from_value(v).unwrap();
+        assert!(matches!(
+            back,
+            MutantOutcome::TimedOut { hung_in: Some(_), timing: Some(t), .. } if t == timing
+        ));
+
+        // Unmeasured outcomes serialize exactly as before (cache MACs and old
+        // reports stay valid), and old JSON reads back with no timing.
+        let plain = serde_json::to_value(MutantOutcome::survived(make_mutant())).unwrap();
+        assert_eq!(plain.as_object().unwrap().len(), 2, "{plain}");
+        let back: MutantOutcome = serde_json::from_value(plain).unwrap();
+        assert!(matches!(back, MutantOutcome::Survived { timing: None, .. }));
+
+        // Never-run outcomes ignore timing.
+        let skipped = MutantOutcome::skipped(make_mutant(), "ty").with_timing(timing);
+        assert!(serde_json::to_value(skipped)
+            .unwrap()
+            .get("duration_ms")
+            .is_none());
+    }
+
+    #[test]
+    fn inferred_kills_count_in_the_score_and_get_an_observed_score() {
+        let r = report(vec![
+            MutantOutcome::killed(make_mutant()),
+            MutantOutcome::killed_inferred(make_mutant(), "t".into(), "d".into()),
+            MutantOutcome::killed_inferred(make_mutant(), "t".into(), "d".into()),
+            MutantOutcome::survived(make_mutant()),
+        ]);
+        let s = r.summary();
+        assert_eq!(s.killed, 3);
+        assert_eq!(s.inferred_killed, 2);
+        assert_eq!(s.mutation_score, 75.0);
+        // Observed only: 1 killed of 2 run.
+        assert_eq!(s.observed_score, Some(50.0));
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["observed_score"], 50.0);
+        // Without inference neither field appears.
+        let plain =
+            serde_json::to_value(report(vec![MutantOutcome::killed(make_mutant())]).summary())
+                .unwrap();
+        assert!(plain.get("inferred_killed").is_none());
+        assert!(plain.get("observed_score").is_none());
+    }
+
+    #[test]
+    fn summary_counts_survivor_targets_after_folding() {
+        let s = report(testing::folded_pair()).summary();
+        assert_eq!(s.survived, 2);
+        assert_eq!(s.survivor_targets, 1);
+        // Score is untouched by folding.
+        assert_eq!(s.mutation_score, 0.0);
     }
 
     #[test]
@@ -427,6 +968,105 @@ mod tests {
             MutantOutcome::survived(make_mutant()),
         ]);
         assert!(r.should_fail(Some(80.0)));
+    }
+
+    #[test]
+    fn mutation_score_opt_is_none_when_nothing_scored() {
+        // Only skipped/errored mutants — zero denominator.
+        let r = report(vec![
+            MutantOutcome::skipped(make_mutant(), "coverage"),
+            MutantOutcome::error(make_mutant(), "boom".into()),
+        ]);
+        assert!(r.counts().mutation_score_opt().is_none());
+        // The floored accessor still returns the historical 100.0.
+        assert!((r.counts().mutation_score() - 100.0).abs() < f64::EPSILON);
+        assert!(r.is_scoreless());
+    }
+
+    #[test]
+    fn all_time_budget_skipped_run_labels_na_not_vacuous_hundred() {
+        // A --max-time budget that expired before any mutant ran: every mutant
+        // is a time-budget skip, zero denominator. The human summary uses
+        // `score_label`, so it must read N/A, never a vacuous 100.0%.
+        let r = report(vec![
+            MutantOutcome::skipped(make_mutant(), "time-budget"),
+            MutantOutcome::skipped(make_mutant(), "time-budget"),
+        ]);
+        assert!(r.is_scoreless());
+        assert_eq!(r.counts().score_label(), "N/A");
+    }
+
+    #[test]
+    fn score_label_is_na_when_scoreless_else_percent() {
+        let scoreless = report(vec![MutantOutcome::error(make_mutant(), "boom".into())]);
+        assert_eq!(scoreless.counts().score_label(), "N/A");
+        let real = report(vec![
+            MutantOutcome::killed(make_mutant()),
+            MutantOutcome::survived(make_mutant()),
+        ]);
+        assert_eq!(real.counts().score_label(), "50.0%");
+    }
+
+    #[test]
+    fn should_fail_fails_vacuous_hundred_when_all_errored() {
+        // The reported bug: every mutant errored, denominator is zero, the
+        // floored score is a vacuous 100% that must NOT pass a threshold gate.
+        let r = report(vec![
+            MutantOutcome::error(make_mutant(), "boom".into()),
+            MutantOutcome::error(make_mutant(), "boom".into()),
+        ]);
+        assert!(r.should_fail(Some(50.0)));
+    }
+
+    #[test]
+    fn should_fail_default_fails_vacuous_hundred_when_all_errored() {
+        // Same vacuous 100%, but no --fail-under: the default gate must also
+        // fail rather than exit 0 while claiming the gate failed.
+        let r = report(vec![
+            MutantOutcome::error(make_mutant(), "boom".into()),
+            MutantOutcome::error(make_mutant(), "boom".into()),
+        ]);
+        assert!(r.should_fail(None));
+    }
+
+    #[test]
+    fn should_fail_default_passes_when_nothing_to_score_and_no_errors() {
+        // No threshold, nothing scored, nothing errored — legitimate N/A pass.
+        let r = report(vec![MutantOutcome::skipped(make_mutant(), "coverage")]);
+        assert!(!r.should_fail(None));
+        assert!(r.is_scoreless());
+    }
+
+    #[test]
+    fn summary_scored_zero_flags_vacuous_score() {
+        // JSON consumers read `scored` to tell a real 100% from an N/A floor.
+        let r = report(vec![MutantOutcome::error(make_mutant(), "boom".into())]);
+        let s = r.summary();
+        assert_eq!(s.scored, 0);
+        assert!((s.mutation_score - 100.0).abs() < f64::EPSILON);
+
+        let real = report(vec![MutantOutcome::killed(make_mutant())]);
+        assert_eq!(real.summary().scored, 1);
+    }
+
+    #[test]
+    fn should_fail_passes_when_nothing_to_score_and_no_errors() {
+        // Nothing scored and nothing errored — a legitimate N/A (e.g. a diff
+        // touching no mutable lines), a pass rather than a fake perfect score.
+        let r = report(vec![
+            MutantOutcome::skipped(make_mutant(), "coverage"),
+            MutantOutcome::skipped(make_mutant(), "shard"),
+        ]);
+        assert!(!r.should_fail(Some(90.0)));
+        assert!(r.is_scoreless());
+    }
+
+    #[test]
+    fn should_fail_empty_report_passes_threshold_gate() {
+        // No mutants at all: N/A, not a failing gate.
+        let r = report(vec![]);
+        assert!(!r.should_fail(Some(90.0)));
+        assert!(r.is_scoreless());
     }
 
     #[test]
@@ -595,6 +1235,19 @@ pub(crate) mod testing {
             original: "+".into(),
             replacement: "-".into(),
             line: 2,
+            stmt_line: 2,
+            site: None,
         }
+    }
+
+    /// `a < b` survivors `>` and `>=`, as the visitor emits them: `>`
+    /// subsumes `>=`, so they fold to one target.
+    pub fn folded_pair() -> Vec<crate::report::MutantOutcome> {
+        crate::mutator::visitor::collect(std::path::Path::new("t.py"), "if a < b:\n    pass\n")
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.site.is_some() && matches!(m.replacement.as_str(), ">" | ">="))
+            .map(|m| crate::report::MutantOutcome::survived(std::sync::Arc::new(m)))
+            .collect()
     }
 }

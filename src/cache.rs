@@ -12,12 +12,23 @@
 //! editing a test re-evaluates the mutants it might now kill instead of
 //! serving the pre-edit verdict.
 //!
-//! The legacy raw-byte hash is still exported as [`hash_file`] for callers
-//! that want byte identity (and for the test suite). Pipeline code paths
-//! should use [`crate::ast_hash::hash_file_ast`] instead.
+//! Pipeline code paths hash the AST via [`crate::ast_hash::hash_file_ast`].
+//! A legacy raw-byte hash survives as the test-only [`hash_file`].
 //!
 //! Stored at `.fermut/cache.json` under the source root by default; one JSON
 //! file, atomic write on save.
+//!
+//! ## Killer-keyed hits
+//!
+//! A `Killed` entry whose killing test `T` is known also stores a
+//! `killer_scope`: a fingerprint of `T`'s file (plus its conftest chain and
+//! shared support files) under the run-shape prefix. When the full `scope`
+//! misses — typically because some *other* covering test file was edited —
+//! the entry is still served if the source hash matches, `T` still covers the
+//! mutant, and `T`'s current killer scope is unchanged ([`Cache::lookup_killer`]).
+//! An edit to a test that didn't kill the mutant can't un-kill it. Survived,
+//! timed-out, and equivalent verdicts never take this path. The engine audits a
+//! sample of killer hits each run to catch flaky or order-dependent kills.
 //!
 //! Filter-skipped outcomes are deliberately **not** cached — the filter chain
 //! changes between invocations (different `--ops`, different `--diff-only`
@@ -27,10 +38,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use hmac::{KeyInit, Mac, SimpleHmac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tracing::warn;
 
@@ -48,12 +59,52 @@ use crate::report::MutantOutcome;
 /// at least 128 bits of entropy.
 const CACHE_KEY_ENV: &str = "FERMUT_CACHE_KEY";
 
-type HmacSha256 = SimpleHmac<Sha256>;
+type HmacSha256 = Hmac<Sha256>;
 
 fn hmac_sha256(key: &[u8], msg: &[u8]) -> Result<[u8; 32]> {
     let mut mac = HmacSha256::new_from_slice(key).context("hmac key init")?;
     mac.update(msg);
     Ok(mac.finalize().into_bytes().into())
+}
+
+/// Atomically write `bytes` to `path`: create the parent dir, write to a
+/// sibling tmp file, then rename onto `path`.
+///
+/// A crash between write and rename leaves the previous file intact — a bare
+/// `std::fs::write` truncates first, so an interrupted save can leave a
+/// half-written / empty file that the next `load` parses as "no entries",
+/// silently discarding a warm cache and re-doing all the work it held. The
+/// rename is atomic on the same filesystem; the tmp lives next to the target
+/// (not `$TMPDIR`, where a cross-mount rename fails with `EXDEV`). The tmp
+/// name includes the PID so concurrent `fermut` processes racing on the same
+/// file don't clobber each other's in-flight writes.
+pub(crate) fn atomic_write(path: &Path, bytes: impl AsRef<[u8]>) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let tmp = tmp_sibling(path);
+    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        // Best-effort cleanup so a failed rename doesn't leave debris.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()));
+    }
+    Ok(())
+}
+
+/// Tmp path next to `path`, PID-suffixed. Kept a sibling so the follow-up
+/// rename stays on one filesystem.
+fn tmp_sibling(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from("cache"));
+    name.push(format!(".tmp.{}", std::process::id()));
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.join(name),
+        _ => PathBuf::from(name),
+    }
 }
 
 /// Load a JSON cache file, returning `T::default()` on any failure.
@@ -125,6 +176,21 @@ struct CacheEntry {
     #[serde(default)]
     scope: String,
     outcome: MutantOutcome,
+    /// Whether this outcome has already been run through the equivalence
+    /// pipeline. A cached `Survived` written by a detector-*off* run is
+    /// `false` — it was never classified, so a later detector-*on* run must
+    /// classify it once (and rewrite the entry `true`). A `Survived` written
+    /// by a detector-*on* run is `true`: the pipeline already cleared it, so
+    /// warm runs report it directly instead of re-spawning the CPython
+    /// bytecode probe every time. `false` for older fermut versions (default),
+    /// which simply forces a one-time reclassify on the next detector-on run.
+    #[serde(default)]
+    equiv_checked: bool,
+    /// Fingerprint of the killing test's scope (see the module docs), present
+    /// only on a `Killed` outcome whose killer is known and covered. Lets the
+    /// entry survive edits to other covering tests via [`Cache::lookup_killer`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    killer_scope: Option<String>,
     /// Hex-encoded HMAC-SHA256 over `(mutant_id, file_hash, scope, outcome)`
     /// keyed by `FERMUT_CACHE_KEY`. Present only when the key was set at
     /// insert time. Verified at load time when the key is set; ignored when
@@ -178,6 +244,24 @@ fn compute_mac(key: &[u8], mutant_id: &str, entry: &CacheEntry) -> Result<String
     msg.extend_from_slice(entry.scope.as_bytes());
     msg.push(0);
     msg.extend_from_slice(outcome_json.as_bytes());
+    // Fold `equiv_checked` in only when true, so entries with the default
+    // (`false`) — including every entry signed by a fermut version that
+    // predates this field — hash identically to before and still verify on
+    // load. A flip in either direction changes the recomputed MAC and is
+    // detected: true→false drops the suffix, false→true adds one.
+    if entry.equiv_checked {
+        msg.push(0);
+        msg.push(1);
+    }
+    // Same additive scheme for `killer_scope`: absent → no suffix, so entries
+    // without one hash as before; present → tagged suffix, so stripping,
+    // adding, or editing it on disk fails verification. (The killer node id
+    // itself lives in the outcome and is already covered by `outcome_json`.)
+    if let Some(ks) = &entry.killer_scope {
+        msg.push(0);
+        msg.push(2);
+        msg.extend_from_slice(ks.as_bytes());
+    }
     Ok(hex::encode(hmac_sha256(key, &msg)?))
 }
 
@@ -238,35 +322,87 @@ impl Cache {
         self.entries.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
         let raw = serde_json::to_string_pretty(self).context("serializing cache")?;
-        std::fs::write(path, raw).with_context(|| format!("writing {}", path.display()))?;
-        Ok(())
+        atomic_write(path, raw)
     }
 
+    #[cfg(test)]
     pub fn lookup(&self, mutant_id: &str, file_hash: &str, scope: &str) -> Option<MutantOutcome> {
+        self.lookup_entry(mutant_id, file_hash, scope)
+            .map(|(outcome, _)| outcome)
+    }
+
+    /// Like [`lookup`], but also returns the entry's `equiv_checked` flag so
+    /// the engine can tell an already-classified cached `Survived` (skip the
+    /// pipeline, pure flip) from one written by a detector-off run (classify
+    /// once, then rewrite).
+    pub fn lookup_entry(
+        &self,
+        mutant_id: &str,
+        file_hash: &str,
+        scope: &str,
+    ) -> Option<(MutantOutcome, bool)> {
         let entry = self.entries.get(mutant_id)?;
         if entry.file_hash == file_hash && entry.scope == scope {
-            Some(entry.outcome.clone())
+            Some((entry.outcome.clone(), entry.equiv_checked))
         } else {
             None
         }
     }
 
+    /// Killer-keyed fallback for a [`lookup_entry`](Self::lookup_entry) miss.
+    /// Serves the cached outcome when it is `Killed` by a known test `T`, the
+    /// source hash still matches, and `current_killer_scope(T)` — which the
+    /// caller returns as `None` when `T` no longer covers the mutant or its
+    /// scope can't be computed — equals the stored killer scope. Returns the
+    /// outcome and `T`.
+    pub fn lookup_killer(
+        &self,
+        mutant_id: &str,
+        file_hash: &str,
+        current_killer_scope: impl FnOnce(&str) -> Option<String>,
+    ) -> Option<(MutantOutcome, String)> {
+        let entry = self.entries.get(mutant_id)?;
+        if entry.file_hash != file_hash {
+            return None;
+        }
+        let stored = entry.killer_scope.as_deref()?;
+        let killer = entry.outcome.killer()?;
+        let current = current_killer_scope(killer)?;
+        (current == stored).then(|| (entry.outcome.clone(), killer.to_string()))
+    }
+
+    /// Drop `mutant_id`'s entry (an audit found its cached kill didn't
+    /// reproduce).
+    pub fn remove(&mut self, mutant_id: &str) {
+        self.entries.remove(mutant_id);
+    }
+
+    #[cfg(test)]
     pub fn insert(
         &mut self,
         mutant_id: String,
         file_hash: String,
         scope: String,
         outcome: MutantOutcome,
+    ) {
+        self.insert_checked(mutant_id, file_hash, scope, outcome, false, None);
+    }
+
+    /// Insert with an explicit `equiv_checked` marker and optional killer
+    /// scope. `insert` is the `(false, None)` shorthand; the engine calls this
+    /// directly so a detector-on outcome is stored pre-classified. A
+    /// `killer_scope` is kept only on a `Killed` outcome with a known killer —
+    /// on anything else it is meaningless and dropped.
+    pub fn insert_checked(
+        &mut self,
+        mutant_id: String,
+        file_hash: String,
+        scope: String,
+        outcome: MutantOutcome,
+        equiv_checked: bool,
+        killer_scope: Option<String>,
     ) {
         // Only cache deterministic outcomes — never skipped (filter-dependent)
         // and never errored (transient infra issue).
@@ -276,10 +412,13 @@ impl Cache {
         ) {
             return;
         }
+        let killer_scope = killer_scope.filter(|_| outcome.killer().is_some());
         let mut entry = CacheEntry {
             file_hash,
             scope,
             outcome,
+            equiv_checked,
+            killer_scope,
             mac: None,
         };
         if let Some(key) = self.key.as_deref() {
@@ -294,8 +433,12 @@ impl Cache {
     }
 }
 
-/// Hex-encoded sha256 of the file's bytes.
+/// Hex-encoded sha256 of the file's bytes. Test-only: the pipeline hashes the
+/// AST via [`crate::ast_hash::hash_file_ast`]; this byte-identity hash is kept
+/// only to exercise that path in the suite.
+#[cfg(test)]
 pub fn hash_file(path: &Path) -> Result<String> {
+    use sha2::Digest;
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
@@ -325,7 +468,45 @@ mod tests {
             original: "+".into(),
             replacement: "-".into(),
             line: 1,
+            stmt_line: 1,
+            site: None,
         }
+    }
+
+    #[test]
+    fn tmp_sibling_lives_next_to_target() {
+        let p = Path::new("/tmp/proj/.fermut/cache.json");
+        let tmp = tmp_sibling(p);
+        assert_eq!(tmp.parent(), p.parent());
+        let name = tmp.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("cache.json.tmp."),
+            "unexpected tmp name `{name}`"
+        );
+    }
+
+    #[test]
+    fn atomic_write_creates_parent_and_no_tmp_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".fermut").join("out.json");
+        atomic_write(&path, b"hello").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "stray tmp file: {leftovers:?}");
+    }
+
+    #[test]
+    fn atomic_write_preserves_prior_file_when_tmp_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.json");
+        atomic_write(&path, b"first").unwrap();
+        // Stray tmp from a hypothetical interrupted save must not corrupt reads.
+        std::fs::write(path.with_file_name("out.json.tmp.99999"), "half").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
     }
 
     #[test]
@@ -461,6 +642,37 @@ mod tests {
     }
 
     #[test]
+    fn timed_out_outcomes_are_cached_and_reused() {
+        // Unlike Skipped/Error, a `TimedOut` verdict IS cached. This is what the
+        // smart-ordering docs warn about: once a mutant is cached as timed_out,
+        // a later run (even one whose learned ordering would now reach the killer
+        // in time and kill it) gets the cached timeout back and never re-runs.
+        // Locking it here so the "cached timeout is not re-evaluated" caveat
+        // can't silently regress by dropping TimedOut from the cache.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+
+        let mut c = Cache::default();
+        c.insert(
+            "id-1".into(),
+            "hashA".into(),
+            "scope-x".into(),
+            MutantOutcome::timed_out(make_mutant("id-1")),
+        );
+        // Retained in-memory…
+        assert!(matches!(
+            c.lookup("id-1", "hashA", "scope-x"),
+            Some(MutantOutcome::TimedOut { .. })
+        ));
+        // …and survives a save/load roundtrip, so the next run reuses it.
+        c.save(&path).unwrap();
+        assert!(matches!(
+            Cache::load(&path).lookup("id-1", "hashA", "scope-x"),
+            Some(MutantOutcome::TimedOut { .. })
+        ));
+    }
+
+    #[test]
     fn load_missing_file_yields_empty_cache() {
         let cache = Cache::load(&PathBuf::from("/nonexistent/cache.json"));
         assert!(cache.lookup("id", "hash", "scope").is_none());
@@ -562,6 +774,140 @@ mod tests {
     }
 
     #[test]
+    fn equiv_checked_marker_roundtrips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+        let mut c = Cache::default();
+        c.insert_checked(
+            "checked".into(),
+            "hashA".into(),
+            "scope-x".into(),
+            MutantOutcome::survived(make_mutant("checked")),
+            true,
+            None,
+        );
+        c.insert_checked(
+            "unchecked".into(),
+            "hashA".into(),
+            "scope-x".into(),
+            MutantOutcome::survived(make_mutant("unchecked")),
+            false,
+            None,
+        );
+        c.save(&path).unwrap();
+
+        let loaded = Cache::load(&path);
+        let (_, checked) = loaded.lookup_entry("checked", "hashA", "scope-x").unwrap();
+        assert!(checked, "checked marker must persist");
+        let (_, unchecked) = loaded
+            .lookup_entry("unchecked", "hashA", "scope-x")
+            .unwrap();
+        assert!(!unchecked, "unchecked marker must persist");
+        assert!(loaded.lookup("checked", "hashA", "scope-x").is_some());
+    }
+
+    #[test]
+    fn legacy_entry_missing_marker_defaults_unchecked() {
+        // An on-disk entry written before `equiv_checked` existed has no such
+        // field; serde default must load it as unchecked (forcing a one-time
+        // reclassify on the next detector-on run) rather than failing to parse.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+        let mut c = Cache::default();
+        c.insert_checked(
+            "id-1".into(),
+            "hashA".into(),
+            "scope-x".into(),
+            MutantOutcome::survived(make_mutant("id-1")),
+            true,
+            None,
+        );
+        c.save(&path).unwrap();
+        // Simulate a pre-marker on-disk shape by dropping the field entirely.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let mut val: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let entry = &mut val["entries"]["id-1"];
+        assert!(
+            entry
+                .as_object_mut()
+                .unwrap()
+                .remove("equiv_checked")
+                .is_some(),
+            "fixture should drop the field"
+        );
+        std::fs::write(&path, serde_json::to_string(&val).unwrap()).unwrap();
+        let loaded = Cache::load(&path);
+        let (_, checked) = loaded.lookup_entry("id-1", "hashA", "scope-x").unwrap();
+        assert!(!checked, "legacy entry must default to unchecked");
+    }
+
+    #[test]
+    fn signed_checked_entry_verifies_and_flag_tamper_is_detected() {
+        let key = b"test-cache-key-with-enough-entropy".to_vec();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+
+        let mut c = keyed_cache(&key);
+        c.insert_checked(
+            "id-1".into(),
+            "hashA".into(),
+            "scope-x".into(),
+            MutantOutcome::survived(make_mutant("id-1")),
+            true,
+            None,
+        );
+        c.save(&path).unwrap();
+
+        // Untampered: the checked flag is folded into the MAC, so it verifies.
+        let loaded = Cache::load_with_key(&path, Some(key.clone()));
+        assert!(
+            loaded.lookup("id-1", "hashA", "scope-x").is_some(),
+            "signed checked entry should verify"
+        );
+
+        // Flip equiv_checked true→false on disk: MAC dropped its suffix so
+        // recomputation no longer matches, and the entry is dropped.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let tampered = raw.replace("\"equiv_checked\": true", "\"equiv_checked\": false");
+        assert_ne!(raw, tampered, "fixture should differ post-tamper");
+        std::fs::write(&path, tampered).unwrap();
+        let loaded = Cache::load_with_key(&path, Some(key));
+        assert!(
+            loaded.lookup("id-1", "hashA", "scope-x").is_none(),
+            "flipping equiv_checked must invalidate the MAC"
+        );
+    }
+
+    #[test]
+    fn legacy_signed_entry_still_verifies_with_default_marker() {
+        // A MAC computed the pre-marker way (no equiv_checked suffix) must
+        // still verify once the field defaults to false — otherwise upgrading
+        // fermut would silently drop every signed warm-cache entry. Simulate
+        // by signing an entry whose equiv_checked is false: the suffix is
+        // omitted, matching the legacy byte layout exactly.
+        let key = b"test-cache-key-with-enough-entropy".to_vec();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+
+        let mut c = keyed_cache(&key);
+        c.insert_checked(
+            "id-1".into(),
+            "hashA".into(),
+            "scope-x".into(),
+            MutantOutcome::killed(make_mutant("id-1")),
+            false,
+            None,
+        );
+        c.save(&path).unwrap();
+
+        let loaded = Cache::load_with_key(&path, Some(key));
+        assert!(
+            loaded.lookup("id-1", "hashA", "scope-x").is_some(),
+            "unchecked signed entry must verify like a legacy entry"
+        );
+    }
+
+    #[test]
     fn unsigned_entry_dropped_when_key_set() {
         // Pre-seed an unsigned cache (simulating an attacker who knows the
         // legacy on-disk shape but doesn't have the key). Loading with a
@@ -618,5 +964,133 @@ mod tests {
 
         let loaded = Cache::load_with_key(&path, None);
         assert!(loaded.lookup("id-1", "hashA", "scope-x").is_some());
+    }
+
+    // ---- killer-keyed lookup ----------------------------------------------
+
+    fn killed_by_a(id: &str) -> MutantOutcome {
+        MutantOutcome::killed_by(make_mutant(id), Some("tests/test_a.py::test_a".into()))
+    }
+
+    fn insert_killer(c: &mut Cache, killer_scope: &str) {
+        c.insert_checked(
+            "id-1".into(),
+            "hashA".into(),
+            "scope-x".into(),
+            killed_by_a("id-1"),
+            false,
+            Some(killer_scope.into()),
+        );
+    }
+
+    #[test]
+    fn lookup_killer_hits_on_matching_killer_scope() {
+        let mut c = Cache::default();
+        insert_killer(&mut c, "ks-1");
+        let (out, killer) = c
+            .lookup_killer("id-1", "hashA", |t| {
+                assert_eq!(t, "tests/test_a.py::test_a");
+                Some("ks-1".into())
+            })
+            .expect("killer hit");
+        assert_eq!(killer, "tests/test_a.py::test_a");
+        assert_eq!(out.killer(), Some("tests/test_a.py::test_a"));
+        // Full key stays as written: a killer hit is not a scope hit.
+        assert!(c.lookup("id-1", "hashA", "scope-y").is_none());
+    }
+
+    #[test]
+    fn lookup_killer_misses_on_changed_scope_hash_or_uncovered_killer() {
+        let mut c = Cache::default();
+        insert_killer(&mut c, "ks-1");
+        assert!(c
+            .lookup_killer("id-1", "hashA", |_| Some("ks-2".into()))
+            .is_none());
+        assert!(c
+            .lookup_killer("id-1", "hashB", |_| Some("ks-1".into()))
+            .is_none());
+        assert!(c.lookup_killer("id-1", "hashA", |_| None).is_none());
+        assert!(c
+            .lookup_killer("nope", "hashA", |_| Some("ks-1".into()))
+            .is_none());
+    }
+
+    #[test]
+    fn killer_scope_dropped_for_outcomes_without_a_killer() {
+        let mut c = Cache::default();
+        for (id, outcome) in [
+            ("s", MutantOutcome::survived(make_mutant("s"))),
+            ("k", MutantOutcome::killed(make_mutant("k"))),
+            ("t", MutantOutcome::timed_out(make_mutant("t"))),
+        ] {
+            c.insert_checked(
+                id.into(),
+                "h".into(),
+                "sc".into(),
+                outcome,
+                false,
+                Some("ks".into()),
+            );
+            assert!(c.entries[id].killer_scope.is_none(), "{id}");
+            assert!(c.lookup_killer(id, "h", |_| Some("ks".into())).is_none());
+        }
+    }
+
+    #[test]
+    fn killer_fields_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+        let mut c = Cache::default();
+        insert_killer(&mut c, "ks-1");
+        c.save(&path).unwrap();
+        let loaded = Cache::load(&path);
+        assert!(loaded
+            .lookup_killer("id-1", "hashA", |_| Some("ks-1".into()))
+            .is_some());
+    }
+
+    #[test]
+    fn mac_covers_killer_fields() {
+        let key = b"test-cache-key-with-enough-entropy".to_vec();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+        let mut c = keyed_cache(&key);
+        insert_killer(&mut c, "ks-1");
+        c.save(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+
+        // Untampered verifies.
+        assert!(Cache::load_with_key(&path, Some(key.clone()))
+            .lookup("id-1", "hashA", "scope-x")
+            .is_some());
+
+        for (what, tampered) in [
+            ("killer_scope", raw.replace("\"ks-1\"", "\"ks-forged\"")),
+            (
+                "killer",
+                raw.replace("test_a.py::test_a", "test_a.py::test_other"),
+            ),
+            (
+                "killer_scope removed",
+                raw.replace("\"killer_scope\": \"ks-1\",", ""),
+            ),
+        ] {
+            assert_ne!(raw, tampered, "{what}: fixture should differ");
+            std::fs::write(&path, tampered).unwrap();
+            assert!(
+                Cache::load_with_key(&path, Some(key.clone()))
+                    .lookup("id-1", "hashA", "scope-x")
+                    .is_none(),
+                "tampered {what} must fail MAC verification"
+            );
+        }
+    }
+
+    #[test]
+    fn remove_drops_entry() {
+        let mut c = Cache::default();
+        insert_killer(&mut c, "ks-1");
+        c.remove("id-1");
+        assert!(c.lookup("id-1", "hashA", "scope-x").is_none());
     }
 }

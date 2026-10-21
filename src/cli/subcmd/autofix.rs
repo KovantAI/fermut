@@ -28,17 +28,12 @@ use serde::Serialize;
 
 use super::explain::MutantSummary;
 use super::suggest::{append_to_test_file, generate_test_code, infer_apply_target, select_targets};
+use crate::cli::Format;
 use crate::llm::cache::default_cache_path;
 use crate::llm::DEFAULT_MODEL;
 use crate::mutator::Mutant;
-use crate::report::{MutantOutcome, Report};
+use crate::report::MutantOutcome;
 use crate::runner::{self, BaselineStatus, Runner};
-
-#[derive(Copy, Clone, Debug)]
-pub enum AutofixFormat {
-    Human,
-    Json,
-}
 
 pub struct AutofixOpts {
     pub report: PathBuf,
@@ -57,7 +52,46 @@ pub struct AutofixOpts {
     /// Keep a generated test even when verification fails. Off by default —
     /// the whole point is to land only proven tests.
     pub keep_failed: bool,
-    pub format: AutofixFormat,
+    pub format: Format,
+}
+
+impl From<AutofixArgs> for AutofixOpts {
+    fn from(a: AutofixArgs) -> Self {
+        let AutofixArgs {
+            report,
+            target,
+            all_survivors,
+            path,
+            tests,
+            python,
+            out,
+            model,
+            context,
+            sample_count,
+            timeout,
+            no_cache,
+            cache_path,
+            keep_failed,
+            format,
+        } = a;
+        AutofixOpts {
+            report,
+            target,
+            all_survivors,
+            path,
+            tests,
+            python,
+            out,
+            model,
+            context_lines: context,
+            sample_count,
+            timeout,
+            no_cache,
+            cache_path,
+            keep_failed,
+            format,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -93,10 +127,7 @@ const OUTCOME_GENERATION_FAILED: &str = "generation-failed";
 const OUTCOME_ERROR: &str = "error";
 
 pub fn autofix(opts: AutofixOpts) -> Result<()> {
-    let raw = std::fs::read_to_string(&opts.report)
-        .with_context(|| format!("reading {}", opts.report.display()))?;
-    let report: Report =
-        serde_json::from_str(&raw).with_context(|| format!("parsing {}", opts.report.display()))?;
+    let report = crate::report::load(&opts.report)?;
     let targets = select_targets(&report, opts.target.as_deref(), opts.all_survivors)?;
     let mutants: Vec<Mutant> = targets.iter().map(|o| o.mutant().clone()).collect();
 
@@ -125,14 +156,14 @@ pub fn autofix(opts: AutofixOpts) -> Result<()> {
         context_lines: opts.context_lines,
         sample_count: opts.sample_count,
         keep_failed: opts.keep_failed,
-        log: matches!(opts.format, AutofixFormat::Human),
+        log: matches!(opts.format, Format::Human),
     };
 
     let report = run_autofix(&core, &mutants);
 
     match opts.format {
-        AutofixFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
-        AutofixFormat::Human => render_human(&report),
+        Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        Format::Human => render_human(&report),
     }
     Ok(())
 }
@@ -141,43 +172,16 @@ pub fn autofix(opts: AutofixOpts) -> Result<()> {
 /// `fermut run`'s defaults; only `path`, `tests`, and `timeout` are wired
 /// through — autofix doesn't mutate, it just needs the runner + baseline.
 fn build_run_config(opts: &AutofixOpts) -> Result<crate::config::Config> {
-    let filter = super::super::FilterArgs {
-        ops: None,
-        skip_ops: None,
-        diff_only: None,
-        since: None,
-        no_diff_only: false,
-        coverage: None,
-        no_coverage: false,
-        experimental: false,
-        parity: false,
-        exclude: Vec::new(),
-    };
     crate::cli::build_config::build_config(
         opts.path.clone(),
-        opts.tests.clone(),
-        None,
-        opts.timeout,
-        false,
-        false,
-        None,
-        Vec::new(),
-        true, // no_cache: autofix doesn't read the mutation cache
-        None,
-        true,                // no_history: a verify run isn't a real scored run
-        None,                // history_path
-        None,                // sample
-        None,                // sample_seed
-        None,                // shard
-        None,                // runner
-        opts.python.clone(), // python
-        None,                // isolation
-        false,
-        None,
-        None,
-        false,
-        None,
-        filter,
+        crate::cli::RunConfigArgs {
+            tests: opts.tests.clone(),
+            timeout: opts.timeout,
+            no_cache: true,   // autofix doesn't read the mutation cache
+            no_history: true, // a verify run isn't a real scored run
+            python: opts.python.clone(),
+            ..Default::default()
+        },
     )
 }
 
@@ -254,9 +258,12 @@ fn fix_one(core: &Core, m: &Mutant) -> AutofixEntry {
         }
     };
 
-    // 2. pick a target file (inferred from the enclosing symbol, or --out)
-    let target_path = match infer_apply_target(m, &ctx)
-        .or_else(|e| core.out.map(|p| Ok(p.to_path_buf())).unwrap_or(Err(e)))
+    // 2. pick a target file: --out when given, else inferred from the
+    //    enclosing symbol
+    let target_path = match core
+        .out
+        .map(|p| Ok(p.to_path_buf()))
+        .unwrap_or_else(|| infer_apply_target(m, &ctx))
     {
         Ok(p) => p,
         Err(e) => return entry(summary, OUTCOME_ERROR, false, None, Some(e.to_string())),
@@ -295,9 +302,11 @@ fn fix_one(core: &Core, m: &Mutant) -> AutofixEntry {
             snapshot,
             &target_path,
             applied,
-            OUTCOME_SUITE_RED,
-            "generated test fails on unmutated code",
-            Some(out),
+            Rejection {
+                outcome: OUTCOME_SUITE_RED,
+                reason: "generated test fails on unmutated code",
+                extra: Some(out),
+            },
         ),
         Ok(Verdict::StillSurvives) => revert_or_keep(
             core,
@@ -305,9 +314,11 @@ fn fix_one(core: &Core, m: &Mutant) -> AutofixEntry {
             snapshot,
             &target_path,
             applied,
-            OUTCOME_STILL_SURVIVES,
-            "generated test does not catch the mutation",
-            None,
+            Rejection {
+                outcome: OUTCOME_STILL_SURVIVES,
+                reason: "generated test does not catch the mutation",
+                extra: None,
+            },
         ),
         Err(e) => revert_or_keep(
             core,
@@ -315,24 +326,40 @@ fn fix_one(core: &Core, m: &Mutant) -> AutofixEntry {
             snapshot,
             &target_path,
             applied,
-            OUTCOME_ERROR,
-            "verification error",
-            Some(e.to_string()),
+            Rejection {
+                outcome: OUTCOME_ERROR,
+                reason: "verification error",
+                extra: Some(e.to_string()),
+            },
         ),
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Why a generated test was rejected at verification, and how to label the
+/// resulting entry. Bundles the three fields that vary per rejection branch so
+/// `revert_or_keep` takes the run environment plus one decision value.
+struct Rejection {
+    /// Stable `OUTCOME_*` label recorded on the entry.
+    outcome: &'static str,
+    /// Human reason, prefixed onto the detail line and the log message.
+    reason: &'static str,
+    /// Extra context (suite tail / error message) appended to `reason`.
+    extra: Option<String>,
+}
+
 fn revert_or_keep(
     core: &Core,
     summary: MutantSummary,
     snapshot: Snapshot,
     path: &Path,
     applied: Option<String>,
-    outcome: &'static str,
-    reason: &str,
-    extra: Option<String>,
+    rej: Rejection,
 ) -> AutofixEntry {
+    let Rejection {
+        outcome,
+        reason,
+        extra,
+    } = rej;
     let detail = match extra {
         Some(x) => Some(format!("{reason}: {x}")),
         None => Some(reason.to_string()),
@@ -409,8 +436,12 @@ fn verify(runner: &dyn Runner, m: &Mutant) -> Result<Verdict> {
 /// Evaluate one mutant on a dedicated thread so `with_worker_mirror`'s
 /// thread-local cache starts empty and rebuilds against the current tests.
 fn run_on_fresh_thread(runner: &dyn Runner, m: &Mutant) -> Result<MutantOutcome> {
+    // Not the hot loop — one survivor verified at a time, each running the full
+    // suite — so wrapping in a fresh `Arc` here (one clone) is negligible and
+    // keeps `verify`'s public `&Mutant` signature.
+    let m = std::sync::Arc::new(m.clone());
     std::thread::scope(|s| {
-        s.spawn(|| runner.run(m))
+        s.spawn(|| runner.run(&m))
             .join()
             .map_err(|_| anyhow::anyhow!("verification thread panicked"))?
     })
@@ -484,7 +515,7 @@ mod tests {
     }
 
     impl Runner for MockRunner {
-        fn run(&self, m: &Mutant) -> Result<MutantOutcome> {
+        fn run(&self, m: &std::sync::Arc<Mutant>) -> Result<MutantOutcome> {
             Ok(if self.run_kills {
                 MutantOutcome::killed(m.clone())
             } else {
@@ -524,6 +555,8 @@ mod tests {
             original: "<=".into(),
             replacement: "<".into(),
             line: 2,
+            stmt_line: 2,
+            site: None,
         }
     }
 
@@ -626,6 +659,24 @@ mod tests {
     }
 
     #[test]
+    fn out_overrides_the_inferred_target() {
+        let (dir, m, test_file) = fixture();
+        let before = std::fs::read_to_string(&test_file).unwrap();
+        let runner = mock(true, true);
+        let tests_dir = dir.path().join("tests");
+        let forced = tests_dir.join("test_forced.py");
+        let mut c = core(&runner, &tests_dir, false);
+        c.out = Some(&forced);
+        let report = run_autofix(&c, std::slice::from_ref(&m));
+        assert_eq!(report.entries[0].outcome, OUTCOME_FIXED);
+        // Written to --out, not the inferred test_calc.py.
+        assert!(std::fs::read_to_string(&forced)
+            .unwrap()
+            .contains("fermut autofix"));
+        assert_eq!(std::fs::read_to_string(&test_file).unwrap(), before);
+    }
+
+    #[test]
     fn snapshot_absent_revert_deletes_created_file() {
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("new_test.py");
@@ -648,4 +699,72 @@ mod tests {
         snap.restore(&p).unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "original\n");
     }
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct AutofixArgs {
+    /// Path to a JSON report produced by `fermut run --json …`.
+    pub(crate) report: std::path::PathBuf,
+
+    /// Mutant selector: 1-based index, or substring of mutant id.
+    /// Omit when `--all-survivors` is set.
+    pub(crate) target: Option<String>,
+
+    /// Fix every surviving (or timed-out) mutant in the report.
+    #[arg(long)]
+    pub(crate) all_survivors: bool,
+
+    /// Python source root (for the runner + baseline). Defaults to the
+    /// configured source_root or `.`.
+    #[arg(long, default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Tests directory: mined for style samples + the apply target, and
+    /// mirrored by the verifier. Defaults to the configured tests dir.
+    #[arg(long)]
+    pub(crate) tests: Option<std::path::PathBuf>,
+
+    /// Python interpreter (path) or virtualenv (dir) the verifier runs
+    /// pytest with (`<python> -m pytest`). Same discovery as `fermut run`.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) python: Option<std::path::PathBuf>,
+
+    /// Force generated tests into this file instead of the inferred one.
+    /// Must live inside the tests tree or the verifier won't see it.
+    #[arg(long)]
+    pub(crate) out: Option<std::path::PathBuf>,
+
+    /// Anthropic model id. Defaults to `claude-sonnet-4-6`.
+    #[arg(long)]
+    pub(crate) model: Option<String>,
+
+    /// Source lines of context around the mutant in the prompt.
+    #[arg(long, default_value_t = 8)]
+    pub(crate) context: usize,
+
+    /// How many existing tests to include in the prompt for style.
+    #[arg(long, default_value_t = 2)]
+    pub(crate) sample_count: usize,
+
+    /// Per-mutant verification timeout, in seconds.
+    #[arg(long, value_name = "SECS")]
+    pub(crate) timeout: Option<u64>,
+
+    /// Disable the LLM response cache.
+    #[arg(long)]
+    pub(crate) no_cache: bool,
+
+    /// Custom path for the LLM response cache.
+    #[arg(long)]
+    pub(crate) cache_path: Option<std::path::PathBuf>,
+
+    /// Keep generated tests even when verification fails (default reverts
+    /// them). Useful for inspecting why a suggestion didn't work.
+    #[arg(long)]
+    pub(crate) keep_failed: bool,
+
+    /// Output format. `json` (default) emits the structured report;
+    /// `human` prints a per-mutant summary.
+    #[arg(long, value_enum, default_value_t = crate::cli::Format::Json)]
+    pub(crate) format: crate::cli::Format,
 }

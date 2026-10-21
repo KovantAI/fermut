@@ -1,5 +1,10 @@
 # fermut · GitHub Actions examples
 
+> **Prefer the packaged action** — `uses: KovantAI/fermut@<tag>` covers the
+> PR gate, sharded sweeps and cache warming without copying YAML. See
+> [docs/guides/github-action.md](../../docs/guides/github-action.md). The
+> workflows below are the hand-rolled equivalents.
+
 Copy-paste-ready workflows for the common patterns:
 
 | File | Trigger | Purpose |
@@ -27,7 +32,7 @@ If you'd rather install from source, swap the install step for:
 ```yaml
 - uses: dtolnay/rust-toolchain@<sha>
   with: { toolchain: stable }
-- run: cargo install --git https://github.com/KovantAI/fermut --tag v0.1.0
+- run: cargo install --git https://github.com/KovantAI/fermut --tag v0.6.0
 ```
 
 ## Action SHAs
@@ -41,7 +46,8 @@ git ls-remote --tags https://github.com/<org>/<action> | grep -E 'vX' | tail -3
 
 ## Notes
 
-The filter flags, output flags, and matrix structure are identical across
-all four examples — adapt the `src/` and `tests/` paths to your project
-layout and adjust the install step if you prefer the `cargo install --git`
-from-source route.
+The examples differ on purpose: only `sharded-matrix.yml` uses a shard
+matrix, and each picks its own scope (`--diff-only`, `--since`, or a full
+sweep with `--no-diff-only`) and output flags. Adapt the `src/` and
+`tests/` paths to your project layout and adjust the install step if you
+prefer the `cargo install --git` from-source route.

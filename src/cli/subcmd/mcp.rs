@@ -166,6 +166,7 @@ fn tool_definitions() -> Value {
                     "diff_only": {"type": "string", "description": "Restrict mutants to lines changed vs this base ref."},
                     "jobs": {"type": "integer", "description": "Parallel worker count. Defaults to logical CPU count."},
                     "timeout": {"type": "integer", "description": "Per-mutant pytest timeout in seconds."},
+                    "max_time": {"type": "integer", "description": "Wall-clock ceiling (seconds) on the testing phase. Highest-value mutants (covered first) run before the deadline; the rest are recorded skipped/`time-budget` and excluded from the score. Bounds testing only, not baseline/generation/ty. Use for a predictable inner-loop latency cap on large suites."},
                     "python": {"type": "string", "description": "Python interpreter path or virtualenv dir to run pytest with (`<python> -m pytest`); avoids relying on PATH. Auto-discovers a venv when omitted."},
                     "report_path": {"type": "string", "description": "Where to write the JSON report. Defaults to <project>/.fermut/last.json."}
                 }
@@ -306,8 +307,7 @@ fn load_report(path: &str) -> Result<Report> {
     {
         return Err(anyhow::anyhow!("Invalid input: {}", path_buf.display()));
     }
-    let raw = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("reading {path}: {e}"))?;
-    serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("parsing {path}: {e}"))
+    crate::report::load(path_buf)
 }
 
 fn tool_next(args: &Value) -> Result<Value> {
@@ -332,7 +332,8 @@ fn tool_next(args: &Value) -> Result<Value> {
 }
 
 fn tool_explain(args: &Value) -> Result<Value> {
-    use super::explain::{build_explain_report, ExplainFormat, ExplainOpts};
+    use super::explain::{build_explain_report, ExplainOpts};
+    use crate::cli::Format;
     let report = str_arg(args, "report").ok_or_else(|| anyhow::anyhow!("`report` is required"))?;
     let target = str_arg(args, "target").ok_or_else(|| anyhow::anyhow!("`target` is required"))?;
     let context_lines = args
@@ -360,8 +361,8 @@ fn tool_explain(args: &Value) -> Result<Value> {
         model: None,
         no_cache: false,
         cache_path: None,
-        project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        format: ExplainFormat::Json,
+        project_root: crate::cli::current_project_root(),
+        format: Format::Json,
     };
     Ok(serde_json::to_value(build_explain_report(&opts)?)?)
 }
@@ -372,7 +373,8 @@ fn tool_doctor(args: &Value) -> Result<Value> {
 }
 
 fn tool_baseline(args: &Value) -> Result<Value> {
-    use super::baseline::{compute_baseline, BaselineFormat, BaselineOpts};
+    use super::baseline::{compute_baseline, BaselineArgs};
+    use crate::cli::Format;
     let path = PathBuf::from(str_arg(args, "path").unwrap_or("."));
     let full = args.get("full").and_then(Value::as_bool).unwrap_or(false);
     let sample = args.get("sample").and_then(Value::as_f64);
@@ -381,12 +383,12 @@ fn tool_baseline(args: &Value) -> Result<Value> {
         .and_then(Value::as_u64)
         .map(|n| n as usize)
         .unwrap_or(3);
-    let opts = BaselineOpts {
+    let opts = BaselineArgs {
         path,
         full,
         sample,
         top,
-        format: BaselineFormat::Json,
+        format: Format::Json,
         // No filter overrides over MCP — compute_baseline forces the
         // coverage filter on so the score is over covered code.
         filter: super::super::FilterArgs {
@@ -399,6 +401,7 @@ fn tool_baseline(args: &Value) -> Result<Value> {
             no_coverage: false,
             experimental: false,
             parity: false,
+            operators: None,
             exclude: Vec::new(),
         },
     };
@@ -470,6 +473,7 @@ fn tool_run(args: &Value) -> Result<Value> {
     let diff_only = str_arg(args, "diff_only").map(str::to_string);
     let jobs = args.get("jobs").and_then(Value::as_u64).map(|n| n as usize);
     let timeout = args.get("timeout").and_then(Value::as_u64);
+    let max_time = args.get("max_time").and_then(Value::as_u64);
     let python = str_arg(args, "python").map(PathBuf::from);
 
     let filter = super::super::FilterArgs {
@@ -482,35 +486,22 @@ fn tool_run(args: &Value) -> Result<Value> {
         no_coverage: false,
         experimental: false,
         parity: false,
+        operators: None,
         exclude: Vec::new(),
     };
     // Build the runtime config the same way `fermut run` does, so a project's
     // fermut.toml is honored and only the explicitly-passed args override it.
     let cfg = crate::cli::build_config::build_config(
         path,
-        tests,
-        jobs,
-        timeout,
-        false,
-        false,
-        None,
-        Vec::new(),
-        false,
-        None,
-        false,
-        None,   // history_path
-        None,   // sample
-        None,   // sample_seed
-        None,   // shard
-        None,   // runner
-        python, // python
-        None,   // isolation
-        false,
-        None,
-        None,
-        false,
-        None,
-        filter,
+        crate::cli::RunConfigArgs {
+            tests,
+            jobs,
+            timeout,
+            python,
+            max_time,
+            filter,
+            ..Default::default()
+        },
     )?;
 
     let (report, _entry) = crate::engine::run(&cfg)?;
@@ -571,6 +562,22 @@ mod tests {
         ] {
             assert!(names.contains(&expected), "missing tool {expected}");
         }
+    }
+
+    #[test]
+    fn fermut_run_advertises_max_time() {
+        // The budget flag must be reachable over MCP, not just the CLI.
+        let run = tool_definitions()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "fermut_run")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            run["inputSchema"]["properties"]["max_time"]["type"], "integer",
+            "fermut_run must expose an integer max_time"
+        );
     }
 
     #[test]
@@ -635,6 +642,32 @@ mod tests {
         let payload: Value = serde_json::from_str(text).unwrap();
         assert_eq!(payload["total"], 1); // two boundary survivors → one cluster
         assert_eq!(payload["survivors"][0]["cluster_size"], 2);
+    }
+
+    #[test]
+    fn next_folds_subsumed_survivors_into_subsumed_ids() {
+        // `a < b`: `>` (mask neg|pos) subsumes `>=` (all regions) at site 5.
+        let tmp = tempfile::tempdir().unwrap();
+        let report = tmp.path().join("r.json");
+        std::fs::write(
+            &report,
+            r#"{"outcomes":[
+                {"status":"survived","mutant":{"id":"a.py@7:compare-op-swap:<->>=","file":"a.py","operator":"compare-op-swap","range":[7,8],"original":"<","replacement":">=","line":1,"site":{"start":5,"mask":7,"minimal":false}}},
+                {"status":"survived","mutant":{"id":"a.py@7:compare-op-swap:<->>","file":"a.py","operator":"compare-op-swap","range":[7,8],"original":"<","replacement":">","line":1,"site":{"start":5,"mask":5,"minimal":false}}}
+            ]}"#,
+        )
+        .unwrap();
+        let result = tools_call(
+            &json!({"name": "fermut_next", "arguments": {"report": report.display().to_string()}}),
+        )
+        .unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(payload["total"], 1);
+        let top = &payload["survivors"][0];
+        assert_eq!(top["replacement"], ">");
+        assert_eq!(top["subsumed_ids"][0], "a.py@7:compare-op-swap:<->>=");
+        assert_eq!(top["sibling_ids"].as_array().unwrap().len(), 0);
     }
 
     #[test]

@@ -10,12 +10,15 @@
 //! That turns N copies of the project (one per mutant) into N_jobs copies
 //! (one per rayon worker).
 
+pub(crate) mod exit;
+pub mod kill_sets;
 pub(crate) mod process_group;
 pub mod pytest;
+pub(crate) mod pytest_result;
 pub mod python;
 pub mod unittest;
 
-pub use python::resolve_python;
+pub use python::{interpreter, resolve_python, resolve_tool};
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -29,7 +32,10 @@ use crate::mutator::Mutant;
 use crate::report::MutantOutcome;
 
 pub trait Runner: Send + Sync {
-    fn run(&self, mutant: &Mutant) -> Result<MutantOutcome>;
+    /// Takes `&Arc<Mutant>` so the outcome it returns embeds the mutant by a
+    /// refcount bump, not a deep copy. Helpers that only read the mutant still
+    /// take `&Mutant` and are called via deref coercion.
+    fn run(&self, mutant: &std::sync::Arc<Mutant>) -> Result<MutantOutcome>;
 
     /// Run the *unmutated* test suite once and report whether it is green.
     ///
@@ -38,6 +44,33 @@ pub trait Runner: Send + Sync {
     /// toward 100% while proving nothing. The engine calls this before any
     /// mutation and aborts on [`BaselineStatus::Failed`].
     fn baseline(&self) -> Result<BaselineStatus>;
+
+    /// Drain the kills learned this run (which test killed which
+    /// `(file, operator)`), for the engine to fold into the smart-ordering
+    /// sidecar. Default empty — only the pytest runner learns them, and only
+    /// when smart ordering is on.
+    fn take_kill_records(&self) -> Vec<crate::kill_order::KillRecord> {
+        Vec::new()
+    }
+
+    /// Drain the per-mutant kill-sets recorded this run, for the engine to write
+    /// out when `--record-kill-sets` is set. Default empty — only the pytest
+    /// runner records them, and only when the flag is on.
+    fn take_kill_sets(&self) -> Vec<kill_sets::KillSetRecord> {
+        Vec::new()
+    }
+
+    /// Re-run `mutant` against only the test `killer` that a cached verdict
+    /// says killed it — the killer-keyed cache's sampled audit. `Ok(None)`
+    /// when the runner can't select a single test (the default), in which case
+    /// the cached kill is left as is.
+    fn audit(
+        &self,
+        _mutant: &std::sync::Arc<Mutant>,
+        _killer: &str,
+    ) -> Result<Option<MutantOutcome>> {
+        Ok(None)
+    }
 }
 
 /// Result of the pre-flight baseline run (the unmutated suite).
@@ -48,6 +81,15 @@ pub enum BaselineStatus {
     /// The suite failed/errored. `output` is the tail of pytest's combined
     /// stdout/stderr, for surfacing in the abort message.
     Failed { output: String },
+}
+
+impl std::fmt::Display for BaselineStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            BaselineStatus::Passed => "passed",
+            BaselineStatus::Failed { .. } => "failed",
+        })
+    }
 }
 
 /// Build a one-shot mirror for a baseline run. Unlike [`with_worker_mirror`],
@@ -72,6 +114,74 @@ pub(crate) fn mirror_pythonpath(mirror: &Mirror) -> Result<std::ffi::OsString> {
         paths.extend(std::env::split_paths(&existing).filter(|p| !p.as_os_str().is_empty()));
     }
     std::env::join_paths(&paths).context("joining PYTHONPATH")
+}
+
+/// Caller-shell variables that silently change how the suite runs — and so
+/// can change verdicts — without appearing in the project's config.
+/// `PYTEST_ADDOPTS` / `PYTEST_PLUGINS` inject flags or plugins (`-n auto`,
+/// `--cov`, `-p ...`) into every spawned pytest; `PYTHONWARNINGS` can turn a
+/// warning into a failure (a false kill); `PYTHONOPTIMIZE` strips `assert`
+/// from the code under test; `PYTHONINSPECT` drops the child into a REPL that
+/// blocks until the timeout. Project-level settings belong in `pytest_args`
+/// or the project's pytest config, which still apply.
+pub(crate) const SANITIZED_ENV_VARS: &[&str] = &[
+    "PYTEST_ADDOPTS",
+    "PYTEST_PLUGINS",
+    "PYTHONWARNINGS",
+    "PYTHONOPTIMIZE",
+    "PYTHONINSPECT",
+];
+
+/// Set on every suite run fermut spawns. The `pytest --fermut` front-end
+/// (`python/pytest_fermut/plugin.py`) stays inert when it sees this, so a
+/// project with `--fermut` in its pytest `addopts` can't recurse into another
+/// mutation run from inside fermut's own baseline, coverage, or mutant runs.
+pub(crate) const CHILD_ENV: &str = "FERMUT_CHILD";
+
+/// Strip [`SANITIZED_ENV_VARS`] from `cmd` so every suite run is reproducible
+/// from the project alone, independent of the caller's shell, and mark it as
+/// a fermut child ([`CHILD_ENV`]).
+pub(crate) fn sanitize_python_env(cmd: &mut std::process::Command) {
+    for var in SANITIZED_ENV_VARS {
+        cmd.env_remove(var);
+    }
+    cmd.env(CHILD_ENV, "1");
+}
+
+/// Apply the environment every per-mutant framework command against a mirror
+/// needs: run from the mirror root, in a fresh process group (so a timeout kill
+/// reaches child processes), with `PYTHONPATH` pinned to the mirror (beats an
+/// editable install's `.pth` pointing at the original tree) and bytecode writes
+/// disabled (a stale `.pyc` that still validates against the patched source
+/// would mask the mutation and falsely report a survivor). Shared by the pytest
+/// and unittest runners so these correctness-critical knobs can't drift apart.
+pub(crate) fn configure_mirror_cmd(cmd: &mut std::process::Command, mirror: &Mirror) -> Result<()> {
+    cmd.current_dir(&mirror.root);
+    process_group::with_new_process_group(cmd);
+    cmd.env("PYTHONPATH", mirror_pythonpath(mirror)?);
+    cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+    sanitize_python_env(cmd);
+    Ok(())
+}
+
+/// Run `f` against this worker's mirror with `mutant`'s patch spliced in for the
+/// duration of the call: reuse (or lazily build) the thread-local mirror, apply
+/// the patch, invoke `f`, then revert the patch on scope exit via the guard.
+/// Both runners funnel through here so the mirror-reuse + patch-lifecycle wiring
+/// lives in exactly one place.
+pub(crate) fn run_patched<F>(
+    tests: &Path,
+    mode: IsolationMode,
+    mutant: &Mutant,
+    f: F,
+) -> Result<MutantOutcome>
+where
+    F: FnOnce(&Mirror) -> Result<MutantOutcome>,
+{
+    with_worker_mirror(tests, mode, |mirror| {
+        let _guard = apply_patch(mirror, mutant)?;
+        f(mirror)
+    })
 }
 
 /// Keep the last `max_lines` lines of `s`, prefixing an elision marker when
@@ -117,6 +227,7 @@ pub(crate) fn run_baseline_with_timeout(
     // Same staleness guard as the per-mutant run: don't write `.pyc` into the
     // mirror during the baseline pass.
     cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+    sanitize_python_env(&mut cmd);
 
     let started = Instant::now();
     let mut child = match cmd.spawn() {
@@ -175,22 +286,58 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
     let timeout = Duration::from_secs(cfg.timeout_secs);
     let baseline_timeout = Duration::from_secs(cfg.baseline_timeout_secs);
     let isolation = cfg.isolation;
-    match cfg.runner {
-        RunnerKind::Pytest => Box::new(pytest::PytestRunner::new(
-            tests,
+    // Smart ordering: load the kill-order history once (immutable, shared for
+    // no-lock ordering) and a fresh sink the runner appends kills to. When off,
+    // the history is empty (ordering no-ops) and no kills are recorded.
+    let kill_order = std::sync::Arc::new(if cfg.smart_order {
+        crate::kill_order::KillOrder::load(&cfg.kill_order_path)
+    } else {
+        crate::kill_order::KillOrder::default()
+    });
+    let kill_sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    // Kill-set recording (the higher-order-mutant experiment): a shared sink the
+    // runner appends per-mutant kill-sets to, drained by the engine afterward.
+    // Empty and unused unless `--record-kill-sets` is set.
+    let record_kill_sets = cfg.record_kill_sets.is_some();
+    let kill_set_sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let key_base = cfg.source_root.clone();
+    // `rstest` is a pytest-CLI-compatible drop-in, so it reuses the pytest
+    // runner wholesale — only the framework executable name differs.
+    let pytest_compatible = |exe: &'static str| -> Box<dyn Runner> {
+        Box::new(pytest::PytestRunner::new(pytest::PytestConfig {
+            tests: tests.clone(),
             timeout,
             baseline_timeout,
-            cfg.hypothesis_seed,
-            cfg.pytest_args.clone(),
+            hypothesis_seed: cfg.hypothesis_seed,
+            extra_args: cfg.pytest_args.clone(),
             isolation,
-            cfg.coverage.clone(),
-            cfg.python.clone(),
-        )),
+            coverage: cfg.coverage.clone(),
+            python: cfg.python.clone(),
+            exe,
+            smart_order: cfg.smart_order,
+            kill_order: kill_order.clone(),
+            kill_sink: kill_sink.clone(),
+            record_kill_sets,
+            kill_set_sink: kill_set_sink.clone(),
+            // Only coverage-selected runs can name a killer the cache can use.
+            learn_killer: cfg.cache && cfg.coverage.is_some(),
+            key_base: key_base.clone(),
+            plugin: cfg.pytest_plugin,
+        }))
+    };
+    match cfg.runner {
+        RunnerKind::Pytest => pytest_compatible("pytest"),
+        RunnerKind::Rstest => pytest_compatible("rstest"),
         RunnerKind::Unittest => Box::new(unittest::UnittestRunner::new(
             tests,
             timeout,
             baseline_timeout,
             isolation,
+            // Resolve the interpreter once: the configured `--python` when set,
+            // else a PATH-probed `python3`/`python`. `unittest` has no console
+            // script, so it's always `<interp> -m unittest`.
+            interpreter(cfg.python.as_deref()),
+            cfg.unittest_pattern.clone(),
         )),
     }
 }
@@ -202,6 +349,10 @@ pub(crate) struct Mirror {
     pub root: PathBuf,
     pub tests: PathBuf,
     pub project_root: PathBuf,
+    /// Directory beside (not inside) the project copy holding fermut's pytest
+    /// reporter plugin and its per-run result files. Kept out of `root` so it
+    /// can't be collected, imported by the project, or swept into a test path.
+    pub plugin_dir: PathBuf,
 }
 
 /// Build a mirror at `tests`'s project root, drop it, return wall-clock
@@ -217,6 +368,36 @@ pub fn time_mirror_build(tests: &Path, mode: IsolationMode) -> Result<Duration> 
 }
 
 impl Mirror {
+    /// The mirror copy of project file `file`.
+    ///
+    /// `file` and `project_root` can spell the same directory differently: on
+    /// macOS the temp dir is `/var/...` but its canonical form is
+    /// `/private/var/...`, and the CLI path and config-resolved `tests` path
+    /// don't agree on which one they use. A plain `strip_prefix` then fails,
+    /// so retry with both sides canonicalized. Never fall back to `file`
+    /// itself: `root.join(<absolute>)` is that absolute path, so the mutant
+    /// would be written into the user's real source tree.
+    fn target_for(&self, file: &Path) -> Result<PathBuf> {
+        if let Ok(rel) = file.strip_prefix(&self.project_root) {
+            return Ok(self.root.join(rel));
+        }
+        let canon_file = file
+            .canonicalize()
+            .with_context(|| format!("resolving mutant file {}", file.display()))?;
+        let canon_root = self
+            .project_root
+            .canonicalize()
+            .with_context(|| format!("resolving project root {}", self.project_root.display()))?;
+        let rel = canon_file.strip_prefix(&canon_root).with_context(|| {
+            format!(
+                "mutant file {} is outside the mirrored project root {}",
+                file.display(),
+                self.project_root.display()
+            )
+        })?;
+        Ok(self.root.join(rel))
+    }
+
     fn build(tests: &Path, mode: IsolationMode) -> Result<Self> {
         let workdir = tempfile::tempdir().context("creating workdir")?;
         let project_root = find_project_root(tests).unwrap_or_else(|| {
@@ -225,15 +406,27 @@ impl Mirror {
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| tests.to_path_buf())
         });
-        let root = workdir.path().join("project");
+        // Resolved, so paths handed to pytest match its `getcwd()`. On macOS the
+        // temp dir sits behind the `/var` → `/private/var` symlink, and pytest
+        // would otherwise print ids for an absolute test path as
+        // `../../var/…/project/tests/…`, unique per mirror.
+        let base = workdir.path().canonicalize().context("resolving workdir")?;
+        let root = base.join("project");
         copy_dir_all(&project_root, &root, mode)?;
         let tests_rel = tests.strip_prefix(&project_root).unwrap_or(tests);
         let tests_in_mirror = root.join(tests_rel);
+        let plugin_dir = base.join("fermut-plugin");
+        std::fs::create_dir_all(&plugin_dir)
+            .with_context(|| format!("mkdir -p {}", plugin_dir.display()))?;
+        let module = plugin_dir.join(format!("{}.py", pytest_result::REPORTER_MODULE));
+        std::fs::write(&module, pytest_result::REPORTER_SOURCE)
+            .with_context(|| format!("writing {}", module.display()))?;
         Ok(Self {
             _workdir: workdir,
             root,
             tests: tests_in_mirror,
             project_root,
+            plugin_dir,
         })
     }
 }
@@ -249,8 +442,26 @@ pub(crate) struct PatchGuard {
 
 impl Drop for PatchGuard {
     fn drop(&mut self) {
-        if let Some(bytes) = self.original.take() {
-            let _ = std::fs::write(&self.path, bytes);
+        let Some(bytes) = self.original.take() else {
+            return;
+        };
+        if std::fs::write(&self.path, &bytes).is_ok() {
+            return;
+        }
+        // Retry once — a transient failure (a concurrent reader still holding
+        // the file, a momentary FS hiccup) may clear on a second try.
+        if let Err(e) = std::fs::write(&self.path, &bytes) {
+            // Drop can't return a Result, but a swallowed restore failure is
+            // dangerous: the mirror file is left MUTATED, so every later mutant
+            // this worker runs on that file measures against corrupt source and
+            // may report bogus survivors/kills. At minimum, name the path.
+            tracing::error!(
+                path = %self.path.display(),
+                error = %e,
+                "failed to restore mirror file after mutant (retried once); \
+                 file left MUTATED — later mutants on this file in this worker \
+                 may report incorrect results"
+            );
         }
     }
 }
@@ -258,11 +469,7 @@ impl Drop for PatchGuard {
 /// Write the mutant's patched source into the mirror, returning a guard
 /// that reverts the file when dropped.
 pub(crate) fn apply_patch(mirror: &Mirror, mutant: &Mutant) -> Result<PatchGuard> {
-    let rel = mutant
-        .file
-        .strip_prefix(&mirror.project_root)
-        .unwrap_or(&mutant.file);
-    let target = mirror.root.join(rel);
+    let target = mirror.target_for(&mutant.file)?;
 
     let original_bytes = std::fs::read(&target)
         .with_context(|| format!("reading mirror file {}", target.display()))?;
@@ -293,13 +500,9 @@ thread_local! {
 /// Run `f` against this worker's mirror, building one on first call.
 /// The mirror is rebuilt only if `tests` or isolation mode changes — neither
 /// should within a run.
-pub(crate) fn with_worker_mirror<F>(
-    tests: &Path,
-    mode: IsolationMode,
-    f: F,
-) -> Result<MutantOutcome>
+pub(crate) fn with_worker_mirror<F, T>(tests: &Path, mode: IsolationMode, f: F) -> Result<T>
 where
-    F: FnOnce(&Mirror) -> Result<MutantOutcome>,
+    F: FnOnce(&Mirror) -> Result<T>,
 {
     WORKER_MIRROR.with(|cell| {
         let mut slot = cell.borrow_mut();
@@ -371,16 +574,15 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
     for entry in walker {
         let entry = entry?;
         let path = entry.path();
-        if path == src {
-            continue;
-        }
         let rel = path.strip_prefix(src).unwrap();
         let target = dst.join(rel);
         let file_type = entry
             .file_type()
             .with_context(|| format!("no file type for {}", path.display()))?;
         if file_type.is_dir() {
-            std::fs::create_dir_all(&target).ok();
+            std::fs::create_dir_all(&target)
+                .with_context(|| format!("create mirror dir {}", target.display()))?;
+            copy_native_extensions(path, &target, mode)?;
         } else if file_type.is_file() {
             // Skip stray compiled bytecode outside `__pycache__` (e.g. legacy
             // sidecar `.pyc`); same staleness hazard as above.
@@ -391,9 +593,41 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
                 continue;
             }
             if let Some(parent) = target.parent() {
-                std::fs::create_dir_all(parent).ok();
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create mirror dir {}", parent.display()))?;
             }
-            clone_file(path, &target, mode)?;
+            // A file deleted mid-walk (a filter's `<stem>_fermut_*.py` temp file,
+            // written beside the source while workers build mirrors) is no
+            // longer part of the project.
+            if let Err(e) = clone_file(path, &target, mode) {
+                if path.exists() {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Copy the compiled extension modules (`*.so`, `*.pyd`) directly in `dir`,
+/// even when `.gitignore` excludes them: a C extension built in place
+/// (`build_ext --inplace`, editable installs) is part of the importable
+/// package. Without it the mirror imports a different package than the one
+/// coverage was recorded against, and node ids parametrized on the extension
+/// (markupsafe's `[markupsafe._speedups]`) don't exist, so pytest exits 4.
+/// Only directories the walk mirrors are scanned, so ignored trees (venvs,
+/// build dirs) stay out.
+fn copy_native_extensions(dir: &Path, target: &Path, mode: IsolationMode) -> Result<()> {
+    let entries = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
+    for entry in entries {
+        let path = entry?.path();
+        let native = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("so") | Some("pyd")
+        );
+        let to = target.join(path.file_name().unwrap());
+        if native && path.is_file() && !to.exists() {
+            clone_file(&path, &to, mode)?;
         }
     }
     Ok(())
@@ -420,7 +654,7 @@ fn clone_file(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
     };
     attempt.with_context(|| {
         format!(
-            "materializing {} -> {} (mode={:?})",
+            "materializing {} -> {} (mode={})",
             src.display(),
             dst.display(),
             mode
@@ -430,7 +664,37 @@ fn clone_file(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_patch, copy_dir_all, tail_lines, Mirror, PatchGuard};
+    use super::{
+        apply_patch, copy_dir_all, sanitize_python_env, tail_lines, Mirror, PatchGuard, CHILD_ENV,
+        SANITIZED_ENV_VARS,
+    };
+
+    #[test]
+    fn sanitize_python_env_removes_caller_overrides() {
+        let mut cmd = std::process::Command::new("python");
+        cmd.env("PYTEST_ADDOPTS", "-n auto");
+        cmd.env("PYTHONPATH", "/mirror");
+        sanitize_python_env(&mut cmd);
+        let envs: std::collections::HashMap<_, _> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_owned())))
+            .collect();
+        // Every listed var is explicitly unset (`None`), not just left unset,
+        // so it is stripped from the inherited parent environment too.
+        for var in SANITIZED_ENV_VARS {
+            assert_eq!(envs.get(*var), Some(&None), "{var} not removed");
+        }
+        // fermut's own pins are untouched.
+        assert_eq!(
+            envs.get("PYTHONPATH"),
+            Some(&Some(std::ffi::OsString::from("/mirror")))
+        );
+        // Marked as a fermut child so `pytest --fermut` can't recurse.
+        assert_eq!(
+            envs.get(CHILD_ENV),
+            Some(&Some(std::ffi::OsString::from("1")))
+        );
+    }
 
     #[test]
     fn tail_lines_keeps_all_when_under_limit() {
@@ -462,6 +726,8 @@ mod tests {
             original: "1".into(),
             replacement: repl.to_string(),
             line: 1,
+            stmt_line: 1,
+            site: None,
         }
     }
 
@@ -608,11 +874,75 @@ mod tests {
         let _ = root;
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn patch_through_symlinked_path_lands_in_mirror_not_source() {
+        // macOS `/var` -> `/private/var`: the mutant's path and the mirror's
+        // project root name the same tree through different prefixes. The
+        // patch must still hit the mirror, never the real source.
+        let (_tmp, _root, tests, src) = fake_project();
+        let mirror = Mirror::build(&tests, IsolationMode::Copy).unwrap();
+        let alias_dir = tempfile::tempdir().unwrap();
+        let alias = alias_dir.path().join("alias");
+        std::os::unix::fs::symlink(&mirror.project_root, &alias).unwrap();
+        let mirrored_src = mirror.root.join("app.py");
+
+        let m = make_mutant(alias.join("app.py"), 4, 5, "2");
+        let guard = apply_patch(&mirror, &m).unwrap();
+        assert_eq!(fs::read(&mirrored_src).unwrap(), b"x = 2\n");
+        assert_eq!(
+            fs::read(&src).unwrap(),
+            b"x = 1\n",
+            "source must stay untouched"
+        );
+        drop(guard);
+        assert_eq!(fs::read(&mirrored_src).unwrap(), b"x = 1\n");
+    }
+
+    #[test]
+    fn patch_outside_project_root_is_refused() {
+        let (_tmp, _root, tests, _src) = fake_project();
+        let mirror = Mirror::build(&tests, IsolationMode::Copy).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let outside = other.path().join("elsewhere.py");
+        fs::write(&outside, b"x = 1\n").unwrap();
+
+        let m = make_mutant(outside.clone(), 4, 5, "2");
+        let err = apply_patch(&mirror, &m).err().expect("must refuse");
+        assert!(format!("{err:#}").contains("outside the mirrored project root"));
+        assert_eq!(fs::read(&outside).unwrap(), b"x = 1\n");
+    }
+
     #[test]
     fn auto_mode_mirror_contents_match_source() {
         let (_tmp, _root, tests, src) = fake_project();
         let mirror = Mirror::build(&tests, IsolationMode::Auto).unwrap();
         let mirrored = mirror.root.join("app.py");
         assert_eq!(fs::read(&mirrored).unwrap(), fs::read(&src).unwrap());
+    }
+
+    /// pytest prints test ids relative to its resolved cwd, so a mirror path
+    /// behind a symlink (macOS `/var`) would leak the temp dir into every id.
+    #[test]
+    fn mirror_paths_are_resolved() {
+        let (_tmp, _root, tests, _src) = fake_project();
+        let mirror = Mirror::build(&tests, IsolationMode::Auto).unwrap();
+        assert_eq!(mirror.root, mirror.root.canonicalize().unwrap());
+        assert!(mirror.tests.starts_with(&mirror.root));
+    }
+
+    #[test]
+    fn mirror_copies_gitignored_native_extensions_but_not_ignored_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(src.join("pkg")).unwrap();
+        fs::create_dir_all(src.join("venv/lib")).unwrap();
+        fs::write(src.join(".gitignore"), "*.so\nvenv/\n").unwrap();
+        fs::write(src.join("pkg/_ext.cpython-313-darwin.so"), "elf").unwrap();
+        fs::write(src.join("venv/lib/dep.so"), "elf").unwrap();
+        let dst = tmp.path().join("dst");
+        copy_dir_all(&src, &dst, IsolationMode::Copy).unwrap();
+        assert!(dst.join("pkg/_ext.cpython-313-darwin.so").is_file());
+        assert!(!dst.join("venv").exists());
     }
 }

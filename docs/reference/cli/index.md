@@ -21,6 +21,7 @@ fermut [-v|-vv|-q] <subcommand> [flags...]
 | Subcommand                          | What it does                                                                  |
 |-------------------------------------|-------------------------------------------------------------------------------|
 | **[`init`](init.md)**               | Detect project layout and emit a starter `fermut.toml` (or `[tool.fermut]`).   |
+| **[`baseline`](baseline.md)**       | Day-one graded verdict: line coverage vs mutation score and the gap.           |
 | **[`run`](run.md)**                 | Generate mutants, run tests against each, report killed / survived.            |
 | **[`coverage`](coverage.md)**       | Generate / incrementally refresh the `.coverage` DB for per-mutant selection.  |
 | **[`list`](list.md)**               | Enumerate mutations without running tests.                                     |
@@ -32,10 +33,13 @@ fermut [-v|-vv|-q] <subcommand> [flags...]
 | **[`merge`](merge.md)**             | Combine JSON reports from sharded runs.                                        |
 | **[`trend`](trend.md)**             | Visualize the mutation-score history.                                          |
 | **[`score`](score.md)**             | Emit the agent reward signal (score + delta + survivor diff) for the latest run. |
+| **[`subsume`](subsume.md)**         | Find dominator mutants in recorded kill-sets; print the dominator score.        |
+| **[`hom`](hom.md)**                 | *Experimental.* Search recorded kill-sets for strongly-subsuming 2nd-order mutants. |
 | **[`dashboard`](dashboard.md)**     | Generate a self-contained HTML dashboard (trend + survivor drill-down).        |
 | **[`doctor`](doctor.md)**           | Diagnose environment + config.                                                 |
 | **[`pr-comment`](pr-comment.md)**   | Post (and stickily update) a Markdown report to a PR.                          |
-| **[`clean`](clean.md)**             | Wipe the result cache (preserves history).                                     |
+| **[`clean`](clean.md)**             | Wipe `.fermut/` artifacts (cache, kill order, dominators) — keeps history.    |
+| **[`install-skills`](install-skills.md)** | Install the bundled agent skill into `.claude/skills/` (or `.agents/skills/`). |
 | **[`migrate`](migrate.md)**         | Translate a mutmut / cosmic-ray config into `[tool.fermut]`.                   |
 | **[`mcp`](mcp.md)**                 | Run a Model Context Protocol server over stdio for agent integration.          |
 | **[`completions`](completions.md)** | Print a shell-completion script.                                               |

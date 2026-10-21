@@ -4,12 +4,15 @@
 //! - `visitor` — AST traversal that emits candidate `Mutant`s for each
 //!   operator on a single Python source file.
 //! - `loader` — walks a source tree, opens each `.py` file, runs the visitor.
+//! - `region` — ROR / logical region model behind the `--operators` profiles.
 //! - `encoding` — handles UTF-8 BOM stripping and PEP 263 encoding directives.
 
 pub mod encoding;
 pub mod ignore;
+mod lexeme;
 pub mod loader;
 pub mod operators;
+pub mod region;
 mod text_range_serde;
 pub mod visitor;
 
@@ -31,7 +34,44 @@ pub struct Mutant {
     pub range: TextRange,
     pub original: String,
     pub replacement: String,
+    /// Line the mutated range starts on. This is what reports, annotations and
+    /// ids show — the place a reader looks to find the mutation.
     pub line: u32,
+    /// First line of the statement enclosing the mutated range. Equal to
+    /// `line` for a single-line statement; earlier when the range sits on a
+    /// continuation line — an element of a multi-line collection literal, an
+    /// argument of a wrapped call.
+    ///
+    /// A continuation line can be absent from per-line coverage data even when
+    /// the statement ran — CPython folds a collection literal of three or more
+    /// constant elements onto the literal's first line, so the element lines
+    /// emit no line event. Coverage lookups therefore fall back to this line;
+    /// see [`crate::filter::coverage::CoverageContexts::tests_for_mutant`] for
+    /// which continuation lines are affected and which are not.
+    ///
+    /// Defaults to `0` when absent from deserialized input (a report written
+    /// by an older version), which disables the fallback.
+    #[serde(default)]
+    pub stmt_line: u32,
+    /// Region-model tag for mutants of a predicate site the static
+    /// subsumption model covers (single-op ordering compare, 2-operand
+    /// `and`/`or` in truth position). `None` everywhere else. See
+    /// [`region`] and the `--operators` profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<SiteTag>,
+}
+
+/// Where a mutant sits in the region model of its predicate site.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteTag {
+    /// Start offset of the `Compare` / `BoolOp` node. Groups the mutants of
+    /// one predicate: op-swap mutants' `range` is the operator token, while
+    /// constant/operand-drop mutants replace the whole node, so `range` can't.
+    pub start: u32,
+    /// Regions where this mutant's truth differs from the original's.
+    pub mask: region::DiffMask,
+    /// In the site's minimal (dominator) set: no sibling candidate subsumes it.
+    pub minimal: bool,
 }
 
 impl Mutant {
@@ -66,6 +106,8 @@ mod tests {
             original: "<=".into(),
             replacement: "<".into(),
             line: 14,
+            stmt_line: 14,
+            site: None,
         }
     }
 

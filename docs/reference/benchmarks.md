@@ -32,7 +32,7 @@ per-phase timing, mutant total, score, and return code.
 
 ## Cold runs (pinned OSS repos)
 
-The numbers below are `cold`-scenario runs of fermut 0.2.2 vs
+The numbers below are `cold`-scenario runs of fermut 0.6.0 vs
 mutmut 3.6.0, **both re-run back-to-back on the same machine
 (2026-06-12)**, excluding clone / install. fermut runs **with its
 coverage filter on** (the designed configuration — see below);
@@ -73,7 +73,7 @@ The picture is **mixed but competitive**:
   fast tests, where fermut's ty + coverage overhead doesn't pay for
   itself as it does on the heavier suites.
 
-Because `coverage_prep` is a **one-time** cost (the `coverage.json` is
+Because `coverage_prep` is a **one-time** cost (the `.coverage` DB is
 reused on every subsequent run), the *steady-state* mutation cost is
 the `mutation` column alone — e.g. typer ~74s vs mutmut ~298s (~4×).
 The cold totals above are the conservative first-contact figure.
@@ -86,8 +86,9 @@ fermut-only.
 
 All ten re-measured same-session on one machine (2026-06-12) with the
 `coverage_prep` / `mutation_run` split. `cov_prep` is the one-time
-coverage-gen cost; `mutation` is the mutation work; `Cold total` is
-their sum (first-contact wall-clock).
+coverage-gen cost; `mutation` is the mutation work; `Cold total` is the
+measured first-contact wall-clock, which runs ~3–5 s above the sum of
+the two phases (time spent outside them).
 
 | Repo (ref)             | Mutants | Score   | cov_prep | mutation | Cold total |
 |------------------------|---------|---------|----------|----------|------------|
@@ -99,8 +100,8 @@ their sum (first-contact wall-clock).
 | click 8.1.7            | 7052    | 82.9    | ~20s     | ~211s    | ~235s      |
 | starlette 0.52.1       | 8061    | 81.3    | ~18s     | ~317s    | ~340s      |
 | jinja2 3.1.6           | 10087   | 78.7    | ~49s     | ~243s    | ~296s      |
-| werkzeug 3.1.8         | 15354   | 73.5    | ~17s     | ~316s    | ~338s      |
 | trio v0.33.0           | 12375   | ~54‡    | ~31s     | ~1220s   | ~1255s     |
+| werkzeug 3.1.8         | 15354   | 73.5    | ~17s     | ~316s    | ~338s      |
 
 † markupsafe's `100.0` is **real** (killed 155 / skipped 111 /
 survived 0 / errored 0) — a tiny, exhaustively-tested library, not
@@ -117,20 +118,21 @@ within ~1.3 pts run-to-run.
 
 ### The coverage filter is what makes fermut fast
 
-fermut consumes a `coverage.json` with per-test contexts and runs
-**only the tests that touch a mutated line** per mutant. Without it,
-every mutant runs the full suite — the difference is large (figures
-from an earlier session; the cold table above is canonical for the
-coverage-on absolutes):
+fermut reads coverage.py's native `.coverage` SQLite DB (written by
+`pytest --cov=src --cov-context=test`, and auto-discovered at the
+project root) with per-test contexts, and runs **only the tests that
+touch a mutated line** per mutant. Without it, every mutant runs the
+full suite — the difference is large (figures from an earlier session;
+the cold table above is canonical for the coverage-on absolutes):
 
 - **pyjwt:** ~392s → **~47s** with coverage (~8×), and the score
   rises (68.0 → 81.9) because mutants on lines *no test covers* are
   now correctly **skipped** rather than counted as survivors.
 - **typer:** ~2174s → **~214s** (~10×).
 
-Coverage is **opt-in** (`--coverage coverage.json`, or wire it via
-`fermut init`); the benchmark harness now generates it automatically
-for fermut. Mutmut has no equivalent, so its per-mutant cost is the
+Coverage is **opt-in** (auto-discovered from `.coverage` at the project
+root, or pass `--coverage .coverage`, or wire it via `fermut init`); the
+benchmark harness now generates it automatically for fermut. Mutmut has no equivalent, so its per-mutant cost is the
 full suite — which is also why it wins on a tiny-suite repo like
 more-itertools where the full suite is already cheap.
 
@@ -155,7 +157,7 @@ the cold table above for absolute head-to-head numbers.
 | click | fails† | — | **DNF** |
 | starlette | fails† | — | **DNF** |
 
-- **mutmut warm** is ~15–30 % faster than cold (its source-line cache
+- **mutmut warm** is ~9–86 % faster than cold (about 25–30 % on pyjwt and typer) (its source-line cache
   short-circuits unchanged mutants). It works on most repos but
   **fails on click** (mutmut's own CLI imports click, so a mutated
   click breaks mutmut's bootstrap) and **starlette** (no verdicts
@@ -180,7 +182,7 @@ re-run, no edits. `loop` = 5 iterations of (touch source → re-run →
 revert), averaged.
 
 `Cold total` = coverage_prep + mutation_run (first-contact cost).
-`Warm` / `Loop` reuse the populated cache + existing `coverage.json`,
+`Warm` / `Loop` reuse the populated cache + existing `.coverage` DB,
 so the coverage_prep split doesn't apply to them.
 
 | Repo (fermut)          | Cold total | Warm   | Loop (avg/iter) |
@@ -189,7 +191,7 @@ so the coverage_prep split doesn't apply to them.
 | pyjwt 2.13.0           | ~42s       | ~5.5s  | ~6s             |
 | more-itertools v10.5.0 | ~304s      | ~11s   | ~11s            |
 
-- **Warm is 8–26× faster than cold** — the per-mutant result cache
+- **Warm is ~8–28× faster than cold** — the per-mutant result cache
   short-circuits every unchanged mutant. (Earlier docs claimed the
   cache gave *no* speedup; that was a harness artifact — the `warm`
   scenario ran one pass without guaranteeing a hot cache, and a
@@ -282,11 +284,11 @@ and `benchmarks/configs/tools.toml`. Results land in
 ## Caveats — read before trusting the numbers
 
 - **Preliminary data.** This is a small, in-progress sample, not a
-  finished benchmark. fermut is at 0.2.2, pre-optimization.
+  finished benchmark. fermut is at 0.6.0, pre-optimization.
 - **Score parity.** The tools find different mutants because
   operator catalogues differ. Scores are **not** directly
   comparable. A fermut `100.0` on a well-tested repo is a red flag,
-  not a result — see the ✗ note above.
+  not a result — see the missing-`pytest` harness bug below.
 - **Benchmark-harness bugs found while validating these numbers**
   (these were harness/setup issues, not fermut runtime bugs). Now
   fixed: per-repo venvs could miss `pytest` (→ every mutant errors →
@@ -299,10 +301,13 @@ and `benchmarks/configs/tools.toml`. Results land in
   --fixtures`. One genuine fermut runtime bug was also fixed: a
   single-file target (`fermut run path/to/file.py`) anchored its
   `.fermut/` cache under the file and silently disabled caching.
-- **Coverage-file size.** `coverage json --show-contexts` on a large
-  suite is huge (typer's `coverage.json` came out ~3.9 GB). It works
-  but won't scale; scoping coverage to the package (excluding test
-  files / big fixtures) is a follow-up.
+- **Coverage-file size.** The legacy `coverage json --show-contexts`
+  export on a large suite is huge (typer's `coverage.json` came out
+  ~3.9 GB). It works but won't scale. This is a large part of why the
+  happy path now reads coverage.py's native `.coverage` SQLite DB
+  directly — it is far smaller (typer's is a fraction of the JSON, no
+  denormalized text blob) and needs no export step. Scoping coverage to
+  the package (excluding test files / big fixtures) shrinks it further.
 - **Comparison coverage.** fermut is measured coverage-on across all
   ten repos. mutmut cold+warm covers markupsafe, pyjwt, typer,
   more-itertools (click/starlette fail, trio bails after ~3.8h).

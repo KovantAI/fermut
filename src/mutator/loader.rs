@@ -23,7 +23,7 @@ pub fn collect_from_tree(root: &Path, exclude: &[String]) -> Result<Vec<Mutant>>
         .filter_entry(|e| !is_excluded(e.path(), root, &excludes));
     for entry in walker.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if !is_python_source(path) {
+        if !is_python_source(path, root) {
             continue;
         }
         let raw =
@@ -70,16 +70,18 @@ fn is_excluded(path: &Path, root: &Path, excludes: &Option<GlobSet>) -> bool {
     set.is_match(rel)
 }
 
-fn is_python_source(p: &Path) -> bool {
+fn is_python_source(p: &Path, root: &Path) -> bool {
     if p.extension().and_then(|s| s.to_str()) != Some("py") {
         return false;
     }
-    // Skip tests, venvs, and caches by default. Configurable later.
-    let s = p.to_string_lossy();
-    !(s.contains("/tests/")
-        || s.contains("/test_")
-        || s.contains("/.venv/")
-        || s.contains("/__pycache__/"))
+    // Skip tests, venvs, and caches by default. Match on path components
+    // relative to `root` so this is platform-independent (no hardcoded `/`)
+    // and a repo rooted under e.g. `.../tests/...` is not wholly excluded.
+    let rel = p.strip_prefix(root).unwrap_or(p);
+    !rel.components().any(|c| {
+        let name = c.as_os_str().to_string_lossy();
+        name == "tests" || name.starts_with("test_") || name == ".venv" || name == "__pycache__"
+    })
 }
 
 #[cfg(test)]
@@ -90,12 +92,37 @@ mod tests {
 
     #[test]
     fn is_python_source_skips_tests_and_caches() {
-        assert!(is_python_source(Path::new("/proj/src/calc.py")));
-        assert!(!is_python_source(Path::new("/proj/tests/test_calc.py")));
-        assert!(!is_python_source(Path::new("/proj/src/test_helper.py")));
-        assert!(!is_python_source(Path::new("/proj/.venv/lib/pkg.py")));
-        assert!(!is_python_source(Path::new("/proj/src/__pycache__/x.py")));
-        assert!(!is_python_source(Path::new("/proj/src/README.md")));
+        let root = Path::new("/proj");
+        assert!(is_python_source(Path::new("/proj/src/calc.py"), root));
+        assert!(!is_python_source(
+            Path::new("/proj/tests/test_calc.py"),
+            root
+        ));
+        assert!(!is_python_source(
+            Path::new("/proj/src/test_helper.py"),
+            root
+        ));
+        assert!(!is_python_source(Path::new("/proj/.venv/lib/pkg.py"), root));
+        assert!(!is_python_source(
+            Path::new("/proj/src/__pycache__/x.py"),
+            root
+        ));
+        assert!(!is_python_source(Path::new("/proj/src/README.md"), root));
+    }
+
+    #[test]
+    fn is_python_source_ignores_dirs_above_root() {
+        // Repo rooted under a path containing "tests" must not exclude
+        // everything — only components below root count.
+        let root = Path::new("/home/ci/tests/myrepo");
+        assert!(is_python_source(
+            Path::new("/home/ci/tests/myrepo/src/calc.py"),
+            root
+        ));
+        assert!(!is_python_source(
+            Path::new("/home/ci/tests/myrepo/tests/test_x.py"),
+            root
+        ));
     }
 
     #[test]

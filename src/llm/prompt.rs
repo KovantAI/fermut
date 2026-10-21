@@ -54,6 +54,7 @@ pub struct SampleTest {
 }
 
 impl PromptContext {
+    #[cfg(test)]
     pub fn empty() -> Self {
         Self {
             source_snippet: String::new(),
@@ -195,6 +196,8 @@ mod tests {
             original: "<=".into(),
             replacement: "<".into(),
             line: 14,
+            stmt_line: 14,
+            site: None,
         }
     }
 

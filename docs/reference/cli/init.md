@@ -16,5 +16,5 @@ fermut init [PATH] [--profile NAME] [--list-profiles]
 | `--pyproject`       | off         | Write `[tool.fermut]` into `pyproject.toml` instead of `fermut.toml`.                                     |
 | `--force`           | off         | Overwrite an existing config block.                                                                       |
 | `--with-gha`        | off         | Also drop a PR-gate workflow at `.github/workflows/fermut.yml`.                                            |
-| `--with-coverage`   | off         | Wire `coverage = "coverage.json"` even when no coverage dep is detected.                                  |
+| `--with-coverage`   | off         | Wire `coverage = ".coverage"` even when no coverage dep is detected.                                      |
 | `--dry-run`         | off         | Print what would be written without touching the filesystem.                                              |

@@ -4,15 +4,12 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::report::{unified_diff_for, MutantOutcome, Report};
 
 pub fn show(report_path: &Path, target: Option<&str>, all: bool) -> Result<()> {
-    let raw = std::fs::read_to_string(report_path)
-        .with_context(|| format!("reading {}", report_path.display()))?;
-    let report: Report =
-        serde_json::from_str(&raw).with_context(|| format!("parsing {}", report_path.display()))?;
+    let report = crate::report::load(report_path)?;
 
     match target {
         None => print_list(&report, all),
@@ -44,7 +41,7 @@ fn print_list(report: &Report, all: bool) -> Result<()> {
     }
     let c = report.counts();
     println!(
-        "\n{} shown of {} total — killed: {}, survived: {}, timeout: {}, skipped: {}, equivalent: {}, errored: {}  | score: {:.1}%",
+        "\n{} shown of {} total — killed: {}, survived: {}, timeout: {}, skipped: {}, equivalent: {}, errored: {}  | score: {}",
         shown,
         c.total(),
         c.killed,
@@ -53,7 +50,7 @@ fn print_list(report: &Report, all: bool) -> Result<()> {
         c.skipped,
         c.equivalent,
         c.errored,
-        c.mutation_score()
+        c.score_label()
     );
     Ok(())
 }
@@ -89,4 +86,28 @@ fn locate_outcome<'a>(report: &'a Report, target: &str) -> Result<&'a MutantOutc
     // `file:line@offset` form, and errors (rather than silently picking the
     // first) when a partial selector is ambiguous.
     crate::cli::subcmd::explain::locate_outcome_impl(&report.outcomes, target)
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct ShowArgs {
+    /// Path to a JSON report produced by `fermut run --json …`.
+    pub(crate) report: std::path::PathBuf,
+
+    /// Optional mutant selector: 1-based index, or substring of mutant id.
+    /// Omit to print a summary list of survivors.
+    pub(crate) target: Option<String>,
+
+    /// Show all outcomes, not just survivors, when target is omitted.
+    #[arg(long)]
+    pub(crate) all: bool,
+}
+
+/// Dispatch handler: unpacks [`ShowArgs`] and runs the inspector.
+pub(crate) fn run(args: ShowArgs) -> Result<()> {
+    let ShowArgs {
+        report,
+        target,
+        all,
+    } = args;
+    show(&report, target.as_deref(), all)
 }

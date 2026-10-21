@@ -1,17 +1,17 @@
 from src.calculator import (
-    add,
-    sub,
-    is_positive,
-    in_range,
     absval,
+    add,
     double_if_truthy,
-    is_none_or_member,
-    negate,
-    trim,
     first_neg,
-    squared_lambda,
+    in_range,
+    is_none_or_member,
+    is_positive,
+    negate,
     safe_div,
+    squared_lambda,
+    sub,
     sum_all,
+    trim,
 )
 
 
@@ -96,3 +96,12 @@ def test_greet():
     from src.calculator import greet
 
     assert greet("world") == "hello, world"
+
+
+def test_add_commutes():
+    # A SECOND test that also exercises `add`, so `add`'s mutated line is
+    # covered by two tests. Smart test ordering (`kill-order.json`) only
+    # captures/reorders when a mutant is selected by >1 test — with the strict
+    # one-test-per-function mapping above there would be nothing to reorder, so
+    # this keeps the smart-order e2e meaningful.
+    assert add(3, 4) == add(4, 3)

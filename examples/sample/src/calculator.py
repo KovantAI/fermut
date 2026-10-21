@@ -11,7 +11,7 @@ def is_positive(x: int) -> bool:
 
 
 def in_range(x: int, lo: int, hi: int) -> bool:
-    return lo <= x and x <= hi
+    return lo <= x <= hi
 
 
 def absval(x: int) -> int:
@@ -36,6 +36,7 @@ def is_none_or_member(x, items: list[int]) -> bool:
 def trace(fn):
     def wrapper(*args, **kw):
         return fn(*args, **kw)
+
     return wrapper
 
 

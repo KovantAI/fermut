@@ -10,6 +10,7 @@ Each (scenario, tool, repo) run writes a JSON file under
 results/runs/<timestamp>-<scenario>-<tool>-<repo>.json. `report` aggregates
 those JSON files into a single markdown table.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -57,7 +58,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             for repo in repo_names:
                 idx += 1
                 key = f"{stamp}-{scenario}-{tool}-{repo}"
-                print(f"\n==> [{idx}/{total_cells}] {scenario} | {tool} | {repo}", flush=True)
+                print(
+                    f"\n==> [{idx}/{total_cells}] {scenario} | {tool} | {repo}",
+                    flush=True,
+                )
                 started_at = meta_mod.utc_now()
                 cell_start = time.perf_counter()
                 try:
@@ -103,11 +107,15 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_clear(args: argparse.Namespace) -> int:
     import shutil
+
     root = Path(__file__).resolve().parents[2]
     targets = [root / "results" / "runs"]
     if args.fixtures or args.all:
-        targets += [p for p in (root / "fixtures").iterdir() if p.is_dir()] \
-            if (root / "fixtures").exists() else []
+        targets += (
+            [p for p in (root / "fixtures").iterdir() if p.is_dir()]
+            if (root / "fixtures").exists()
+            else []
+        )
     if args.all:
         targets.append(root / "fixtures" / ".wheels")
     for t in targets:
@@ -136,29 +144,51 @@ def cmd_report(args: argparse.Namespace) -> int:
         version = (meta.get("tool_version") or "").splitlines()[0]
         seconds = data.get("total_seconds") or data.get("avg_seconds")
         score = data.get("score") or data.get("final_score")
-        rows.append([
-            (meta.get("started_at") or "")[:16].replace("T", " "),
-            data.get("scenario"),
-            version,
-            data.get("repo"),
-            f"{ref}@{head}" if head else ref,
-            data.get("status", "ok"),
-            fmt_num(seconds, ".1f"),
-            fmt_num(score, ".1f"),
-            data.get("mutants") if data.get("mutants") is not None else "",
-            fmt_num(data.get("delta"), "+.1f"),
-        ])
-    print(tabulate(
-        rows,
-        headers=[
-            "started", "scenario", "version",
-            "repo", "ref", "status", "secs", "score%", "mutants", "Δ",
-        ],
-        tablefmt="simple",
-        colalign=("left", "left", "left", "left", "left", "left",
-                  "right", "right", "right", "right"),
-        disable_numparse=True,
-    ))
+        rows.append(
+            [
+                (meta.get("started_at") or "")[:16].replace("T", " "),
+                data.get("scenario"),
+                version,
+                data.get("repo"),
+                f"{ref}@{head}" if head else ref,
+                data.get("status", "ok"),
+                fmt_num(seconds, ".1f"),
+                fmt_num(score, ".1f"),
+                data.get("mutants") if data.get("mutants") is not None else "",
+                fmt_num(data.get("delta"), "+.1f"),
+            ]
+        )
+    print(
+        tabulate(
+            rows,
+            headers=[
+                "started",
+                "scenario",
+                "version",
+                "repo",
+                "ref",
+                "status",
+                "secs",
+                "score%",
+                "mutants",
+                "Δ",
+            ],
+            tablefmt="simple",
+            colalign=(
+                "left",
+                "left",
+                "left",
+                "left",
+                "left",
+                "left",
+                "right",
+                "right",
+                "right",
+                "right",
+            ),
+            disable_numparse=True,
+        )
+    )
     return 0
 
 
@@ -167,25 +197,35 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_run = sub.add_parser("run", help="Run benchmark scenario(s)")
-    p_run.add_argument("--scenario", default="cold",
-                       help=f"comma-list or 'all' ({','.join(SCENARIOS)})")
-    p_run.add_argument("--tool", default="fermut",
-                       help="comma-list or 'all' (fermut,mutmut,cosmic-ray,poodle)")
-    p_run.add_argument("--repo", default="more-itertools",
-                       help="comma-list or 'all'")
-    p_run.add_argument("--timeout", type=int, default=3600,
-                       help="per-run hard timeout in seconds")
+    p_run.add_argument(
+        "--scenario",
+        default="cold",
+        help=f"comma-list or 'all' ({','.join(SCENARIOS)})",
+    )
+    p_run.add_argument(
+        "--tool",
+        default="fermut",
+        help="comma-list or 'all' (fermut,mutmut,cosmic-ray,poodle)",
+    )
+    p_run.add_argument("--repo", default="more-itertools", help="comma-list or 'all'")
+    p_run.add_argument(
+        "--timeout", type=int, default=3600, help="per-run hard timeout in seconds"
+    )
     p_run.set_defaults(fn=cmd_run)
 
     p_report = sub.add_parser("report", help="Aggregate result JSONs into a table")
     p_report.add_argument("--dir", help="results dir (default: results/runs)")
     p_report.set_defaults(fn=cmd_report)
 
-    p_clear = sub.add_parser("clear", help="Wipe benchmark artifacts (results, fixtures, wheels)")
-    p_clear.add_argument("--fixtures", action="store_true",
-                         help="also wipe cloned repos + tool venvs")
-    p_clear.add_argument("--all", action="store_true",
-                         help="results + fixtures + built wheels")
+    p_clear = sub.add_parser(
+        "clear", help="Wipe benchmark artifacts (results, fixtures, wheels)"
+    )
+    p_clear.add_argument(
+        "--fixtures", action="store_true", help="also wipe cloned repos + tool venvs"
+    )
+    p_clear.add_argument(
+        "--all", action="store_true", help="results + fixtures + built wheels"
+    )
     p_clear.set_defaults(fn=cmd_clear)
 
     args = parser.parse_args(argv)

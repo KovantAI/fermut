@@ -33,26 +33,19 @@ use anyhow::{anyhow, Context, Result};
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use serde::Serialize;
 
-use super::explain::{
-    enclosing_symbol, grep_symbol, render_source_snippet, EnclosingSymbol, MutantSummary,
-    DEFAULT_GREP_MATCH_LIMIT,
-};
+use super::explain::{enclosing_symbol, render_source_snippet, EnclosingSymbol, MutantSummary};
+use crate::cli::Format;
 use crate::llm::cache::{default_cache_path, LlmCache};
 use crate::llm::client::client_from_env;
 use crate::llm::prompt::{
     build_suggest_prompt, cache_key, extract_first_code_block, file_sha256, PromptContext,
     SampleTest,
 };
-use crate::llm::DEFAULT_MODEL;
+use crate::llm::{LlmCallOpts, DEFAULT_MODEL};
 use crate::mutator::Mutant;
 use crate::report::{MutantOutcome, Report};
 use crate::sync::lock_recover;
-
-#[derive(Copy, Clone, Debug)]
-pub enum SuggestFormat {
-    Human,
-    Json,
-}
+use crate::util::search::{grep_symbol, DEFAULT_GREP_MATCH_LIMIT};
 
 pub struct SuggestOpts {
     pub report: PathBuf,
@@ -67,8 +60,47 @@ pub struct SuggestOpts {
     pub no_cache: bool,
     pub cache_path: Option<PathBuf>,
     pub project_root: PathBuf,
-    pub format: SuggestFormat,
+    pub format: Format,
     pub parallel: usize,
+}
+
+/// Built with a caller-resolved `project_root` (via
+/// [`crate::cli::current_project_root`]) rather than reading the cwd here, so
+/// the conversion is pure and unit-testable.
+impl From<(SuggestArgs, PathBuf)> for SuggestOpts {
+    fn from((a, project_root): (SuggestArgs, PathBuf)) -> Self {
+        let SuggestArgs {
+            report,
+            target,
+            all_survivors,
+            apply,
+            out,
+            model,
+            tests,
+            context,
+            sample_count,
+            no_cache,
+            cache_path,
+            format,
+            parallel,
+        } = a;
+        SuggestOpts {
+            report,
+            target,
+            all_survivors,
+            apply,
+            out,
+            model,
+            tests: super::explain::tests_or_default(tests, &project_root),
+            context_lines: context,
+            sample_count,
+            no_cache,
+            cache_path,
+            project_root,
+            format,
+            parallel,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -100,22 +132,19 @@ pub struct SuggestEntry {
 // ---------------------------------------------------------------------------
 
 pub fn suggest(opts: SuggestOpts) -> Result<()> {
-    let raw = std::fs::read_to_string(&opts.report)
-        .with_context(|| format!("reading {}", opts.report.display()))?;
-    let report: Report =
-        serde_json::from_str(&raw).with_context(|| format!("parsing {}", opts.report.display()))?;
+    let report = crate::report::load(&opts.report)?;
 
     let targets = select_targets(&report, opts.target.as_deref(), opts.all_survivors)?;
     if targets.is_empty() {
         match opts.format {
-            SuggestFormat::Json => {
+            Format::Json => {
                 let out = SuggestReport {
                     model: opts.model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
                     entries: Vec::new(),
                 };
                 println!("{}", serde_json::to_string_pretty(&out)?);
             }
-            SuggestFormat::Human => {
+            Format::Human => {
                 eprintln!("no mutants matched the selector / no survivors in the report");
             }
         }
@@ -155,7 +184,14 @@ pub fn suggest(opts: SuggestOpts) -> Result<()> {
         })
         .collect();
 
-    let log_progress = matches!(opts.format, SuggestFormat::Human);
+    let log_progress = matches!(opts.format, Format::Human);
+
+    // Loop-invariant LLM knobs, resolved once and shared by every worker.
+    let llm_opts = LlmCallOpts {
+        model: model.clone(),
+        no_cache: opts.no_cache,
+        cache_path: cache_path.clone(),
+    };
 
     // Generation phase: parallel-safe. File writes happen later, serial.
     // Cache persists per-response inside `generate_one` so an interrupt mid-loop
@@ -163,18 +199,7 @@ pub fn suggest(opts: SuggestOpts) -> Result<()> {
     let work = mutants.into_iter().zip(contexts).collect::<Vec<_>>();
     let raw_results: Vec<GenResult> = if parallel == 1 {
         work.into_iter()
-            .map(|(m, ctx)| {
-                generate_one(
-                    &m,
-                    &ctx,
-                    &model,
-                    &client_cell,
-                    &cache,
-                    &cache_path,
-                    opts.no_cache,
-                    log_progress,
-                )
-            })
+            .map(|(m, ctx)| generate_one(&m, &ctx, &llm_opts, &client_cell, &cache, log_progress))
             .collect()
     } else {
         let pool = rayon::ThreadPoolBuilder::new()
@@ -185,16 +210,7 @@ pub fn suggest(opts: SuggestOpts) -> Result<()> {
             work.into_par_iter()
                 .with_max_len(1)
                 .map(|(m, ctx)| {
-                    generate_one(
-                        &m,
-                        &ctx,
-                        &model,
-                        &client_cell,
-                        &cache,
-                        &cache_path,
-                        opts.no_cache,
-                        log_progress,
-                    )
+                    generate_one(&m, &ctx, &llm_opts, &client_cell, &cache, log_progress)
                 })
                 .collect()
         })
@@ -209,12 +225,12 @@ pub fn suggest(opts: SuggestOpts) -> Result<()> {
 
     let suggest_report = SuggestReport { model, entries };
     match opts.format {
-        SuggestFormat::Json => {
+        Format::Json => {
             let s = serde_json::to_string_pretty(&suggest_report)
                 .context("serializing suggest report")?;
             println!("{s}");
         }
-        SuggestFormat::Human => render_human(&suggest_report, opts.apply, opts.out.as_deref()),
+        Format::Human => render_human(&suggest_report, opts.apply, opts.out.as_deref()),
     }
     Ok(())
 }
@@ -230,15 +246,12 @@ struct GenResult {
     response: Result<String>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn generate_one(
     m: &Mutant,
     ctx: &PromptContext,
-    model: &str,
+    opts: &LlmCallOpts,
     client_cell: &OnceLock<std::result::Result<Arc<dyn crate::llm::client::LlmClient>, String>>,
     cache: &Arc<Mutex<LlmCache>>,
-    cache_path: &Path,
-    no_cache: bool,
     log: bool,
 ) -> GenResult {
     if log {
@@ -250,11 +263,11 @@ fn generate_one(
         );
     }
 
-    let req = build_suggest_prompt(m, ctx, model);
+    let req = build_suggest_prompt(m, ctx, &opts.model);
     let sha = file_sha256(&m.file).unwrap_or_default();
     let key = cache_key(&m.id, &sha, &req.user);
 
-    let cached_hit = if no_cache {
+    let cached_hit = if opts.no_cache {
         None
     } else {
         lock_recover(cache).lookup(&key).map(str::to_string)
@@ -280,16 +293,16 @@ fn generate_one(
                 Err(e) => (Err(anyhow!(e.clone())), false),
                 Ok(client) => match client.complete(&req) {
                     Ok(text) => {
-                        if !no_cache {
+                        if !opts.no_cache {
                             // Hold the lock across save so concurrent rayon
                             // workers serialize disk writes and never race on
                             // the shared tmp-sibling path.
                             let mut guard = lock_recover(cache);
                             guard.insert(key, text.clone());
-                            if let Err(e) = guard.save(cache_path) {
+                            if let Err(e) = guard.save(&opts.cache_path) {
                                 eprintln!(
                                     "  warning: persisting llm cache to {} failed: {e}",
-                                    cache_path.display()
+                                    opts.cache_path.display()
                                 );
                             }
                         }
@@ -460,11 +473,13 @@ pub(crate) fn generate_test_code(
     let r = generate_one(
         m,
         &ctx,
-        model,
+        &LlmCallOpts {
+            model: model.to_string(),
+            no_cache,
+            cache_path: cache_path.to_path_buf(),
+        },
         &client_cell,
         &cache,
-        cache_path,
-        no_cache,
         false,
     );
     let text = r.response?;
@@ -649,6 +664,8 @@ mod tests {
             original: "<=".into(),
             replacement: "<".into(),
             line,
+            stmt_line: line,
+            site: None,
         }
     }
 
@@ -758,7 +775,7 @@ mod tests {
         out_path: Option<PathBuf>,
         all_survivors: bool,
         parallel: usize,
-        format: SuggestFormat,
+        format: Format,
         project_root: PathBuf,
     ) -> Result<()> {
         std::env::set_var("FERMUT_LLM_MOCK", "1");
@@ -797,6 +814,8 @@ mod tests {
             original: "<=".into(),
             replacement: "<".into(),
             line: 2,
+            stmt_line: 2,
+            site: None,
         };
         let report = Report::new(vec![
             MutantOutcome::survived(mutant.clone()),
@@ -816,7 +835,7 @@ mod tests {
             Some(out_path.clone()),
             true,
             1,
-            SuggestFormat::Human,
+            Format::Human,
             dir.path().to_path_buf(),
         )
         .unwrap();
@@ -839,7 +858,7 @@ mod tests {
             Some(out_path.clone()),
             true,
             4,
-            SuggestFormat::Human,
+            Format::Human,
             dir.path().to_path_buf(),
         )
         .unwrap();
@@ -878,11 +897,13 @@ mod tests {
         let result = generate_one(
             &mutant,
             &ctx,
-            DEFAULT_MODEL,
+            &LlmCallOpts {
+                model: DEFAULT_MODEL.to_string(),
+                no_cache: false,
+                cache_path: cache_path.clone(),
+            },
             &client_cell,
             &cache,
-            &cache_path,
-            false,
             false,
         );
 
@@ -908,4 +929,69 @@ mod tests {
         let t = select_targets(&r, None, true).unwrap();
         assert!(t.is_empty());
     }
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct SuggestArgs {
+    /// Path to a JSON report produced by `fermut run --json …`.
+    pub(crate) report: std::path::PathBuf,
+
+    /// Mutant selector: 1-based index, or substring of mutant id.
+    /// Omit when `--all-survivors` is set.
+    pub(crate) target: Option<String>,
+
+    /// Generate a test for every surviving (or timed-out) mutant in
+    /// the report.
+    #[arg(long)]
+    pub(crate) all_survivors: bool,
+
+    /// Append the generated test to the test file that already
+    /// references the enclosing symbol. Falls back to `--out` if no
+    /// candidate test file is found.
+    #[arg(long)]
+    pub(crate) apply: bool,
+
+    /// Append the generated test to this path instead of stdout.
+    #[arg(long)]
+    pub(crate) out: Option<std::path::PathBuf>,
+
+    /// Anthropic model id. Defaults to `claude-sonnet-4-6`.
+    #[arg(long)]
+    pub(crate) model: Option<String>,
+
+    /// Tests directory to mine for style samples (and the `--apply` target).
+    /// Defaults to `tests/` when it exists under the current directory.
+    #[arg(long, num_args = 0..=1, default_missing_value = "tests")]
+    pub(crate) tests: Option<std::path::PathBuf>,
+
+    /// Source lines of context to include in the prompt on each side
+    /// of the mutant line.
+    #[arg(long, default_value_t = 8)]
+    pub(crate) context: usize,
+
+    /// How many existing tests to include in the prompt for style
+    /// reference.
+    #[arg(long, default_value_t = 2)]
+    pub(crate) sample_count: usize,
+
+    /// Disable the LLM response cache.
+    #[arg(long)]
+    pub(crate) no_cache: bool,
+
+    /// Custom path for the LLM response cache. Defaults to
+    /// `.fermut/llm-cache.json` under the project root.
+    #[arg(long)]
+    pub(crate) cache_path: Option<std::path::PathBuf>,
+
+    /// Output format. `human` (default) prints generated code blocks
+    /// and progress logs. `json` emits the structured `SuggestReport`
+    /// for agent consumers.
+    #[arg(long, value_enum, default_value_t = crate::cli::Format::Human)]
+    pub(crate) format: crate::cli::Format,
+
+    /// Run up to N Anthropic calls concurrently. Default `1`. Raise to
+    /// shorten wall-clock when `--all-survivors` is large; keep within
+    /// your tenant's rate limit. File writes stay serial.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) parallel: usize,
 }

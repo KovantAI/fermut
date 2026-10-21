@@ -1,0 +1,5 @@
+# Pin clippy's MSRV to the crate's `rust-version` (Cargo.toml). Clippy runs on
+# stable in CI, so without this it can suggest APIs newer than 1.83 and its
+# advice would break the `cargo check (MSRV 1.83)` job. Keep in sync with
+# `rust-version` in Cargo.toml.
+msrv = "1.83"

@@ -8,7 +8,7 @@ expect, where it lives in config.
 The order (cheap → expensive) is fixed:
 
 ```
-experimental → operator allow/deny → shard → sample → diff/since → coverage → ruff → ty
+experimental → parity → profile → operator allow/deny → shard → sample → diff-only/since → coverage → ruff → ty → tce
 ```
 
 `shard` only runs when `--shard i/n` is set (CI matrix split); it
@@ -53,9 +53,11 @@ every available name.
 
 ## `--experimental`
 
-Enables the four experimental operators (`exp:exception-class-swap`,
+Enables the eight experimental operators (`exp:exception-class-swap`,
 `exp:bare-except`, `exp:zero-iteration-for-loop`,
-`exp:one-iteration-for-loop`). Off by default — they tend to
+`exp:one-iteration-for-loop`, `exp:raise-from-drop`,
+`exp:numeric-type-swap`, `exp:optional-type-drop`,
+`exp:container-type-swap`). Off by default — they tend to
 produce equivalent mutants or behavior the test suite can't usefully
 distinguish.
 
@@ -81,8 +83,18 @@ Config:
 diff_only = "main"
 ```
 
-The diff *includes* uncommitted working-tree changes — editing a
-file locally re-runs its mutants without needing to commit.
+`--diff-only` resolves the merge base of `base` and `HEAD`, then diffs
+that commit against the **working tree** (`git diff <merge-base>`). It
+scopes to every line this branch changed since it forked from `base` —
+committed **and** uncommitted edits — unaffected by `base` advancing
+after the fork. Untracked files (never `git add`ed) are not seen.
+
+If `base` doesn't exist as a local ref but `origin/<base>` does (a CI PR
+checkout has no local `main`), fermut uses `origin/<base>`.
+
+The merge base must be resolvable: on a shallow clone (`actions/checkout`
+default `fetch-depth: 1`) fermut exits with an error rather than running
+zero mutants. Use `fetch-depth: 0` in CI.
 
 ## `--since`
 
@@ -100,7 +112,15 @@ fermut run src/ --since '1 week ago'
 `SPEC` is resolved as a git ref first, then (on failure) as a date
 that `git log --before=<SPEC>` accepts.
 
-`--diff-only` and `--since` are mutually exclusive.
+`--since` is a two-dot diff (`git diff <spec>`) against the working
+tree, so uncommitted edits are included — same as `--diff-only`. The
+difference is the anchor: `--since` is a fixed point (commit or date),
+`--diff-only` is the fork point from a branch.
+
+`--diff-only` and `--since` are mutually exclusive on the command line.
+A CLI scope replaces the config's: `--since HEAD` works on a config that
+sets `diff_only = "main"`, and `--diff-only` overrides a config `since`.
+Setting both keys in the config is an error.
 
 ## `--exclude`
 
@@ -131,9 +151,8 @@ Useful for:
 - Vendor / third-party trees checked into the source tree.
 - Integration test directories where mutation testing is too coarse.
 
-Prefer this over inline `# fermut: ignore-file` markers when you can
-describe the excluded set with a glob — one config entry beats
-sprinkling markers across hundreds of files.
+There is no file-level inline marker: `--exclude` is the only way to
+skip a whole file. (`# fermut: ignore` applies to its own line only.)
 
 ## `--coverage`
 
@@ -141,8 +160,14 @@ Per-test selection — narrow which tests run per mutant. See the
 dedicated **[Coverage guide](coverage.md)**.
 
 ```sh
-fermut run src/ --coverage coverage.json
+fermut run src/ --coverage .coverage
 ```
+
+fermut reads coverage.py's native `.coverage` SQLite database directly
+and sniffs the file's format, so a legacy `coverage.json` export works
+here too. With a `.coverage` at the project root the flag is optional —
+fermut auto-discovers it (precedence: `--coverage` > config
+`coverage = "…"` > auto-discovered `.coverage` > none).
 
 ## `--sample`
 
@@ -241,7 +266,7 @@ The PR-gate sweet spot is the full stack:
 ```sh
 fermut run src/ --tests tests/ \
     --diff-only origin/main \
-    --coverage coverage.json \
+    --coverage .coverage \
     --ops arith-op-swap,compare-op-swap,boundary-shift,return-value-to-none \
     --timeout 15
 ```

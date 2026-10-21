@@ -32,6 +32,29 @@ pub struct MigrateOpts {
     pub no_pragma_rewrite: bool,
 }
 
+impl From<MigrateArgs> for MigrateOpts {
+    fn from(a: MigrateArgs) -> Self {
+        let MigrateArgs {
+            from,
+            path,
+            config,
+            pyproject,
+            force,
+            dry_run,
+            no_pragma_rewrite,
+        } = a;
+        MigrateOpts {
+            source: from.into(),
+            path,
+            config,
+            pyproject,
+            force,
+            dry_run,
+            no_pragma_rewrite,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum MigrateSource {
     Mutmut,
@@ -263,27 +286,26 @@ fn translate_mutmut_key(key: &str, raw: &str, out: &mut Translation) {
         "paths_to_mutate" | "source_paths" => {
             // Accept "src/", "src/, lib/", or a TOML list rendered as `["src/"]`.
             // Pick the first non-empty path; the rest are surfaced as a note.
-            let first = first_path(raw);
-            if let Some(p) = first {
+            if let Some(p) = take_single_path(
+                raw,
+                key,
+                "fermut takes one source root — run fermut once per extra root (`fermut run <root> --json <root>.json`) if you need them mutated too; give each run its own `--json` report so the per-root results stay separate.",
+                out,
+            ) {
                 out.config.source_root = Some(p);
-            }
-            if extra_paths_present(raw) {
-                out.notes.push(format!(
-                    "`{key}` had multiple entries ({raw}); fermut takes one source root — review and add inline `# fermut: ignore-file` markers for the rest if needed.",
-                ));
             }
         }
         "tests_dir" => {
             out.config.tests = Some(PathBuf::from(unquote(raw)));
         }
         "pytest_add_cli_args_test_selection" => {
-            if let Some(p) = first_path(raw) {
+            if let Some(p) = take_single_path(
+                raw,
+                key,
+                "fermut takes one tests path — append the rest to `pytest_args` if you need them on the pytest command line.",
+                out,
+            ) {
                 out.config.tests = Some(p);
-            }
-            if extra_paths_present(raw) {
-                out.notes.push(format!(
-                    "`pytest_add_cli_args_test_selection` had multiple entries ({raw}); fermut takes one tests path — append the rest to `pytest_args` if you need them on the pytest command line.",
-                ));
             }
         }
         "pytest_add_cli_args" => match parse_string_list(raw) {
@@ -300,7 +322,7 @@ fn translate_mutmut_key(key: &str, raw: &str, out: &mut Translation) {
         }
         "use_coverage" | "mutate_only_covered_lines" => {
             if as_bool(raw) == Some(true) {
-                out.config.coverage = Some(PathBuf::from("coverage.json"));
+                out.config.coverage = Some(PathBuf::from(".coverage"));
             }
         }
         // Known mutmut keys without an equivalent — surface them so the
@@ -541,6 +563,25 @@ impl FermutConfig {
             && self.isolation.is_none()
             && self.exclude.is_empty()
     }
+}
+
+/// Parse a config value that fermut treats as a *single* path but the source
+/// tool may express as several ("src/, lib/" or a TOML list). Returns the
+/// first path, and when extra entries were present pushes a note joining
+/// `key`/`raw` with `on_extra` (the tool-specific fallback advice) so nothing
+/// is silently dropped.
+fn take_single_path(
+    raw: &str,
+    key: &str,
+    on_extra: &str,
+    out: &mut Translation,
+) -> Option<PathBuf> {
+    let first = first_path(raw);
+    if extra_paths_present(raw) {
+        out.notes
+            .push(format!("`{key}` had multiple entries ({raw}); {on_extra}"));
+    }
+    first
 }
 
 /// Parse a shell-style runner command (`"python -m pytest -x -q"`) into
@@ -917,7 +958,7 @@ y = 2
         assert_eq!(tx.config.tests, Some(PathBuf::from("tests")));
         assert_eq!(tx.config.runner, Some("pytest"));
         assert_eq!(tx.config.pytest_args, vec!["-x", "-q"]);
-        assert_eq!(tx.config.coverage, Some(PathBuf::from("coverage.json")));
+        assert_eq!(tx.config.coverage, Some(PathBuf::from(".coverage")));
         assert!(tx.unmapped.is_empty());
     }
 
@@ -939,7 +980,7 @@ y = 2
         assert_eq!(tx.config.source_root, Some(PathBuf::from("src/")));
         assert_eq!(tx.config.tests, Some(PathBuf::from("tests/")));
         assert_eq!(tx.config.pytest_args, vec!["-x", "-q", "-m", "not slow"]);
-        assert_eq!(tx.config.coverage, Some(PathBuf::from("coverage.json")));
+        assert_eq!(tx.config.coverage, Some(PathBuf::from(".coverage")));
         assert!(tx.unmapped.is_empty(), "unmapped: {:?}", tx.unmapped);
     }
 
@@ -1139,7 +1180,7 @@ name = "celery4"
             runner: Some("pytest"),
             pytest_args: vec!["-x".into(), "-q".into()],
             timeout: Some(60),
-            coverage: Some(PathBuf::from("coverage.json")),
+            coverage: Some(PathBuf::from(".coverage")),
             isolation: Some("copy"),
             exclude: vec!["migrations/**".into(), "legacy/*.py".into()],
         };
@@ -1149,7 +1190,7 @@ name = "celery4"
         assert!(body.contains("runner = \"pytest\""));
         assert!(body.contains("pytest_args = [\"-x\", \"-q\"]"));
         assert!(body.contains("timeout = 60"));
-        assert!(body.contains("coverage = \"coverage.json\""));
+        assert!(body.contains("coverage = \".coverage\""));
         assert!(body.contains("isolation = \"copy\""));
         assert!(body.contains("exclude = [\"migrations/**\", \"legacy/*.py\"]"));
     }
@@ -1243,4 +1284,39 @@ name = "celery4"
         assert!(!paths.iter().any(|p| p == &txt));
         assert!(!paths.iter().any(|p| p.starts_with(&hidden)));
     }
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct MigrateArgs {
+    /// Which tool to migrate from.
+    #[arg(value_enum)]
+    pub(crate) from: crate::cli::MigrateSourceCli,
+
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Explicit source config file. Defaults: `pyproject.toml` /
+    /// `setup.cfg` for mutmut, `cosmic-ray.toml` for cosmic-ray.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) config: Option<std::path::PathBuf>,
+
+    /// Write `[tool.fermut]` into `pyproject.toml` instead of a
+    /// standalone `fermut.toml`.
+    #[arg(long)]
+    pub(crate) pyproject: bool,
+
+    /// Overwrite an existing `fermut.toml` or `[tool.fermut]` block.
+    #[arg(long)]
+    pub(crate) force: bool,
+
+    /// Print what would be written and which files would be rewritten,
+    /// without touching the filesystem.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+
+    /// Skip rewriting `# pragma: no mutate` → `# fermut: ignore`
+    /// (mutmut only; no-op for cosmic-ray).
+    #[arg(long)]
+    pub(crate) no_pragma_rewrite: bool,
 }

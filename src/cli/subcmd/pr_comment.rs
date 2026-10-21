@@ -13,38 +13,19 @@
 //! none matches we fall back to `gh pr comment` to create a fresh one.
 
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::report::writers::markdown::STICKY_MARKER;
 
-/// Inputs for `fermut pr-comment`. Most fields default from environment
-/// variables that GitHub Actions sets automatically — keeps the CLI call
-/// in the workflow file short.
-#[derive(Debug, Clone)]
-pub struct PrCommentOpts {
-    /// Markdown file produced by a prior `fermut run … --markdown` invocation.
-    pub markdown: PathBuf,
-    /// `owner/repo`. Defaults to `$GITHUB_REPOSITORY`.
-    pub repo: Option<String>,
-    /// Pull-request number. Defaults to the PR in `$GITHUB_REF`
-    /// (`refs/pull/<N>/merge`) or `$PR_NUMBER`.
-    pub pr: Option<u64>,
-    /// Override the marker substring used to identify the previous comment.
-    /// Defaults to `<!-- fermut:report -->`.
-    pub marker: Option<String>,
-    /// Print the resolved plan and skip the network calls.
-    pub dry_run: bool,
-}
-
-pub fn pr_comment(opts: PrCommentOpts) -> Result<()> {
+pub(crate) fn pr_comment(opts: PrCommentArgs) -> Result<()> {
     let body = std::fs::read_to_string(&opts.markdown)
         .with_context(|| format!("reading markdown report {}", opts.markdown.display()))?;
     let repo = resolve_repo(opts.repo.as_deref())?;
     let pr = resolve_pr(opts.pr)?;
     let marker = opts.marker.as_deref().unwrap_or(STICKY_MARKER);
+    let body = stamp_marker(body, marker);
 
     if opts.dry_run {
         println!("pr-comment plan:");
@@ -72,6 +53,17 @@ pub fn pr_comment(opts: PrCommentOpts) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Discovery matches on the body's *prefix*, but the markdown report always
+/// starts with the default [`STICKY_MARKER`]. Prepend a custom marker so the
+/// next run's lookup finds this comment instead of creating another.
+fn stamp_marker(body: String, marker: &str) -> String {
+    if body.starts_with(marker) {
+        body
+    } else {
+        format!("{marker}\n{body}")
+    }
 }
 
 fn resolve_repo(arg: Option<&str>) -> Result<String> {
@@ -261,6 +253,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stamp_marker_prefixes_custom_marker_only() {
+        let body = format!("{STICKY_MARKER}\n# report\n");
+        // Default marker already leads the report: body unchanged.
+        assert_eq!(stamp_marker(body.clone(), STICKY_MARKER), body);
+        // Custom marker must lead, or the startswith lookup never matches.
+        let stamped = stamp_marker(body.clone(), "<!-- shard-2 -->");
+        assert!(stamped.starts_with("<!-- shard-2 -->\n"));
+        assert!(stamped.ends_with(&body));
+    }
+
+    #[test]
     fn pr_from_ref_parses_merge_and_head() {
         assert_eq!(pr_from_ref("refs/pull/42/merge"), Some(42));
         assert_eq!(pr_from_ref("refs/pull/7/head"), Some(7));
@@ -282,4 +285,28 @@ mod tests {
         // GITHUB_REPOSITORY set, so we only assert the arg-wins path.
         assert_eq!(resolve_repo(Some("o/r")).unwrap(), "o/r");
     }
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct PrCommentArgs {
+    /// Markdown file to post (produced by a prior `fermut run --markdown …`).
+    #[arg(long)]
+    pub(crate) markdown: std::path::PathBuf,
+
+    /// `owner/repo`. Defaults to `$GITHUB_REPOSITORY` (set automatically on GHA).
+    #[arg(long)]
+    pub(crate) repo: Option<String>,
+
+    /// Pull-request number. Defaults to one inferred from `$GITHUB_REF` or `$PR_NUMBER`.
+    #[arg(long)]
+    pub(crate) pr: Option<u64>,
+
+    /// Override the comment marker. Defaults to `<!-- fermut:report -->`.
+    /// Use to keep multiple gates (e.g. per-shard) as independent comments.
+    #[arg(long)]
+    pub(crate) marker: Option<String>,
+
+    /// Print the resolved plan without contacting GitHub.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
 }

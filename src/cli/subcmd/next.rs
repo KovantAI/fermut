@@ -26,6 +26,13 @@
 //!   test (`cluster_size / denom`). The ceiling, realised only when the
 //!   co-kill guess holds.
 //!
+//! Before clustering, survivors are **folded** (see [`crate::report::fold`]):
+//! at a compare or `and`/`or` site, a survivor that another survivor there
+//! subsumes is not its own target. It rides along in the dominator's
+//! `subsumed_ids` and counts in both gain bounds, because killing the
+//! dominator kills it by construction (where the region model holds). Unlike
+//! `sibling_ids`, which is a guess, `subsumed_ids` is derived.
+//!
 //! Equivalent mutants are already excluded upstream — the detector emits
 //! them as a separate `equivalent` status, never `survived` — so there's
 //! nothing to drop here. Timeouts are excluded: they aren't killed by an
@@ -41,11 +48,13 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Serialize;
 
 use crate::cli::subcmd::explain::operator_hint;
+use crate::cli::Format;
 use crate::mutator::{Mutant, Operator};
+use crate::report::fold::fold;
 use crate::report::{MutantOutcome, Report};
 
 #[derive(Debug, Clone)]
@@ -59,13 +68,25 @@ pub struct NextOpts {
     /// entry is always included even if it alone exceeds the budget — a
     /// budget should never starve the agent of its single best target.
     pub max_tokens: Option<usize>,
-    pub format: NextFormat,
+    pub format: Format,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum NextFormat {
-    Human,
-    Json,
+impl From<NextArgs> for NextOpts {
+    fn from(a: NextArgs) -> Self {
+        let NextArgs {
+            report,
+            limit,
+            all,
+            max_tokens,
+            format,
+        } = a;
+        NextOpts {
+            report,
+            limit: if all { None } else { Some(limit) },
+            max_tokens,
+            format,
+        }
+    }
 }
 
 /// Kill-ease tier for an operator. Higher = easier to write a killing test.
@@ -84,12 +105,16 @@ fn ease(op: Operator) -> Ease {
     match op {
         BoundaryShift | CompareOpSwap | ArithOpSwap | ConstantReplace | NumberShift
         | NumberToZero | NumberToNeg | StringToEmpty | StringSentinel | BytesSentinel
-        | NotInsertion | BoolOpSwap | UnaryOpSwap | StringCaseSwap => Ease::High,
+        | NotInsertion | BoolOpSwap | UnaryOpSwap | StringCaseSwap | MatchGuardNegate
+        | RelationalToEquality | CompareToConst | BoolOperandDrop | BoolOpToConst | RegionRest => {
+            Ease::High
+        }
         ReturnValueToNone | AssignValueToNone | DefaultArgToNone | LambdaBodyToNone | ArgToNone
         | NoneToValue | ExprToNone | KeywordArgDrop | DictItemDrop | PositionalDrop
-        | SliceBoundDrop | SliceStepMutate | AugAssignSwap => Ease::Medium,
+        | SliceBoundDrop | SliceStepMutate | AugAssignSwap | AwaitDrop => Ease::Medium,
         BreakContinueSwap | RemoveDecorator | ExceptionClassSwap | BareExcept
-        | ZeroIterationForLoop | OneIterationForLoop => Ease::Low,
+        | ZeroIterationForLoop | OneIterationForLoop | AsyncForToSync | AsyncWithToSync
+        | RaiseFromDrop | NumericTypeSwap | OptionalTypeDrop | ContainerTypeSwap => Ease::Low,
     }
 }
 
@@ -122,6 +147,10 @@ pub(crate) struct NextEntry {
     /// Other survivor ids in the same cluster (excludes `id`). A test
     /// written for the representative often kills these too.
     sibling_ids: Vec<String>,
+    /// Survivors at the representative's compare / `and`-`or` site that it
+    /// subsumes: a test that kills the representative kills these too, by the
+    /// region model rather than by guess. Counted in both gain bounds.
+    subsumed_ids: Vec<String>,
     /// Whether the run used coverage selection. When `false`, the report had
     /// no coverage data, so a high-`ease` survivor may sit on an unexecuted
     /// line and need a brand-new test, not just a stronger assertion — the
@@ -145,14 +174,7 @@ pub(crate) fn rank_report(
     let counts = report.counts();
     let denom = counts.killed + counts.timed_out + counts.survived;
 
-    let survivors: Vec<&Mutant> = report
-        .outcomes
-        .iter()
-        .filter_map(|o| match o {
-            MutantOutcome::Survived { mutant } => Some(mutant),
-            _ => None,
-        })
-        .collect();
+    let survivors = crate::report::fold::survivors(&report.outcomes);
 
     // `ease` assumes a survivor's line is executed by the suite, so a killing
     // test only needs a stronger assertion. That holds when the run used
@@ -191,22 +213,19 @@ pub fn next(opts: NextOpts) -> Result<()> {
     // "fit N of M ... tokens" stderr — are meaningless for `--format human`.
     // Reject the combo rather than emit a number that doesn't describe the
     // output.
-    if opts.max_tokens.is_some() && matches!(opts.format, NextFormat::Human) {
+    if opts.max_tokens.is_some() && matches!(opts.format, Format::Human) {
         anyhow::bail!(
             "--max-tokens applies to JSON output only; drop --format human or --max-tokens"
         );
     }
-    let raw = std::fs::read_to_string(&opts.report)
-        .with_context(|| format!("reading {}", opts.report.display()))?;
-    let report: Report =
-        serde_json::from_str(&raw).with_context(|| format!("parsing {}", opts.report.display()))?;
+    let report = crate::report::load(&opts.report)?;
 
     let (shown, total) = rank_report(&report, opts.limit, opts.max_tokens);
     let coverage_selected = shown.first().map(|e| e.coverage_selected).unwrap_or(true);
 
     match opts.format {
-        NextFormat::Json => println!("{}", serde_json::to_string_pretty(&shown)?),
-        NextFormat::Human => print_human(&shown, coverage_selected),
+        Format::Json => println!("{}", serde_json::to_string_pretty(&shown)?),
+        Format::Human => print_human(&shown, coverage_selected),
     }
 
     // Never truncate silently: when a budget dropped clusters, say so on
@@ -267,18 +286,26 @@ fn take_within_budget(entries: Vec<NextEntry>, budget: usize) -> Vec<NextEntry> 
 /// actually happens. See `benchmarks/parity/`.
 const CLUSTER_LINE_GAP: u32 = 2;
 
-/// Group survivors into clusters — same `(file, operator)` *and* within
+/// Fold survivors (see the module doc), then group the targets into
+/// clusters — same `(file, operator)` *and* within
 /// [`CLUSTER_LINE_GAP`] lines of a neighbour — then rank them. Sort key,
 /// descending: cluster size first (one test often kills a tight cluster),
 /// then kill-ease. Ties break ascending on `(file, line, id)` for
 /// determinism, so the same report always yields the same ranking.
 fn rank(survivors: &[&Mutant], denom: usize) -> Vec<NextEntry> {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
+    let groups = fold(survivors);
+    let subsumed: HashMap<&str, &[&Mutant]> = groups
+        .iter()
+        .map(|g| (g.target.id.as_str(), g.subsumed.as_slice()))
+        .collect();
+    let folded = |m: &Mutant| subsumed.get(m.id.as_str()).map_or(0, |s| s.len());
+    let survivors: Vec<&Mutant> = groups.iter().map(|g| g.target).collect();
     // BTreeMap keyed on (file, operator-name) gives a deterministic initial
     // grouping order before the explicit sort below.
-    let mut groups: BTreeMap<(String, &'static str), Vec<&Mutant>> = BTreeMap::new();
+    let mut clusters: BTreeMap<(String, &'static str), Vec<&Mutant>> = BTreeMap::new();
     for m in survivors {
-        groups
+        clusters
             .entry((m.file.display().to_string(), m.operator.name()))
             .or_default()
             .push(m);
@@ -289,7 +316,7 @@ fn rank(survivors: &[&Mutant], denom: usize) -> Vec<NextEntry> {
     // exceeds CLUSTER_LINE_GAP. A spread-out group becomes several clusters,
     // each a genuine one-test target.
     let mut ranked: Vec<(usize, Ease, &Mutant, Vec<&Mutant>)> = Vec::new();
-    for mut members in groups.into_values() {
+    for mut members in clusters.into_values() {
         // Sort by (line, offset) so proximity splitting sees survivors in
         // source order; offset breaks line ties deterministically.
         members.sort_by_key(|m| (m.line, u32::from(m.range.start())));
@@ -318,10 +345,14 @@ fn rank(survivors: &[&Mutant], denom: usize) -> Vec<NextEntry> {
         .into_iter()
         .enumerate()
         .map(|(i, (size, ease, rep, siblings))| {
+            // Folded survivors die with their dominator, so they count in the
+            // floor (the representative's) and the ceiling (the cluster's).
+            let floor = 1 + folded(rep);
+            let ceiling = size + folded(rep) + siblings.iter().map(|m| folded(m)).sum::<usize>();
             let (min_gain, max_gain) = if denom > 0 {
                 (
-                    round1(100.0 / denom as f64),
-                    round1(100.0 * size as f64 / denom as f64),
+                    round1(100.0 * floor as f64 / denom as f64),
+                    round1(100.0 * ceiling as f64 / denom as f64),
                 )
             } else {
                 (0.0, 0.0)
@@ -340,6 +371,10 @@ fn rank(survivors: &[&Mutant], denom: usize) -> Vec<NextEntry> {
                 max_gain_pts: max_gain,
                 hint: operator_hint(rep.operator),
                 sibling_ids: siblings.iter().map(|m| m.id.clone()).collect(),
+                subsumed_ids: subsumed
+                    .get(rep.id.as_str())
+                    .map(|s| s.iter().map(|m| m.id.clone()).collect())
+                    .unwrap_or_default(),
                 // Filled in by the caller, which knows the run-level flag.
                 coverage_selected: false,
             }
@@ -395,6 +430,13 @@ fn print_human(entries: &[NextEntry], coverage_selected: bool) {
             if e.cluster_size == 1 { "" } else { "s" },
         );
         println!("   {}", e.hint);
+        if !e.subsumed_ids.is_empty() {
+            println!(
+                "   killing it also kills {} subsumed survivor{} at the same site",
+                e.subsumed_ids.len(),
+                if e.subsumed_ids.len() == 1 { "" } else { "s" },
+            );
+        }
         if !e.sibling_ids.is_empty() {
             println!(
                 "   one test may also kill {} sibling{}",
@@ -422,7 +464,44 @@ mod tests {
             original: "x".into(),
             replacement: "y".into(),
             line,
+            stmt_line: line,
+            site: None,
         }
+    }
+
+    /// Survivors of `src` whose replacement is in `repls`, as the visitor
+    /// emits them (with region-model site tags).
+    fn site_survivors(src: &str, repls: &[&str]) -> Vec<Mutant> {
+        crate::mutator::visitor::collect(std::path::Path::new("t.py"), src)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.site.is_some() && repls.contains(&m.replacement.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn subsumed_survivor_folds_into_its_dominator_and_counts_in_gain() {
+        // `<` site: `>` subsumes `>=`, so one target, two kills.
+        let ms = site_survivors("if a < b:\n    pass\n", &[">", ">="]);
+        let refs: Vec<&Mutant> = ms.iter().collect();
+        let ranked = rank(&refs, 10);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].replacement, ">");
+        assert_eq!(ranked[0].subsumed_ids.len(), 1);
+        assert!(ranked[0].sibling_ids.is_empty());
+        // Guaranteed co-kill: both bounds include the folded survivor.
+        assert_eq!(ranked[0].min_gain_pts, 20.0);
+        assert_eq!(ranked[0].max_gain_pts, 20.0);
+    }
+
+    #[test]
+    fn unrelated_survivors_at_a_site_stay_separate() {
+        // `<=` and `>` share no containment: two targets, nothing folded.
+        let ms = site_survivors("if a < b:\n    pass\n", &["<=", ">"]);
+        let refs: Vec<&Mutant> = ms.iter().collect();
+        let ranked = rank(&refs, 10);
+        assert_eq!(ranked.len(), 2);
+        assert!(ranked.iter().all(|e| e.subsumed_ids.is_empty()));
     }
 
     #[test]
@@ -575,4 +654,31 @@ mod tests {
         let ids_r: Vec<&str> = reverse.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids_f, ids_r);
     }
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct NextArgs {
+    /// Path to a JSON report produced by `fermut run --json …`.
+    pub(crate) report: std::path::PathBuf,
+
+    /// Number of ranked survivors to emit. Defaults to 1 — the single
+    /// best next target.
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    pub(crate) limit: usize,
+
+    /// Emit every ranked survivor instead of just `--limit`.
+    #[arg(long, conflicts_with = "limit")]
+    pub(crate) all: bool,
+
+    /// Cap the output at this many estimated tokens: emit the
+    /// highest-ranked survivors that fit, drop the rest (count logged to
+    /// stderr). Conflicts with `--limit`/`--all`. The single top target is always
+    /// included. For agents budgeting context window.
+    #[arg(long, value_name = "N", conflicts_with_all = ["limit", "all"])]
+    pub(crate) max_tokens: Option<usize>,
+
+    /// Output format. `json` (default) emits the ranked list for machine
+    /// consumers; `human` prints a readable summary.
+    #[arg(long, value_enum, default_value_t = crate::cli::Format::Json)]
+    pub(crate) format: crate::cli::Format,
 }

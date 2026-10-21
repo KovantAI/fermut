@@ -44,3 +44,44 @@ updates:
     labels:
       - rust
       - dependencies
+
+  # The docs toolchain pinned for Read the Docs and CI (zensical and the
+  # Markdown extensions it constrains). One grouped PR keeps the pins
+  # mutually compatible; CI's docs job (zensical build --strict) gates it.
+  - package-ecosystem: pip
+    directory: /docs
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: docs
+    groups:
+      docs-toolchain:
+        patterns:
+          - "*"
+    labels:
+      - documentation
+      - dependencies
+
+  # Hash-locked CI tooling (pre-commit, pytest, ty, rstest). Regenerate by hand
+  # with: uv pip compile --generate-hashes --python-version <job python> <name>.in -o <name>.txt
+  - package-ecosystem: pip
+    directory: "/.github/requirements"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    groups:
+      ci-python:
+        patterns:
+          - "*"
+    labels:
+      - ci
+      - dependencies

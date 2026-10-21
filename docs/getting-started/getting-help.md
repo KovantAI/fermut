@@ -7,7 +7,9 @@ fermut doctor --strict
 ```
 
 Diagnoses common environment issues — missing pytest, Python too old,
-`coverage.json` lacks per-test contexts, Hypothesis seed not pinned —
+coverage lacks per-test contexts (the `coverage-data` check is format-aware:
+it accepts either a `.coverage` SQLite DB with a populated context table
+or a JSON export with a `"contexts"` field), Hypothesis seed not pinned —
 and prints a one-line remediation per failure. Run this before
 opening an issue.
 
@@ -23,7 +25,7 @@ common ones:
 - **[Lots of timeouts](../reference/troubleshooting/timeouts.md)** — mutant introduces infinite loop, or pytest fixture doesn't terminate.
 - **[Phantom survivors](../reference/troubleshooting/phantom-survivors.md)** — survivor in the report that doesn't reproduce by hand.
 - **[Score swings](../reference/troubleshooting/score-swings.md)** — Hypothesis seed isn't pinned, or cache was cleared.
-- **[Coverage rejected](../reference/troubleshooting/coverage-rejected.md)** — fermut refuses the `coverage.json` you passed.
+- **[Coverage rejected](../reference/troubleshooting/coverage-rejected.md)** — fermut refuses the coverage data (`.coverage` DB or JSON export) it read.
 - **[`--diff-only` empty](../reference/troubleshooting/diff-only-empty.md)** — shallow clone, missing merge base.
 - **[`ty` not found](../reference/troubleshooting/ty-not-found.md)** — type filter can't locate the binary.
 - **[Missing mutants](../reference/troubleshooting/missing-mutants.md)** — operator should fire but doesn't.

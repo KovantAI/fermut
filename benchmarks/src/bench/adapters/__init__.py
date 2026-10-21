@@ -1,4 +1,5 @@
 """Per-tool adapters."""
+
 from __future__ import annotations
 
 from .base import Adapter

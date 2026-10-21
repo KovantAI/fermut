@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 
+use crate::cli::Format;
 use crate::history::{self, HistoryEntry, StreakDir};
 
 #[derive(Debug, Clone)]
@@ -16,7 +17,7 @@ pub struct TrendOpts {
     pub history_path: Option<PathBuf>,
     pub limit: usize,
     pub all: bool,
-    pub format: TrendFormat,
+    pub format: Format,
     pub scale: TrendScale,
     /// Keep only entries whose `git_branch` exactly matches.
     pub branch: Option<String>,
@@ -39,12 +40,48 @@ pub struct TrendOpts {
     /// after the table. Currently only `File` is supported (operator-
     /// grouping requires the run report, which trend doesn't load).
     pub group_by: Option<TrendGroupBy>,
+    /// Fail instead of silently skipping malformed history lines. The loader
+    /// drops corrupt lines so one bad line can't poison the trend; under
+    /// `--strict` a malformed line is an error, so a CI job can catch a
+    /// truncated history file. Newer-schema lines are warned, not failed — an
+    /// older binary can't read them and can't repair them, so failing on them
+    /// would only wedge CI during a version rollout.
+    pub strict: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum TrendFormat {
-    Human,
-    Json,
+impl From<TrendArgs> for TrendOpts {
+    fn from(a: TrendArgs) -> Self {
+        let TrendArgs {
+            path,
+            history_path,
+            limit,
+            all,
+            branch,
+            since,
+            until,
+            fail_on_regression,
+            scale,
+            diff,
+            by,
+            format,
+            strict,
+        } = a;
+        TrendOpts {
+            path,
+            history_path,
+            limit,
+            all,
+            branch,
+            since,
+            until,
+            fail_on_regression,
+            scale: scale.into(),
+            diff,
+            group_by: by.map(Into::into),
+            format,
+            strict,
+        }
+    }
 }
 
 /// Aggregation axis for the latest-run survivor list. File grouping reads
@@ -70,7 +107,21 @@ pub fn trend(opts: TrendOpts) -> Result<()> {
         .history_path
         .clone()
         .unwrap_or_else(|| history::default_history_path(&history::resolve_root(&opts.path)));
-    let entries = history::load(&history_path)?;
+    let (entries, stats) = history::load_with_stats(&history_path)?;
+    // Integrity check on malformed lines only. A malformed line doesn't parse,
+    // so it carries no branch/date and can't be attributed to a query window —
+    // the check is necessarily global. Newer-schema lines are readable in
+    // principle (just by a newer binary) and are only warned, not failed, so
+    // `--strict` doesn't wedge an old binary during a version rollout.
+    if opts.strict && stats.malformed > 0 {
+        anyhow::bail!(
+            "history at {} has {} malformed line(s) that could not be parsed — \
+             the trend would be computed over a silently truncated set. \
+             Inspect the file's entries by hand, then re-run. (Drop --strict to skip them.)",
+            history_path.display(),
+            stats.malformed,
+        );
+    }
 
     let since_norm = opts
         .since
@@ -100,11 +151,11 @@ pub fn trend(opts: TrendOpts) -> Result<()> {
 
     if filtered.is_empty() {
         match opts.format {
-            TrendFormat::Human => println!(
+            Format::Human => println!(
                 "no history matching filters at {}\n  run `fermut run …` once to populate it",
                 history_path.display()
             ),
-            TrendFormat::Json => println!("[]"),
+            Format::Json => println!("[]"),
         }
         return Ok(());
     }
@@ -117,10 +168,8 @@ pub fn trend(opts: TrendOpts) -> Result<()> {
     };
 
     match opts.format {
-        TrendFormat::Human => {
-            print_human(window, &history_path, opts.scale, opts.diff, opts.group_by)
-        }
-        TrendFormat::Json => print_json(window)?,
+        Format::Human => print_human(window, &history_path, opts.scale, opts.diff, opts.group_by),
+        Format::Json => print_json(window)?,
     }
 
     // Regression gate runs after rendering so the user still sees the table
@@ -152,15 +201,20 @@ fn resolve_scale(entries: &[HistoryEntry], scale: TrendScale) -> (f64, f64, Stri
     if scale == TrendScale::Fixed || entries.is_empty() {
         return (0.0, 100.0, String::new());
     }
+    // Only comparable runs set the range. A scoreless vacuous-100 or a
+    // `--max-time` partial subset score would warp the auto-scale (a real
+    // 40-60 window stretched to 40-100, or a subset 40 dropping the floor).
     let lo = entries
         .iter()
+        .filter(|e| e.is_comparable())
         .map(|e| e.mutation_score)
         .fold(f64::INFINITY, f64::min);
     let hi = entries
         .iter()
+        .filter(|e| e.is_comparable())
         .map(|e| e.mutation_score)
         .fold(f64::NEG_INFINITY, f64::max);
-    if hi - lo < 1.0 {
+    if !lo.is_finite() || !hi.is_finite() || hi - lo < 1.0 {
         return (0.0, 100.0, String::new());
     }
     let label = format!("  (scale {lo:.1}-{hi:.1})");
@@ -225,11 +279,17 @@ fn print_human(
     }
     println!();
 
-    let scores = entries.iter().map(|e| e.mutation_score);
+    // Summary sparkline and first→last span read from comparable runs only — a
+    // scoreless vacuous-100 would draw a phantom spike and fake the overall
+    // delta, and a `--max-time` partial subset score would do the same. The
+    // per-run table below still lists every run (N/A for scoreless, a badged
+    // real % for partial) so nothing is hidden.
+    let scored: Vec<&HistoryEntry> = entries.iter().filter(|e| e.is_comparable()).collect();
+    let scores = scored.iter().map(|e| e.mutation_score);
     let (lo, hi, scale_label) = resolve_scale(entries, scale);
     let sparkline = history::sparkline_scaled(scores, lo, hi);
-    let first = entries.first().map(|e| e.mutation_score).unwrap_or(0.0);
-    let last = entries.last().map(|e| e.mutation_score).unwrap_or(0.0);
+    let first = scored.first().map(|e| e.mutation_score).unwrap_or(0.0);
+    let last = scored.last().map(|e| e.mutation_score).unwrap_or(0.0);
     let overall_delta = last - first;
     println!(
         "score: {sparkline}   {:.1}% → {:.1}%  ({}{:.1} pts){}",
@@ -254,7 +314,13 @@ fn print_human(
     );
     let mut prev_score: Option<f64> = None;
     for e in entries {
-        let delta = prev_score.map(|p| e.mutation_score - p);
+        // Scoreless runs have no real score: show N/A. A `--max-time` partial
+        // run has a real subset score to show, but it isn't comparable — so
+        // neither a partial nor a scoreless run gets a delta or seeds the next
+        // row's delta (see `history::trend_step`). `scoreless` still gates the
+        // score cell (partial shows its %).
+        let scoreless = e.is_scoreless();
+        let (delta, next_prev) = history::trend_step(prev_score, e);
         let delta_s = match delta {
             Some(d) if d.abs() < 0.05 => "  0.0".to_string(),
             Some(d) if d >= 0.0 => format!("+{d:.1}"),
@@ -268,27 +334,39 @@ fn print_human(
             (None, None) => "".into(),
         };
         // Mark the day-one anchor written by `fermut baseline` so it reads as
-        // run zero rather than an ordinary run in the table.
-        let git = if e.baseline {
-            if git.is_empty() {
-                "[baseline]".to_string()
-            } else {
-                format!("{git} [baseline]")
-            }
-        } else {
+        // run zero rather than an ordinary run in the table. Mark a `--max-time`
+        // partial run too, so a "—" delta on a real score reads as "truncated
+        // subset, not comparable" rather than a glitch.
+        let mut tags = String::new();
+        if e.baseline {
+            tags.push_str(" [baseline]");
+        }
+        if e.partial {
+            tags.push_str(" [partial]");
+        }
+        let git = if tags.is_empty() {
             git
+        } else if git.is_empty() {
+            tags.trim_start().to_string()
+        } else {
+            format!("{git}{tags}")
+        };
+        let score_s = if scoreless {
+            format!("{:>7}", "N/A")
+        } else {
+            format!("{:>6.1}%", e.mutation_score)
         };
         println!(
-            "  {:<20} {:>6.1}% {:>5} {:>5} {:>5} {:>10} {}",
+            "  {:<20} {} {:>5} {:>5} {:>5} {:>10} {}",
             truncate(&e.timestamp, 19),
-            e.mutation_score,
+            score_s,
             e.killed,
             e.survived,
             e.timed_out,
             delta_s,
             git,
         );
-        prev_score = Some(e.mutation_score);
+        prev_score = next_prev;
     }
 
     print_survivor_diff(entries, diff);
@@ -411,7 +489,9 @@ mod tests {
             schema_version: crate::history::CURRENT_SCHEMA_V,
             timestamp: ts.into(),
             mutation_score: score,
-            killed: 0,
+            // Non-zero so the entry is a real scored run, not a scoreless
+            // vacuous-100 that trend/regression now filter out.
+            killed: 1,
             survived: 0,
             timed_out: 0,
             skipped: 0,
@@ -420,10 +500,12 @@ mod tests {
             total: None,
             duration_ms: None,
             config_hash: None,
+            fermut_version: None,
             git_sha: None,
             git_branch: branch.map(str::to_string),
             survivor_ids: None,
             baseline: false,
+            partial: false,
         }
     }
 
@@ -561,6 +643,22 @@ mod tests {
     }
 
     #[test]
+    fn resolve_scale_ignores_partial_subset_score() {
+        // A `--max-time` partial run scored a subset 40.0. It must not drop the
+        // auto-scale floor — the range stays 85-95 over the comparable runs.
+        let mut partial = entry("p", 40.0, None);
+        partial.partial = true;
+        let es = vec![entry("a", 85.0, None), partial, entry("c", 95.0, None)];
+        let (lo, hi, label) = resolve_scale(&es, TrendScale::Auto);
+        assert!(
+            (lo - 85.0).abs() < f64::EPSILON,
+            "partial 40 must not lower the floor"
+        );
+        assert!((hi - 95.0).abs() < f64::EPSILON);
+        assert!(label.contains("85.0-95.0"));
+    }
+
+    #[test]
     fn resolve_scale_auto_falls_back_when_span_under_1pt() {
         // Flat window — auto-scale would amplify noise.
         let es = vec![entry("a", 90.0, None), entry("b", 90.3, None)];
@@ -592,6 +690,50 @@ mod tests {
     }
 
     #[test]
+    fn print_human_renders_partial_baseline_and_scoreless_rows() {
+        // Smoke: drive the full human table over the mix of run kinds the
+        // `--max-time` work added branches for — a baseline anchor, a full run,
+        // a `--max-time` partial subset run, and a scoreless vacuous-100 run.
+        // Guards that the `[partial]`/`[baseline]` tag and N/A score-cell paths
+        // (see `trend_step`/`is_comparable`) render end-to-end without panicking
+        // on the mix. Output-shape assertions live in the history.rs unit tests.
+        let anchor = {
+            let mut e = entry("2026-01-01T00:00:00Z", 54.0, Some("main"));
+            e.baseline = true;
+            e
+        };
+        let full = entry("2026-01-02T00:00:00Z", 80.0, Some("main"));
+        let partial = {
+            let mut e = entry("2026-01-03T00:00:00Z", 40.0, Some("main"));
+            e.partial = true; // --max-time-truncated subset score
+            e
+        };
+        // Scoreless: zero denominator (killed+survived+timed_out == 0) → N/A.
+        let scoreless = {
+            let mut e = entry("2026-01-04T00:00:00Z", 100.0, Some("main"));
+            e.killed = 0;
+            assert!(e.is_scoreless() && !e.is_comparable());
+            e
+        };
+        // A tagged run with no git info exercises the "tags only, empty git"
+        // column branch (a partial run before any commit metadata was recorded).
+        let partial_no_git = {
+            let mut e = entry("2026-01-05T00:00:00Z", 42.0, None);
+            e.partial = true;
+            e
+        };
+        let entries = vec![anchor, full, partial, scoreless, partial_no_git];
+        // diff on so `print_survivor_diff` is exercised too; group_by None.
+        print_human(
+            &entries,
+            Path::new("/tmp/history.jsonl"),
+            TrendScale::Auto,
+            true,
+            None,
+        );
+    }
+
+    #[test]
     fn missing_hashes_dont_trigger_warning() {
         let es = vec![
             entry_with_hash("a", Some("aaa")),
@@ -600,4 +742,126 @@ mod tests {
         ];
         assert!(!crate::history::mixed_config_hashes(&es));
     }
+
+    fn strict_opts(history_path: PathBuf) -> TrendOpts {
+        TrendOpts {
+            path: PathBuf::from("."),
+            history_path: Some(history_path),
+            limit: 20,
+            all: true,
+            format: Format::Json,
+            scale: TrendScale::Auto,
+            branch: None,
+            since: None,
+            until: None,
+            fail_on_regression: None,
+            diff: false,
+            group_by: None,
+            strict: true,
+        }
+    }
+
+    #[test]
+    fn strict_fails_on_a_malformed_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("history.jsonl");
+        let good = serde_json::to_string(&entry("2026-06-04T12:00:00Z", 50.0, None)).unwrap();
+        std::fs::write(&p, format!("{good}\nnot json\n")).unwrap();
+
+        let err = trend(strict_opts(p)).unwrap_err().to_string();
+        assert!(err.contains("malformed"), "got: {err}");
+    }
+
+    #[test]
+    fn strict_does_not_fail_on_a_newer_schema_line() {
+        // A newer-schema line is readable by a newer binary and unrepairable by
+        // this one — --strict must warn, not fail, or version skew wedges CI.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("history.jsonl");
+        let good = serde_json::to_string(&entry("2026-06-04T12:00:00Z", 50.0, None)).unwrap();
+        let newer = format!(
+            r#"{{"v":{},"timestamp":"2026-06-05T12:00:00Z","mutation_score":80.0,"killed":4,"survived":1,"timed_out":0,"skipped":0,"errored":0}}"#,
+            crate::history::CURRENT_SCHEMA_V + 1
+        );
+        std::fs::write(&p, format!("{good}\n{newer}\n")).unwrap();
+
+        assert!(trend(strict_opts(p)).is_ok());
+    }
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct TrendArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Custom path to the history log. Defaults to `.fermut/history.jsonl`
+    /// under the project root (nearest ancestor of `<path>` with
+    /// `pyproject.toml`/`setup.cfg`).
+    #[arg(long)]
+    pub(crate) history_path: Option<std::path::PathBuf>,
+
+    /// Show only the most recent N entries (default 10). Ignored when `--all` is set.
+    #[arg(long, default_value_t = 10)]
+    pub(crate) limit: usize,
+
+    /// Show every recorded entry.
+    #[arg(long)]
+    pub(crate) all: bool,
+
+    /// Keep only entries recorded on this git branch. Useful in CI where
+    /// feature-branch runs would otherwise dilute the main-branch trend.
+    #[arg(long)]
+    pub(crate) branch: Option<String>,
+
+    /// Keep only entries newer than this date. Accepts `YYYY-MM-DD`
+    /// (start-of-day UTC) or a full `YYYY-MM-DDTHH:MM:SSZ` timestamp.
+    #[arg(long, value_name = "DATE")]
+    pub(crate) since: Option<String>,
+
+    /// Keep only entries older than this date. Accepts `YYYY-MM-DD`
+    /// (end-of-day UTC, so the full day is included) or a full
+    /// `YYYY-MM-DDTHH:MM:SSZ` timestamp.
+    #[arg(long, value_name = "DATE")]
+    pub(crate) until: Option<String>,
+
+    /// Exit non-zero if the most recent run dropped more than this many
+    /// score points vs the previous filtered entry. CI gate.
+    #[arg(long, value_name = "PTS")]
+    pub(crate) fail_on_regression: Option<f64>,
+
+    /// Sparkline scaling. `fixed` (default) renders against [0, 100]
+    /// so charts from different windows are visually comparable.
+    /// `auto` rescales to the window's own min/max to expose small
+    /// drifts; loses cross-window comparability and falls back to
+    /// fixed when the window's span is under 1 point.
+    #[arg(long, value_enum, default_value_t = crate::cli::TrendScaleCli::Fixed)]
+    pub(crate) scale: crate::cli::TrendScaleCli,
+
+    /// Expand the per-run survivor diff into the full new-survivor and
+    /// newly-killed mutant-id lists below the table. Without this flag,
+    /// only the counts are shown.
+    #[arg(long)]
+    pub(crate) diff: bool,
+
+    /// Aggregate the latest run's survivors. `file` groups by source
+    /// file and prints counts + the oldest survivor's age per group.
+    /// Reads only data already stored in `history.jsonl`, no report
+    /// needed.
+    #[arg(long, value_enum, value_name = "AXIS")]
+    pub(crate) by: Option<crate::cli::TrendGroupByCli>,
+
+    /// stdout output format.
+    #[arg(long, value_enum, default_value_t = crate::cli::Format::Human)]
+    pub(crate) format: crate::cli::Format,
+
+    /// Fail if the history log has any malformed (corrupt, unparseable)
+    /// line instead of silently skipping it, so a `fermut trend --strict`
+    /// CI step catches a truncated history file before the trend is
+    /// trusted. Newer-schema lines an older binary can't read are warned,
+    /// not failed — nothing this binary can do about them. Does not change
+    /// the `fermut run --fail-on-regression` gate, which loads history on
+    /// its own; run this as a separate step to guard the shared file.
+    #[arg(long)]
+    pub(crate) strict: bool,
 }

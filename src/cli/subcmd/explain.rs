@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use crate::cli::Format;
 use crate::filter::coverage::CoverageContexts;
 use crate::llm::cache::{default_cache_path, LlmCache};
 use crate::llm::client::client_from_env;
@@ -31,15 +32,10 @@ use crate::llm::prompt::{
     build_explain_prompt, cache_key, extract_first_code_block, file_sha256, PromptContext,
     SampleTest,
 };
-use crate::llm::DEFAULT_MODEL;
+use crate::llm::{LlmCallOpts, DEFAULT_MODEL};
 use crate::mutator::{Mutant, Operator};
 use crate::report::{MutantOutcome, Report};
-
-#[derive(Copy, Clone, Debug)]
-pub enum ExplainFormat {
-    Human,
-    Json,
-}
+use crate::util::search::{extract_ident, grep_symbol, indent_of, DEFAULT_GREP_MATCH_LIMIT};
 
 pub struct ExplainOpts {
     pub report: PathBuf,
@@ -52,7 +48,50 @@ pub struct ExplainOpts {
     pub no_cache: bool,
     pub cache_path: Option<PathBuf>,
     pub project_root: PathBuf,
-    pub format: ExplainFormat,
+    pub format: Format,
+}
+
+/// Built with a caller-resolved `project_root` (via
+/// [`crate::cli::current_project_root`]) rather than reading the cwd here, so
+/// the conversion is pure and unit-testable.
+/// `--tests` when given, else `<project_root>/tests` when that directory
+/// exists. clap's `default_missing_value` only covers a bare `--tests`; an
+/// omitted flag would otherwise mean no style samples and no apply target.
+pub(crate) fn tests_or_default(tests: Option<PathBuf>, project_root: &Path) -> Option<PathBuf> {
+    tests.or_else(|| {
+        let dir = project_root.join("tests");
+        dir.is_dir().then_some(dir)
+    })
+}
+
+impl From<(ExplainArgs, PathBuf)> for ExplainOpts {
+    fn from((a, project_root): (ExplainArgs, PathBuf)) -> Self {
+        let ExplainArgs {
+            report,
+            target,
+            context,
+            tests,
+            coverage,
+            llm,
+            model,
+            no_cache,
+            cache_path,
+            format,
+        } = a;
+        ExplainOpts {
+            report,
+            target,
+            context_lines: context,
+            tests: tests_or_default(tests, &project_root),
+            coverage,
+            llm,
+            model,
+            no_cache,
+            cache_path,
+            project_root,
+            format,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +148,10 @@ pub struct CoverageSignal {
     pub covered: bool,
     pub tests: Vec<String>,
     pub note: String,
+    /// Set when the coverage file could not be loaded; `covered` is then
+    /// meaningless.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -145,8 +188,8 @@ pub struct LlmBlock {
 pub fn explain(opts: ExplainOpts) -> Result<()> {
     let report_obj = build_explain_report(&opts)?;
     match opts.format {
-        ExplainFormat::Json => render_json(&report_obj)?,
-        ExplainFormat::Human => render_human(&report_obj),
+        Format::Json => render_json(&report_obj)?,
+        Format::Human => render_human(&report_obj),
     }
     Ok(())
 }
@@ -156,19 +199,13 @@ pub fn explain(opts: ExplainOpts) -> Result<()> {
 /// same heuristic signal (hint, source context, coverage, skeleton). The
 /// optional LLM block is included only when `opts.llm` is set.
 pub(crate) fn build_explain_report(opts: &ExplainOpts) -> Result<ExplainReport> {
-    let raw = std::fs::read_to_string(&opts.report)
-        .with_context(|| format!("reading {}", opts.report.display()))?;
-    let report: Report =
-        serde_json::from_str(&raw).with_context(|| format!("parsing {}", opts.report.display()))?;
+    let report = crate::report::load(&opts.report)?;
 
     let outcome = locate_outcome(&report, &opts.target)?;
     let m = outcome.mutant();
     let enclosing = enclosing_symbol(m);
 
-    let coverage = match &opts.coverage {
-        Some(p) => Some(build_coverage_signal(p, m)?),
-        None => None,
-    };
+    let coverage = resolve_coverage(opts.coverage.as_deref(), opts.tests.as_deref(), m)?;
     let test_matches = match (&opts.tests, &enclosing) {
         (Some(dir), Some(sym)) => Some(build_test_matches(dir, &sym.name)?),
         _ => None,
@@ -179,10 +216,17 @@ pub(crate) fn build_explain_report(opts: &ExplainOpts) -> Result<ExplainReport> 
             opts.context_lines,
             opts.tests.as_deref(),
             enclosing.as_ref(),
-            &opts.model,
-            opts.no_cache,
-            opts.cache_path.as_deref(),
-            &opts.project_root,
+            &LlmCallOpts {
+                model: opts
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+                no_cache: opts.no_cache,
+                cache_path: opts
+                    .cache_path
+                    .clone()
+                    .unwrap_or_else(|| default_cache_path(&opts.project_root)),
+            },
         )?)
     } else {
         None
@@ -247,31 +291,63 @@ fn build_source_context(m: &Mutant, context_lines: usize) -> SourceContext {
     out
 }
 
+/// Coverage signal for `m`. An explicit `--coverage` is always reported (a
+/// load failure surfaces as `error`). Without one, discover the project-root
+/// `.coverage` like `run` does — and like `run`, drop it silently when it is
+/// stale or unusable (e.g. recorded without per-test contexts) rather than
+/// claim the line is untested.
+fn resolve_coverage(
+    explicit: Option<&Path>,
+    tests: Option<&Path>,
+    m: &Mutant,
+) -> Result<Option<CoverageSignal>> {
+    if let Some(p) = explicit {
+        return build_coverage_signal(p, m).map(Some);
+    }
+    let start = m.file.parent().map(Path::to_path_buf);
+    let root = match start.as_deref().and_then(crate::runner::find_project_root) {
+        Some(r) => r,
+        None => std::env::current_dir()?,
+    };
+    let Some(db) = crate::cli::build_config::discover_coverage_db(&root) else {
+        return Ok(None);
+    };
+    if crate::cli::build_config::newer_source_than_coverage(&db, &root, tests, &root).is_some() {
+        return Ok(None);
+    }
+    let sig = build_coverage_signal(&db, m)?;
+    Ok(sig.error.is_none().then_some(sig))
+}
+
 fn build_coverage_signal(coverage_path: &Path, m: &Mutant) -> Result<CoverageSignal> {
     let cwd = std::env::current_dir()?;
     let project_root = crate::runner::find_project_root(&cwd).unwrap_or_else(|| cwd.clone());
-    let ctx = match CoverageContexts::from_json(coverage_path, &cwd, &project_root) {
+    let ctx = match CoverageContexts::from_path(coverage_path, &cwd, &project_root) {
         Ok(c) => c,
         Err(e) => {
             return Ok(CoverageSignal {
                 covered: false,
                 tests: Vec::new(),
                 note: format!("could not load coverage: {e}"),
+                error: Some(e.to_string()),
             });
         }
     };
-    match ctx.tests_for(&m.file, m.line) {
+    match ctx.tests_for_mutant(m) {
         Some(tests) if !tests.is_empty() => Ok(CoverageSignal {
             covered: true,
             tests: tests.to_vec(),
             note:
                 "tests executed this line but did not distinguish the mutation; strengthen their assertions"
                     .to_string(),
+            error: None,
         }),
         _ => Ok(CoverageSignal {
             covered: false,
             tests: Vec::new(),
-            note: "no test executes this line; add one that exercises it at all".to_string(),
+            note: "no test executes this line or the statement around it; add one that exercises it at all"
+                .to_string(),
+            error: None,
         }),
     }
 }
@@ -305,46 +381,36 @@ fn build_skeleton(m: &Mutant, enclosing: Option<&EnclosingSymbol>) -> TestSkelet
     TestSkeleton { name, code }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn call_llm(
     m: &Mutant,
     context_lines: usize,
     tests_dir: Option<&Path>,
     enclosing: Option<&EnclosingSymbol>,
-    model_override: &Option<String>,
-    no_cache: bool,
-    cache_path_override: Option<&Path>,
-    project_root: &Path,
+    opts: &LlmCallOpts,
 ) -> Result<LlmBlock> {
-    let model = model_override
-        .clone()
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let ctx = PromptContext {
         source_snippet: render_source_snippet(m, context_lines),
         enclosing_symbol: enclosing.map(|s| s.name.clone()),
         sample_tests: sample_tests_for_symbol(tests_dir, enclosing.map(|s| s.name.as_str())),
     };
-    let req = build_explain_prompt(m, &ctx, &model);
+    let req = build_explain_prompt(m, &ctx, &opts.model);
 
-    let cache_path = cache_path_override
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| default_cache_path(project_root));
-    let mut cache = if no_cache {
+    let mut cache = if opts.no_cache {
         LlmCache::default()
     } else {
-        LlmCache::load(&cache_path)
+        LlmCache::load(&opts.cache_path)
     };
     let sha = file_sha256(&m.file).unwrap_or_default();
     let key = cache_key(&m.id, &sha, &req.user);
 
-    let (response, cached) = match (no_cache, cache.lookup(&key)) {
+    let (response, cached) = match (opts.no_cache, cache.lookup(&key)) {
         (false, Some(hit)) => (hit.to_string(), true),
         _ => {
             let client = client_from_env()?;
             let text = client.complete(&req)?;
-            if !no_cache {
+            if !opts.no_cache {
                 cache.insert(key, text.clone());
-                cache.save(&cache_path)?;
+                cache.save(&opts.cache_path)?;
             }
             (text, false)
         }
@@ -352,7 +418,7 @@ fn call_llm(
 
     let extracted_code = extract_first_code_block(&response);
     Ok(LlmBlock {
-        model,
+        model: opts.model.clone(),
         cached,
         response,
         extracted_code,
@@ -440,6 +506,18 @@ fn render_json(report: &ExplainReport) -> Result<()> {
 }
 
 fn render_human(r: &ExplainReport) {
+    print_header(r);
+    print_source(r);
+    print_hint(r);
+    print_coverage(r);
+    print_test_matches(r);
+    print_skeleton(r);
+    print_llm(r);
+}
+
+/// Mutant identity block: location, operator, status, id, the mutation itself,
+/// plus the filter/error lines when present.
+fn print_header(r: &ExplainReport) {
     println!("{}:{}", r.mutant.file, r.mutant.line);
     println!("operator : {}", r.mutant.operator);
     println!("status   : {}", r.status);
@@ -455,71 +533,90 @@ fn render_human(r: &ExplainReport) {
         println!("error    : {e}");
     }
     println!();
+}
 
+/// Surrounding source context with the mutant line marked (`►`), or a notice
+/// when the file was unreadable.
+fn print_source(r: &ExplainReport) {
     if r.source_context.lines.is_empty() {
         println!("(source unreadable: {})", r.mutant.file);
-    } else {
-        let max_line = r.source_context.start_line as usize + r.source_context.lines.len();
-        let width = max_line.to_string().len().max(3);
-        println!("source:");
-        for (i, line) in r.source_context.lines.iter().enumerate() {
-            let absolute = r.source_context.start_line as usize + i;
-            let marker = if absolute as u32 == r.source_context.mutant_line {
-                "►"
-            } else {
-                " "
-            };
-            println!("  {marker} {:>width$}  {}", absolute, line, width = width);
-        }
-        println!();
+        return;
     }
+    let max_line = r.source_context.start_line as usize + r.source_context.lines.len();
+    let width = max_line.to_string().len().max(3);
+    println!("source:");
+    for (i, line) in r.source_context.lines.iter().enumerate() {
+        let absolute = r.source_context.start_line as usize + i;
+        let marker = if absolute as u32 == r.source_context.mutant_line {
+            "►"
+        } else {
+            " "
+        };
+        println!("  {marker} {:>width$}  {}", absolute, line, width = width);
+    }
+    println!();
+}
 
+/// Enclosing `def`/`class` (when found) and the operator-specific hint line.
+fn print_hint(r: &ExplainReport) {
     if let Some(s) = &r.enclosing {
         println!("enclosing: {} {}", s.kind, s.name);
     }
     println!("hint     : {}", r.hint);
+}
 
-    if let Some(c) = &r.coverage {
-        if c.covered {
-            println!("\ncoverage : {} test(s) executed this line:", c.tests.len());
-            for t in c.tests.iter().take(10) {
-                println!("  - {t}");
-            }
-            if c.tests.len() > 10 {
-                println!("  ... ({} more)", c.tests.len() - 10);
-            }
-            println!("→ {}", c.note);
-        } else {
-            println!(
-                "\ncoverage : NO test executes {}:{}",
-                r.mutant.file, r.mutant.line
-            );
-            println!("→ {}", c.note);
+/// Coverage signal — which tests executed the line, or that none did.
+fn print_coverage(r: &ExplainReport) {
+    let Some(c) = &r.coverage else { return };
+    if let Some(e) = &c.error {
+        println!("\ncoverage : could not load coverage: {e}");
+    } else if c.covered {
+        println!("\ncoverage : {} test(s) executed this line:", c.tests.len());
+        for t in c.tests.iter().take(10) {
+            println!("  - {t}");
+        }
+        if c.tests.len() > 10 {
+            println!("  ... ({} more)", c.tests.len() - 10);
+        }
+        println!("→ {}", c.note);
+    } else {
+        println!(
+            "\ncoverage : NO test executes {}:{}",
+            r.mutant.file, r.mutant.line
+        );
+        println!("→ {}", c.note);
+    }
+}
+
+/// Tests that reference the mutant's symbol by name (grep of the tests tree).
+fn print_test_matches(r: &ExplainReport) {
+    let Some(t) = &r.test_matches else { return };
+    if t.matches.is_empty() {
+        println!(
+            "\ntests   : no test file mentions `{}`. Likely no direct test exists.",
+            t.symbol
+        );
+    } else {
+        println!("\ntests   : `{}` referenced in:", t.symbol);
+        for m in t.matches.iter().take(8) {
+            println!("  - {}:{}", m.file, m.line);
+        }
+        if t.matches.len() > 8 {
+            println!("  ... ({} more)", t.matches.len() - 8);
         }
     }
+}
 
-    if let Some(t) = &r.test_matches {
-        if t.matches.is_empty() {
-            println!(
-                "\ntests   : no test file mentions `{}`. Likely no direct test exists.",
-                t.symbol
-            );
-        } else {
-            println!("\ntests   : `{}` referenced in:", t.symbol);
-            for m in t.matches.iter().take(8) {
-                println!("  - {}:{}", m.file, m.line);
-            }
-            if t.matches.len() > 8 {
-                println!("  ... ({} more)", t.matches.len() - 8);
-            }
-        }
-    }
-
+/// The pytest skeleton the user can paste to start the kill.
+fn print_skeleton(r: &ExplainReport) {
     println!("\nsuggested test skeleton:");
     println!("```python");
     print!("{}", r.skeleton.code);
     println!("```");
+}
 
+/// Optional Anthropic-generated prose + killing test.
+fn print_llm(r: &ExplainReport) {
     if let Some(l) = &r.llm {
         let tag = if l.cached { " (cached)" } else { "" };
         println!("\nllm ({}){tag}:\n{}", l.model, l.response);
@@ -527,7 +624,8 @@ fn render_human(r: &ExplainReport) {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers retained from earlier pass (operator hint table, indent scan, grep)
+// Explain-specific helpers (enclosing-symbol scan, operator hint/slug table).
+// Generic text scanning lives in `crate::util::search`.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -574,26 +672,6 @@ pub(crate) fn enclosing_symbol(m: &Mutant) -> Option<EnclosingSymbol> {
     None
 }
 
-fn indent_of(line: &str) -> usize {
-    line.len() - line.trim_start().len()
-}
-
-fn extract_ident(s: &str) -> Option<String> {
-    let mut end = 0;
-    for (i, ch) in s.char_indices() {
-        if ch.is_alphanumeric() || ch == '_' {
-            end = i + ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    if end == 0 {
-        None
-    } else {
-        Some(s[..end].to_string())
-    }
-}
-
 pub(crate) fn operator_hint(op: Operator) -> &'static str {
     match op {
         Operator::BoundaryShift => {
@@ -611,6 +689,24 @@ pub(crate) fn operator_hint(op: Operator) -> &'static str {
         Operator::BoolOpSwap => {
             "`and`↔`or` swap. Tests likely cover both-true and both-false; add a case \
              where exactly one operand is true."
+        }
+        Operator::RelationalToEquality => {
+            "ordering compare replaced with `!=`/`==`. The tests never take the side of \
+             the bound the original rejects (or never hit the bound). Add a case on the \
+             other side of the comparison and assert the result."
+        }
+        Operator::CompareToConst | Operator::RegionRest => {
+            "comparison replaced with a constant. The tests only exercise one outcome \
+             of it. Add a case where the comparison goes the other way."
+        }
+        Operator::BoolOperandDrop => {
+            "`and`/`or` replaced with one operand. The dropped operand never decides \
+             the outcome in the tests. Add a case where only that operand changes the \
+             result."
+        }
+        Operator::BoolOpToConst => {
+            "`and`/`or` replaced with a constant. The tests never take the branch where \
+             the condition goes the other way. Add a case for it."
         }
         Operator::NotInsertion => {
             "extra `not` survived. Tests likely don't check the negative path. Add a \
@@ -702,93 +798,43 @@ pub(crate) fn operator_hint(op: Operator) -> &'static str {
             "loop iteration count mutated. Tests likely don't assert on the number of \
              iterations or their cumulative effect."
         }
-    }
-}
-
-/// Default upper bound for `grep_symbol`. Picked to comfortably exceed the
-/// dedup-by-path requirements of every current caller (sample collection
-/// truncates to ≤8 unique files; the test-matches signal renders at most
-/// a few dozen) while still capping the walk on a multi-thousand-file
-/// repo.
-pub(crate) const DEFAULT_GREP_MATCH_LIMIT: usize = 64;
-
-/// Recursive walk of `root`, returning `(path, line)` pairs where `symbol`
-/// appears as a whole word inside a `*.py` file. Returns after collecting
-/// `limit` matches so a giant test tree can't stall `explain` / `suggest`.
-/// Callers that need stricter caps can pass a smaller limit; callers that
-/// genuinely want every match should not be using this function.
-pub(crate) fn grep_symbol(
-    root: &Path,
-    symbol: &str,
-    limit: usize,
-) -> Result<Vec<(PathBuf, usize)>> {
-    let mut out = Vec::new();
-    if limit == 0 {
-        return Ok(out);
-    }
-    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        if out.len() >= limit {
-            break;
+        Operator::AwaitDrop => {
+            "`await` dropped — the expression now yields the coroutine/awaitable \
+             instead of its result. Tests likely don't assert on the awaited value. \
+             Add an assertion on what the awaited call returns."
         }
-        let read = match std::fs::read_dir(&dir) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        for entry in read.flatten() {
-            if out.len() >= limit {
-                break;
-            }
-            let path = entry.path();
-            let Ok(ft) = entry.file_type() else { continue };
-            if ft.is_dir() {
-                if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                    if name.starts_with('.') || name == "__pycache__" {
-                        continue;
-                    }
-                }
-                stack.push(path);
-            } else if ft.is_file() && path.extension().and_then(|s| s.to_str()) == Some("py") {
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                for (i, line) in text.lines().enumerate() {
-                    if contains_word(line, symbol) {
-                        out.push((path.clone(), i + 1));
-                        break;
-                    }
-                }
-            }
+        Operator::AsyncForToSync | Operator::AsyncWithToSync => {
+            "`async` dropped from an `async for` / `async with`. Tests likely never \
+             drive this async path under a running loop. Add a test that awaits the \
+             coroutine so the async iteration / context manager actually executes."
+        }
+        Operator::MatchGuardNegate => {
+            "`match`/`case` guard negated (`if g` → `if not (g)`). Tests likely don't \
+             cover both sides of the guard. Add a case where the guard's truth value \
+             decides which arm handles the subject."
+        }
+        Operator::RaiseFromDrop => {
+            "explicit exception chaining dropped (`raise X from e` → `raise X`). Tests \
+             likely assert the exception type but not `__cause__`. Assert on \
+             `exc.__cause__` (or use `pytest.raises(...)` and inspect `.value.__cause__`)."
+        }
+        Operator::NumericTypeSwap => {
+            "numeric type annotation swapped (`int` ↔ `float`). Only observable when \
+             the type is enforced at runtime (pydantic / dataclass validation, \
+             `beartype`). Add a test that feeds a value the swapped type would coerce \
+             or reject differently."
+        }
+        Operator::OptionalTypeDrop => {
+            "optionality dropped from an annotation (`Optional[T]` / `T | None` → `T`). \
+             If the type is runtime-validated, passing `None` should now be rejected. \
+             Add a test that passes `None` and asserts it is accepted (or rejected)."
+        }
+        Operator::ContainerTypeSwap => {
+            "container type annotation swapped (`list` → `tuple`, `set` → `frozenset`). \
+             Observable under runtime validation/coercion. Add a test that depends on \
+             the concrete container type the annotation declares."
         }
     }
-    Ok(out)
-}
-
-fn contains_word(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-    let bytes = haystack.as_bytes();
-    let needle_bytes = needle.as_bytes();
-    let mut start = 0;
-    while let Some(pos) = haystack[start..].find(needle) {
-        let abs = start + pos;
-        let before_ok = abs == 0 || !is_word_byte(bytes[abs - 1]);
-        let after = abs + needle_bytes.len();
-        let after_ok = after == bytes.len() || !is_word_byte(bytes[after]);
-        if before_ok && after_ok {
-            return true;
-        }
-        start = abs + needle_bytes.len();
-        if start >= bytes.len() {
-            break;
-        }
-    }
-    false
-}
-
-fn is_word_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
 }
 
 pub(crate) fn operator_slug(op: Operator) -> &'static str {
@@ -796,7 +842,10 @@ pub(crate) fn operator_slug(op: Operator) -> &'static str {
         Operator::BoundaryShift => "boundary",
         Operator::CompareOpSwap => "compare",
         Operator::ArithOpSwap => "arith",
-        Operator::BoolOpSwap => "bool_logic",
+        Operator::BoolOpSwap | Operator::BoolOperandDrop | Operator::BoolOpToConst => "bool_logic",
+        Operator::RelationalToEquality | Operator::CompareToConst | Operator::RegionRest => {
+            "compare"
+        }
         Operator::NotInsertion => "negation",
         Operator::ReturnValueToNone | Operator::AssignValueToNone => "return_value",
         Operator::ConstantReplace
@@ -815,8 +864,15 @@ pub(crate) fn operator_slug(op: Operator) -> &'static str {
         Operator::DictItemDrop => "dict_item",
         Operator::ArgToNone => "arg_value",
         Operator::NoneToValue => "none_value",
-        Operator::ExceptionClassSwap | Operator::BareExcept => "exception",
+        Operator::ExceptionClassSwap | Operator::BareExcept | Operator::RaiseFromDrop => {
+            "exception"
+        }
         Operator::ZeroIterationForLoop | Operator::OneIterationForLoop => "loop_count",
+        Operator::AwaitDrop | Operator::AsyncForToSync | Operator::AsyncWithToSync => "async",
+        Operator::MatchGuardNegate => "match",
+        Operator::NumericTypeSwap | Operator::OptionalTypeDrop | Operator::ContainerTypeSwap => {
+            "type_annotation"
+        }
         Operator::ExprToNone => "return_value",
         Operator::PositionalDrop => "arg_value",
         Operator::StringCaseSwap => "literal",
@@ -874,6 +930,50 @@ pub(crate) fn locate_outcome_impl<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explain_args_conversion_is_pure_and_threads_project_root() {
+        // Regression for the impure-From fix: the conversion must NOT read the
+        // cwd. It takes the project root as an argument and copies it verbatim,
+        // so the caller controls it and the mapping is deterministic — including
+        // the `context` → `context_lines` rename.
+        let args = ExplainArgs {
+            report: PathBuf::from("r.json"),
+            target: "3".into(),
+            context: 7,
+            tests: None,
+            coverage: None,
+            llm: false,
+            model: None,
+            no_cache: false,
+            cache_path: None,
+            format: Format::Json,
+        };
+        let root = PathBuf::from("/nowhere/project");
+        let opts: ExplainOpts = (args, root.clone()).into();
+        assert_eq!(
+            opts.project_root, root,
+            "project root must be threaded, not cwd"
+        );
+        assert_eq!(opts.context_lines, 7, "context maps to context_lines");
+        assert_eq!(opts.report, PathBuf::from("r.json"));
+    }
+
+    #[test]
+    fn omitted_tests_defaults_to_existing_tests_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(tests_or_default(None, tmp.path()), None, "no tests/ → None");
+        std::fs::create_dir(tmp.path().join("tests")).unwrap();
+        assert_eq!(
+            tests_or_default(None, tmp.path()),
+            Some(tmp.path().join("tests"))
+        );
+        let explicit = PathBuf::from("spec");
+        assert_eq!(
+            tests_or_default(Some(explicit.clone()), tmp.path()),
+            Some(explicit)
+        );
+    }
     use crate::mutator::Operator;
     use ruff_text_size::TextRange;
     use std::path::PathBuf;
@@ -899,7 +999,92 @@ mod tests {
             original: ">=".into(),
             replacement: ">".into(),
             line,
+            stmt_line: line,
+            site: None,
         }
+    }
+
+    /// Write a minimal coverage.py SQLite DB recording `src` line 2 under
+    /// `context` (`""` = recorded without per-test contexts).
+    fn write_cov_db(db: &Path, src: &Path, context: &str) {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE file (id integer primary key, path text);
+             CREATE TABLE context (id integer primary key, context text);
+             CREATE TABLE line_bits (file_id integer, context_id integer, numbits blob);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO file (id, path) VALUES (1, ?1)",
+            [src.display().to_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO context (id, context) VALUES (1, ?1)",
+            [context],
+        )
+        .unwrap();
+        // numbits: line 2 → byte 0, bit 2.
+        conn.execute(
+            "INSERT INTO line_bits (file_id, context_id, numbits) VALUES (1, 1, ?1)",
+            [vec![0b100u8]],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn coverage_signal_reads_sqlite_db() {
+        // Regression: explain used to call `from_json` only, so a `.coverage`
+        // SQLite DB failed to parse and was silently reported as uncovered.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("calc.py");
+        std::fs::write(&src, "def f(x):\n    return x >= 1\n").unwrap();
+        let db = tmp.path().join(".coverage");
+        write_cov_db(&db, &src, "tests/test_calc.py::test_f|run");
+
+        let sig = build_coverage_signal(&db, &make_mutant(src, 2)).unwrap();
+        assert!(
+            !sig.note.contains("could not load coverage"),
+            "SQLite DB must load: {}",
+            sig.note
+        );
+        assert!(sig.covered, "line 2 is covered: {:?}", sig.tests);
+    }
+
+    #[test]
+    fn auto_discovered_coverage_without_contexts_is_dropped() {
+        // A plain `pytest --cov` DB has no per-test contexts. Auto-discovery
+        // must not turn that into a false "NO test executes" verdict; an
+        // explicit `--coverage` still reports the load error.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pyproject.toml"), "").unwrap();
+        let src = tmp.path().join("calc.py");
+        std::fs::write(&src, "def f(x):\n    return x >= 1\n").unwrap();
+        let db = tmp.path().join(".coverage");
+        write_cov_db(&db, &src, "");
+        // Keep the DB fresh so the staleness guard isn't what drops it.
+        for f in [&src, &tmp.path().join("pyproject.toml")] {
+            filetime::set_file_mtime(f, filetime::FileTime::from_unix_time(1_000, 0)).unwrap();
+        }
+        let m = make_mutant(src, 2);
+        assert!(resolve_coverage(None, None, &m).unwrap().is_none());
+        let explicit = resolve_coverage(Some(&db), None, &m).unwrap().unwrap();
+        assert!(explicit.error.is_some(), "explicit load error must surface");
+    }
+
+    #[test]
+    fn auto_discovered_stale_coverage_is_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pyproject.toml"), "").unwrap();
+        let src = tmp.path().join("calc.py");
+        std::fs::write(&src, "def f(x):\n    return x >= 1\n").unwrap();
+        let db = tmp.path().join(".coverage");
+        write_cov_db(&db, &src, "tests/test_calc.py::test_f|run");
+        let m = make_mutant(src, 2);
+        // Fresh: loads. Then backdate the DB below the source: dropped.
+        assert!(resolve_coverage(None, None, &m).unwrap().unwrap().covered);
+        filetime::set_file_mtime(&db, filetime::FileTime::from_unix_time(1_000, 0)).unwrap();
+        assert!(resolve_coverage(None, None, &m).unwrap().is_none());
     }
 
     #[test]
@@ -989,15 +1174,6 @@ mod tests {
         let path = write_tmp("encl_module.py", src);
         let m = make_mutant(path, 1);
         assert!(enclosing_symbol(&m).is_none());
-    }
-
-    #[test]
-    fn contains_word_matches_whole_word_only() {
-        assert!(contains_word("foo bar baz", "bar"));
-        assert!(contains_word("(bar)", "bar"));
-        assert!(!contains_word("foobar", "bar"));
-        assert!(!contains_word("barbecue", "bar"));
-        assert!(contains_word("bar", "bar"));
     }
 
     #[test]
@@ -1110,4 +1286,56 @@ mod tests {
         assert_eq!(ctx.mutant_line, 3);
         assert_eq!(ctx.lines, vec!["b".to_string(), "c".into(), "d".into()]);
     }
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct ExplainArgs {
+    /// Path to a JSON report produced by `fermut run --json …`.
+    pub(crate) report: std::path::PathBuf,
+
+    /// Mutant selector: 1-based index into the report, or substring of
+    /// mutant id (matches `fermut show`'s selector grammar).
+    pub(crate) target: String,
+
+    /// Number of source lines to show on each side of the mutant line.
+    #[arg(long, default_value_t = 5)]
+    pub(crate) context: usize,
+
+    /// Tests directory to grep for the enclosing symbol. Defaults to
+    /// `tests/` when it exists under the current directory.
+    #[arg(long, num_args = 0..=1, default_missing_value = "tests")]
+    pub(crate) tests: Option<std::path::PathBuf>,
+
+    /// Coverage data with per-test contexts: coverage.py's `.coverage`
+    /// SQLite DB or a `coverage json --show-contexts` export (format is
+    /// sniffed). Without the flag, a `.coverage` DB at the project root is
+    /// auto-discovered. When present, the explanation includes whether any
+    /// test executed the mutant line and which tests they were.
+    #[arg(long, num_args = 0..=1, default_missing_value = "coverage.json")]
+    pub(crate) coverage: Option<std::path::PathBuf>,
+
+    /// Augment the heuristic explanation with an Anthropic-generated
+    /// prose explanation + killing test. Requires `ANTHROPIC_API_KEY`
+    /// (or `FERMUT_LLM_MOCK=1` for offline runs).
+    #[arg(long)]
+    pub(crate) llm: bool,
+
+    /// Anthropic model id. Defaults to `claude-sonnet-4-6`.
+    #[arg(long)]
+    pub(crate) model: Option<String>,
+
+    /// Disable the LLM response cache.
+    #[arg(long)]
+    pub(crate) no_cache: bool,
+
+    /// Custom path for the LLM response cache. Defaults to
+    /// `.fermut/llm-cache.json` under the project root.
+    #[arg(long)]
+    pub(crate) cache_path: Option<std::path::PathBuf>,
+
+    /// Output format. `human` (default) prints the laid-out terminal
+    /// view. `json` emits the structured `ExplainReport` for agent
+    /// consumers.
+    #[arg(long, value_enum, default_value_t = crate::cli::Format::Human)]
+    pub(crate) format: crate::cli::Format,
 }

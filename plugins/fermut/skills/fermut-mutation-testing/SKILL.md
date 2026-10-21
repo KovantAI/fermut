@@ -26,11 +26,14 @@ Source repo: https://github.com/KovantAI/fermut
 
 Before invoking fermut, verify:
 
-1. **Binary**: prefer the debug build over the release build — `release` may be stale. Confirm the agent-loop subcommands are present:
+1. **Binary**: install the published wheel — no Rust needed — and confirm the agent-loop subcommands are present:
    ```bash
-   <path-to-fermut>/target/debug/fermut --help | grep -E "next|explain|score|autofix"
+   uv tool install fermut            # or: pipx install fermut / pip install fermut
+   fermut --help | grep -E "next|explain|score|autofix"
    ```
-   `next` (ranked survivor triage) and `score` (reward signal) are used below; if they're missing the binary predates the agent loop — rebuild. If the release binary at `<path>/target/release/fermut` is current, use that; otherwise fall back to debug.
+   `next` (ranked survivor triage) and `score` (reward signal) are used below; if they're missing the binary predates the agent loop — upgrade (`uv tool upgrade fermut`). Org package firewalls (Aikido, Artifactory, Nexus) may block a just-released version until it's vetted — allowlist `fermut` if the install 403s on "not yet vetted".
+
+   **From source instead** (hacking on fermut, or an unsupported platform): build the repo and point at `target/debug/fermut` — prefer debug over release, which may be stale; rebuild if the subcommand check above fails.
 
 2. **Optional deps installed**: many real Python projects gate test modules behind `[project.optional-dependencies]` (msgraph, azure, openai, etc.). pytest collection fails on missing imports and coverage.json comes back empty. Before generating coverage:
    ```bash
@@ -41,14 +44,14 @@ Before invoking fermut, verify:
    Symptom if you skip this: `pytest --collect-only` reports `N errors during collection` and coverage gen produces no contexts. The errors usually look like `ModuleNotFoundError: No module named 'msgraph'`.
 
 3. **Tooling on PATH**:
-   - `ty` (Astral's type-checker — fermut's default pre-filter; without it on PATH, you must pass `--no-ty-filter`)
+   - `ty` (Astral's type-checker — fermut's default pre-filter). It runs in-process, so the binary is optional; it's only needed with `FERMUT_TY_EMBEDDED=0`. `fermut doctor` still flags a missing binary.
    - `pytest-cov` installed in the project venv. Add it explicitly — it transitively installs `coverage`:
      ```bash
      uv add --dev pytest-cov     # or: pip install pytest-cov
      ```
    - Verify `coverage >= 7` is reachable from the venv (pytest-cov pulls it).
 
-4. **Project venv**: fermut spawns `pytest` directly, so the venv's `bin/` must be on PATH when fermut runs. Find the venv first — **do not assume it lives at `$PWD/.venv`**. Many projects keep it elsewhere (`.venv`, `venv`, a uv/conda shared dir, a sibling `../.venvs/<name>`). Locate the one with `pytest`, then set it once:
+4. **Project venv**: fermut runs `<python> -m pytest` with `--python`, else an active `$VIRTUAL_ENV`, else a nearby `.venv`; only with none of those does it spawn a bare `pytest` from PATH. The commands below prepend `$VENV` to PATH as a belt-and-braces fallback; `--python "$VENV/python"` works too (see pitfall 8). Find the venv first — **do not assume it lives at `$PWD/.venv`**. Many projects keep it elsewhere (`.venv`, `venv`, a uv/conda shared dir, a sibling `../.venvs/<name>`). Locate the one with `pytest`, then set it once:
    ```bash
    VENV=/abs/path/to/the/venv/bin   # the dir containing pytest — MUST be absolute
    ```
@@ -60,7 +63,7 @@ Before invoking fermut, verify:
 
 ## Coverage setup (critical — easy to get wrong)
 
-Mutation testing wants per-test line attribution so it knows *which* tests to re-run per mutant. fermut reads coverage.json from coverage.py.
+Mutation testing wants per-test line attribution so it knows *which* tests to re-run per mutant. fermut reads either coverage.py's `.coverage` SQLite DB directly (what `fermut coverage` writes, and what the [guide](https://fermut.readthedocs.io/guides/claude-code-skill/) uses) or a `coverage json --show-contexts` export. This skill uses the JSON export throughout; both work for `run` and `explain`.
 
 ### .coveragerc
 
@@ -211,10 +214,10 @@ Op kill-rate intuition (varies by repo):
 ```bash
 jq '
 def stat(skip):
-  [.outcomes[] | select((.status=="killed" or .status=="survived" or .status=="timeout") and (.mutant.operator as $o | (skip | index($o) | not)))] as $kept
+  [.outcomes[] | select((.status=="killed" or .status=="survived" or .status=="timed_out") and (.mutant.operator as $o | (skip | index($o) | not)))] as $kept
   | ($kept | map(select(.status=="killed")) | length) as $k
   | ($kept | map(select(.status=="survived")) | length) as $s
-  | ($kept | map(select(.status=="timeout")) | length) as $t
+  | ($kept | map(select(.status=="timed_out")) | length) as $t
   | {kept: ($k+$s+$t), killed: $k, survived: $s, score: (if ($k+$s+$t) > 0 then (($k*1000/($k+$s+$t)|floor)/10) else 0 end)};
 {
   baseline: stat([]),
@@ -234,7 +237,7 @@ def stat(skip):
 PATH="$VENV:$PATH" <fermut> next .fermut/last.json --all      # or --limit N for the top N
 ```
 
-Each entry carries `id`, `file`, `line`, `operator`, `cluster_size`, `ease` (high/medium/low), `estimated_gain_pts`, the operator `hint`, and `sibling_ids` (other survivors one test likely also kills). Work the list top-down: fixing rank 1 is the highest reward per test. Feed the chosen `id` straight into Stage 6's `explain`. On a huge survivor set, `--max-tokens N` returns only the highest-value clusters that fit a context budget (it logs how many it dropped to stderr).
+Each entry carries `id`, `file`, `line`, `operator`, `cluster_size`, `ease` (high/medium/low), `min_gain_pts` / `max_gain_pts` (score points if only the representative dies / if the whole cluster dies), the operator `hint`, and `sibling_ids` (other survivors one test likely also kills). Work the list top-down: fixing rank 1 is the highest reward per test. Feed the chosen `id` straight into Stage 6's `explain`. On a huge survivor set, `--max-tokens N` returns only the highest-value clusters that fit a context budget (it logs how many it dropped to stderr).
 
 `next` ranks whatever survivors are in the report — it doesn't know your Stage 4 skip set. If you've decided on a skip set, run `next` against a report produced *with* those `--skip-ops` (re-run, or use the Reference command); otherwise noise-op clusters like `constant-replace` you meant to ignore can rank as "fixable" and waste a kill attempt.
 
@@ -362,10 +365,10 @@ Per file: a focused batch of 6–15 tests typically kills 10–30 mutants. The k
 5. **`dynamic_context=test_function` produces wrong nodeid format** — use `pytest --cov-context=test` instead.
 6. **`--show-contexts` missing on `coverage json`** — fermut errors out.
 7. **Coverage filter drops everything when path mismatch** — verify mutant count via `jq '[.outcomes[] | select(.status != "skipped")] | length'`.
-8. **pytest binary not on PATH** — fermut spawns `pytest` directly. Prepend the venv bin (`PATH="$VENV:$PATH"`). The venv is often NOT at `$PWD/.venv`; locate the dir holding `pytest` and use its **absolute** path (a relative one breaks because fermut chdirs). See pre-flight item 4. **Restricted sandboxes/CI** (harness forbids modifying `PATH` — some agent sandboxes deny any `PATH=` assignment, and may deny invoking `pytest`/`coverage` directly even by absolute path): pass `--python <venv-or-interpreter>` to **both** `fermut run` and `fermut coverage` so fermut runs `<python> -m pytest` itself with an absolute interpreter — no PATH, and no direct pytest/coverage call of your own. The whole loop then becomes:
+8. **pytest binary not on PATH** — fermut found no `--python`, `$VIRTUAL_ENV` or nearby `.venv`, so it fell back to a bare `pytest`. Prepend the venv bin (`PATH="$VENV:$PATH"`). The venv is often NOT at `$PWD/.venv`; locate the dir holding `pytest` and use its **absolute** path (a relative one breaks because fermut chdirs). See pre-flight item 4. **Restricted sandboxes/CI** (harness forbids modifying `PATH` — some agent sandboxes deny any `PATH=` assignment, and may deny invoking `pytest`/`coverage` directly even by absolute path): pass `--python <venv-or-interpreter>` to **both** `fermut run` and `fermut coverage` so fermut runs `<python> -m pytest` itself with an absolute interpreter — no PATH, and no direct pytest/coverage call of your own. The whole loop then becomes:
 
 ```bash
-FERMUT=/abs/path/to/target/debug/fermut
+FERMUT=fermut               # installed on PATH; or an abs path to target/debug/fermut for a source build
 VENV="$PWD/.venv"            # the venv dir (or an interpreter path)
 $FERMUT coverage "$PWD" --tests "$PWD/tests" --source "$PWD/<pkg>" --python "$VENV"   # writes .coverage, no PATH
 $FERMUT run "$PWD" --tests "$PWD/tests" --coverage "$PWD/.coverage" --python "$VENV" --json .fermut/last.json --no-history -q
@@ -376,7 +379,7 @@ fermut also auto-discovers an active venv or a nearby `.venv`, so often no flag 
 10. **Passing `src/` as the target** — prefer the project root so source-root, tests, and coverage keys stay consistent (coverage cwd is auto-detected, so this is consistency, not a path-join bug).
 11. **Polling the bg fermut process** — don't; the harness notifies on completion.
 12. **Iter rerun unexpectedly slow (10+ min)** — broad cache miss from tests in a shared dir. One-time; not a bug. See Stage 7.
-13. **Wasting tokens on `explain --llm` / `suggest` / `autofix`** — all three call the Anthropic API through fermut's own client (`suggest` and `autofix` always; `explain` only with `--llm`). When Claude is driving, that API-side call is redundant and produces weaker, context-free tests. Use plain `explain --format json` and write the test yourself. `autofix` (generate + verify) and `suggest` are for **non-LLM** drivers — CI jobs, shell scripts — not this skill. Likewise, `fermut mcp` exposes the loop as MCP tools for an agent that prefers tool calls over shelling out; this skill drives the CLI directly and doesn't need it.
+13. **Wasting tokens on `explain --llm` / `suggest` / `autofix`** — all three call the Anthropic API through fermut's own client (`suggest` and `autofix` always; `explain` only with `--llm`). When Claude is driving, that API-side call is redundant and produces weaker, context-free tests. Use plain `explain --format json` and write the test yourself. `autofix` (generate + verify) and `suggest` are for **non-LLM** drivers — CI jobs, shell scripts — not this skill. Likewise, `fermut mcp` exposes the loop as MCP tools (the fermut Claude Code plugin registers it as `mcp__plugin_fermut_fermut__*`); this skill drives the CLI directly and doesn't need them, but `fermut_doctor` / `fermut_next` / `fermut_explain` return the same JSON as the CLI if they're available.
 
 ## Reference command (one-liner that works)
 

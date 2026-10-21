@@ -17,7 +17,6 @@ use serde::Deserialize;
 use crate::filter::coverage::CoverageContexts;
 use crate::mutator::Operator;
 
-pub use file::FileConfig;
 pub use loader::{ConfigSource, LoadedConfig};
 
 /// Resolved, ready-to-use configuration. The CLI builds one of these by
@@ -30,10 +29,18 @@ pub struct Config {
     pub timeout_secs: u64,
     pub ty_filter: bool,
     pub ruff_filter: bool,
+    /// Trivial Compiler Equivalence pre-filter. When on, each mutant is
+    /// `compile()`d against its original and dropped (never tested) when the
+    /// code-object signatures are byte-identical — a proof of equivalence.
+    /// Off by default (adds a `compile()` subprocess per surviving-the-cheaper-
+    /// filters mutant); enable with `--tce` or `tce = true`.
+    pub tce: bool,
     pub experimental: bool,
     /// Include parity operators (expr→None, positional/element drop, string
     /// case-swap) — for cross-tool comparison only, never a default score.
     pub parity: bool,
+    /// ROR / logical operator set (`--operators`). See [`OperatorProfile`].
+    pub operator_profile: OperatorProfile,
     pub ops_allow: Option<HashSet<Operator>>,
     pub ops_deny: HashSet<Operator>,
     pub diff_base: Option<String>,
@@ -47,6 +54,35 @@ pub struct Config {
     pub pytest_args: Vec<String>,
     pub cache: bool,
     pub cache_path: PathBuf,
+    /// Smart test ordering: when on (and coverage is available), the
+    /// coverage-selected tests for a mutant are reordered so the most targeted
+    /// test runs first, letting pytest's `-x` short-circuit sooner. Two layers:
+    /// a cold-start breadth prior (fewest of the mutated file's lines covered),
+    /// then any historically-killing test (per `(file, operator)`) lifted ahead
+    /// of it. Advisory — only permutes the selected set, so it never changes a
+    /// verdict, only speed. Default on; disable with `--no-smart-order` /
+    /// `smart_order = false`.
+    pub smart_order: bool,
+    /// Load fermut's reporter plugin (`-p _fermut_reporter`) into each
+    /// per-mutant pytest/rstest run and read its structured result: whether a
+    /// test module or conftest failed to import (an exit-4 kill) and which test
+    /// killed the mutant. Verdict-neutral — the exit code still decides the
+    /// verdict, and without a result the runner falls back to exit-code and
+    /// stdout parsing. Default on; disable with `--no-pytest-plugin` /
+    /// `pytest_plugin = false`.
+    pub pytest_plugin: bool,
+    /// Fraction (0.0–1.0) of killer-keyed cache hits re-run each run against
+    /// just the recorded killing test, to catch flaky or order-dependent kills
+    /// (at least one hit is audited whenever any occur and the rate is > 0). A
+    /// disagreement drops the entry and re-runs the mutant fully. `0.0`
+    /// disables the audit. Default [`DEFAULT_CACHE_AUDIT_RATE`]; set via
+    /// `--cache-audit-rate` / `--no-cache-audit` / `cache_audit_rate`.
+    pub cache_audit_rate: f64,
+    /// Path to the advisory kill-order sidecar (`.fermut/kill-order.json`).
+    pub kill_order_path: PathBuf,
+    /// Dominator store written by `fermut subsume` (`.fermut/dominators.json`).
+    /// Read after a run to add `dominator_score` to the summary while fresh.
+    pub dominators_path: PathBuf,
     /// When true, each `fermut run` appends a summary line to `history_path`.
     /// Disable with `--no-history` or `history = false` in the config file.
     pub history: bool,
@@ -60,6 +96,13 @@ pub struct Config {
     /// the `python` config key, or auto-discovered from an active venv / a
     /// `.venv` near the source root. See [`crate::runner::resolve_python`].
     pub python: Option<PathBuf>,
+    /// Glob passed to `unittest discover -p` (the `Unittest` runner only). The
+    /// unittest default `test*.py` misses the `*_test.py` convention; set this
+    /// to match a project's layout. A pattern that collects zero tests makes
+    /// the baseline vacuously "pass", so the runner errors on zero-collection
+    /// rather than silently reporting every mutant as surviving. Ignored by the
+    /// pytest/rstest runners. `None` = the unittest default `test*.py`.
+    pub unittest_pattern: Option<String>,
     pub isolation: IsolationMode,
     /// Run the equivalent-mutant detector on `Survived` outcomes. Provably-
     /// equivalent mutants are remapped to `Equivalent` and excluded from the
@@ -86,14 +129,74 @@ pub struct Config {
     /// be counted "killed", inflating the score toward 100%. Default on;
     /// disable with `--no-verify-baseline` or `verify_baseline = false`.
     pub verify_baseline: bool,
-    /// Wall-clock cap (seconds) for the [`verify_baseline`] run. Separate from
+    /// Wall-clock cap (seconds) for the [`Self::verify_baseline`] run. Separate from
     /// `timeout_secs` (which bounds a single mutant's coverage-selected subset)
     /// because the baseline runs the entire suite. A hung suite is killed past
     /// this so it can't stall the whole run. Set via `--baseline-timeout`.
     pub baseline_timeout_secs: u64,
+    /// Optional wall-clock ceiling (seconds) on the per-mutant **testing
+    /// phase**. When set, mutants are evaluated highest-value first (covered
+    /// mutants ahead of uncovered ones) and, once the deadline passes, every
+    /// mutant not yet started is recorded as `skipped` with filter
+    /// `time-budget` rather than run. In-flight mutants finish. Bounds only the
+    /// testing phase — baseline verification, generation, and the ty pre-filter
+    /// are separate fixed costs the budget does not cover. `None` = run the
+    /// whole catalogue. Set via `--max-time`.
+    pub max_time_secs: Option<u64>,
+    /// Experiment hook: when `Some(path)`, the pytest runner drops `-x` and
+    /// records, per mutant, the FULL set of covering tests that fail (the
+    /// mutant's kill-set `K(m)`), writing one JSON object per mutant to `path`
+    /// as JSONL. Off by default — recording drops the `-x` short-circuit, so a
+    /// killed mutant runs *every* selected test instead of stopping at the
+    /// first, which is markedly slower. Needed to measure higher-order /
+    /// subsuming-mutant structure (an SSHOM is defined by kill-set containment),
+    /// which fermut's normal Killed/Survived verdict discards. Pair with
+    /// `--no-cache`: a cache hit skips the run and records no kill-set. Set via
+    /// `--record-kill-sets`.
+    pub record_kill_sets: Option<PathBuf>,
+    /// `--only-dominators`: run dominators, infer the kills they imply. See
+    /// [`crate::subsume::DominatorPlan`].
+    pub only_dominators: bool,
+    /// Fraction of inferred kills re-verified (`--audit-inferred`).
+    pub inferred_audit_rate: f64,
 }
 
+/// Default for [`Config::cache_audit_rate`].
+pub const DEFAULT_CACHE_AUDIT_RATE: f64 = 0.05;
+
 /// Cache-key granularity for source-file identity. See `Config::cache_scope`.
+/// Which ROR / logical operator set to test (see `mutator::region`). Set via
+/// `--operators` / `operators = "..."`.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum OperatorProfile {
+    /// The historical catalogue: `and`↔`or` and the 3 compare swaps per
+    /// ordering op, no region-model operators.
+    #[default]
+    Default,
+    /// The region-model minimal set: per ordering compare and 2-operand
+    /// truth-position `and`/`or`, only the 3 dominator mutants. About the same
+    /// count as `default`, but none is trivially killed.
+    Minimal,
+    /// `default` plus the minimal-set operators. For experiments.
+    Full,
+    /// `full` plus every remaining region-model form (all 7 per ordering
+    /// compare). Only for the subsumption gate; not documented as a profile.
+    RorAll,
+}
+
+impl OperatorProfile {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Minimal => "minimal",
+            Self::Full => "full",
+            Self::RorAll => "ror-all",
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -109,6 +212,8 @@ pub enum CacheScope {
 pub enum RunnerKind {
     #[default]
     Pytest,
+    /// pytest-CLI-compatible drop-in; driven by the same runner as `Pytest`.
+    Rstest,
     Unittest,
 }
 
@@ -129,6 +234,36 @@ pub enum IsolationMode {
     Copy,
     Hardlink,
     Reflink,
+}
+
+impl std::fmt::Display for CacheScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CacheScope::File => "file",
+            CacheScope::Scope => "scope",
+        })
+    }
+}
+
+impl std::fmt::Display for RunnerKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RunnerKind::Pytest => "pytest",
+            RunnerKind::Rstest => "rstest",
+            RunnerKind::Unittest => "unittest",
+        })
+    }
+}
+
+impl std::fmt::Display for IsolationMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            IsolationMode::Auto => "auto",
+            IsolationMode::Copy => "copy",
+            IsolationMode::Hardlink => "hardlink",
+            IsolationMode::Reflink => "reflink",
+        })
+    }
 }
 
 impl Config {

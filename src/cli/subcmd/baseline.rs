@@ -19,7 +19,6 @@
 //! anchors the `trend`/`score` graph at run zero.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 
@@ -27,7 +26,7 @@ use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 
 use crate::cli::build_config::build_config;
-use crate::cli::FilterArgs;
+use crate::cli::Format;
 use crate::report::{MutantOutcome, Report};
 
 /// Default fraction of mutants tested in the sampled pass. Tuned for a
@@ -35,27 +34,6 @@ use crate::report::{MutantOutcome, Report};
 const DEFAULT_SAMPLE: f64 = 0.1;
 /// Fixed seed so two baselines on the same tree report the same number.
 const SAMPLE_SEED: u64 = 0;
-
-#[derive(Debug, Clone)]
-pub struct BaselineOpts {
-    pub path: PathBuf,
-    /// Skip sampling — mutate every covered mutant for an exact score.
-    pub full: bool,
-    /// Sampling fraction when not `--full`. Defaults to `DEFAULT_SAMPLE`.
-    pub sample: Option<f64>,
-    /// How many worst-offender files to list. Defaults to 3.
-    pub top: usize,
-    pub format: BaselineFormat,
-    /// Filter chain (coverage path, excludes, op allow/deny). Threaded
-    /// through from the CLI exactly like `run`.
-    pub filter: FilterArgs,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum BaselineFormat {
-    Human,
-    Json,
-}
 
 /// One grade band for the headline verdict. The thresholds are on the
 /// mutation score *of covered code* — line coverage can't earn a grade
@@ -68,6 +46,9 @@ enum Grade {
     Ok,
     Weak,
     Smoke,
+    /// Nothing scored — the run's mutation score is the vacuous 100.0 floor,
+    /// not a measurement, so no band applies (all-errored / all-skipped).
+    Na,
 }
 
 impl Grade {
@@ -86,6 +67,7 @@ impl Grade {
             Grade::Ok => "real gaps in covered code",
             Grade::Weak => "many covered lines untested for behavior",
             Grade::Smoke => "mostly smoke tests — they run code but assert little",
+            Grade::Na => "nothing scored — no test-quality signal",
         }
     }
 }
@@ -96,8 +78,15 @@ pub(crate) struct BaselineReport {
     /// `null` when it couldn't be read (the mutation half still stands).
     #[serde(skip_serializing_if = "Option::is_none")]
     line_coverage: Option<f64>,
-    /// Mutation score on covered code, percent.
+    /// Mutation score on covered code, percent. Carries the vacuous `100.0`
+    /// floor when `scored == 0` — read `scored` to tell a genuine perfect run
+    /// from a scoreless N/A (mirrors [`crate::report::Summary`]).
     mutation_score: f64,
+    /// Mutants with a real verdict (`killed + timed_out + survived`) — the
+    /// score denominator. `0` means `mutation_score` is a vacuous floor, not a
+    /// measurement (grade `na`), so JSON/MCP consumers must not read the score
+    /// as a genuine 100%.
+    scored: usize,
     /// `100 - mutation_score`: of the code tests *do* execute, the share of
     /// behavior changes no test would notice — the false-confidence gap.
     /// This is on the covered-code denominator (same as `mutation_score`),
@@ -129,12 +118,12 @@ struct FileSurvivors {
     survivors: usize,
 }
 
-pub fn baseline(opts: BaselineOpts) -> Result<()> {
-    let format = opts.format;
-    let out = compute_baseline(opts)?;
+pub(crate) fn baseline(args: BaselineArgs) -> Result<()> {
+    let format = args.format;
+    let out = compute_baseline(args)?;
     match format {
-        BaselineFormat::Json => println!("{}", serde_json::to_string_pretty(&out)?),
-        BaselineFormat::Human => print_human(&out),
+        Format::Json => println!("{}", serde_json::to_string_pretty(&out)?),
+        Format::Human => print_human(&out),
     }
     Ok(())
 }
@@ -142,10 +131,10 @@ pub fn baseline(opts: BaselineOpts) -> Result<()> {
 /// Run the baseline pipeline and return the structured report without
 /// printing. Shared by the `baseline` subcommand and the MCP
 /// `fermut_baseline` tool so both surface identical numbers.
-pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
+pub(crate) fn compute_baseline(args: BaselineArgs) -> Result<BaselineReport> {
     // 1. Gate on environment health. A broken toolchain produces a
     //    confidently-wrong score, which is worse than no score on day one.
-    let diag = crate::cli::subcmd::doctor::diagnose(&opts.path);
+    let diag = crate::cli::subcmd::doctor::diagnose(&args.path);
     if diag.get("healthy").and_then(|v| v.as_bool()) == Some(false) {
         return Err(anyhow!(
             "environment not ready — run `fermut doctor` and fix the failing \
@@ -158,13 +147,13 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
     // relative path against the process cwd, not the project dir, so a bare
     // `.coverage` breaks whenever `baseline` is invoked from elsewhere (e.g.
     // `fermut baseline path/to/project` from a repo root).
-    let loaded = crate::config::loader::LoadedConfig::load(&opts.path)
+    let loaded = crate::config::loader::LoadedConfig::load(&args.path)
         .context("loading project config for baseline")?;
     let cov_db = loaded.base_dir.join(".coverage");
 
     // 2. Build/refresh `.coverage`, then read the line-coverage headline.
-    crate::cli::subcmd::coverage::coverage(crate::cli::subcmd::coverage::CoverageOpts {
-        path: opts.path.clone(),
+    crate::cli::subcmd::coverage::coverage(crate::cli::subcmd::coverage::CoverageArgs {
+        path: args.path.clone(),
         source: None,
         tests: None,
         full: false,
@@ -173,50 +162,42 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
         python: None,
     })
     .context("building coverage database for baseline")?;
-    let line_coverage = read_line_coverage(&loaded.base_dir);
+    // `coverage` has no console script we rely on, so it's `<interp> -m
+    // coverage`. Resolve the same interpreter the runner would (venv near the
+    // source root, else a PATH-probed `python3`/`python`) so a `python3`-only
+    // box doesn't silently drop the line-coverage headline.
+    let interp = crate::runner::interpreter(
+        crate::runner::resolve_python(&loaded.base_dir, None).as_deref(),
+    );
+    let line_coverage = read_line_coverage(&interp, &loaded.base_dir);
 
     // 3. Sampled mutation pass, restricted to covered lines. We reuse the
     //    full `build_config` path so the filter chain (coverage, excludes,
     //    op allow/deny) matches what `run` would do — only the sample knob
     //    differs.
-    let sample = if opts.full {
+    let sample = if args.full {
         None
     } else {
-        Some(opts.sample.unwrap_or(DEFAULT_SAMPLE))
+        Some(args.sample.unwrap_or(DEFAULT_SAMPLE))
     };
-    let mut filter = opts.filter.clone();
+    let mut filter = args.filter.clone();
     // Force the coverage filter on if the user didn't pick a path — the
     // whole point is "score on covered code".
     if filter.coverage.is_none() && !filter.no_coverage {
         filter.coverage = Some(cov_db.clone());
     }
     let cfg = build_config(
-        opts.path.clone(),
-        None,       // tests
-        None,       // jobs
-        None,       // timeout
-        false,      // no_ty_filter
-        false,      // ruff_filter
-        None,       // hypothesis_seed
-        Vec::new(), // pytest_args
-        false,      // no_cache
-        None,       // cache_path
-        true,       // no_history — engine must NOT append; we write our
-        // own entry below marked `baseline: true`, else the
-        // anchor would be an ordinary, unmarked run entry.
-        None,   // history_path
-        sample, // sample
-        Some(SAMPLE_SEED),
-        None,  // shard
-        None,  // runner
-        None,  // python
-        None,  // isolation
-        false, // no_equiv_detect
-        None,  // cache_scope
-        None,  // fail_under
-        false, // no_verify_baseline
-        None,  // baseline_timeout
-        filter,
+        args.path.clone(),
+        crate::cli::RunConfigArgs {
+            // engine must NOT append history; we write our own entry below
+            // marked `baseline: true`, else the anchor would be an ordinary,
+            // unmarked run entry.
+            no_history: true,
+            sample,
+            sample_seed: Some(SAMPLE_SEED),
+            filter,
+            ..Default::default()
+        },
     )?;
 
     let started = Instant::now();
@@ -241,8 +222,15 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
     }
 
     let summary = report.summary();
-    let worst_files = top_survivor_files(&report, opts.top);
-    let grade = Grade::of(summary.mutation_score);
+    let worst_files = top_survivor_files(&report, args.top);
+    // A scoreless run (nothing killed/survived/timed out) carries the vacuous
+    // 100.0 floor, not a measurement — grade it N/A rather than a perfect
+    // "Strong", which would read as an A for a run that scored nothing.
+    let grade = if report.is_scoreless() {
+        Grade::Na
+    } else {
+        Grade::of(summary.mutation_score)
+    };
     // The blind spot in covered code — never negative, same denominator as
     // the mutation score. (Line coverage is a separate axis below.)
     let quality_gap = round1(100.0 - summary.mutation_score);
@@ -251,6 +239,7 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
     Ok(BaselineReport {
         line_coverage,
         mutation_score: summary.mutation_score,
+        scored: summary.scored,
         quality_gap,
         untested_risk,
         grade,
@@ -267,8 +256,8 @@ pub(crate) fn compute_baseline(opts: BaselineOpts) -> Result<BaselineReport> {
 /// more robust than re-parsing the SQLite numbits ourselves. Best-effort:
 /// any failure degrades to `None` and the mutation half of the report still
 /// stands.
-fn read_line_coverage(path: &std::path::Path) -> Option<f64> {
-    let out = Command::new("python")
+fn read_line_coverage(interp: &std::path::Path, path: &std::path::Path) -> Option<f64> {
+    let out = Command::new(interp)
         .arg("-m")
         .arg("coverage")
         .arg("report")
@@ -289,7 +278,7 @@ fn read_line_coverage(path: &std::path::Path) -> Option<f64> {
 fn top_survivor_files(report: &Report, top: usize) -> Vec<FileSurvivors> {
     let mut by_file: BTreeMap<String, usize> = BTreeMap::new();
     for o in &report.outcomes {
-        if let MutantOutcome::Survived { mutant } = o {
+        if let MutantOutcome::Survived { mutant, .. } = o {
             *by_file
                 .entry(mutant.file.display().to_string())
                 .or_default() += 1;
@@ -323,14 +312,18 @@ fn print_human(r: &BaselineReport) {
     } else {
         "  (on covered code)".to_string()
     };
-    println!("  mutation score    {:.0}%{est}", r.mutation_score);
-    println!("  ───────────────────────────────");
-    println!(
-        "  test-quality gap  {:.0} pts   ← covered code whose behavior no test checks",
-        r.quality_gap
-    );
-    if let Some(risk) = r.untested_risk {
-        println!("  untested risk     {risk:.0}%     ← lines no test executes at all");
+    if matches!(r.grade, Grade::Na) {
+        println!("  mutation score    N/A  (nothing scored — no mutants got a verdict)");
+    } else {
+        println!("  mutation score    {:.0}%{est}", r.mutation_score);
+        println!("  ───────────────────────────────");
+        println!(
+            "  test-quality gap  {:.0} pts   ← covered code whose behavior no test checks",
+            r.quality_gap
+        );
+        if let Some(risk) = r.untested_risk {
+            println!("  untested risk     {risk:.0}%     ← lines no test executes at all");
+        }
     }
     println!("\n  grade: {:?} — {}", r.grade, r.grade.blurb());
 
@@ -424,4 +417,33 @@ mod tests {
         assert!((round1(28.04) - 28.0).abs() < f64::EPSILON);
         assert!((round1(28.05) - 28.1).abs() < f64::EPSILON);
     }
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct BaselineArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Mutate every covered mutant for the exact score instead of a
+    /// sampled estimate. Slower; use once the sampled run looks right.
+    #[arg(long)]
+    pub(crate) full: bool,
+
+    /// Sampling fraction (0.0–1.0) for the fast pass. Defaults to 0.1.
+    /// Ignored with `--full`.
+    #[arg(long, value_name = "RATIO")]
+    pub(crate) sample: Option<f64>,
+
+    /// How many worst-offender files to list. Defaults to 3.
+    #[arg(long, default_value_t = 3, value_name = "N")]
+    pub(crate) top: usize,
+
+    /// Output format. `human` (default) prints the graded verdict;
+    /// `json` emits the same numbers for an agent / dashboard.
+    #[arg(long, value_enum, default_value_t = crate::cli::Format::Human)]
+    pub(crate) format: crate::cli::Format,
+
+    #[command(flatten)]
+    pub(crate) filter: crate::cli::FilterArgs,
 }

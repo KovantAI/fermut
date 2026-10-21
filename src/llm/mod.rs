@@ -18,16 +18,28 @@
 pub mod cache;
 pub mod client;
 pub mod prompt;
+// TODO: not yet wired into the pipeline (no CLI flag constructs it); kept
+// pending a wire-up-or-delete decision. Remove the allow once reachable.
+#[allow(dead_code)]
 pub mod prompt_equiv;
 pub mod redact;
 
-pub use cache::LlmCache;
-pub use client::{client_from_env, LlmClient, LlmRequest, MockClient};
-pub use prompt::{build_explain_prompt, build_suggest_prompt, PromptContext};
-pub use prompt_equiv::{build_equivalence_prompt, PROMPT_TEMPLATE_VERSION};
+pub use client::LlmClient;
 
 /// Default Anthropic model used when neither config nor `--model` overrides.
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+
+/// Loop-invariant LLM call configuration shared by `fermut explain --llm` and
+/// `fermut suggest`: which model, whether to bypass the cache, and where the
+/// cache file lives. Built once per command (model and cache path already
+/// resolved) and passed by reference to each per-mutant call, replacing the
+/// repeated `(model, no_cache, cache_path)` argument trio.
+#[derive(Clone, Debug)]
+pub struct LlmCallOpts {
+    pub model: String,
+    pub no_cache: bool,
+    pub cache_path: std::path::PathBuf,
+}
 
 /// Default max tokens for completions. Tests are small; this is plenty.
 pub const DEFAULT_MAX_TOKENS: u32 = 2048;

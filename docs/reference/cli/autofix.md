@@ -11,8 +11,8 @@ fermut autofix <REPORT> [TARGET] [flags...]
 For each surviving mutant, autofix:
 
 1. **Generates** a test (same Anthropic prompt as `suggest`).
-2. **Appends** it to the discovered test file (the one referencing the
-   enclosing symbol), or `--out`.
+2. **Appends** it to `--out` when given, else to the discovered test file
+   (the one referencing the enclosing symbol).
 3. **Verifies** against the real runner:
    - the unmutated suite (with the new test) still passes — a test that
      fails on correct code is wrong;
@@ -29,7 +29,7 @@ For each surviving mutant, autofix:
 | `--path <dir>`        | `.`                  | Source root for the runner + baseline.                           |
 | `--tests <dir>`       | configured           | Tests dir: mined for the apply target and mirrored by the verifier. |
 | `--python <PATH>`     | auto-discover        | Interpreter or virtualenv the verifier runs pytest with (`<python> -m pytest`). Same discovery as [`fermut run`](run.md#python-interpreter). |
-| `--out <file>`        | inferred             | Force generated tests into this file. **Must live inside the tests tree** or the verifier won't see it. |
+| `--out <file>`        | inferred             | Write generated tests to this file instead of the inferred one. **Must live inside the tests tree** or the verifier won't see it. |
 | `--model <id>`        | `claude-sonnet-4-6`  | Anthropic model.                                                 |
 | `--context <N>`       | `8`                  | Source lines of context in the prompt.                           |
 | `--sample-count <N>`  | `2`                  | Existing tests included in the prompt for style.                 |

@@ -9,9 +9,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{info, warn};
 
-use super::FilterArgs;
+use super::RunConfigArgs;
 use crate::config::{CacheScope, Config, ConfigSource, IsolationMode, LoadedConfig, RunnerKind};
 use crate::filter;
 use crate::mutator::Operator;
@@ -23,33 +23,77 @@ pub(super) const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// the whole suite runs once; raise with `--baseline-timeout` for big suites.
 pub(super) const DEFAULT_BASELINE_TIMEOUT_SECS: u64 = 300;
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_config(
-    cli_path: PathBuf,
-    cli_tests: Option<PathBuf>,
-    cli_jobs: Option<usize>,
-    cli_timeout: Option<u64>,
-    cli_no_ty_filter: bool,
-    cli_ruff_filter: bool,
-    cli_hypothesis_seed: Option<u64>,
-    cli_pytest_args: Vec<String>,
-    cli_no_cache: bool,
-    cli_cache_path: Option<PathBuf>,
-    cli_no_history: bool,
-    cli_history_path: Option<PathBuf>,
-    cli_sample: Option<f64>,
-    cli_sample_seed: Option<u64>,
-    cli_shard: Option<(u32, u32)>,
-    cli_runner: Option<RunnerKind>,
-    cli_python: Option<PathBuf>,
-    cli_isolation: Option<IsolationMode>,
-    cli_no_equiv_detect: bool,
-    cli_cache_scope: Option<CacheScope>,
-    cli_fail_under: Option<f64>,
-    cli_no_verify_baseline: bool,
-    cli_baseline_timeout: Option<u64>,
-    f: FilterArgs,
-) -> Result<Config> {
+/// Resolve smart test ordering from the CLI force-off/force-on flags and the
+/// config value. Pure so the precedence is unit-tested.
+///
+/// Precedence: `--no-smart-order` wins; then `--smart-order` /
+/// `smart_order = true` force it on; otherwise it defaults on.
+///
+/// A per-mutant timeout does **not** disable ordering. Ordering only permutes
+/// the coverage-selected set, and under pytest `-x` that can convert a
+/// `killed`↔`timed_out` outcome — but *never* produce or remove a `survived`
+/// one (a failing test still fails whenever it runs; a timeout merely relabels
+/// the kill). fermut's score counts `timed_out` as detected, identical to
+/// `killed` (see [`crate::report::Counts`]), so the mutation score and the
+/// `--fail-on-regression` gate (score + survivor ids) are order-invariant with
+/// or without a timeout. Killer-first ordering only changes speed — and helps
+/// *most* under a timeout, by reaching the kill before the deadline instead of
+/// burning it on slow non-killer tests.
+fn resolve_smart_order(cli_no: bool, cli_yes: bool, file: Option<bool>) -> bool {
+    if cli_no {
+        false
+    } else if cli_yes {
+        true
+    } else {
+        file.unwrap_or(true)
+    }
+}
+
+/// Merge the parsed `run` CLI args (`cli_path` positional + the flattened
+/// [`RunConfigArgs`]) with the loaded config file into a runtime `Config`.
+pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Config> {
+    let RunConfigArgs {
+        tests: cli_tests,
+        jobs: cli_jobs,
+        timeout: cli_timeout,
+        no_ty_filter: cli_no_ty_filter,
+        ruff_filter: cli_ruff_filter,
+        tce: cli_tce,
+        hypothesis_seed: cli_hypothesis_seed,
+        pytest_args: cli_pytest_args,
+        no_cache: cli_no_cache,
+        cache_path: cli_cache_path,
+        cache_audit_rate: cli_cache_audit_rate,
+        no_cache_audit: cli_no_cache_audit,
+        no_history: cli_no_history,
+        history_path: cli_history_path,
+        sample: cli_sample,
+        sample_seed: cli_sample_seed,
+        shard: cli_shard,
+        runner: cli_runner,
+        python: cli_python,
+        isolation: cli_isolation,
+        no_equiv_detect: cli_no_equiv_detect,
+        cache_scope: cli_cache_scope,
+        fail_under: cli_fail_under,
+        no_verify_baseline: cli_no_verify_baseline,
+        baseline_timeout: cli_baseline_timeout,
+        no_smart_order: cli_no_smart_order,
+        smart_order: cli_smart_order,
+        no_pytest_plugin: cli_no_pytest_plugin,
+        max_time: cli_max_time,
+        record_kill_sets: cli_record_kill_sets,
+        only_dominators,
+        audit_inferred,
+        filter: f,
+    } = args;
+    let cli_runner: Option<RunnerKind> = cli_runner.map(Into::into);
+    if cli_record_kill_sets.is_some() {
+        warn!("`--record-kill-sets` is experimental: its output format may change");
+    }
+    let cli_isolation: Option<IsolationMode> = cli_isolation.map(Into::into);
+    let cli_cache_scope: Option<CacheScope> = cli_cache_scope.map(Into::into);
+
     let loaded = LoadedConfig::load(&cli_path)?;
     let file = &loaded.file;
 
@@ -98,8 +142,14 @@ pub(crate) fn build_config(
         file.ty_filter.unwrap_or(true)
     };
     let ruff_filter = cli_ruff_filter || file.ruff_filter.unwrap_or(false);
+    let tce = cli_tce || file.tce.unwrap_or(false);
     let experimental = f.experimental || file.experimental.unwrap_or(false);
     let parity = f.parity || file.parity.unwrap_or(false);
+    let operator_profile = f
+        .operators
+        .map(Into::into)
+        .or(file.operators)
+        .unwrap_or_default();
 
     let ops_allow = merge_op_list(f.ops, &file.ops)?;
     let ops_deny = merge_op_list(f.skip_ops, &file.skip_ops)?.unwrap_or_default();
@@ -107,32 +157,100 @@ pub(crate) fn build_config(
     let (diff_base, since) = if f.no_diff_only {
         (None, None)
     } else {
-        let diff_base = f.diff_only.or_else(|| file.diff_only.clone());
-        let since = f.since.or_else(|| file.since.clone());
-        if diff_base.is_some() && since.is_some() {
-            return Err(anyhow::anyhow!(
-                "`--diff-only` and `--since` are mutually exclusive"
-            ));
+        match (f.diff_only, f.since) {
+            // A CLI scope replaces the config's (CLI > config), so
+            // `--since HEAD` works on a pr-gate config's `diff_only = "main"`.
+            // clap already rejects both flags together.
+            (Some(base), _) => (Some(base), None),
+            (None, Some(spec)) => (None, Some(spec)),
+            (None, None) => {
+                if file.diff_only.is_some() && file.since.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "config sets both `diff_only` and `since`; they are mutually exclusive"
+                    ));
+                }
+                (file.diff_only.clone(), file.since.clone())
+            }
         }
-        (diff_base, since)
+    };
+    // Inferred kills are for full nightly sweeps. A diff-scoped run is the PR
+    // gate, which must score observed verdicts only — refuse even when the
+    // scope came from the config file, where clap's conflict can't see it.
+    if only_dominators && (diff_base.is_some() || since.is_some()) {
+        anyhow::bail!(
+            "`--only-dominators` can't be combined with `--diff-only`/`--since` \
+             (from the CLI or config): a diff-scoped run must score observed verdicts"
+        );
+    }
+    if only_dominators {
+        warn!("`--only-dominators` is experimental: some kills are inferred, not run");
+    }
+
+    let project_root =
+        crate::runner::find_project_root(&source_root).unwrap_or_else(|| source_root.clone());
+    // Resolve the coverage file and remember whether it was *explicitly* wired
+    // (CLI/config) or *auto-discovered*. The provenance decides how we react to
+    // a stale file below: an explicit path is the user's choice (warn, obey),
+    // an auto-discovered one is opportunistic (decline rather than silently
+    // narrow test sets with outdated data).
+    let explicit_coverage = f
+        .coverage
+        .or_else(|| file.coverage.clone().map(|p| loaded.resolve_path(p)));
+    let (mut coverage_path, coverage_auto) = if f.no_coverage {
+        (None, false)
+    } else if let Some(p) = explicit_coverage {
+        (Some(p), false)
+    } else {
+        // Nothing wired explicitly: fall back to coverage.py's canonical
+        // `.coverage` SQLite DB at the project root if one is present. fermut
+        // reads it directly, so a plain `pytest --cov-context=test` is enough —
+        // no config edit and no `coverage json` export needed.
+        match discover_coverage_db(&project_root) {
+            Some(p) => (Some(p), true),
+            None => (None, false),
+        }
     };
 
-    let coverage_path = if f.no_coverage {
-        None
-    } else {
-        f.coverage
-            .or_else(|| file.coverage.clone().map(|p| loaded.resolve_path(p)))
-    };
-    let coverage = match &coverage_path {
-        Some(p) => {
-            let project_root = crate::runner::find_project_root(&source_root)
-                .unwrap_or_else(|| source_root.clone());
-            Some(crate::filter::coverage::CoverageContexts::from_path(
-                p,
-                &source_root,
-                &project_root,
-            )?)
+    // Freshness guard: a `.coverage` older than the source/tests it claims to
+    // describe narrows each mutant's test set from stale data — mutants on
+    // newly-added or edited lines get wrongly skipped (false survivors / vacuous
+    // 100%). Detect it by mtime and act on provenance.
+    if let Some(p) = &coverage_path {
+        if let Some(newer) =
+            newer_source_than_coverage(p, &source_root, tests.as_deref(), &project_root)
+        {
+            if coverage_auto {
+                warn!(
+                    "ignoring auto-discovered coverage {} — it is older than e.g. {} \
+                     (and possibly other sources/tests). Using stale coverage would \
+                     wrongly skip mutants on changed lines, so this run proceeds \
+                     without coverage selection. Refresh it with \
+                     `pytest --cov={src} --cov-context=test` (or `fermut coverage`).",
+                    p.display(),
+                    newer.display(),
+                    src = source_root.display(),
+                );
+                coverage_path = None;
+            } else {
+                warn!(
+                    "coverage {} looks stale — it is older than e.g. {} (and possibly \
+                     other sources/tests). Survivors on changed lines may be false; \
+                     regenerate before trusting results: \
+                     `pytest --cov={src} --cov-context=test` (or `fermut coverage`).",
+                    p.display(),
+                    newer.display(),
+                    src = source_root.display(),
+                );
+            }
         }
+    }
+
+    let coverage = match &coverage_path {
+        Some(p) => Some(crate::filter::coverage::CoverageContexts::from_path(
+            p,
+            &source_root,
+            &project_root,
+        )?),
         None => None,
     };
 
@@ -152,6 +270,20 @@ pub(crate) fn build_config(
         .or_else(|| file.cache_path.clone().map(|p| loaded.resolve_path(p)))
         .unwrap_or_else(|| crate::cache::default_cache_path(&artifact_root));
 
+    let cache_audit_rate = if cli_no_cache_audit {
+        0.0
+    } else {
+        match cli_cache_audit_rate {
+            Some(r) => r,
+            None => file
+                .cache_audit_rate
+                .map(check_audit_rate)
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("cache_audit_rate: {e}"))?
+                .unwrap_or(crate::config::DEFAULT_CACHE_AUDIT_RATE),
+        }
+    };
+
     let history = if cli_no_history {
         false
     } else {
@@ -160,6 +292,23 @@ pub(crate) fn build_config(
     let history_path = cli_history_path
         .or_else(|| file.history_path.clone().map(|p| loaded.resolve_path(p)))
         .unwrap_or_else(|| crate::history::default_history_path(&artifact_root));
+
+    // Smart test ordering is verdict-neutral even with a per-mutant timeout:
+    // reordering only permutes the selected set, so it can flip
+    // `killed`↔`timed_out` (both count as *detected* in the score) but never
+    // produce or remove a `survived` one. The mutation score and the
+    // `--fail-on-regression` gate are therefore order-invariant, so an explicit
+    // timeout does *not* disable ordering — `--no-smart-order` /
+    // `smart_order = false` remain the only off switches. The sidecar lives
+    // beside cache/history.
+    let smart_order = resolve_smart_order(cli_no_smart_order, cli_smart_order, file.smart_order);
+    let pytest_plugin = !cli_no_pytest_plugin && file.pytest_plugin.unwrap_or(true);
+    let kill_order_path = file
+        .kill_order_path
+        .clone()
+        .map(|p| loaded.resolve_path(p))
+        .unwrap_or_else(|| crate::kill_order::default_kill_order_path(&artifact_root));
+    let dominators_path = crate::subsume::default_dominators_path(&artifact_root);
 
     let sample_ratio = cli_sample.or(file.sample);
     let sample_seed = cli_sample_seed.or(file.sample_seed);
@@ -223,6 +372,7 @@ pub(crate) fn build_config(
     let baseline_timeout_secs = cli_baseline_timeout
         .or(file.baseline_timeout)
         .unwrap_or(DEFAULT_BASELINE_TIMEOUT_SECS);
+    let max_time_secs = cli_max_time.or(file.max_time);
 
     Ok(Config {
         source_root,
@@ -231,8 +381,10 @@ pub(crate) fn build_config(
         timeout_secs,
         ty_filter,
         ruff_filter,
+        tce,
         experimental,
         parity,
+        operator_profile,
         ops_allow,
         ops_deny,
         diff_base,
@@ -243,6 +395,11 @@ pub(crate) fn build_config(
         pytest_args,
         cache,
         cache_path,
+        cache_audit_rate,
+        smart_order,
+        pytest_plugin,
+        kill_order_path,
+        dominators_path,
         history,
         history_path,
         sample_ratio,
@@ -250,6 +407,7 @@ pub(crate) fn build_config(
         shard,
         runner,
         python,
+        unittest_pattern: file.unittest_pattern.clone(),
         isolation,
         equiv_detect,
         cache_scope,
@@ -257,7 +415,26 @@ pub(crate) fn build_config(
         exclude,
         verify_baseline,
         baseline_timeout_secs,
+        max_time_secs,
+        record_kill_sets: cli_record_kill_sets.map(absolutize),
+        only_dominators,
+        inferred_audit_rate: audit_inferred.unwrap_or(crate::config::DEFAULT_CACHE_AUDIT_RATE),
     })
+}
+
+/// Clap value parser for `--cache-audit-rate`: a fraction in `[0, 1]`.
+pub(crate) fn parse_audit_rate(s: &str) -> Result<f64, String> {
+    let r: f64 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
+    check_audit_rate(r)
+}
+
+/// A killer-hit audit rate must be a finite fraction in `[0, 1]`.
+fn check_audit_rate(r: f64) -> Result<f64, String> {
+    if (0.0..=1.0).contains(&r) {
+        Ok(r)
+    } else {
+        Err(format!("audit rate must be between 0 and 1, got {r}"))
+    }
 }
 
 /// Make `p` absolute. Prefer `canonicalize` so symlinks resolve to a real
@@ -270,6 +447,115 @@ fn absolutize(p: PathBuf) -> PathBuf {
         return c;
     }
     std::env::current_dir().map(|d| d.join(&p)).unwrap_or(p)
+}
+
+/// Auto-discover coverage.py's canonical `.coverage` SQLite DB at the project
+/// root when no coverage path was wired. Returns it only when the file exists
+/// *and* sniffs as a real SQLite DB — guarding against a stray/empty `.coverage`
+/// that isn't a coverage database. Verifying it actually carries per-test
+/// contexts is left to `from_path`, which errors with the regeneration recipe.
+pub(crate) fn discover_coverage_db(project_root: &Path) -> Option<PathBuf> {
+    let candidate = project_root.join(".coverage");
+    if !candidate.is_file() {
+        return None;
+    }
+    match filter::coverage::is_sqlite(&candidate) {
+        Ok(true) => {
+            info!(
+                "auto-discovered coverage DB at {} (no `coverage` key set)",
+                candidate.display()
+            );
+            Some(candidate)
+        }
+        _ => None,
+    }
+}
+
+/// Freshness check for a coverage file: return the first `.py` whose mtime is
+/// newer than the coverage file's, i.e. code that changed after the coverage
+/// was recorded and would therefore be described by stale test-context data.
+/// `None` means the coverage is at least as new as every source/test file
+/// (fresh), or that mtimes couldn't be read (be permissive — never block a run
+/// on a stat failure).
+///
+/// Which trees are scanned depends on whether a `tests` dir is known:
+///  - `tests` given → `source_root` plus `tests` (a nested tests dir is folded
+///    into the `source_root` walk to avoid double-stating).
+///  - `tests` unknown → the whole `project_root`, so a newly-added test
+///    *anywhere* (the primary staleness case) is still caught rather than
+///    silently missed. Vendored/cache dirs are pruned so this stays a cheap
+///    stat walk instead of a venv/site-packages crawl.
+///
+/// The returned path is just *an* offending file for the warning message, not
+/// necessarily the newest — the walk short-circuits on the first one found.
+pub(crate) fn newer_source_than_coverage(
+    coverage: &Path,
+    source_root: &Path,
+    tests: Option<&Path>,
+    project_root: &Path,
+) -> Option<PathBuf> {
+    let cov_mtime = std::fs::metadata(coverage).ok()?.modified().ok()?;
+    let mut roots: Vec<&Path> = Vec::new();
+    match tests {
+        Some(t) => {
+            roots.push(source_root);
+            // Skip a tests dir nested under source_root — walking source_root
+            // already covers it, and double-walking is wasted stats.
+            if !t.starts_with(source_root) {
+                roots.push(t);
+            }
+        }
+        // No configured tests dir: scan the whole project so a new test file
+        // located outside source_root still trips the guard.
+        None => roots.push(project_root),
+    }
+    for root in roots {
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_entry(|e| !is_pruned_dir(e))
+            .filter_map(Result::ok)
+        {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "py") {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            let Ok(mtime) = meta.modified() else { continue };
+            if mtime > cov_mtime {
+                return Some(path.to_path_buf());
+            }
+        }
+    }
+    None
+}
+
+/// Directories never worth scanning for freshness: version control, virtual
+/// envs, vendored deps, and tool caches. Pruning them keeps the project-root
+/// walk cheap and stops a stale dependency `.py` from spuriously tripping the
+/// guard. Only prunes directories — files always pass through.
+fn is_pruned_dir(entry: &walkdir::DirEntry) -> bool {
+    if !entry.file_type().is_dir() {
+        return false;
+    }
+    matches!(
+        entry.file_name().to_str(),
+        Some(
+            ".git"
+                | ".hg"
+                | ".svn"
+                | ".venv"
+                | "venv"
+                | "node_modules"
+                | "__pycache__"
+                | "site-packages"
+                | ".fermut"
+                | ".tox"
+                | ".nox"
+                | ".mypy_cache"
+                | ".pytest_cache"
+                | ".ruff_cache"
+        )
+    )
 }
 
 fn parse_isolation_env(s: String) -> Option<IsolationMode> {
@@ -310,6 +596,7 @@ fn merge_op_list(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::FilterArgs;
 
     fn empty_filter() -> FilterArgs {
         FilterArgs {
@@ -322,7 +609,199 @@ mod tests {
             no_coverage: false,
             experimental: false,
             parity: false,
+            operators: None,
             exclude: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn discover_coverage_db_finds_sqlite_at_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join(".coverage");
+        // Minimal real SQLite DB (rusqlite writes the magic header on create).
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("CREATE TABLE coverage_schema (version integer)", [])
+            .unwrap();
+        drop(conn);
+        assert_eq!(discover_coverage_db(tmp.path()), Some(db));
+    }
+
+    #[test]
+    fn discover_coverage_db_ignores_non_sqlite_file() {
+        // A stray `.coverage` that isn't a SQLite DB must not be picked up.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".coverage"), "not a database").unwrap();
+        assert_eq!(discover_coverage_db(tmp.path()), None);
+    }
+
+    #[test]
+    fn discover_coverage_db_none_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(discover_coverage_db(tmp.path()), None);
+    }
+
+    /// Stamp `path`'s mtime to `epoch_secs` so freshness tests are deterministic
+    /// regardless of filesystem timestamp resolution.
+    fn set_mtime(path: &Path, epoch_secs: i64) {
+        filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(epoch_secs, 0)).unwrap();
+    }
+
+    #[test]
+    fn freshness_none_when_coverage_newer_than_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let py = src.join("a.py");
+        std::fs::write(&py, "x = 1\n").unwrap();
+        let cov = tmp.path().join(".coverage");
+        std::fs::write(&cov, "db").unwrap();
+        set_mtime(&py, 1000);
+        set_mtime(&cov, 2000); // coverage recorded after the source → fresh
+        assert_eq!(newer_source_than_coverage(&cov, &src, None, &src), None);
+    }
+
+    #[test]
+    fn freshness_flags_source_edited_after_coverage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let py = src.join("a.py");
+        std::fs::write(&py, "x = 1\n").unwrap();
+        let cov = tmp.path().join(".coverage");
+        std::fs::write(&cov, "db").unwrap();
+        set_mtime(&cov, 1000);
+        set_mtime(&py, 2000); // source edited after coverage → stale
+        assert_eq!(newer_source_than_coverage(&cov, &src, None, &src), Some(py));
+    }
+
+    #[test]
+    fn freshness_flags_new_test_after_coverage() {
+        // A test added after coverage was recorded isn't reflected in the
+        // contexts → its would-be kills become false survivors. Detected via
+        // the separate tests dir.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let tests = tmp.path().join("tests");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::create_dir(&tests).unwrap();
+        let s = src.join("a.py");
+        std::fs::write(&s, "x = 1\n").unwrap();
+        let cov = tmp.path().join(".coverage");
+        std::fs::write(&cov, "db").unwrap();
+        set_mtime(&s, 500);
+        set_mtime(&cov, 1000);
+        let t = tests.join("test_a.py");
+        std::fs::write(&t, "def test(): pass\n").unwrap();
+        set_mtime(&t, 2000); // new test after coverage → stale
+        assert_eq!(
+            newer_source_than_coverage(&cov, &src, Some(&tests), &src),
+            Some(t)
+        );
+    }
+
+    #[test]
+    fn freshness_flags_new_test_via_project_root_when_tests_unset() {
+        // No configured tests dir: a test added anywhere under the project after
+        // coverage was recorded must still be caught by walking project_root.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let tests = tmp.path().join("tests");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::create_dir(&tests).unwrap();
+        let s = src.join("a.py");
+        std::fs::write(&s, "x = 1\n").unwrap();
+        let cov = tmp.path().join(".coverage");
+        std::fs::write(&cov, "db").unwrap();
+        set_mtime(&s, 500);
+        set_mtime(&cov, 1000);
+        let t = tests.join("test_a.py");
+        std::fs::write(&t, "def test(): pass\n").unwrap();
+        set_mtime(&t, 2000); // new test after coverage, tests dir unknown → stale
+        assert_eq!(
+            newer_source_than_coverage(&cov, &src, None, tmp.path()),
+            Some(t)
+        );
+    }
+
+    #[test]
+    fn freshness_prunes_vendored_dirs() {
+        // A newer `.py` inside a pruned dir (e.g. .venv/site-packages) must not
+        // trip the guard — those are dependencies, not the code under test.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let venv = tmp.path().join(".venv");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::create_dir(&venv).unwrap();
+        let s = src.join("a.py");
+        std::fs::write(&s, "x = 1\n").unwrap();
+        let cov = tmp.path().join(".coverage");
+        std::fs::write(&cov, "db").unwrap();
+        set_mtime(&s, 500);
+        set_mtime(&cov, 1000);
+        let dep = venv.join("dep.py");
+        std::fs::write(&dep, "y = 2\n").unwrap();
+        set_mtime(&dep, 2000); // newer, but vendored → pruned
+        assert_eq!(
+            newer_source_than_coverage(&cov, &src, None, tmp.path()),
+            None
+        );
+    }
+
+    #[test]
+    fn freshness_ignores_non_python_files() {
+        // A newer README/data file must not trip the guard — only `.py` counts.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let py = src.join("a.py");
+        std::fs::write(&py, "x = 1\n").unwrap();
+        let cov = tmp.path().join(".coverage");
+        std::fs::write(&cov, "db").unwrap();
+        set_mtime(&py, 500);
+        set_mtime(&cov, 1000);
+        let readme = src.join("notes.md");
+        std::fs::write(&readme, "hi\n").unwrap();
+        set_mtime(&readme, 2000); // newer, but not .py → ignored
+        assert_eq!(newer_source_than_coverage(&cov, &src, None, &src), None);
+    }
+
+    /// A `RunConfigArgs` with every flag defaulted off/none, carrying the
+    /// given `filter`. Tests tweak individual fields before calling.
+    fn run_args(filter: FilterArgs) -> RunConfigArgs {
+        RunConfigArgs {
+            tests: None,
+            jobs: None,
+            timeout: None,
+            no_ty_filter: false,
+            ruff_filter: false,
+            tce: false,
+            hypothesis_seed: None,
+            pytest_args: Vec::new(),
+            no_cache: false,
+            cache_path: None,
+            no_history: false,
+            history_path: None,
+            sample: None,
+            sample_seed: None,
+            shard: None,
+            runner: None,
+            python: None,
+            isolation: None,
+            no_equiv_detect: false,
+            cache_scope: None,
+            fail_under: None,
+            no_verify_baseline: false,
+            baseline_timeout: None,
+            no_smart_order: false,
+            smart_order: false,
+            no_pytest_plugin: false,
+            max_time: None,
+            record_kill_sets: None,
+            only_dominators: false,
+            audit_inferred: None,
+            cache_audit_rate: None,
+            no_cache_audit: false,
+            filter,
         }
     }
 
@@ -335,32 +814,9 @@ mod tests {
         cli_fail_under: Option<f64>,
         filter: FilterArgs,
     ) -> Result<Config> {
-        build_config(
-            cli_path,
-            None,
-            None,
-            None,
-            false,
-            false,
-            None,
-            Vec::new(),
-            false,
-            None,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None, // cli_runner
-            None, // cli_python
-            None, // cli_isolation
-            false,
-            None,
-            cli_fail_under,
-            false,
-            None,
-            filter,
-        )
+        let mut args = run_args(filter);
+        args.fail_under = cli_fail_under;
+        build_config(cli_path, args)
     }
 
     #[test]
@@ -517,6 +973,17 @@ mod tests {
     }
 
     #[test]
+    fn cli_since_overrides_config_diff_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "diff_only = \"main\"\n").unwrap();
+        let mut f = empty_filter();
+        f.since = Some("HEAD".into());
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
+        assert_eq!(cfg.since.as_deref(), Some("HEAD"));
+        assert!(cfg.diff_base.is_none());
+    }
+
+    #[test]
     fn no_diff_only_clears_config_since() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("fermut.toml"), "since = \"HEAD~10\"\n").unwrap();
@@ -540,6 +1007,197 @@ mod tests {
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
         assert!(cfg.coverage_path.is_none());
         assert!(cfg.coverage.is_none());
+    }
+
+    #[test]
+    fn resolve_smart_order_precedence() {
+        // (cli_no, cli_yes, file) -> on. A timeout is deliberately absent from
+        // the signature: ordering is verdict-neutral even under a timeout (it
+        // only flips killed↔timed_out, both detected), so a timeout must never
+        // enter the decision. This is the guard for finding #1 — the old code
+        // auto-disabled the default under an explicit timeout.
+        let cases = [
+            // Default on when nothing forces it.
+            ((false, false, None), true),
+            // Config value honored.
+            ((false, false, Some(false)), false),
+            ((false, false, Some(true)), true),
+            // `--no-smart-order` wins over everything.
+            ((true, false, None), false),
+            ((true, false, Some(true)), false),
+            // `--smart-order` forces on over a config-off.
+            ((false, true, Some(false)), true),
+            ((false, true, None), true),
+        ];
+        for ((cli_no, cli_yes, file), want) in cases {
+            assert_eq!(
+                resolve_smart_order(cli_no, cli_yes, file),
+                want,
+                "resolve_smart_order({cli_no}, {cli_yes}, {file:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn smart_order_defaults_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert!(cfg.smart_order, "smart ordering is on by default");
+        assert!(cfg.kill_order_path.ends_with(".fermut/kill-order.json"));
+    }
+
+    #[test]
+    fn kill_order_path_from_config_resolves_against_config_dir() {
+        // A relative `kill_order_path` in config resolves against the config
+        // dir, not left hardcoded to `.fermut/kill-order.json`. Guards the
+        // sidecar-path knob against regressing back to a fixed location.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("fermut.toml"),
+            "kill_order_path = \"artifacts/ko.json\"\n",
+        )
+        .unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        // `resolve_path` canonicalizes (on macOS `/var` → `/private/var`), so
+        // compare the tail + absoluteness rather than the exact temp prefix.
+        assert!(cfg.kill_order_path.is_absolute());
+        assert!(
+            cfg.kill_order_path.ends_with("artifacts/ko.json"),
+            "kill_order_path {:?} should resolve under the config dir",
+            cfg.kill_order_path
+        );
+    }
+
+    #[test]
+    fn only_dominators_refuses_a_diff_scope_from_config() {
+        // clap's conflict can't see `diff_only` in the config file; the PR-gate
+        // refusal must still hold.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "diff_only = \"main\"\n").unwrap();
+        let mut args = run_args(empty_filter());
+        args.only_dominators = true;
+        let err = build_config(tmp.path().to_path_buf(), args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--only-dominators"), "{err}");
+    }
+
+    #[test]
+    fn operator_profile_from_config_and_cli_override() {
+        use crate::config::OperatorProfile;
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert_eq!(cfg.operator_profile, OperatorProfile::Default);
+
+        std::fs::write(tmp.path().join("fermut.toml"), "operators = \"minimal\"\n").unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert_eq!(cfg.operator_profile, OperatorProfile::Minimal);
+
+        let f = FilterArgs {
+            operators: Some(crate::cli::OperatorProfileCli::Full),
+            ..empty_filter()
+        };
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
+        assert_eq!(cfg.operator_profile, OperatorProfile::Full, "CLI wins");
+    }
+
+    #[test]
+    fn smart_order_config_false_disables() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "smart_order = false\n").unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert!(!cfg.smart_order);
+    }
+
+    #[test]
+    fn cli_no_smart_order_overrides_config_on() {
+        // Config says on; the CLI flag must win and turn it off.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "smart_order = true\n").unwrap();
+        let mut args = run_args(empty_filter());
+        args.no_smart_order = true;
+        let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
+        assert!(!cfg.smart_order, "--no-smart-order wins over config on");
+    }
+
+    #[test]
+    fn pytest_plugin_defaults_on_and_both_switches_disable_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = build_config(tmp.path().to_path_buf(), run_args(empty_filter())).unwrap();
+        assert!(cfg.pytest_plugin, "the reporter plugin is on by default");
+
+        let mut args = run_args(empty_filter());
+        args.no_pytest_plugin = true;
+        let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
+        assert!(!cfg.pytest_plugin, "--no-pytest-plugin disables it");
+
+        std::fs::write(tmp.path().join("fermut.toml"), "pytest_plugin = false\n").unwrap();
+        let cfg = build_config(tmp.path().to_path_buf(), run_args(empty_filter())).unwrap();
+        assert!(!cfg.pytest_plugin, "pytest_plugin = false disables it");
+    }
+
+    #[test]
+    fn explicit_config_timeout_keeps_default_smart_order_on() {
+        // Finding #1 regression guard: a per-mutant timeout does NOT disable
+        // smart ordering. Ordering only flips killed↔timed_out (both detected in
+        // the score), never producing or removing a survivor, so the score and
+        // the regression gate stay order-invariant — and killer-first ordering
+        // helps *most* under a timeout. An explicit `timeout` in config must
+        // leave the default-on ordering on.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "timeout = 30\n").unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert!(
+            cfg.smart_order,
+            "an explicit timeout must NOT disable default-on smart ordering"
+        );
+    }
+
+    #[test]
+    fn explicit_smart_order_true_survives_timeout() {
+        // Config `smart_order = true` alongside a timeout stays on (as does the
+        // default — see the sibling test; a timeout never disables ordering).
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("fermut.toml"),
+            "smart_order = true\ntimeout = 30\n",
+        )
+        .unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert!(
+            cfg.smart_order,
+            "explicit smart_order = true must survive an explicit timeout"
+        );
+    }
+
+    #[test]
+    fn explicit_cli_timeout_keeps_smart_order_on() {
+        // Finding #1 guard via the CLI `--timeout`, no config at all: a timeout
+        // must not disable default-on ordering (order-invariant score).
+        let tmp = tempfile::tempdir().unwrap();
+        let mut args = run_args(empty_filter());
+        args.timeout = Some(5); // explicit per-mutant timeout
+        let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
+        assert!(
+            cfg.smart_order,
+            "--timeout must NOT disable default-on smart ordering"
+        );
+    }
+
+    #[test]
+    fn cli_smart_order_forces_on_over_config_off_with_timeout() {
+        // `--smart-order` forces ordering on over a config `smart_order = false`,
+        // timeout present or not. (The timeout itself never disables ordering.)
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "smart_order = false\n").unwrap();
+        let mut args = run_args(empty_filter());
+        args.timeout = Some(5);
+        args.smart_order = true; // forces on over config-off
+        let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
+        assert!(
+            cfg.smart_order,
+            "--smart-order must force ordering on over config smart_order = false"
+        );
     }
 
     #[test]

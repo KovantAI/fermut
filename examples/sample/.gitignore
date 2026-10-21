@@ -2,4 +2,5 @@
 .fermut/
 coverage.json
 .coverage
+.coverage.fermut-fingerprints.json
 .venv/

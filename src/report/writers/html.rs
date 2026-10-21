@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 
 use super::html_escape;
 use crate::report::diff::unified_diff_for;
+use crate::report::fold::FoldIndex;
 use crate::report::{MutantOutcome, Report};
 
 impl Report {
@@ -18,6 +19,7 @@ impl Report {
             by_file.entry(o.mutant().file.clone()).or_default().push(o);
         }
 
+        let folds = FoldIndex::new(&self.outcomes);
         let mut body = String::new();
         body.push_str(&format!(
             "<h1>fermut report</h1><div class='summary'>\
@@ -27,14 +29,14 @@ impl Report {
              <span class='x'>skipped: {}</span> \
              <span class='q'>equivalent: {}</span> \
              <span class='e'>errored: {}</span> \
-             <span class='score'>score: {:.1}%</span></div>",
+             <span class='score'>score: {}</span></div>",
             c.killed,
             c.survived,
             c.timed_out,
             c.skipped,
             c.equivalent,
             c.errored,
-            c.mutation_score()
+            c.score_label()
         ));
 
         for (file, outcomes) in &by_file {
@@ -56,6 +58,9 @@ impl Report {
             body.push_str("<ul class='mutants'>");
             for o in outcomes {
                 let m = o.mutant();
+                if folds.is_folded(&m.id) {
+                    continue;
+                }
                 let cls = match o {
                     MutantOutcome::Killed { .. } => "killed",
                     MutantOutcome::Survived { .. } => "survived",
@@ -64,13 +69,19 @@ impl Report {
                     MutantOutcome::Error { .. } => "error",
                     MutantOutcome::Equivalent { .. } => "equivalent",
                 };
-                let label = format!(
+                let mut label = format!(
                     "line {} · {} · <code>{}</code> → <code>{}</code>",
                     m.line,
                     m.operator.name(),
                     html_escape(&m.original),
                     html_escape(&m.replacement)
                 );
+                if o.inferred_from().is_some() {
+                    label.push_str(" · <i>inferred from a dominator, not run</i>");
+                }
+                if let Some(t) = o.hung_in() {
+                    label.push_str(&format!(" · timed out in <code>{}</code>", html_escape(t)));
+                }
                 body.push_str(&format!(
                     "<li class='m {cls}'><span class='tag'>{}</span> {label}",
                     o.status_label()
@@ -85,6 +96,24 @@ impl Report {
                             html_escape(&diff)
                         ));
                     }
+                }
+                let sub = folds.subsumed(&m.id);
+                if !sub.is_empty() {
+                    body.push_str(
+                        "<div class='folded'>also killed by a test that kills this one:\
+                         <ul class='mutants'>",
+                    );
+                    for s in sub {
+                        body.push_str(&format!(
+                            "<li class='m survived'><span class='tag'>survived</span> \
+                             line {} · {} · <code>{}</code> → <code>{}</code></li>",
+                            s.line,
+                            s.operator.name(),
+                            html_escape(&s.original),
+                            html_escape(&s.replacement)
+                        ));
+                    }
+                    body.push_str("</ul></div>");
                 }
                 body.push_str("</li>");
             }
@@ -120,5 +149,133 @@ summary { cursor: pointer; padding: .4em 0; }
 .tag { display: inline-block; min-width: 70px; font-weight: 700; text-transform: uppercase; font-size: 10.5px; letter-spacing: .04em; }
 code { background: rgba(0,0,0,0.05); padding: 0 .3em; border-radius: 3px; }
 .diff { margin-top: .3em; }
+.folded { margin-top: .3em; font-family: -apple-system, system-ui, sans-serif; font-size: 12px; color: #555; }
 .diff pre { background: #fafafa; padding: .6em .9em; border-radius: 4px; overflow-x: auto; font-size: 12px; line-height: 1.4; }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use crate::mutator::{Mutant, Operator};
+    use crate::report::testing::make_mutant;
+    use crate::report::{MutantOutcome, Report};
+    use ruff_text_size::TextRange;
+
+    fn read(r: &Report) -> String {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        r.write_html(tmp.path()).unwrap();
+        std::fs::read_to_string(tmp.path()).unwrap()
+    }
+
+    #[test]
+    fn html_nests_subsumed_survivors_under_their_dominator() {
+        let html = read(&Report::new(crate::report::testing::folded_pair()));
+        let folded = html.find("class='folded'").expect("folded block");
+        let ge = html.find("<code>&gt;=</code>").unwrap();
+        assert!(folded < ge, "`>=` should render inside the folded block");
+        assert_eq!(
+            html.matches("<code>&gt;=</code>").count(),
+            1,
+            "rendered once"
+        );
+    }
+
+    #[test]
+    fn html_headlines_counts_score_and_inlines_css() {
+        let r = Report::new(vec![
+            MutantOutcome::killed(make_mutant()),
+            MutantOutcome::survived(make_mutant()),
+        ]);
+        let h = read(&r);
+        // Self-contained document with inlined stylesheet — no external assets.
+        assert!(h.starts_with("<!doctype html>"));
+        assert!(h.contains("<title>fermut report</title>"));
+        assert!(h.contains(".m.survived"), "CSS must be inlined");
+        // Summary carries every bucket count and the score label.
+        assert!(h.contains("killed: 1"));
+        assert!(h.contains("survived: 1"));
+        assert!(h.contains("score: 50.0%"));
+    }
+
+    #[test]
+    fn html_emits_a_class_and_tag_for_every_outcome_kind() {
+        let r = Report::new(vec![
+            MutantOutcome::killed(make_mutant()),
+            MutantOutcome::survived(make_mutant()),
+            MutantOutcome::timed_out(make_mutant()),
+            MutantOutcome::skipped(make_mutant(), "coverage"),
+            MutantOutcome::error(make_mutant(), "boom".into()),
+            MutantOutcome::equivalent(make_mutant(), "reason", "bytecode"),
+        ]);
+        let h = read(&r);
+        for cls in [
+            "killed",
+            "survived",
+            "timeout",
+            "skipped",
+            "error",
+            "equivalent",
+        ] {
+            assert!(
+                h.contains(&format!("class='m {cls}'")),
+                "missing class {cls}"
+            );
+        }
+    }
+
+    #[test]
+    fn html_groups_mutants_per_file_with_kill_survive_counts() {
+        let mut a = make_mutant();
+        a.file = "a.py".into();
+        let mut b = make_mutant();
+        b.file = "b.py".into();
+        let r = Report::new(vec![
+            MutantOutcome::killed(a.clone()),
+            MutantOutcome::survived(a),
+            MutantOutcome::killed(b),
+        ]);
+        let h = read(&r);
+        // Files sort into their own <details> section with a per-file tally.
+        assert!(h.contains("<b>a.py</b> — 2 mutants (1 killed, 1 survived)"));
+        assert!(h.contains("<b>b.py</b> — 1 mutants (1 killed, 0 survived)"));
+    }
+
+    #[test]
+    fn html_escapes_markup_in_file_and_code_spans() {
+        let mut m = make_mutant();
+        m.file = "<x>.py".into();
+        m.original = "a & b".into();
+        m.replacement = "<script>".into();
+        let r = Report::new(vec![MutantOutcome::killed(m)]);
+        let h = read(&r);
+        // No raw injection survives into the document.
+        assert!(!h.contains("<script>"));
+        assert!(h.contains("&lt;script&gt;"));
+        assert!(h.contains("&lt;x&gt;.py"));
+        assert!(h.contains("a &amp; b"));
+    }
+
+    #[test]
+    fn html_renders_diff_block_for_survivor_with_readable_source() {
+        // A survivor whose file exists on disk gets an inline unified diff;
+        // killed mutants never do.
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("f.py");
+        std::fs::write(&file, "x = 1 + 2\n").unwrap();
+        let m = Mutant {
+            id: "d-1".into(),
+            file: file.clone(),
+            operator: Operator::ArithOpSwap,
+            range: TextRange::new(6u32.into(), 7u32.into()),
+            original: "+".into(),
+            replacement: "-".into(),
+            line: 1,
+            stmt_line: 1,
+            site: None,
+        };
+        let r = Report::new(vec![MutantOutcome::survived(m)]);
+        let h = read(&r);
+        assert!(h.contains("<details class='diff'>"));
+        assert!(h.contains("-x = 1 + 2"));
+        assert!(h.contains("+x = 1 - 2"));
+    }
+}

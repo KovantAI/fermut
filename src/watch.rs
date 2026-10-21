@@ -118,3 +118,91 @@ fn drain_debounce(rx: &std::sync::mpsc::Receiver<notify::Result<notify::Event>>)
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{AccessKind, CreateKind, ModifyKind, RemoveKind};
+    use std::path::PathBuf;
+
+    fn event(kind: EventKind, paths: &[&str]) -> notify::Event {
+        notify::Event {
+            kind,
+            paths: paths.iter().map(PathBuf::from).collect(),
+            attrs: Default::default(),
+        }
+    }
+
+    #[test]
+    fn python_source_is_watched() {
+        assert!(is_python_path(Path::new("src/app.py")));
+        assert!(is_python_path(Path::new("app.py")));
+    }
+
+    #[test]
+    fn non_python_and_generated_paths_are_ignored() {
+        // Wrong extension, or none at all.
+        assert!(!is_python_path(Path::new("README.md")));
+        assert!(!is_python_path(Path::new("Makefile")));
+        // fermut's own artifacts and bytecode caches must not trigger re-runs,
+        // even though the file ends in `.py`.
+        assert!(!is_python_path(Path::new(".fermut/cache/x.py")));
+        assert!(!is_python_path(Path::new("src/__pycache__/app.py")));
+    }
+
+    #[test]
+    fn interesting_only_on_create_modify_remove_of_python() {
+        for kind in [
+            EventKind::Create(CreateKind::Any),
+            EventKind::Modify(ModifyKind::Any),
+            EventKind::Remove(RemoveKind::Any),
+        ] {
+            assert!(is_interesting(&event(kind, &["src/app.py"])));
+        }
+        // Access events never re-run — they don't change the tree.
+        assert!(!is_interesting(&event(
+            EventKind::Access(AccessKind::Any),
+            &["src/app.py"]
+        )));
+        // A qualifying event kind but no `.py` path → not interesting.
+        assert!(!is_interesting(&event(
+            EventKind::Modify(ModifyKind::Any),
+            &["notes.txt"]
+        )));
+    }
+
+    #[test]
+    fn interesting_when_any_path_in_batch_is_python() {
+        // notify batches multiple paths; one Python file is enough.
+        let ev = event(
+            EventKind::Modify(ModifyKind::Any),
+            &["notes.txt", "src/app.py"],
+        );
+        assert!(is_interesting(&ev));
+    }
+
+    #[test]
+    fn path_contains_segment_matches_only_whole_components() {
+        assert!(path_contains_segment(Path::new("a/.fermut/b"), ".fermut"));
+        // Substring of a component must not match.
+        assert!(!path_contains_segment(
+            Path::new("a/my.fermut.bak/b"),
+            ".fermut"
+        ));
+    }
+
+    #[test]
+    fn drain_debounce_returns_after_events_then_disconnect() {
+        // Queued events are consumed (the Ok branch), then a dropped sender
+        // ends the drain via Disconnected without waiting out the full window.
+        let (tx, rx) = channel();
+        tx.send(Ok(event(EventKind::Modify(ModifyKind::Any), &["a.py"])))
+            .unwrap();
+        tx.send(Ok(event(EventKind::Modify(ModifyKind::Any), &["b.py"])))
+            .unwrap();
+        drop(tx);
+        let start = Instant::now();
+        drain_debounce(&rx);
+        assert!(start.elapsed() < DEBOUNCE, "must not block for full window");
+    }
+}

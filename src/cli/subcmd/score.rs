@@ -13,42 +13,16 @@
 //! id sets, and a `regressed` flag. JSON is the default format — this
 //! command exists for machine consumers.
 
-use std::path::PathBuf;
-
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 
+use crate::cli::Format;
 use crate::history::{self, HistoryEntry};
 
 /// Float-noise floor for score comparisons. A delta inside `±SCORE_NOISE`
 /// is treated as flat — not a regression. Shared by the `regressed` flag
 /// and the `--fail-on-regression` gate so the two never disagree.
 const SCORE_NOISE: f64 = 0.05;
-
-#[derive(Debug, Clone)]
-pub struct ScoreOpts {
-    pub path: PathBuf,
-    pub history_path: Option<PathBuf>,
-    /// Compare the latest run against the entry this many branch-comparable
-    /// runs back. `1` (default) is the immediately prior run — the reward
-    /// signal for a single inner-loop iteration.
-    pub baseline: usize,
-    /// Restrict both current and baseline selection to entries recorded on
-    /// this git branch. Without it, the baseline is the most recent prior
-    /// run on the same branch as the latest entry (detached-HEAD / untagged
-    /// entries are treated as comparable, matching the regression gate).
-    pub branch: Option<String>,
-    /// If set and the score dropped more than this many points vs the
-    /// baseline, exit non-zero after printing. CI / agent rollback gate.
-    pub fail_on_regression: Option<f64>,
-    pub format: ScoreFormat,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum ScoreFormat {
-    Human,
-    Json,
-}
 
 /// The reward signal. Optional baseline fields are `null` when there is no
 /// comparable prior run (first recorded run on the branch).
@@ -115,18 +89,25 @@ pub(crate) fn compute_score(
     Ok(Some(build_report(current, base)))
 }
 
-pub fn score(opts: ScoreOpts) -> Result<()> {
-    let history_path = opts
-        .history_path
-        .clone()
-        .unwrap_or_else(|| history::default_history_path(&history::resolve_root(&opts.path)));
+pub(crate) fn score(args: ScoreArgs) -> Result<()> {
+    let ScoreArgs {
+        path,
+        history_path,
+        baseline,
+        branch,
+        fail_on_regression,
+        format,
+    } = args;
 
-    let Some(report) = compute_score(&history_path, opts.baseline, opts.branch.as_deref())? else {
+    let history_path = history_path
+        .unwrap_or_else(|| history::default_history_path(&history::resolve_root(&path)));
+
+    let Some(report) = compute_score(&history_path, baseline, branch.as_deref())? else {
         // Empty window: either the log is empty, or a `--branch` filter
         // excluded every entry. Distinguish so the user isn't told to
         // populate a log that already has runs.
         let entries = history::load(&history_path)?;
-        return match (entries.is_empty(), opts.branch.as_deref()) {
+        return match (entries.is_empty(), branch.as_deref()) {
             (false, Some(b)) => Err(anyhow!(
                 "no runs on branch '{b}' in {} ({} entr{} on other branches) — \
                  drop --branch or run `fermut run` on '{b}'",
@@ -141,16 +122,16 @@ pub fn score(opts: ScoreOpts) -> Result<()> {
         };
     };
 
-    match opts.format {
-        ScoreFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
-        ScoreFormat::Human => print_human(&report),
+    match format {
+        Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        Format::Human => print_human(&report),
     }
 
     // Gate fires only when the report already counts as a regression, so a
     // non-zero exit always implies `regressed: true` — the flag and the gate
     // can't disagree. On top of that the drop must exceed the caller's
     // points threshold (a magnitude filter).
-    if let (Some(threshold), Some(delta)) = (opts.fail_on_regression, report.delta) {
+    if let (Some(threshold), Some(delta)) = (fail_on_regression, report.delta) {
         let drop = -delta;
         if report.regressed && drop > threshold {
             eprintln!("mutation score regressed by {drop:.1} pts (threshold {threshold:.1})");
@@ -210,7 +191,16 @@ fn build_report(current: &HistoryEntry, baseline: Option<&HistoryEntry>) -> Scor
         survivor_ids_compared,
     ) = match baseline {
         Some(base) => {
-            let delta = current.mutation_score - base.mutation_score;
+            // A scoreless run carries the vacuous 100.0 floor and a `--max-time`
+            // partial run scored a nondeterministic subset — a delta against
+            // either (on either side) is fabricated. Leave the delta undefined
+            // so regression is driven by survivor ids alone, never by a phantom
+            // score move. `is_comparable` rejects both.
+            let delta = if !current.is_comparable() || !base.is_comparable() {
+                None
+            } else {
+                Some(current.mutation_score - base.mutation_score)
+            };
             let (new_surv, new_kill, compared) = match history::survivor_diff(base, current) {
                 Some((s, k)) => (
                     s.into_iter().map(str::to_string).collect(),
@@ -224,12 +214,13 @@ fn build_report(current: &HistoryEntry, baseline: Option<&HistoryEntry>) -> Scor
             // rule in the coding-agents guide. When survivor ids weren't
             // compared (`compared == false`) the survivor term is always
             // empty, so this is score-delta-only — `survivor_ids_compared`
-            // tells the consumer.
-            let regressed = delta < -SCORE_NOISE || !new_surv.is_empty();
+            // tells the consumer. A missing (scoreless) delta never signals
+            // a regression on its own.
+            let regressed = delta.is_some_and(|d| d < -SCORE_NOISE) || !new_surv.is_empty();
             (
                 Some(base.mutation_score),
                 Some(base.timestamp.clone()),
-                Some(delta),
+                delta,
                 new_surv,
                 new_kill,
                 regressed,
@@ -288,13 +279,16 @@ fn print_human(r: &ScoreReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn entry(ts: &str, score: f64, branch: Option<&str>, survivors: &[&str]) -> HistoryEntry {
         HistoryEntry {
             schema_version: crate::history::CURRENT_SCHEMA_V,
             timestamp: ts.into(),
             mutation_score: score,
-            killed: 0,
+            // Non-zero so the entry is a real scored run, not a scoreless
+            // vacuous-100 that score-delta/regression now ignore.
+            killed: 1,
             survived: survivors.len(),
             timed_out: 0,
             skipped: 0,
@@ -303,10 +297,12 @@ mod tests {
             total: None,
             duration_ms: None,
             config_hash: None,
+            fermut_version: None,
             git_sha: None,
             git_branch: branch.map(str::to_string),
             survivor_ids: Some(survivors.iter().map(|s| s.to_string()).collect()),
             baseline: false,
+            partial: false,
         }
     }
 
@@ -367,6 +363,47 @@ mod tests {
         // current=t3 (85), baseline two back = t1 (70).
         assert_eq!(r.baseline_score, Some(70.0));
         assert!((r.delta.unwrap() - 15.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn scoreless_side_yields_no_delta_and_no_regression() {
+        // A scoreless run carries the vacuous 100.0 floor. Whether it's the
+        // baseline or the current run, the delta is undefined and must not
+        // trip regression on a phantom score move.
+        let mut scoreless = entry("t1", 100.0, Some("main"), &[]);
+        scoreless.killed = 0; // now killed+survived+timed_out == 0
+        assert!(scoreless.is_scoreless());
+
+        let real = entry("t2", 60.0, Some("main"), &[]);
+
+        // scoreless baseline vs real current (100→60 would fake a -40 drop).
+        let r = build_report(&real, Some(&scoreless));
+        assert!(r.delta.is_none());
+        assert!(!r.regressed);
+
+        // real baseline vs scoreless current (60→100 would fake a +40 gain).
+        let r = build_report(&scoreless, Some(&real));
+        assert!(r.delta.is_none());
+        assert!(!r.regressed);
+    }
+
+    #[test]
+    fn partial_side_yields_no_delta() {
+        // A `--max-time` partial run scored a nondeterministic subset. Whether
+        // it's the baseline or the current run, the score delta is fabricated
+        // and must be suppressed (survivor ids still drive real regressions).
+        let mut partial = entry("t1", 70.0, Some("main"), &["a"]);
+        partial.partial = true;
+        assert!(!partial.is_scoreless() && !partial.is_comparable());
+        let real = entry("t2", 90.0, Some("main"), &["a"]);
+
+        // partial baseline vs real current (70→90 would fake a +20 gain).
+        let r = build_report(&real, Some(&partial));
+        assert!(r.delta.is_none());
+
+        // real baseline vs partial current (90→70 would fake a -20 drop).
+        let r = build_report(&partial, Some(&real));
+        assert!(r.delta.is_none());
     }
 
     #[test]
@@ -467,14 +504,14 @@ mod tests {
         (dir, path)
     }
 
-    fn opts(history_path: PathBuf) -> ScoreOpts {
-        ScoreOpts {
+    fn opts(history_path: PathBuf) -> ScoreArgs {
+        ScoreArgs {
             path: ".".into(),
             history_path: Some(history_path),
             baseline: 1,
             branch: None,
             fail_on_regression: None,
-            format: ScoreFormat::Json,
+            format: Format::Json,
         }
     }
 
@@ -518,4 +555,38 @@ mod tests {
         ]);
         assert!(score(opts(path)).is_ok());
     }
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct ScoreArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Custom path to the history log. Defaults to `.fermut/history.jsonl`
+    /// under the project root (nearest ancestor of `<path>` with
+    /// `pyproject.toml`/`setup.cfg`).
+    #[arg(long)]
+    pub(crate) history_path: Option<std::path::PathBuf>,
+
+    /// Compare against the entry this many branch-comparable runs back.
+    /// `1` (default) is the immediately prior run.
+    #[arg(long, default_value_t = 1, value_name = "N")]
+    pub(crate) baseline: usize,
+
+    /// Restrict current/baseline selection to this git branch. Pin to
+    /// `main` in CI where the cache restores main-branch history into a
+    /// PR build.
+    #[arg(long)]
+    pub(crate) branch: Option<String>,
+
+    /// Exit non-zero if the score dropped more than this many points vs
+    /// the baseline. Agent rollback / CI gate.
+    #[arg(long, value_name = "PTS")]
+    pub(crate) fail_on_regression: Option<f64>,
+
+    /// Output format. `json` (default) emits the reward signal for
+    /// machine consumers; `human` prints a short summary.
+    #[arg(long, value_enum, default_value_t = crate::cli::Format::Json)]
+    pub(crate) format: crate::cli::Format,
 }

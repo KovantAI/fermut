@@ -14,11 +14,13 @@ cross-tool parity study, not for measuring your suite.
 |---------------------------|------------------------------------------------------------------|
 | `parity:expr-to-none`     | `obj.attr`, `seq[i]`, `f(x)` → `None` (value-position attribute / subscript reads and call results) |
 | `parity:positional-drop`  | `f(x, y)` → `f(y)`; `[a, b, c]` → `[a, c]` (drops one positional call arg or one element of a list/set/tuple literal, ≥2 elements) |
-| `parity:string-case-swap` | `"Hello"` → `"hELLO"` (swaps the case of a string literal, mirroring mutmut) |
+| `parity:string-case-swap` | `"Hello"` → `"HELLO"` and `"Hello"` → `"hello"` (two mutants: all-upper and all-lower, mirroring mutmut) |
 
 `parity:expr-to-none` only fires on `Load`-context reads (mutating a
-store target would be a syntax error); `parity:positional-drop` skips
-`*args` / `**kwargs` splats and values already `None`.
+store target would be a syntax error). `parity:positional-drop` fires on
+every positional call argument, `*args` splats and `None` values included
+(a single-argument `f(x)` drops to `f()`); the ≥2-element limit applies
+only to list/set/tuple literals.
 
 ## See also
 

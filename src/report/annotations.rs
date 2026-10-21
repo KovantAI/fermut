@@ -14,7 +14,7 @@ impl Report {
                 MutantOutcome::Killed { .. }
                 | MutantOutcome::Skipped { .. }
                 | MutantOutcome::Equivalent { .. } => {}
-                MutantOutcome::Survived { mutant } => {
+                MutantOutcome::Survived { mutant, .. } => {
                     println!(
                         "::error file={file},line={line},title=Mutant survived::[{op}] {orig} -> {repl}",
                         file = gha_escape(&mutant.file.display().to_string()),
@@ -24,9 +24,15 @@ impl Report {
                         repl = gha_escape(&mutant.replacement),
                     );
                 }
-                MutantOutcome::TimedOut { mutant } => {
+                MutantOutcome::TimedOut {
+                    mutant, hung_in, ..
+                } => {
+                    let hung = hung_in
+                        .as_deref()
+                        .map(|t| format!(" (in {})", gha_escape(t)))
+                        .unwrap_or_default();
                     println!(
-                        "::warning file={file},line={line},title=Mutant timed out::[{op}] {orig} -> {repl}",
+                        "::warning file={file},line={line},title=Mutant timed out::[{op}] {orig} -> {repl}{hung}",
                         file = gha_escape(&mutant.file.display().to_string()),
                         line = mutant.line,
                         op = mutant.operator.name(),
@@ -34,7 +40,9 @@ impl Report {
                         repl = gha_escape(&mutant.replacement),
                     );
                 }
-                MutantOutcome::Error { mutant, message } => {
+                MutantOutcome::Error {
+                    mutant, message, ..
+                } => {
                     println!(
                         "::error file={file},line={line},title=Mutant error::{msg}",
                         file = gha_escape(&mutant.file.display().to_string()),

@@ -20,8 +20,12 @@ pub struct FileConfig {
     pub timeout: Option<u64>,
     pub ty_filter: Option<bool>,
     pub ruff_filter: Option<bool>,
+    /// Trivial Compiler Equivalence pre-filter: drop mutants that `compile()`
+    /// to a byte-identical code object. Default false; CLI `--tce` overrides.
+    pub tce: Option<bool>,
     pub experimental: Option<bool>,
     pub parity: Option<bool>,
+    pub operators: Option<crate::config::OperatorProfile>,
     pub ops: Option<Vec<String>>,
     pub skip_ops: Option<Vec<String>>,
     pub diff_only: Option<String>,
@@ -31,6 +35,21 @@ pub struct FileConfig {
     pub pytest_args: Option<Vec<String>>,
     pub cache: Option<bool>,
     pub cache_path: Option<PathBuf>,
+    /// Fraction (0.0–1.0) of killer-keyed cache hits audited per run. Default
+    /// 0.05; 0 disables. CLI `--cache-audit-rate` / `--no-cache-audit` win.
+    pub cache_audit_rate: Option<f64>,
+    /// Smart test ordering: cold-start coverage-breadth prior, then
+    /// historical-killer lifted first. Default true; CLI `--no-smart-order`
+    /// overrides.
+    pub smart_order: Option<bool>,
+    /// Load fermut's reporter plugin into per-mutant pytest runs for exact
+    /// outcomes (import breaks, the killing test). Default true; CLI
+    /// `--no-pytest-plugin` overrides.
+    pub pytest_plugin: Option<bool>,
+    /// Path to the advisory kill-order sidecar. Default
+    /// `<artifact_root>/.fermut/kill-order.json`; relative paths resolve
+    /// against the config file's directory.
+    pub kill_order_path: Option<PathBuf>,
     pub history: Option<bool>,
     pub history_path: Option<PathBuf>,
     pub sample: Option<f64>,
@@ -41,6 +60,10 @@ pub struct FileConfig {
     /// fermut invokes `<python> -m pytest` instead of a bare `pytest` from
     /// PATH. A relative value resolves against the config's base dir.
     pub python: Option<PathBuf>,
+    /// Glob for `unittest discover -p` (the `unittest` runner only). The
+    /// unittest default `test*.py` misses `*_test.py`; set e.g. `"*_test.py"`
+    /// to match that convention. Ignored by pytest/rstest.
+    pub unittest_pattern: Option<String>,
     pub isolation: Option<IsolationMode>,
     pub equiv_detect: Option<bool>,
     pub cache_scope: Option<CacheScope>,
@@ -50,6 +73,11 @@ pub struct FileConfig {
     pub verify_baseline: Option<bool>,
     /// Wall-clock cap (seconds) for the baseline run. Default 300.
     pub baseline_timeout: Option<u64>,
+    /// Wall-clock ceiling (seconds) on the per-mutant testing phase. Mutants
+    /// are evaluated highest-value first and the remainder is skipped
+    /// (`time-budget`) once the deadline passes. Unset = run the whole
+    /// catalogue. Set via `--max-time`.
+    pub max_time: Option<u64>,
     /// Glob patterns matched against paths relative to `source_root`. Files
     /// (and directories) matching any pattern are pruned during mutation
     /// collection. Examples: `"alembic/**"`, `"tests/integration/**"`,

@@ -88,7 +88,9 @@ nav:
   - Guides:
       - guides/index.md
       - CI quickstart: guides/ci-quickstart.md
+      - GitHub Action: guides/github-action.md
       - Integrations: guides/integrations.md
+      - pytest plugin: guides/pytest-plugin.md
       - Working on projects: guides/projects.md
       - Tightening the inner loop: guides/inner-loop.md
       - Coding agents: guides/coding-agents.md
@@ -114,6 +116,7 @@ nav:
       - CLI:
           - reference/cli/index.md
           - fermut init: reference/cli/init.md
+          - fermut baseline: reference/cli/baseline.md
           - fermut run: reference/cli/run.md
           - fermut coverage: reference/cli/coverage.md
           - fermut list: reference/cli/list.md
@@ -125,10 +128,13 @@ nav:
           - fermut merge: reference/cli/merge.md
           - fermut trend: reference/cli/trend.md
           - fermut score: reference/cli/score.md
+          - fermut subsume: reference/cli/subsume.md
+          - fermut hom: reference/cli/hom.md
           - fermut dashboard: reference/cli/dashboard.md
           - fermut doctor: reference/cli/doctor.md
           - fermut pr-comment: reference/cli/pr-comment.md
           - fermut clean: reference/cli/clean.md
+          - fermut install-skills: reference/cli/install-skills.md
           - fermut migrate: reference/cli/migrate.md
           - fermut mcp: reference/cli/mcp.md
           - fermut completions: reference/cli/completions.md
@@ -138,6 +144,7 @@ nav:
           - Stable: reference/operators/stable.md
           - Experimental: reference/operators/experimental.md
           - Parity: reference/operators/parity.md
+          - Profiles: reference/operators/profiles.md
           - Selecting: reference/operators/selecting.md
           - Docstring skip: reference/operators/docstring-skip.md
           - Inline ignore: reference/operators/inline-ignore.md

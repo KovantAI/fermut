@@ -11,7 +11,7 @@ fermut dashboard [PATH] [flags...]
 | Flag                 | Default                          | Effect                                                          |
 |----------------------|----------------------------------|-----------------------------------------------------------------|
 | `PATH`               | `.`                              | Where to start the project-root walk.                            |
-| `--history-path <p>` | `<PATH>/.fermut/history.jsonl`   | Custom history-log location.                                     |
+| `--history-path <p>` | `<project root>/.fermut/history.jsonl` | Custom history-log location.                                     |
 | `--output <p>`       | `fermut-dashboard.html`          | Output path for the generated HTML.                              |
 | `--report <p>`       | none                             | JSON report (from `fermut run --json`) used to attach inline source diffs to each survivor. Without it the survivor list still renders, but only IDs are shown. |
 | `--limit <N>`        | `30`                             | How many trailing history entries to show in the chart and table.|

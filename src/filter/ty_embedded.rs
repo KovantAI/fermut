@@ -148,10 +148,7 @@ impl EmbeddedTyChecker {
         let db = &mut self.db;
         let sys_path_ref = &sys_path;
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            db.apply_changes(
-                &[ChangeEvent::file_content_changed(sys_path_ref.clone())],
-                None,
-            );
+            db.apply_changes(&[ChangeEvent::file_content_changed(sys_path_ref.clone())]);
             count_errors(db, sys_path_ref)
         }));
 
@@ -173,7 +170,7 @@ impl EmbeddedTyChecker {
         state.bump(&sys_path);
         drop(state);
         self.db
-            .apply_changes(&[ChangeEvent::file_content_changed(sys_path.clone())], None);
+            .apply_changes(&[ChangeEvent::file_content_changed(sys_path.clone())]);
 
         match result {
             Ok(count) => Ok(count),

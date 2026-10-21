@@ -1,4 +1,5 @@
 """Clone + install reference repos into isolated worktrees."""
+
 from __future__ import annotations
 
 import os
@@ -67,6 +68,7 @@ def install(repo: RepoCfg, worktree: Path, venv_python: str) -> None:
         env=env,
         capture_output=True,
         text=True,
+        check=False,
     )
     if check.returncode != 0:
         raise RuntimeError(

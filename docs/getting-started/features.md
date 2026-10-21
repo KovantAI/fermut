@@ -9,14 +9,14 @@ guide or reference page.
 
 ## Mutation testing core
 
-- **26 stable operators + 4 experimental.** Arithmetic / compare /
+- **30 stable operators + 8 experimental.** Arithmetic / compare /
   boundary / boolean / constant / return-to-none / slice / sentinel /
   decorator / and more. See the **[Operators reference](../reference/operators/index.md)**.
 - **Inline ignore markers.** `# fermut: ignore[op-name]` on a line
   drops one or all operators from that line. Useful for
   known-equivalent mutants.
-- **Docstring auto-skip.** Module/class/function docstrings are never
-  mutated.
+- **Docstring auto-skip.** Docstrings and other bare string
+  statements (e.g. attribute docstrings) are never mutated.
 
 ## Speed
 
@@ -28,8 +28,10 @@ guide or reference page.
   invocation. Typically removes 20–40% of naive mutants on type-hinted
   codebases.
 - **Per-mutant result cache.** Keyed on `(mutant.id, ast_hash(file), scope)`.
-  AST-structural hashing means reformat / comment edits don't
-  invalidate. `scope` covers the run-shape inputs that change the
+  Any code change to a file invalidates every mutant in that file (the
+  AST hash changes). Whitespace/comment edits keep the AST hash, but the
+  id embeds the mutant's byte offset, so mutants below such an edit
+  still miss; only mutants above it keep their hits. `scope` covers the run-shape inputs that change the
   outcome without changing the AST: runner kind, timeout, hypothesis
   seed, pytest args, and the per-mutant test selection set when
   coverage-driven selection is on. Edits to one file only re-run
@@ -41,8 +43,9 @@ guide or reference page.
 
 - **`--diff-only`.** Restrict to lines changed vs. a base ref. Right
   default for PR-time gates.
-- **`--coverage`.** Per-mutant test selection from
-  `coverage.json` per-test contexts. Big wall-clock win.
+- **`--coverage`.** Per-mutant test selection from coverage.py's native
+  `.coverage` SQLite DB (auto-discovered at the project root, or a JSON
+  export) via its per-test contexts. Big wall-clock win.
 - **Sticky PR comments.** `fermut pr-comment` posts a Markdown report
   and updates the **same comment** across re-runs instead of stacking.
 - **JUnit / JSON / HTML / Markdown reports.** Stable JSON shapes, GHA
@@ -92,9 +95,9 @@ stable JSON, cache-friendly, deterministic, score-delta as reward
 signal. See **[Coding agents](../guides/coding-agents.md)**.
 
 - **`fermut mcp`.** Native [Model Context Protocol](https://modelcontextprotocol.io)
-  server over stdio — agents call `fermut_doctor`, `fermut_run`,
-  `fermut_next`, `fermut_explain`, `fermut_score`, `fermut_list_survivors`
-  as tools instead of shelling out. See
+  server over stdio — agents call `fermut_doctor`, `fermut_baseline`,
+  `fermut_run`, `fermut_next`, `fermut_explain`, `fermut_score`,
+  `fermut_list_survivors` as tools instead of shelling out. See
   **[Integrations → MCP](../guides/integrations.md#mcp-server)**.
 
 ## Reference quick links

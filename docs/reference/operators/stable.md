@@ -13,7 +13,7 @@ markers).
 | `unary-op-swap`      | `-x` → `+x`, `not x` → `x`, `~x` → `x`                             |
 | `aug-assign-swap`    | `x += y` → `x -= y`, `//=` → `/=`, `&=` → `\|=`                    |
 | `constant-replace`   | `True` ↔ `False`, `""` → `"fermut"`                                |
-| `number-shift`       | `n` → `n+1`, `n` → `n-1` (decimal int / float literals only — hex `0xFF`, oct `0o77`, bin `0b11`, and complex `1j` literals are not mutated) |
+| `number-shift`       | `n` → `n+1`, `n` → `n-1` (int / float literals, including exponent floats; hex `0xFF`, oct `0o77`, bin `0b11` keep their base, e.g. `0xFF` → `0x100`; complex `1j` literals are not mutated) |
 | `return-value-to-none` | `return expr` → `return None`                                    |
 | `break-continue-swap` | `break` ↔ `continue`                                              |
 | `not-insertion`      | `if x:` → `if not (x):` (also `while`, `assert`)                   |
@@ -32,3 +32,7 @@ markers).
 | `bytes-sentinel`     | `b"Bearer "` → `b"XXBearer XX"`                                     |
 | `keyword-arg-drop`   | `f(x=1, y=2)` → `f(x=1)` (drops one kwarg + its comma)             |
 | `dict-item-drop`     | `{a: 1, b: 2, c: 3}` → `{a: 1, c: 3}` (drops one item + comma)     |
+| `await-drop`         | `x = await f()` → `x = f()` (drops `await` — value becomes the un-awaited coroutine/awaitable) |
+| `async-for-to-sync`  | `async for x in it:` → `for x in it:` (sync iteration over an async iterator raises at runtime) |
+| `async-with-to-sync` | `async with cm:` → `with cm:` (sync context-manager protocol on an async CM raises at runtime) |
+| `match-guard-negate` | `case n if n > 0:` → `case n if not (n > 0):` (flips which `match` arm handles the subject) |

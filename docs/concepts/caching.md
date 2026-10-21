@@ -19,25 +19,34 @@ After every successful mutant evaluation, fermut writes one entry to
   (e.g. `src/calculator.py@216:boundary-shift:<=-><`).
 - `ast_hash(source_file)` is the **AST-structural** hash of the
   file containing the mutant. Whitespace, comments, and pure
-  formatting changes don't change the AST, so a `ruff format` pass
-  doesn't invalidate the cache. With `cache_scope = "scope"`, this
+  formatting changes don't change the AST hash. They *do* move byte
+  offsets, though, and the byte offset is part of `mutant.id`, so any
+  edit that shifts bytes **above** a mutant changes its id and misses
+  (see [Why AST-hash](#why-ast-hash-not-mtime-or-raw-bytes)). With `cache_scope = "scope"`, this
   narrows to the enclosing top-level def/class instead of the whole
   file, so sibling-function edits keep cache hits intact (see
   [`cache_scope`](../reference/configuration.md#schema)).
-- `scope` captures every run-shape input that could change the
-  outcome without touching the AST: runner kind, timeout, hypothesis
-  seed, pytest args, and the per-mutant test selection set when
-  coverage-driven selection is on. A mismatch on any of those
-  invalidates the entry — a stale `survived` from a narrow
-  `--coverage` run can't poison a later full-suite run, and vice
-  versa.
+- `scope` captures every input that could change the outcome without
+  touching the AST: runner kind, interpreter, timeout, hypothesis
+  seed, pytest args, the per-mutant test selection set when
+  coverage-driven selection is on, and a fingerprint of the tests
+  that run against the mutant (see
+  [Test-suite invalidation](#test-suite-invalidation)). A mismatch on
+  any of those invalidates the entry — a stale `survived` from a
+  narrow `--coverage` run can't poison a later full-suite run, and
+  vice versa.
 
 All of fermut's sidecar state lives in one `.fermut/` directory at the
 **project root** (nearest `pyproject.toml`/`setup.cfg`, so a
 `source_root = "src"` layout still anchors at the repo root, not under
-`src/`): `cache.json` (this cache), `history.jsonl` (trend log), and
-`ty-cache.json` (the ty pre-filter's baseline-diagnostic cache). The
-whole directory is gitignored by default.
+`src/`): `cache.json` (this cache), `history.jsonl` (trend log),
+`kill-order.json` (smart test ordering's kill history),
+`ty-cache.json` (the ty pre-filter's baseline-diagnostic cache), plus
+`dominators.json` and `llm-cache.json` once you use `fermut subsume`
+or the LLM-backed commands.
+fermut does not write a `.gitignore` for it — add `.fermut/` to your
+own `.gitignore` (or commit only `history.jsonl`, see
+[Projects](projects.md)).
 
 On the next `run`:
 
@@ -47,17 +56,100 @@ On the next `run`:
    cached entry, the cached outcome is reused — **no pytest
    invocation**.
 3. If either component mismatches, the entry is ignored and the
-   mutant re-runs. Stale entries are overwritten on the next save.
+   mutant re-runs; the new outcome overwrites the entry for that id.
+   Entries whose id no longer exists (the mutant moved or vanished)
+   are never pruned — they accumulate until `fermut clean`.
 
 Result: editing one function in one file only pays for mutants
 inside that function (under `cache_scope = "scope"`) or that file
 (default `cache_scope = "file"`). Everything else is reused.
 
+## Test-suite invalidation
+
+Editing a test can flip a verdict without touching the source — that's
+the whole point of writing a killing test. So each entry's `scope`
+folds in a content fingerprint of the tests. *Which* tests depends on
+whether fermut knows exactly what runs against the mutant.
+
+**With coverage contexts** (`pytest` or `rstest` runner), the
+fingerprint covers only:
+
+- the test files holding the mutant's covering node ids;
+- every `conftest.py` from the tests root down to each of those files'
+  directories (a sibling directory's `conftest.py` is not included);
+- every shared support file under the tests tree — anything that is
+  neither a test module (`test_*.py` / `*_test.py`) nor a
+  `conftest.py`: helpers, `__init__.py`, fixture data. Conservative:
+  changing one invalidates every entry.
+
+The covering node-id set is part of the key too, so a new test that
+starts covering the mutant's line invalidates it even if no existing
+file changed.
+
+**Otherwise** the fingerprint covers the whole tests tree, and any
+test edit invalidates every entry. That fallback applies with no
+coverage file, under the `unittest` runner (it runs the full suite
+regardless of coverage), for a mutant with no recorded context (the
+runner sweeps the whole tests dir), and when a covering file lies
+outside the tests tree or couldn't be read.
+
+| Change                                         | With coverage    | Without coverage |
+|------------------------------------------------|------------------|------------------|
+| Edit/add a test that doesn't cover the mutant  | **kept**         | invalidated      |
+| Sibling-directory `conftest.py`                | **kept**         | invalidated      |
+| Edit a covering test file                      | invalidated      | invalidated      |
+| `conftest.py` above a covering test            | invalidated      | invalidated      |
+| Non-test file under the tests tree             | invalidated (all)| invalidated      |
+| New test covering the mutant's line            | invalidated      | invalidated      |
+
+### Killed verdicts: keyed on the killing test
+
+A `killed` verdict only depends on the test that killed it. When fermut
+knows that test (pytest/rstest with coverage contexts — the runner reads
+it from pytest's summary, or it's the only selected test), the entry
+also stores a **killer scope**: the killer's node id plus the
+fingerprint of *its* file, its `conftest.py` chain, and the shared
+support files. If the full key misses — say you edited another test
+file that also covers the mutant — the kill is still reused as long as:
+
+- the mutant's source hash is unchanged;
+- the killing test still covers the mutant's line;
+- the killer scope is unchanged.
+
+Editing the killing test's file (or its conftest chain, or a support
+file) re-runs the mutant. `survived` and `timed_out` verdicts never take
+this path: a survivor depends on *every* covering test, so any of them
+changing re-runs it.
+
+Trusting a killer hit skips the run entirely, so each run **audits** a
+random sample: `ceil(5%)` of the killer hits (at least one) are
+re-run against the killing test alone. If the kill doesn't reproduce —
+a flaky test, or one that only failed because of state an earlier test
+left behind — fermut drops the entry, warns naming the test and the
+mutant, and re-runs the mutant fully. Tune with `--cache-audit-rate` /
+`cache_audit_rate`; `--no-cache-audit` turns it off for deterministic
+benchmarks. The end-of-run `cache:` log line counts full hits, killer
+hits, audits (and drops), and misses.
+
+| Change                                         | killed (killer known) | survived / timed_out |
+|------------------------------------------------|-----------------------|----------------------|
+| Edit another covering test file                | **kept**              | invalidated          |
+| Edit the killing test's file                   | invalidated           | invalidated          |
+| `conftest.py` above the killing test           | invalidated           | invalidated          |
+| Coverage no longer lists the killing test      | invalidated           | invalidated          |
+
+Not tracked, in either mode: a helper module outside both the tests
+tree and the mutated source, and a `conftest.py` above the tests root.
+The scoped fingerprint also misses a test module importing *another
+test module* (`from tests.test_a import helper`) — keep shared helpers
+in non-test files so they count as support files. Run `fermut clean`
+if you hit one of these.
+
 ## What's cached
 
 | Outcome    | Cached?         | Why                                                                                  |
 |------------|-----------------|--------------------------------------------------------------------------------------|
-| killed     | ✓               | Same patched bytes + same test bytes → same outcome.                                  |
+| killed     | ✓               | Same patched bytes + same killing-test bytes → same outcome.                          |
 | survived   | ✓               | Same.                                                                                |
 | timed_out  | ✓               | Same.                                                                                |
 | skipped    | ✗               | Filter chain may differ between runs (different `--ops`, `--coverage`, etc.) — reusing a skip would be wrong. |
@@ -92,22 +184,26 @@ AST being identical.
 
 The structural AST hash makes cache hits identical across:
 
-- Reformats, whitespace edits, comment edits — same AST → same hash.
-- Local dev → CI hand-off.
+- Whitespace or comment edits *below* a mutant — same AST, same byte
+  offset → hit.
 - Agent run #1 → agent run #2 on the same commit.
 - Cache restored from `actions/cache` in a fresh GHA runner.
 
+It does **not** survive edits that shift bytes above a mutant —
+including a reformat or a comment added near the top of a file. The
+mutant id embeds the byte offset, so every mutant below the edit gets
+a new id and re-runs (the old entries stay in the file as orphans).
+
 The cost is one parse + hash per source file per run. On a typical
-project this is in single-digit milliseconds. The legacy raw-byte
-hash is still exported as `cache::hash_file` for callers that need
-byte identity (and for the test suite).
+project this is in single-digit milliseconds.
 
-## Version field
+## File format and compatibility
 
-The cache file carries a `version` integer. Older readers fail closed
-(treat the cache as empty). Newer readers handle forward-compat with
-`#[serde(default)]` on new fields. You won't normally notice this —
-worst case is a one-time cache-miss after upgrading fermut.
+`cache.json` has no version field. New entry fields are added with
+`#[serde(default)]`, so older entries load and simply miss when a new
+key component doesn't match. A file that fails to parse is moved
+aside to `cache.corrupt-<pid>` with a warning, and the run starts from
+an empty cache.
 
 ## Where next
 

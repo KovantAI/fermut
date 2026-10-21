@@ -57,22 +57,27 @@ Once resolved, the project root anchors three things:
 |---------------------|-----------------------------------------------|---------------------------------------------------------|
 | **Source root**     | `<root>/src` if present, else `<root>`         | `source_root = "..."` in `fermut.toml`, or CLI `PATH`.  |
 | **Tests directory** | `<root>/tests`                                 | `tests = "..."` in `fermut.toml`, or `--tests`.         |
-| **State directory** | `<root>/.fermut/`                              | `--cache-path`, `--history-path` (or env vars).         |
+| **State directory** | `<root>/.fermut/`                              | `--cache-path`, `--history-path` (CLI or config keys).  |
 
 `fermut init` runs this detection and writes a `fermut.toml` tuned
 to what it sees. Re-run with `--force` to overwrite.
 
 ## The `.fermut/` directory
 
-Every project gets a `.fermut/` directory at the root. Two files
-live here:
+Every project gets a `.fermut/` directory at the root. The two that
+matter for sharing state:
 
 - **`cache.json`** — content-hashed result cache. See
   **[Caching](caching.md)**.
 - **`history.jsonl`** — append-only run log. See
   **[Trends](../guides/trends.md)**.
 
-Both are safe to commit if you want CI to inherit local state; both
+fermut also keeps local helpers there: `kill-order.json` (smart test
+ordering), `ty-cache.json` (ty pre-filter), and, when you use those
+features, `dominators.json` (`fermut subsume`) and `llm-cache.json`
+(LLM-backed `explain`/`suggest`/`autofix`).
+
+`cache.json` and `history.jsonl` are safe to commit if you want CI to inherit local state; both
 are also safe to gitignore if you want each environment to maintain
 its own. The common pattern is **gitignore `cache.json`, commit
 `history.jsonl`** so the trend log persists across machines without
@@ -132,9 +137,7 @@ fermut run packages/billing/src/
 ```
 
 Or wire each one as its own CI job. There's no monorepo-aware
-aggregation today; the
-**[Roadmap](../roadmap.md#engine-and-runtime)** tracks a
-`workspace`-style mode for that.
+aggregation today.
 
 ## Where next
 

@@ -1,0 +1,136 @@
+name: Mutation (pytest plugin)
+
+# Runs the published fermut actions on fermut's own Python code:
+# python/pytest_fermut, killed by python/tests. PRs get a diff-scoped gate and
+# a sticky comment; a weekly sweep on main records the score in the trend
+# history, fails on a regression, and publishes the README badge.
+#
+# Coverage blind spot: test_reporter.py drives _fermut_reporter in a pytest
+# subprocess, which per-test coverage can't see, so every reporter mutant is
+# skipped as uncovered. Once a release ships the run.sh `--no-coverage`
+# passthrough, add `args: --no-coverage` (the suite runs in ~2s) and bump
+# config-hash.
+
+on:
+  pull_request:
+    paths:
+      - "python/**"
+      - ".github/workflows/mutation.yml"
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SOURCE: python/pytest_fermut
+  TESTS: python/tests
+  # The repo's pyproject builds fermut itself with maturin; install only the
+  # test stack the plugin tests need.
+  INSTALL: uv venv --quiet && uv pip install --quiet --require-hashes -r .github/requirements/pytest9.txt
+  # A SHA-pinned action ref can't imply the version; keep in step with the pins.
+  FERMUT_VERSION: "0.6.0"
+  PREFIX: fermut-self
+
+jobs:
+  pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: KovantAI/fermut@a0c243cd38ca742512b34e8578b03d8c58aed515 # v0.6.0
+        with:
+          source: ${{ env.SOURCE }}
+          tests: ${{ env.TESTS }}
+          fermut-version: ${{ env.FERMUT_VERSION }}
+          python-version: "3.12"
+          install-command: ${{ env.INSTALL }}
+          cache-key-prefix: ${{ env.PREFIX }}
+          fail-under: "90"
+
+  warm:
+    # Builds the coverage DB once; the shards restore it instead of rebuilding.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: KovantAI/fermut@a0c243cd38ca742512b34e8578b03d8c58aed515 # v0.6.0
+        with:
+          warm-only: "true"
+          source: ${{ env.SOURCE }}
+          tests: ${{ env.TESTS }}
+          fermut-version: ${{ env.FERMUT_VERSION }}
+          python-version: "3.12"
+          install-command: ${{ env.INSTALL }}
+          cache-key-prefix: ${{ env.PREFIX }}
+
+  sweep:
+    needs: warm
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: KovantAI/fermut/sweep@a0c243cd38ca742512b34e8578b03d8c58aed515 # v0.6.0
+        with:
+          shard: ${{ matrix.shard }}/2
+          source: ${{ env.SOURCE }}
+          tests: ${{ env.TESTS }}
+          fermut-version: ${{ env.FERMUT_VERSION }}
+          python-version: "3.12"
+          install-command: ${{ env.INSTALL }}
+          cache-key-prefix: ${{ env.PREFIX }}
+          artifact-name: mutation-self
+
+  trend:
+    needs: sweep
+    runs-on: ubuntu-latest
+    outputs:
+      score: ${{ steps.trend.outputs.score }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: trend
+        uses: KovantAI/fermut/trend@a0c243cd38ca742512b34e8578b03d8c58aed515 # v0.6.0
+        with:
+          fermut-version: ${{ env.FERMUT_VERSION }}
+          artifact-name: mutation-self
+          cache-key-prefix: ${{ env.PREFIX }}
+          # Bump when the sweep's shape (source, tests, args, shards) changes.
+          config-hash: pytest_fermut-2shards-v1
+          fail-on-regression: "2"
+          fail-under: "90"
+          max-errored: "0"
+
+  badge:
+    # Shields endpoint JSON on an orphan `badges` branch, read by the README
+    # badge. Main only, and only after the trend gates passed.
+    needs: trend
+    if: github.ref == 'refs/heads/main' && needs.trend.outputs.score != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish badge
+        env:
+          SCORE: ${{ needs.trend.outputs.score }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          color=$(awk -v s="$SCORE" 'BEGIN { print (s >= 90 ? "brightgreen" : s >= 80 ? "green" : s >= 70 ? "yellow" : "red") }')
+          mkdir badges && cd badges
+          git init -q -b badges
+          printf '{"schemaVersion":1,"label":"mutation (pytest plugin)","message":"%.1f%%","color":"%s"}\n' \
+            "$SCORE" "$color" > mutation-plugin.json
+          cat mutation-plugin.json
+          git add mutation-plugin.json
+          git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com \
+            commit -q -m "mutation badge: $SCORE%"
+          git push -q -f "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" badges

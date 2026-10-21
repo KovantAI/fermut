@@ -8,11 +8,17 @@ explained in depth.
 
 ## Coverage filter
 
-Filter stage that drops mutants on lines no test executes. Requires
-`coverage.json` from `pytest --cov=src --cov-context=test` so fermut
-knows **which** tests reach each line. Without per-test contexts, the
-filter still drops uncovered mutants but cannot pick a narrow test
-subset for the survivors. See [coverage guide](../guides/coverage.md).
+Filter stage that drops mutants on lines no test executes. Requires a
+per-test-context coverage database — run `pytest --cov=src
+--cov-context=test`, which writes coverage.py's native `.coverage`
+SQLite DB. fermut reads that DB directly (auto-discovering `.coverage`
+at the project root, or via `--coverage .coverage`), so it knows
+**which** tests reach each line — no `coverage json` export step is
+needed. (fermut also accepts a manual `coverage json -o coverage.json
+--show-contexts` export; it sniffs the file format.) Without per-test
+contexts, the filter still drops uncovered mutants but cannot pick a
+narrow test subset for the survivors. See [coverage
+guide](../guides/coverage.md).
 
 ## cosmic-ray
 
@@ -23,11 +29,13 @@ Older Python mutation-testing tool, distributor-based model
 
 ## `--diff-only`
 
-CLI flag and config key. Restricts mutation to lines in
-`git diff <base>...HEAD`. Default base is the `pr-gate` profile's
-`diff_only = "main"`. Requires git history — on a shallow clone
-(`fetch-depth: 1` in CI, `git clone --depth 1` locally) the diff
-comes back empty and zero mutants run. See
+CLI flag and config key. Restricts mutation to lines changed since
+the merge-base of `<base>` and `HEAD`, diffed against the working
+tree (so uncommitted edits to tracked files count). Default base is
+the `pr-gate` profile's `diff_only = "main"`. Requires git history:
+on a shallow clone (`fetch-depth: 1` in CI, `git clone --depth 1`
+locally) the base can't be resolved and the run fails with a git
+error. See
 [diff-only-empty troubleshooting](../reference/troubleshooting/diff-only-empty.md).
 
 ## Equivalent mutant
@@ -36,11 +44,10 @@ A mutant whose patched code behaves identically to the original at
 runtime, even though the source is textually different. Example:
 `x + 0` → `x - 0`. No test can kill it — there's no observable
 difference to assert against. fermut runs a layered detector on
-survivors (AST patterns + CPython bytecode by default, with opt-in
-hypothesis probe and LLM judge); provably-equivalent mutants become
+survivors (AST patterns + CPython bytecode; the hypothesis probe and
+LLM judge are not wired in yet); provably-equivalent mutants become
 the `Equivalent` outcome and drop out of the score denominator, and
-likely-equivalent ones surface as suggestions for inline-ignore
-review. Domain-restricted equivalences the detector can't see still
+likely-equivalent ones stay plain survivors. Domain-restricted equivalences the detector can't see still
 need a manual `# fermut: ignore` marker. See
 [equivalent mutants walkthrough](../guides/equivalent-mutants.md).
 
@@ -56,7 +63,8 @@ the source tree — see
 
 Composable stack of pre-flight checks every mutant runs through
 before pytest sees it. Order is cheap → expensive: experimental →
-operator → sample → diff-only → coverage → ruff → ty. Skipping a
+parity → profile → operator → shard → sample → diff-only → since →
+coverage → ruff → ty → tce. Skipping a
 mutant via a filter is dramatically cheaper than running pytest
 against it. See
 [filter chain overview](mutation-testing.md#the-filter-chain).
@@ -68,14 +76,18 @@ inputs each run unless given a fixed seed. Mutation testing relies
 on deterministic test outcomes — a flaky test that passes on the
 original but fails on a mutant due to a different random draw will
 falsely "kill" the mutant. fermut's `pr-gate` and `library` profiles
-pin the Hypothesis seed in `pyproject.toml`. Ignore this entry if
+write `hypothesis_seed = 12345` into the generated `fermut.toml` when
+Hypothesis is a declared dependency; without Hypothesis installed the
+seed is ignored. Ignore this entry if
 your test suite doesn't import `hypothesis`.
 
 ## Inline ignore marker
 
 Comment on a source line that tells fermut to skip mutations on that
 line: `# fermut: ignore` (skips all ops) or
-`# fermut: ignore [op-name]` (skips one op). Use for equivalent
+`# fermut: ignore[op-name]` (skips one op; no space before `[` —
+`# fermut: ignore [op-name]` is read as a bare `ignore` and skips
+every op). Use for equivalent
 mutants and for lines where mutation produces noise without signal.
 See [inline ignore reference](../reference/operators/inline-ignore.md).
 
@@ -96,8 +108,8 @@ score. **What you want more of.**
 ## Mutant
 
 One specific application of one operator to one specific source
-location. Identified by `mutant.id`, a stable hash so caching works
-across runs.
+location. Identified by [`mutant.id`](#mutant-id), a deterministic
+string (not a hash) so caching works across runs.
 
 ## `mutant.id` { #mutant-id }
 
@@ -120,7 +132,7 @@ overlapping operators. fermut ships a
 ## Mutation score
 
 `detected / (detected + survived)` where `detected = killed + timeout`.
-Skipped and errored mutants don't appear in either side of the ratio.
+Skipped, errored and equivalent mutants don't appear in either side of the ratio.
 Timeouts count as detected (the mutant changed behavior enough to
 wedge the test, the runner just gave up before getting a clean fail).
 See [mutation score on the concept page](mutation-testing.md#the-mutation-score).
@@ -129,15 +141,15 @@ See [mutation score on the concept page](mutation-testing.md#the-mutation-score)
 
 A *kind* of mutation. Examples: `arith-op-swap` (replace `+` with
 `-`), `boundary-shift` (`<` → `<=`), `return-to-none`. fermut ships
-26 stable operators and 4 experimental. Select with `--ops`, skip
+30 stable operators and 8 experimental. Select with `--ops`, skip
 with `--skip-ops`, enable experimental with `--experimental`. See
 [operator catalogue](../reference/operators/index.md).
 
 ## Profile
 
 A named starter template for `fermut.toml`. Four profiles ship:
-`pr-gate` (narrow ops, diff-only, fast), `nightly` (every op,
-no filters, slower), `local` (25% sample, dev loop), `library`
+`pr-gate` (narrow ops, diff-only, fast), `nightly` (every op incl.
+experimental, no coverage, slower), `local` (25% sample, dev loop), `library`
 (every stable op, no experimental). Pick with
 `fermut init --profile <name>`. Profiles are templates, not modes —
 after `init` the config is plain text and you hand-edit. See
@@ -194,8 +206,9 @@ Astral's fast Python type checker (Rust-based). fermut's ty filter
 rejects mutants that introduce *new* type errors — e.g. swapping a
 numeric op into a string context. Drops 20–40% of naive mutants on
 type-hinted codebases at ~25ms each, much cheaper than running
-pytest ([benchmarks](../reference/benchmarks.md)). Requires
-`ty` on `$PATH`. See [ty-not-found troubleshooting](../reference/troubleshooting/ty-not-found.md).
+pytest ([benchmarks](../reference/benchmarks.md)). Runs in-process
+by default (embedded checker); the `ty` binary is only needed when
+`FERMUT_TY_EMBEDDED=0` or the embedded checker can't be built. See [ty-not-found troubleshooting](../reference/troubleshooting/ty-not-found.md).
 
 ## uv
 

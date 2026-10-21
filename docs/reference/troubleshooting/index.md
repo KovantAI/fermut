@@ -12,8 +12,8 @@ The symptoms we see most often. Start with `fermut doctor --strict`
   reproduce by hand.
 - **[Score swings](score-swings.md)** — same commit, different
   scores between runs.
-- **[Coverage rejected](coverage-rejected.md)** — `coverage.json`
-  lacks per-test contexts.
+- **[Coverage rejected](coverage-rejected.md)** — the coverage
+  database (`.coverage` or `coverage.json`) lacks per-test contexts.
 - **[ty not found](ty-not-found.md)** — ty pre-filter warning.
 - **[PR comment fails](pr-comment-fails.md)** — `gh: command not
   found` in CI.

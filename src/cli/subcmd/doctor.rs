@@ -18,12 +18,6 @@ use anyhow::Result;
 
 use crate::config::loader::{ConfigSource, LoadedConfig};
 
-#[derive(Debug, Clone)]
-pub struct DoctorOpts {
-    pub path: PathBuf,
-    pub strict: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
     Ok,
@@ -97,7 +91,7 @@ impl Check {
     }
 }
 
-pub fn doctor(opts: DoctorOpts) -> Result<()> {
+pub(crate) fn doctor(opts: DoctorArgs) -> Result<()> {
     let checks = collect_checks(&opts.path);
     print_checks(&checks);
     let counts = tally(&checks);
@@ -210,21 +204,46 @@ fn collect_checks(start: &Path) -> Vec<Check> {
         ),
     });
 
+    // ---- virtualenv discovery ----
+    // Resolve the project's venv (the same walk `run`/`coverage` use) so every
+    // tool probe below can look inside it, not just on PATH. This is what lets
+    // `fermut doctor` see uv-managed tools without the caller activating the
+    // venv or prepending `.venv/bin` to PATH.
+    let scope = loaded
+        .as_ref()
+        .map(|c| c.base_dir.clone())
+        .unwrap_or_else(|| start.to_path_buf());
+    let venv_python = crate::runner::resolve_python(&scope, None);
+    let venv_bin: Option<PathBuf> = venv_python
+        .as_deref()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf);
+    out.push(match &venv_bin {
+        Some(bin) => Check::ok("venv", format!("probing tools in {}", bin.display())),
+        None => Check::skip("venv", "none found — probing tools on PATH only"),
+    });
+    let vbin = venv_bin.as_deref();
+
     // ---- python ----
-    out.push(check_python());
+    out.push(check_python(vbin));
 
     // ---- test runner ----
     let runner = loaded
         .as_ref()
         .and_then(|c| c.file.runner)
         .unwrap_or(crate::config::RunnerKind::Pytest);
-    out.push(check_runner(runner));
+    out.push(check_runner(runner, vbin));
 
     // ---- coverage + pytest-cov (required; per-test coverage filter) ----
-    out.push(check_coverage_binary());
-    out.push(check_pytest_cov());
+    out.push(check_coverage_binary(vbin));
+    out.push(check_pytest_cov(vbin));
 
-    // ---- coverage.json (only meaningful when wired in config) ----
+    // ---- coverage data ----
+    // Prefer the explicitly wired path; otherwise validate the same `.coverage`
+    // SQLite DB that `run` auto-discovers at the project root. Without this,
+    // doctor would stay silent while a real run silently picks up (or stale-
+    // rejects) an auto-discovered DB — the exact divergence doctor exists to
+    // surface.
     let coverage_wired = loaded.as_ref().and_then(|c| c.file.coverage.clone());
     if let Some(rel_path) = coverage_wired {
         let base = loaded
@@ -232,20 +251,27 @@ fn collect_checks(start: &Path) -> Vec<Check> {
             .map(|c| c.base_dir.as_path())
             .unwrap_or(start);
         out.push(check_coverage_file(base, &rel_path));
+    } else {
+        // Mirror `run`'s auto-discovery, which only picks up a real SQLite DB.
+        // A stray non-SQLite `.coverage` that run would ignore shouldn't make
+        // doctor cry wolf, so gate on the same sniff.
+        let root = crate::runner::find_project_root(&scope).unwrap_or_else(|| scope.clone());
+        let candidate = root.join(".coverage");
+        if candidate.is_file() && matches!(crate::filter::coverage::is_sqlite(&candidate), Ok(true))
+        {
+            out.push(check_coverage_file(&root, Path::new(".coverage")));
+        }
     }
 
-    // ---- ty (required by default; only skipped if explicitly disabled) ----
+    // ---- ty (on by default; only skipped if explicitly disabled) ----
     let ty_on = loaded
         .as_ref()
         .and_then(|c| c.file.ty_filter)
         .unwrap_or(true);
     if ty_on {
-        out.push(check_tool(
-            "ty",
-            &["ty", "--version"],
-            "type-aware mutant pre-filter",
-            "uv tool install ty",
-            /* required */ true,
+        out.push(ty_check(
+            tool_version(&["ty", "--version"], vbin),
+            crate::filter::ty::env_disables_embedded(),
         ));
     } else {
         // Surface it as skipped instead of dropping the row — otherwise the
@@ -262,6 +288,7 @@ fn collect_checks(start: &Path) -> Vec<Check> {
             "lint pre-filter",
             "uv tool install ruff",
             /* required */ true,
+            vbin,
         ));
     }
 
@@ -272,6 +299,7 @@ fn collect_checks(start: &Path) -> Vec<Check> {
         "needed for `fermut pr-comment`",
         "install GitHub CLI: https://cli.github.com",
         /* required */ false,
+        vbin,
     ));
 
     // ---- common gotchas ----
@@ -280,11 +308,11 @@ fn collect_checks(start: &Path) -> Vec<Check> {
     out
 }
 
-fn check_python() -> Check {
+fn check_python(venv_bin: Option<&Path>) -> Check {
     let candidates = ["python3", "python"];
     let probed: Vec<(&str, Option<String>)> = candidates
         .into_iter()
-        .map(|bin| (bin, tool_version(&[bin, "--version"])))
+        .map(|bin| (bin, tool_version(&[bin, "--version"], venv_bin)))
         .collect();
     pick_python(&probed)
 }
@@ -346,7 +374,7 @@ fn parse_python_version(s: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-fn check_runner(runner: crate::config::RunnerKind) -> Check {
+fn check_runner(runner: crate::config::RunnerKind, venv_bin: Option<&Path>) -> Check {
     match runner {
         crate::config::RunnerKind::Pytest => check_tool(
             "pytest",
@@ -354,6 +382,15 @@ fn check_runner(runner: crate::config::RunnerKind) -> Check {
             "configured runner",
             "pipx install pytest  (or `uv add --dev pytest`)",
             /* required */ true,
+            venv_bin,
+        ),
+        crate::config::RunnerKind::Rstest => check_tool(
+            "rstest",
+            &["rstest", "--version"],
+            "configured runner",
+            "pipx install rstest  (or `uv add --dev rstest`)",
+            /* required */ true,
+            venv_bin,
         ),
         crate::config::RunnerKind::Unittest => {
             // Stdlib; presence implies Python is present.
@@ -362,26 +399,27 @@ fn check_runner(runner: crate::config::RunnerKind) -> Check {
     }
 }
 
-fn check_coverage_binary() -> Check {
+fn check_coverage_binary(venv_bin: Option<&Path>) -> Check {
     check_tool(
         "coverage",
         &["coverage", "--version"],
         "needed to generate coverage.json with per-test contexts",
         "uv add --dev coverage  (or pip install coverage)",
         /* required */ true,
+        venv_bin,
     )
 }
 
-fn check_pytest_cov() -> Check {
+fn check_pytest_cov(venv_bin: Option<&Path>) -> Check {
     // pytest-cov isn't a binary; probe the Python interpreter that fermut
-    // would actually launch tests against (same interpreter resolves
-    // `python3` on PATH).
+    // would actually launch tests against — the venv's `python` when one is
+    // discovered (venv_bin prepends it to PATH), else `python3` on PATH.
     let probe = [
         "python3",
         "-c",
         "import pytest_cov; print(pytest_cov.__version__)",
     ];
-    match tool_version(&probe) {
+    match tool_version(&probe, venv_bin) {
         Some(v) => Check::ok(
             "pytest-cov",
             format!("pytest-cov {v} — per-test coverage contexts"),
@@ -402,30 +440,114 @@ fn check_coverage_file(base: &Path, rel: &Path) -> Check {
     };
     if !path.is_file() {
         return Check::warn(
-            "coverage.json",
+            "coverage-data",
             format!("{} not found", path.display()),
-            "produce it before each run:  pytest --cov=src --cov-context=test && coverage json -o coverage.json --show-contexts",
+            "produce it before each run:  pytest --cov=src --cov-context=test  (fermut reads the `.coverage` SQLite DB directly, or a `coverage json --show-contexts` export)",
         );
     }
-    match std::fs::read_to_string(&path) {
+    // fermut ingests either format: coverage.py's native `.coverage` SQLite DB
+    // or a `coverage json` export. Sniff the format and validate per-test
+    // contexts accordingly — the old JSON-only text scan false-failed on a
+    // SQLite DB, which fermut now reads directly.
+    match crate::filter::coverage::is_sqlite(&path) {
+        Ok(true) => check_coverage_sqlite(&path),
+        Ok(false) => check_coverage_json(&path),
+        Err(e) => Check::fail(
+            "coverage-data",
+            format!("{}: {e}", path.display()),
+            "regenerate the coverage report",
+        ),
+    }
+}
+
+/// Validate a `coverage json` export has per-test contexts.
+fn check_coverage_json(path: &Path) -> Check {
+    match std::fs::read_to_string(path) {
         Ok(text) => {
             if text.contains("\"contexts\"") {
                 Check::ok(
-                    "coverage.json",
-                    format!("{} (has per-test contexts)", path.display()),
+                    "coverage-data",
+                    format!("{} (JSON export, has per-test contexts)", path.display()),
                 )
             } else {
                 Check::fail(
-                    "coverage.json",
-                    format!("{} has no per-test contexts", path.display()),
+                    "coverage-data",
+                    format!("{} (JSON export) has no per-test contexts", path.display()),
                     "regenerate with `pytest --cov=src --cov-context=test` and `coverage json --show-contexts` (requires pytest-cov)",
                 )
             }
         }
         Err(e) => Check::fail(
-            "coverage.json",
+            "coverage-data",
             format!("{}: {e}", path.display()),
             "regenerate the coverage report",
+        ),
+    }
+}
+
+/// Validate a coverage.py `.coverage` SQLite DB has recorded per-test contexts
+/// (a `context` table with pytest-nodeid rows, not just the empty default or a
+/// single static label).
+fn check_coverage_sqlite(path: &Path) -> Check {
+    let conn = match rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            return Check::fail(
+                "coverage-data",
+                format!("{}: {e}", path.display()),
+                "regenerate the coverage report",
+            );
+        }
+    };
+    // coverage.py always stores one empty-string context (the default, no
+    // `--cov-context`). A single *static* label (`coverage run --context=LABEL`)
+    // is also non-empty but is NOT per-test — counting `context != ''` would
+    // green-light it. Per-test contexts are pytest nodeids, which always contain
+    // `::` (e.g. `tests/test_x.py::test_foo`); require that marker so a static
+    // label can't masquerade as per-test data.
+    let named: rusqlite::Result<i64> = conn.query_row(
+        "SELECT count(*) FROM context WHERE context LIKE '%::%'",
+        [],
+        |r| r.get(0),
+    );
+    match named {
+        Ok(n) if n > 0 => Check::ok(
+            "coverage-data",
+            format!("{} (SQLite DB, {n} per-test contexts)", path.display()),
+        ),
+        Ok(_) => Check::fail(
+            "coverage-data",
+            format!("{} (SQLite DB) has no per-test contexts", path.display()),
+            "regenerate with `pytest --cov=src --cov-context=test` (requires pytest-cov; a bare `coverage run --context=LABEL` is not per-test)",
+        ),
+        Err(e) => Check::fail(
+            "coverage-data",
+            format!("{}: reading `context` table: {e}", path.display()),
+            "regenerate the coverage report (needs a coverage.py `.coverage` DB)",
+        ),
+    }
+}
+
+/// `run` type-checks in-process by default, so a missing `ty` binary only
+/// matters when `FERMUT_TY_EMBEDDED=0` forces the subprocess path (or as the
+/// fallback if the embedded build fails, hence the warning).
+fn ty_check(version: Option<String>, embedded_disabled: bool) -> Check {
+    const PURPOSE: &str = "type-aware mutant pre-filter";
+    const HINT: &str = "uv tool install ty";
+    match version {
+        Some(v) => Check::ok("ty", format!("{v} — {PURPOSE}")),
+        None if embedded_disabled => Check::fail(
+            "ty",
+            format!("not on PATH and FERMUT_TY_EMBEDDED=0 ({PURPOSE})"),
+            HINT,
+        ),
+        None => Check::warn(
+            "ty",
+            "binary not on PATH; run uses the embedded checker (binary is only the fallback)",
+            HINT,
         ),
     }
 }
@@ -436,17 +558,34 @@ fn check_tool(
     purpose: &str,
     install_hint: &str,
     required: bool,
+    venv_bin: Option<&Path>,
 ) -> Check {
-    match tool_version(cmd) {
+    match tool_version(cmd, venv_bin) {
         Some(v) => Check::ok(name, format!("{v} — {purpose}")),
         None if required => Check::fail(name, format!("not on PATH ({purpose})"), install_hint),
         None => Check::warn(name, format!("not on PATH ({purpose})"), install_hint),
     }
 }
 
-fn tool_version(cmd: &[&str]) -> Option<String> {
+/// Probe a tool's `--version` (or similar). When `venv_bin` is set — the
+/// project's virtualenv `bin/` — it is prepended to the child's PATH, so a bare
+/// `pytest`/`coverage`/`python` resolves to the venv's copy first and falls
+/// back to PATH only when the venv lacks it. This is why `fermut doctor` no
+/// longer needs the caller to activate the venv (or prepend `.venv/bin` to PATH
+/// by hand) to see uv-managed tools.
+fn tool_version(cmd: &[&str], venv_bin: Option<&Path>) -> Option<String> {
     let (head, tail) = cmd.split_first()?;
-    let out = Command::new(head).args(tail).output().ok()?;
+    let mut command = Command::new(head);
+    command.args(tail);
+    if let Some(bin) = venv_bin {
+        let existing = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = vec![bin.to_path_buf()];
+        paths.extend(std::env::split_paths(&existing));
+        if let Ok(joined) = std::env::join_paths(paths) {
+            command.env("PATH", joined);
+        }
+    }
+    let out = command.output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -572,6 +711,25 @@ fn project_uses_hypothesis(base: &Path) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn tool_version_finds_a_tool_only_in_the_venv_bin() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        // A fake tool that exists ONLY in the venv bin, not on PATH.
+        let tool = bin.join("fermut-faketool");
+        std::fs::write(&tool, "#!/bin/sh\necho 'faketool 9.9.9'\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Without the venv bin, the bare name is not on PATH → not found.
+        assert!(tool_version(&["fermut-faketool"], None).is_none());
+        // With the venv bin prepended, it resolves.
+        let v = tool_version(&["fermut-faketool"], Some(&bin));
+        assert_eq!(v.as_deref(), Some("faketool 9.9.9"));
+    }
+
     #[test]
     fn parse_python_version_handles_common_formats() {
         assert_eq!(parse_python_version("Python 3.12.3"), Some((3, 12)));
@@ -602,6 +760,13 @@ mod tests {
     }
 
     #[test]
+    fn missing_ty_fails_only_when_embedded_disabled() {
+        assert_eq!(ty_check(None, false).status, Status::Warn);
+        assert_eq!(ty_check(None, true).status, Status::Fail);
+        assert_eq!(ty_check(Some("ty 0.1".into()), true).status, Status::Ok);
+    }
+
+    #[test]
     fn skip_status_never_counts_as_failure() {
         // A skipped check must not push fail/warn — doctor stays green.
         let t = tally(&[Check::skip("ty", "disabled (ty_filter = false)")]);
@@ -626,6 +791,61 @@ mod tests {
         std::fs::write(&p, "{\"files\": {\"x.py\": {\"contexts\": {}}}}").unwrap();
         let c = check_coverage_file(tmp.path(), Path::new("coverage.json"));
         assert_eq!(c.status, Status::Ok);
+    }
+
+    #[test]
+    fn check_coverage_file_accepts_sqlite_with_contexts() {
+        // A coverage.py `.coverage` DB with per-test contexts must pass — the
+        // old JSON text scan false-failed on the SQLite magic header.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join(".coverage");
+        let conn = rusqlite::Connection::open(&p).unwrap();
+        conn.execute("CREATE TABLE context (id integer, context text)", [])
+            .unwrap();
+        // The empty default context plus one real per-test context.
+        conn.execute("INSERT INTO context VALUES (0, '')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO context VALUES (1, 'tests/test_x.py::test_foo|run')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let c = check_coverage_file(tmp.path(), Path::new(".coverage"));
+        assert_eq!(c.status, Status::Ok, "detail: {}", c.detail);
+    }
+
+    #[test]
+    fn check_coverage_file_flags_sqlite_without_contexts() {
+        // A DB with only the empty default context has no per-test data.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join(".coverage");
+        let conn = rusqlite::Connection::open(&p).unwrap();
+        conn.execute("CREATE TABLE context (id integer, context text)", [])
+            .unwrap();
+        conn.execute("INSERT INTO context VALUES (0, '')", [])
+            .unwrap();
+        drop(conn);
+        let c = check_coverage_file(tmp.path(), Path::new(".coverage"));
+        assert_eq!(c.status, Status::Fail, "detail: {}", c.detail);
+    }
+
+    #[test]
+    fn check_coverage_file_flags_sqlite_static_label_only() {
+        // A single non-empty *static* label (`coverage run --context=LABEL`) is
+        // not per-test data — it lacks a pytest `::` nodeid marker and must fail.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join(".coverage");
+        let conn = rusqlite::Connection::open(&p).unwrap();
+        conn.execute("CREATE TABLE context (id integer, context text)", [])
+            .unwrap();
+        conn.execute("INSERT INTO context VALUES (0, '')", [])
+            .unwrap();
+        conn.execute("INSERT INTO context VALUES (1, 'mylabel')", [])
+            .unwrap();
+        drop(conn);
+        let c = check_coverage_file(tmp.path(), Path::new(".coverage"));
+        assert_eq!(c.status, Status::Fail, "detail: {}", c.detail);
     }
 
     #[test]
@@ -725,4 +945,15 @@ mod tests {
         assert_eq!(c.status, Status::Warn);
         assert!(c.detail.contains(".mutmut-cache"));
     }
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct DoctorArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Treat warnings as failures (exit non-zero on any warn).
+    #[arg(long)]
+    pub(crate) strict: bool,
 }

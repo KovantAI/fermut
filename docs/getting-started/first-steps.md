@@ -43,9 +43,9 @@ fermut init — detected:
 wrote /work/project/fermut.toml
 ```
 
-`coverage: wired` means `init` wrote `coverage = "coverage.json"` into the
-config (it detected `pytest-cov` / a coverage setup) — the JSON itself is
-produced by the next step. If no coverage dependency were found you'd see
+`coverage: wired` means `init` wrote `coverage = ".coverage"` into the
+config (it detected `pytest-cov` / a coverage setup) — the `.coverage`
+database itself is produced by the next step. If no coverage dependency were found you'd see
 `coverage: off (no coverage dependency found)` here and `init` would skip
 the key (and `fermut doctor` would surface a `[fail]` for the missing
 `pytest-cov`).
@@ -67,26 +67,32 @@ You'll need `coverage` and `pytest-cov` installed (see
 **[Installation prerequisites](installation.md#prerequisites)** if you
 skipped it). Quick sanity check: `coverage --version`.
 
-Generate the per-test coverage JSON:
+Generate per-test coverage:
 
 ```sh
 pytest --cov=src --cov-context=test
-coverage json -o coverage.json --show-contexts
 ```
+
+This writes coverage.py's native `.coverage` SQLite database, which
+fermut reads directly and auto-discovers at the project root — no
+`coverage json` export step. (`fermut coverage` is a convenience wrapper
+that does the same discovery-from-config and also refreshes
+incrementally as you add tests. Or, manually: `coverage json -o
+coverage.json --show-contexts`, then pass `--coverage coverage.json`.)
 
 `--cov-context=test` is what tags each covered line with the pytest
 nodeID of the test that touched it. Without it, fermut knows the line
 is covered but not by *which* test, so it falls back to running every
 test against every mutant. See
 **[Coverage](../guides/coverage.md)** for the full setup (and the
-one common footgun if your `coverage.json` ends up with a single
-static label instead of per-test contexts).
+one common footgun if your coverage ends up with a single static label
+instead of per-test contexts).
 
 Then baseline. No `--diff-only`, no CI — just an absolute number to
 anchor everything else.
 
 ```sh
-fermut run src/ --tests tests/ --coverage coverage.json --json baseline.json
+fermut run src/ --tests tests/ --coverage .coverage --json baseline.json
 ```
 
 `fermut run` streams progress logs (the `INFO fermut::…` lines) to
@@ -106,8 +112,9 @@ run (no cache, default profile, `ty` filter on):
 If your run is dramatically slower than this on first pass, the
 usual suspect is the coverage filter not being applied (no per-test
 contexts — see [coverage-rejected](../reference/troubleshooting/coverage-rejected.md)).
-A missing `ty` won't just slow the run — it aborts before any
-mutant is tested; see
+ty runs in-process by default, so the `ty` binary isn't needed for a
+normal run. If the embedded checker is unavailable and the binary is
+missing too, the run aborts before any mutant is tested; see
 [ty-not-found](../reference/troubleshooting/ty-not-found.md).
 Re-runs are much faster thanks to the AST-hash cache — typically
 80–95% cache hit on a no-source-change re-run.
@@ -161,9 +168,10 @@ The most common surprises, in roughly the order people hit them:
   pinned, or you have order-dependent tests. Pin
   `hypothesis_seed` in `fermut.toml`; investigate flaky tests.
   See [score swings](../reference/troubleshooting/score-swings.md).
-- **`--diff-only` produces zero mutants.** Shallow clone (`git
+- **`--diff-only` fails with a git error.** Shallow clone (`git
   clone --depth 1`, or CI checkout with `fetch-depth: 1`) means
-  the merge base isn't reachable. Re-clone with full history. See
+  the base or merge-base isn't reachable. Fetch full history. Zero
+  mutants with no error usually means you're on the base branch. See
   [diff-only empty](../reference/troubleshooting/diff-only-empty.md).
 - **Lots of timeouts.** Some tests don't terminate cleanly under
   arithmetic mutants (infinite loops on boundary-shifted
@@ -172,8 +180,8 @@ The most common surprises, in roughly the order people hit them:
   suite that has never been mutation-tested" note above the
   "What can go wrong" header.
 - **Run is much slower than the wall-clock table.** Check that
-  `ty` is installed and on `$PATH`, and that `--coverage` is being
-  honored (the JSON has per-test contexts).
+  the ty filter isn't disabled (`ty_filter = false` / `--no-ty-filter`),
+  and that coverage is being honored (the `.coverage` DB has per-test contexts).
 - **`pytest` fails to collect before fermut even starts.** A previous
   mutation tool may have left a top-level `mutants/` (mutmut) or
   similar directory containing duplicate test-module basenames. The
@@ -183,11 +191,11 @@ The most common surprises, in roughly the order people hit them:
   generating coverage. `fermut doctor` flags this under
   `legacy-artifacts` when it detects the dir.
 - **Score is 100% with thousands of `skipped` and no tests actually
-  running.** `coverage.json` was produced with `coverage run
+  running.** Coverage was produced with `coverage run
   --context=test` (a static label, not per-test contexts) or with
   `dynamic_context = test_function` (dotted Python names, not pytest
   nodeIDs). Regenerate with `pytest --cov=src --cov-context=test`.
-  See [Coverage](../guides/coverage.md#generate-coveragejson-with-per-test-contexts).
+  See [Coverage](../guides/coverage.md#generate-coverage-with-per-test-contexts).
 
 For everything else, see the
 [troubleshooting reference](../reference/troubleshooting/index.md).
@@ -234,7 +242,7 @@ Once you can read survivors, the next thing to optimize is cycle
 time. The dev-loop one-liner:
 
 ```sh
-fermut run src/ --tests tests/ --coverage coverage.json --diff-only main --watch
+fermut run src/ --tests tests/ --coverage .coverage --diff-only main --watch
 ```
 
 `--diff-only main` scopes mutation to your branch's changes;
@@ -256,13 +264,14 @@ fermut trend
 history: /work/project/.fermut/history.jsonl (5 entries)
 
 score: ▅▆▇▇▇   62.5% → 92.0%  (+29.5 pts)
+streak: ↑ improving (4 runs in a row)
 
-  timestamp              score  killed  survived  timeout    delta git
-  2026-05-01T10:00:00    62.5%      10        6        0         — main@aaa1111
-  2026-05-03T10:00:00    71.4%      15        6        0      +8.9 main@bbb2222
-  2026-05-10T10:00:00    80.0%      20        5        0      +8.6 main@ccc3333
-  2026-05-20T10:00:00    85.7%      24        4        0      +5.7 main@ddd4444
-  2026-06-01T10:00:00    92.0%      46        4        0      +6.3 features/coverage@eee5555
+  timestamp              score  kill  surv    to      delta git
+  2026-05-01T10:00:00    62.5%    10     6     0          — main@aaa1111
+  2026-05-03T10:00:00    71.4%    15     6     0       +8.9 main@bbb2222
+  2026-05-10T10:00:00    80.0%    20     5     0       +8.6 main@ccc3333
+  2026-05-20T10:00:00    85.7%    24     4     0       +5.7 main@ddd4444
+  2026-06-01T10:00:00    92.0%    46     4     0       +6.3 features/coverage@eee5555
 ```
 
 After a handful of inner-loop iterations, run `fermut trend --limit 10`

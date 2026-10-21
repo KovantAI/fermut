@@ -44,7 +44,7 @@ pub enum Profile {
     /// generous timeout, no diff filter — catches drift between gates.
     Nightly,
     /// Local dev loop. Sub-samples mutants for fast feedback, short timeout,
-    /// no coverage so it works before you've generated `coverage.json`.
+    /// no coverage so it works before you've generated `.coverage`.
     Local,
     /// Library-author workflow. Every stable op, no experimental noise,
     /// pinned Hypothesis seed for reproducibility.
@@ -122,6 +122,9 @@ struct Detection {
     runner: &'static str,
     ty_available: bool,
     coverage: CoverageDetection,
+    /// Hypothesis is a declared dependency. Profiles pin `hypothesis_seed` only
+    /// then — pytest rejects `--hypothesis-seed` without the plugin.
+    hypothesis: bool,
     package_manager: PackageManager,
     py_file_count: usize,
 }
@@ -130,7 +133,7 @@ struct Detection {
 enum CoverageDetection {
     /// `coverage` or `pytest-cov` is declared in project deps, or the
     /// `coverage` binary is on PATH, or a `.coveragerc` / `[tool.coverage.*]`
-    /// table exists. Safe to wire `coverage = "coverage.json"` into config.
+    /// table exists. Safe to wire `coverage = ".coverage"` into config.
     Present,
     Absent,
 }
@@ -161,7 +164,7 @@ impl PackageManager {
 
 pub fn init(opts: InitOpts) -> Result<()> {
     let detection = detect(&opts.path)?;
-    // Wire `coverage = "coverage.json"` when coverage is already part of
+    // Wire `coverage = ".coverage"` when coverage is already part of
     // the project, OR when the user explicitly asked for it. The latter
     // assumes they'll install coverage themselves — we print the command.
     let wire_coverage_base = detection.coverage == CoverageDetection::Present || opts.with_coverage;
@@ -174,6 +177,16 @@ pub fn init(opts: InitOpts) -> Result<()> {
     };
     let size = RepoSize::classify(detection.py_file_count);
 
+    print_detection_summary(&detection, &opts, size);
+    write_outputs(&detection, &toml_body, &opts)?;
+    print_next_steps(&detection, wire_coverage);
+
+    Ok(())
+}
+
+/// Print the "fermut init — detected:" block: resolved roots, runner, ty,
+/// coverage, package manager, repo size, and the effective profile.
+fn print_detection_summary(detection: &Detection, opts: &InitOpts, size: RepoSize) {
     println!("fermut init — detected:");
     println!("  project root : {}", detection.project_root.display());
     println!(
@@ -194,7 +207,7 @@ pub fn init(opts: InitOpts) -> Result<()> {
         if detection.ty_available {
             "on"
         } else {
-            "off (ty not on PATH)"
+            "off (FERMUT_TY_EMBEDDED=0 and ty not on PATH)"
         }
     );
     println!(
@@ -211,7 +224,11 @@ pub fn init(opts: InitOpts) -> Result<()> {
         }
     );
     println!();
+}
 
+/// Write the rendered config (fermut.toml or pyproject) and, when requested,
+/// the GHA workflow — or, under `--dry-run`, just print what would be written.
+fn write_outputs(detection: &Detection, toml_body: &str, opts: &InitOpts) -> Result<()> {
     let target = if opts.pyproject {
         detection.project_root.join("pyproject.toml")
     } else {
@@ -222,7 +239,7 @@ pub fn init(opts: InitOpts) -> Result<()> {
         println!("--dry-run: would write to {}:\n", target.display());
         println!("{}", toml_body);
     } else {
-        write_config(&target, &toml_body, opts.pyproject, opts.force)?;
+        write_config(&target, toml_body, opts.pyproject, opts.force)?;
         println!("wrote {}", target.display());
     }
 
@@ -239,17 +256,23 @@ pub fn init(opts: InitOpts) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Print the actionable "next steps:" tail — missing tests/ty warnings, the
+/// coverage-generation recipe, and the smoke-test / first-run commands.
+fn print_next_steps(detection: &Detection, wire_coverage: bool) {
     println!();
     println!("next steps:");
     if detection.tests.is_none() {
         println!("  - no tests directory detected; set `tests = \"path/to/tests\"` in the config");
     }
     if !detection.ty_available {
-        println!("  - install ty for the type-aware mutant pre-filter:  uv tool install ty");
+        println!("  - install ty (or unset FERMUT_TY_EMBEDDED) for the type-aware mutant pre-filter:  uv tool install ty");
     }
     if wire_coverage {
         println!(
-            "  - generate coverage with per-test contexts before each run:\n      pytest --cov=src --cov-context=test\n      coverage json -o coverage.json --show-contexts\n    (requires pytest-cov; `coverage run --context=LABEL` won't produce per-test contexts)"
+            "  - generate coverage with per-test contexts before each run:\n      pytest --cov=src --cov-context=test\n    (writes `.coverage`, which fermut reads directly — no `coverage json` export needed;\n     requires pytest-cov; `coverage run --context=LABEL` won't produce per-test contexts)"
         );
         if detection.coverage == CoverageDetection::Absent {
             println!(
@@ -271,8 +294,6 @@ pub fn init(opts: InitOpts) -> Result<()> {
         "  - first run :  fermut run {}",
         rel(&detection.source_root, &detection.project_root)
     );
-
-    Ok(())
 }
 
 fn detect(start: &Path) -> Result<Detection> {
@@ -284,8 +305,12 @@ fn detect(start: &Path) -> Result<Detection> {
     } else {
         "unittest"
     };
-    let ty_available = which("ty").is_some();
+    // The embedded checker needs no binary; only FERMUT_TY_EMBEDDED=0 makes
+    // the filter depend on `ty` being on PATH.
+    let ty_available = which("ty").is_some() || !crate::filter::ty::env_disables_embedded();
     let coverage = detect_coverage(&project_root);
+    let hypothesis = pyproject_mentions(&project_root, &["hypothesis"])
+        || lockfile_mentions(&project_root, &["hypothesis"]);
     let package_manager = detect_package_manager(&project_root);
     let py_file_count = count_py_files(&source_root);
 
@@ -296,6 +321,7 @@ fn detect(start: &Path) -> Result<Detection> {
         runner,
         ty_available,
         coverage,
+        hypothesis,
         package_manager,
         py_file_count,
     })
@@ -476,11 +502,15 @@ fn render_config(d: &Detection, wire_coverage: bool, profile: Option<Profile>) -
         _ => wire_coverage,
     };
     if coverage_on {
-        out.push_str("coverage = \"coverage.json\"\n");
+        // fermut reads coverage.py's native `.coverage` SQLite DB directly, so
+        // no separate `coverage json` export step is needed. `.coverage` at the
+        // project root is also the auto-discovery default, so this line is
+        // strictly a make-it-explicit; it stays for documentation value.
+        out.push_str("coverage = \".coverage\"\n");
     }
 
     if let Some(p) = profile {
-        write_profile_keys(&mut out, p);
+        write_profile_keys(&mut out, p, d.hypothesis);
     } else if let Some(ops) = RepoSize::classify(d.py_file_count).recommended_ops() {
         write_ops(&mut out, &ops);
     }
@@ -529,11 +559,13 @@ fn profile_timeout(profile: Option<Profile>) -> u64 {
     }
 }
 
-fn write_profile_keys(out: &mut String, p: Profile) {
+fn write_profile_keys(out: &mut String, p: Profile, hypothesis: bool) {
     match p {
         Profile::PrGate => {
             out.push_str("diff_only = \"main\"\n");
-            out.push_str("hypothesis_seed = 12345\n");
+            if hypothesis {
+                out.push_str("hypothesis_seed = 12345\n");
+            }
             write_ops(
                 out,
                 &[
@@ -554,7 +586,9 @@ fn write_profile_keys(out: &mut String, p: Profile) {
         }
         Profile::Library => {
             out.push_str("experimental = false\n");
-            out.push_str("hypothesis_seed = 12345\n");
+            if hypothesis {
+                out.push_str("hypothesis_seed = 12345\n");
+            }
         }
     }
 }
@@ -795,6 +829,7 @@ mod tests {
             runner: "pytest",
             ty_available: true,
             coverage: CoverageDetection::Absent,
+            hypothesis: true,
             package_manager: PackageManager::Pip,
             py_file_count: 10,
         }
@@ -827,7 +862,7 @@ mod tests {
 
     fn render_config_wires_coverage_when_requested() {
         let body = render_config(&fake_detection(), true, None);
-        assert!(body.contains("coverage = \"coverage.json\""));
+        assert!(body.contains("coverage = \".coverage\""));
     }
 
     #[test]
@@ -847,7 +882,7 @@ mod tests {
         let body = render_config(&fake_detection(), false, Some(Profile::PrGate));
         assert!(body.contains("# fermut profile: pr-gate"));
         assert!(body.contains("diff_only = \"main\""));
-        assert!(body.contains("coverage = \"coverage.json\""));
+        assert!(body.contains("coverage = \".coverage\""));
         assert!(body.contains("hypothesis_seed = 12345"));
         assert!(body.contains("timeout = 15"));
         assert!(body.contains("ops = [\"arith-op-swap\""));
@@ -881,13 +916,22 @@ mod tests {
     }
 
     #[test]
+    fn profiles_skip_hypothesis_seed_without_hypothesis() {
+        let mut d = fake_detection();
+        d.hypothesis = false;
+        for p in [Profile::PrGate, Profile::Library] {
+            assert!(!render_config(&d, false, Some(p)).contains("hypothesis_seed"));
+        }
+    }
+
+    #[test]
     fn pr_gate_profile_forces_coverage_even_without_detection() {
         // Detection says coverage absent, no --with-coverage; profile should
         // still wire it because the pr-gate scenario depends on it.
         let mut d = fake_detection();
         d.coverage = CoverageDetection::Absent;
         let body = render_config(&d, false, Some(Profile::PrGate));
-        assert!(body.contains("coverage = \"coverage.json\""));
+        assert!(body.contains("coverage = \".coverage\""));
     }
 
     #[test]
@@ -1106,5 +1150,106 @@ mod tests {
         fs::write(tmp.path().join("a/y.py"), "").unwrap();
         fs::write(tmp.path().join("a/z.txt"), "").unwrap();
         assert_eq!(count_py_files(tmp.path()), 2);
+    }
+}
+
+#[derive(clap::Args, Debug)]
+pub(crate) struct InitArgs {
+    /// Where to start the project-root walk. Defaults to cwd.
+    #[arg(default_value = ".")]
+    pub(crate) path: std::path::PathBuf,
+
+    /// Write `[tool.fermut]` into `pyproject.toml` instead of a
+    /// standalone `fermut.toml`.
+    #[arg(long)]
+    pub(crate) pyproject: bool,
+
+    /// Overwrite an existing `fermut.toml` or `[tool.fermut]` block.
+    #[arg(long)]
+    pub(crate) force: bool,
+
+    /// Also drop a PR-gate workflow at `.github/workflows/fermut.yml`.
+    #[arg(long)]
+    pub(crate) with_gha: bool,
+
+    /// Wire `coverage = ".coverage"` into the config even when no
+    /// coverage dependency is detected in the project. Use when you'll
+    /// install `coverage` yourself — `init` prints the install command
+    /// matching your package manager.
+    #[arg(long)]
+    pub(crate) with_coverage: bool,
+
+    /// Pre-seed the config with one of fermut's curated profiles:
+    /// `pr-gate` (CI gate), `nightly` (full sweep), `local` (dev loop),
+    /// or `library` (lib authors). Without `--profile`, init falls back
+    /// to a size-based heuristic.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) profile: Option<String>,
+
+    /// Print the profile catalogue (name, description, key overrides)
+    /// and exit. Nothing is written.
+    #[arg(long)]
+    pub(crate) list_profiles: bool,
+
+    /// Print what would be written without touching the filesystem.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+}
+
+/// Dispatch handler: resolves `--list-profiles` / `--profile <name>` and
+/// runs the config wizard. Owns the profile-parsing that used to sit in the
+/// `cli/mod.rs` match arm so dispatch stays a thin delegation.
+pub(crate) fn run(args: InitArgs) -> Result<()> {
+    let InitArgs {
+        path,
+        pyproject,
+        force,
+        with_gha,
+        with_coverage,
+        profile,
+        list_profiles,
+        dry_run,
+    } = args;
+
+    if list_profiles {
+        print_profile_catalogue();
+        return Ok(());
+    }
+
+    let profile = match profile {
+        Some(name) => Some(Profile::parse(&name).ok_or_else(|| {
+            anyhow!(
+                "unknown profile `{name}`. Run `fermut init --list-profiles` to see the catalogue."
+            )
+        })?),
+        None => None,
+    };
+
+    init(InitOpts {
+        path,
+        pyproject,
+        force,
+        with_gha,
+        with_coverage,
+        profile,
+        dry_run,
+    })
+}
+
+/// Print the curated-profile catalogue (name + description), aligned.
+fn print_profile_catalogue() {
+    println!("Available profiles (pass with --profile <name>):\n");
+    let name_width = Profile::ALL
+        .iter()
+        .map(|p| p.name().len())
+        .max()
+        .unwrap_or(0);
+    for p in Profile::ALL {
+        println!(
+            "  {:<width$}  {}",
+            p.name(),
+            p.description(),
+            width = name_width
+        );
     }
 }

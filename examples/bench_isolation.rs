@@ -20,8 +20,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use fermut::config::IsolationMode;
-use fermut::runner::time_mirror_build;
+use fermut::{time_mirror_build, IsolationMode};
 
 struct Args {
     files: usize,

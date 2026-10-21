@@ -48,7 +48,8 @@ comparable on either side — the same best-effort rule the
 ```
 
 - **`delta`** — `score - baseline_score`. Absent from the JSON when there is
-  no comparable prior run, e.g. the first recorded run on a branch.
+  no prior run (e.g. the first recorded run on a branch), and also when
+  either run is not comparable: scoreless, or a `--max-time` partial run.
 - **`new_survivors`** — mutants surviving now that the baseline killed.
   Regressions. Empty when either entry predates the survivor-id field.
 - **`newly_killed`** — mutants the baseline reported as survivors that are
@@ -62,8 +63,10 @@ comparable on either side — the same best-effort rule the
   `regressed` is score-delta-only. Omitted (treat as `true`) otherwise.
 
 `baseline_score`, `baseline_timestamp`, and `delta` are absent from the
-JSON entirely when there is no comparable prior run, rather than emitted as
-`null`.
+JSON entirely when there is no prior run, rather than emitted as `null`.
+`delta` alone is absent when a baseline exists but either run is scoreless
+or partial; `regressed` is then driven by survivor ids only, and
+`--fail-on-regression` cannot trip.
 
 `--fail-on-regression <PTS>` exits non-zero only when `regressed` is `true`
 **and** the drop exceeds `PTS`, so a non-zero exit always implies

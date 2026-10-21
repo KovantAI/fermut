@@ -9,51 +9,75 @@
 //! pre-filter in front of ty.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
 use anyhow::{anyhow, Context, Result};
+use tracing::warn;
 
 use super::Filter;
 use crate::emit::patch_source;
 use crate::mutator::Mutant;
+use crate::runner::resolve_tool;
 use crate::sync::lock_recover;
 
 pub struct RuffFilter {
-    bin: String,
+    bin: PathBuf,
     baseline: Mutex<HashMap<PathBuf, usize>>,
 }
 
 impl RuffFilter {
-    pub fn new() -> Result<Self> {
-        let bin = which("ruff").context(
-            "ruff binary not found; install via `pipx install ruff` or `uv tool install ruff`, or omit the --ruff-filter flag",
-        )?;
+    /// Resolve `ruff` preferring the project's venv `bin/` (derived from
+    /// `source_root`), then the ambient PATH — the same resolution `doctor`
+    /// reports, so a green `ruff ok` there means the run finds it too.
+    pub fn new(source_root: &Path) -> Result<Self> {
+        let bin = resolve_tool("ruff", source_root).ok_or_else(|| {
+            anyhow!(
+                "ruff binary not found in the project venv or on PATH; install via \
+                 `uv tool install ruff` (or `pipx install ruff`), or omit the --ruff-filter flag"
+            )
+        })?;
         Ok(Self {
             bin,
             baseline: Mutex::new(HashMap::new()),
         })
     }
 
-    fn baseline_count_for(&self, file: &PathBuf) -> Result<usize> {
+    fn baseline_count_for(&self, file: &PathBuf) -> Result<Option<usize>> {
         if let Some(&n) = lock_recover(&self.baseline).get(file) {
-            return Ok(n);
+            return Ok(Some(n));
         }
-        let n = self.diagnostic_count(file.to_string_lossy().as_ref())?;
-        lock_recover(&self.baseline).insert(file.clone(), n);
-        Ok(n)
+        match self.diagnostic_count(file.to_string_lossy().as_ref())? {
+            Some(n) => {
+                lock_recover(&self.baseline).insert(file.clone(), n);
+                Ok(Some(n))
+            }
+            None => Ok(None),
+        }
     }
 
-    fn diagnostic_count(&self, path: &str) -> Result<usize> {
-        let out = Command::new(&self.bin)
-            .args(["check", "--no-fix", "--output-format", "concise", path])
-            .output()
-            .with_context(|| format!("invoking `{} check {}`", self.bin, path))?;
+    /// `Ok(None)` when the `ruff` subprocess outran the filter timeout — the
+    /// caller bypasses the filter (admits the mutant) rather than hanging.
+    fn diagnostic_count(&self, path: &str) -> Result<Option<usize>> {
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["check", "--no-fix", "--output-format", "concise", path]);
+        let Some(out) = super::run_filter_with_timeout(cmd)
+            .with_context(|| format!("invoking `{} check {}`", self.bin.display(), path))?
+        else {
+            warn!(
+                path,
+                timeout_secs = super::FILTER_SUBPROCESS_TIMEOUT.as_secs(),
+                "ruff check timed out; bypassing ruff filter for this file"
+            );
+            return Ok(None);
+        };
         let stdout = String::from_utf8_lossy(&out.stdout);
         // Concise lines look like `path:line:col: RULE message`. Each line
         // is one diagnostic; ignore footer like `Found N error(s).`.
-        Ok(stdout.lines().filter(|l| looks_like_diagnostic(l)).count())
+        Ok(Some(
+            stdout.lines().filter(|l| looks_like_diagnostic(l)).count(),
+        ))
     }
 }
 
@@ -63,19 +87,17 @@ impl Filter for RuffFilter {
     }
 
     fn admits(&self, mutant: &Mutant) -> Result<bool> {
-        let baseline = self.baseline_count_for(&mutant.file)?;
+        let Some(baseline) = self.baseline_count_for(&mutant.file)? else {
+            return Ok(true); // ruff timed out on baseline → bypass
+        };
         let original = std::fs::read_to_string(&mutant.file)
             .with_context(|| format!("reading {}", mutant.file.display()))?;
         let patched = patch_source(&original, mutant.range, &mutant.replacement);
 
-        let tmp = tempfile::Builder::new()
-            .prefix("fermut-ruff-")
-            .suffix(".py")
-            .tempfile()
-            .context("creating temp file")?;
-        std::fs::write(tmp.path(), &patched).context("writing patched source")?;
-
-        let mutated = self.diagnostic_count(tmp.path().to_string_lossy().as_ref())?;
+        let tmp = super::patched_tempfile(&mutant.file, &patched)?;
+        let Some(mutated) = self.diagnostic_count(tmp.path().to_string_lossy().as_ref())? else {
+            return Ok(true); // ruff timed out on mutant → bypass
+        };
         Ok(mutated <= baseline)
     }
 }
@@ -92,17 +114,4 @@ fn looks_like_diagnostic(line: &str) -> bool {
         }
     }
     false
-}
-
-fn which(bin: &str) -> Result<String> {
-    let out = Command::new("which").arg(bin).output();
-    if let Ok(o) = out {
-        if o.status.success() {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if !s.is_empty() {
-                return Ok(s);
-            }
-        }
-    }
-    Err(anyhow!("`{bin}` not on PATH"))
 }

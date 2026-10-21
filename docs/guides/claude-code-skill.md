@@ -8,35 +8,113 @@ If you're looking for the general agent loop, start with [Coding agents](coding-
 
 ## Install the skill
 
-This playbook ships as a Claude Code [skill](https://docs.claude.com/en/docs/claude-code/skills) in the fermut repo at `skills/fermut-mutation-testing/`. Claude Code auto-discovers skills from `~/.claude/skills/` (user-wide) or `<project>/.claude/skills/` (project-local).
+This playbook ships as an [Agent Skill](https://agentskills.io),
+`fermut-mutation-testing`, that lets a coding agent (Claude Code, Codex, and
+others) drive the loop below for you. A skill only loads from a place the
+agent looks, so installing the `fermut` package doesn't give you the skill by
+itself. Pick one of the two ways below.
 
-=== "User-wide (recommended)"
+### Option 1: from the fermut binary (any agent)
 
-    Symlink so updates to the fermut checkout flow through automatically:
+```bash
+fermut install-skills
+```
 
-    ```bash
-    mkdir -p ~/.claude/skills
-    ln -s "$(realpath <fermut-checkout>/skills/fermut-mutation-testing)" \
-          ~/.claude/skills/fermut-mutation-testing
-    ```
+This writes the skill bundled with your installed fermut into
+`.claude/skills/` in the current directory. Commit that directory and everyone
+on the team gets the skill. The skill always matches the binary it came from,
+so the flags and subcommands it tells the agent to run exist in your version.
+Run the command again after upgrading fermut to refresh it.
 
-    Or copy if you prefer a pinned version:
+| Flag | Writes to |
+|------|-----------|
+| (none) | `./.claude/skills/` (Claude Code, this project) |
+| `--user` | `~/.claude/skills/` (Claude Code, every project) |
+| `--agents` | `./.agents/skills/` (Codex and other Agent Skills readers) |
+| `--user --agents` | `~/.agents/skills/` |
+| `--dir DIR` | `DIR/<skill>/` |
 
-    ```bash
-    cp -R <fermut-checkout>/skills/fermut-mutation-testing ~/.claude/skills/
-    ```
+If the skill is already installed and its files differ from the bundled copy
+(you edited it, or it came from another fermut version), it is left alone and
+the command exits `1`. Add `--force` to overwrite it. `--force` replaces only
+the files fermut ships and keeps any files you added to the skill directory.
 
-=== "Project-local"
+```console
+$ fermut install-skills
+  fermut-mutation-testing: installed
+fermut 0.6.0 skills in /path/to/project/.claude/skills. Claude Code picks up project and user skills live; if they don't show up, start a new session.
+```
 
-    Drop the skill into a project's `.claude/skills/` so it only loads when working in that repo:
+### Option 2: the Claude Code plugin
 
-    ```bash
-    mkdir -p <your-project>/.claude/skills
-    cp -R <fermut-checkout>/skills/fermut-mutation-testing \
-          <your-project>/.claude/skills/
-    ```
+The fermut repository is also a Claude Code plugin marketplace. Inside Claude
+Code:
 
-Verify Claude Code loaded it: in a new session, ask "what claude code skills are available?" — `fermut-mutation-testing` should appear in the list. The skill auto-triggers when you mention fermut, mutation testing, mutation score, weak tests, or similar.
+```text
+/plugin marketplace add KovantAI/fermut
+/plugin install fermut@fermut
+```
+
+Or from a shell:
+
+```bash
+claude plugin marketplace add KovantAI/fermut
+claude plugin install fermut@fermut
+```
+
+The plugin makes the skill available in every project. It also registers the
+[`fermut mcp`](../reference/cli/mcp.md) server, so the agent can call
+`fermut_doctor`, `fermut_run`, `fermut_next`, `fermut_explain` and the other
+tools natively instead of shelling out. The server runs the `fermut` on your
+`PATH` from the directory you start Claude Code in, so install fermut first
+(`pip install fermut`); without it, `/mcp` lists the `fermut` server as failed
+and the skill still works through the CLI.
+
+Its version follows fermut releases, so plugin updates bring the skill for the
+latest fermut rather than the version you have installed. If you pin an older
+fermut, use `fermut install-skills` instead, and register the server yourself
+with `claude mcp add fermut -- fermut mcp`.
+
+To suggest the plugin to everyone who opens your repository in Claude Code,
+add this to the project's `.claude/settings.json`:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "fermut": {
+      "source": { "source": "github", "repo": "KovantAI/fermut" }
+    }
+  },
+  "enabledPlugins": {
+    "fermut@fermut": true
+  }
+}
+```
+
+### Using the skill
+
+The agent picks the skill when your request matches it: "are my tests any
+good", "get the mutation score above 80%", "kill the survivors in
+`billing.py`". To run it explicitly, type its slash command:
+
+| Installed with | Command |
+|----------------|---------|
+| `fermut install-skills` | `/fermut-mutation-testing` |
+| the plugin | `/fermut:fermut-mutation-testing` |
+
+### If the skill doesn't show up
+
+- **Check that it's loaded.** In Claude Code, `/skills` lists every skill it
+  found. The plugin's skill appears under the `fermut` plugin, and `/mcp`
+  shows the plugin's `fermut` server.
+- **Reload after a plugin install.** If `/plugin install` says to run
+  `/reload-plugins`, do that, or start a new session.
+- **Install where the agent looks.** `fermut install-skills` writes to the
+  current directory. Run it from the project root, the directory you start the
+  agent in.
+- **Match the agent to the directory.** Claude Code reads `.claude/skills/`.
+  Codex and other Agent Skills readers use `.agents/skills/`, so install with
+  `--agents` for them.
 
 ## When to use this playbook
 
@@ -58,7 +136,7 @@ Prefer the debug build over release — `target/release/fermut` may be stale dur
 
 ### 2. Optional dependencies installed
 
-Many Python projects gate test modules behind `[project.optional-dependencies]`. Without them, `pytest --collect-only` errors on missing imports and `coverage.json` comes back empty.
+Many Python projects gate test modules behind `[project.optional-dependencies]`. Without them, `pytest --collect-only` errors on missing imports and `.coverage` comes back empty.
 
 === "uv"
 
@@ -73,11 +151,11 @@ Many Python projects gate test modules behind `[project.optional-dependencies]`.
     ```
 
 !!! warning "Symptom if you skip this step"
-    `pytest --collect-only -q` reports `N errors during collection` with `ModuleNotFoundError` for things like `msgraph`, `azure.ai.projects`, etc. coverage.json will not have the contexts fermut needs.
+    `pytest --collect-only -q` reports `N errors during collection` with `ModuleNotFoundError` for things like `msgraph`, `azure.ai.projects`, etc. `.coverage` will not have the contexts fermut needs.
 
 ### 3. Tooling on PATH
 
-- `ty` — fermut's default pre-filter. Without it: pass `--no-ty-filter`.
+- `ty` — fermut's default pre-filter runs in-process, so the `ty` binary is optional (only needed with `FERMUT_TY_EMBEDDED=0`). `fermut doctor` still reports it as a failure when missing.
 - `pytest-cov` — install explicitly; it transitively pulls in `coverage`:
   ```bash
   uv add --dev pytest-cov         # or: pip install pytest-cov
@@ -86,7 +164,7 @@ Many Python projects gate test modules behind `[project.optional-dependencies]`.
 
 ### 4. Project venv
 
-Locate `.venv/bin/pytest`. fermut spawns `pytest` directly, so the venv must be on PATH when fermut runs.
+fermut runs `<python> -m pytest` with the interpreter it resolves: `--python`, else an active `$VIRTUAL_ENV`, else a nearby `.venv`. Only when none is found does it fall back to a bare `pytest` on PATH. If your venv lives elsewhere, pass `--python /abs/path/to/venv`.
 
 ### 5. `--fail-under` — skip it in this loop
 
@@ -94,7 +172,7 @@ Locate `.venv/bin/pytest`. fermut spawns `pytest` directly, so the venv must be 
 
 ## Coverage setup
 
-fermut reads `coverage.json` to know which tests touch which lines and re-runs only the relevant ones per mutant. Get this wrong and either every mutant is skipped (no coverage filter signal) or fermut can't pass the right test selection back to pytest.
+fermut reads coverage.py's native `.coverage` SQLite database directly to know which tests touch which lines and re-runs only the relevant ones per mutant. Running `pytest --cov=src --cov-context=test` writes `.coverage`; fermut auto-discovers it at the project root (or pass `--coverage .coverage`). Get this wrong and either every mutant is skipped (no coverage filter signal) or fermut can't pass the right test selection back to pytest.
 
 ### `.coveragerc`
 
@@ -113,14 +191,34 @@ exclude_lines =
 !!! danger "Do NOT set `dynamic_context = test_function`"
     That setting produces context strings like `module.test_func`, which fermut cannot pass to pytest. Pytest expects `tests/file_test.py::test_func`. Use `pytest --cov-context=test` instead (next step).
 
-### Generate `coverage.json`
+### Generate coverage
+
+The one command — `fermut coverage` — runs the suite and writes a
+`.coverage` SQLite database fermut reads directly (no `coverage json`
+export step). It's incremental: after the first run it re-measures only
+the test files whose content changed.
+
+```bash
+fermut coverage --source <src-dir> --tests "$PWD/tests"
+```
+
+The `run`/`explain` commands below all pass `--coverage "$PWD/.coverage"`
+(explicit and absolute because these are agent scripts where cwd is
+unstable — auto-discovery is the convenience for interactive use, not
+these scripts).
+
+Or, manually — a `coverage json --show-contexts` export. fermut sniffs
+the file format, so a JSON export still works as a legacy alternative
+(the `.coveragerc` and context-format notes below apply to this path).
+If you take this path, pass `--coverage "$PWD/coverage.json"` in place of
+`--coverage "$PWD/.coverage"` on every `run`/`explain` below:
 
 ```bash
 uv run pytest --cov=<src-dir> --cov-context=test --cov-report= -q
 uv run coverage json --rcfile=.coveragerc --show-contexts -o coverage.json
 ```
 
-`--show-contexts` is **mandatory**. Without it:
+`--show-contexts` is **mandatory** on this manual JSON path. Without it:
 
 ```
 coverage.json at coverage.json has no per-test contexts.
@@ -156,7 +254,7 @@ If you see `['foo_test.test_bar']` (no `tests/` prefix, no `::` separator), `dyn
 ```bash
 PATH="$PWD/.venv/bin:$PATH" <fermut> run "$PWD" \
     --tests "$PWD/tests" \
-    --coverage "$PWD/coverage.json" \
+    --coverage "$PWD/.coverage" \
     --json .fermut/last.json --no-history -q
 ```
 
@@ -169,7 +267,7 @@ PATH="$PWD/.venv/bin:$PATH" <fermut> run "$PWD" \
 
 ```bash
 PATH="$PWD/.venv/bin:$PATH" <fermut> run "$PWD" \
-    --tests "$PWD/tests" --coverage "$PWD/coverage.json" \
+    --tests "$PWD/tests" --coverage "$PWD/.coverage" \
     --sample 0.005 --json .fermut/sample.json --no-history -q
 ```
 
@@ -183,7 +281,7 @@ Should complete in &lt;30s. Verify:
 
 ```bash
 PATH="$PWD/.venv/bin:$PATH" <fermut> run "$PWD" \
-    --tests "$PWD/tests" --coverage "$PWD/coverage.json" \
+    --tests "$PWD/tests" --coverage "$PWD/.coverage" \
     --json .fermut/last.json --no-history -q
 ```
 
@@ -229,10 +327,10 @@ Use this jq scenario calculator to predict the score under candidate skip sets b
 ```bash
 jq '
 def stat(skip):
-  [.outcomes[] | select((.status=="killed" or .status=="survived" or .status=="timeout") and (.mutant.operator as $o | (skip | index($o) | not)))] as $kept
+  [.outcomes[] | select((.status=="killed" or .status=="survived" or .status=="timed_out") and (.mutant.operator as $o | (skip | index($o) | not)))] as $kept
   | ($kept | map(select(.status=="killed")) | length) as $k
   | ($kept | map(select(.status=="survived")) | length) as $s
-  | ($kept | map(select(.status=="timeout")) | length) as $t
+  | ($kept | map(select(.status=="timed_out")) | length) as $t
   | {kept: ($k+$s+$t), killed: $k, survived: $s, score: (($k*1000/($k+$s+$t)|floor)/10)};
 {
   baseline: stat([]),
@@ -266,7 +364,7 @@ For each survivor in a high-value file:
 
 ```bash
 <fermut> explain .fermut/last.json <idx-or-id> \
-    --tests "$PWD/tests" --coverage "$PWD/coverage.json" \
+    --tests "$PWD/tests" --coverage "$PWD/.coverage" \
     --format json
 ```
 
@@ -299,12 +397,18 @@ The highest-signal field is `coverage.tests` — these are tests that *executed*
 After Claude writes the killing test:
 
 1. Run it locally: `uv run pytest tests/new_test.py -q` — confirm green
-2. Regenerate coverage:
+2. Regenerate coverage — `fermut coverage` re-measures only the changed
+   test file and updates `.coverage`:
+   ```bash
+   fermut coverage --source src --tests "$PWD/tests"
+   ```
+   Or, manually, refresh `coverage.json`:
    ```bash
    uv run pytest --cov=src --cov-context=test --cov-report= -q
    uv run coverage json --rcfile=.coveragerc --show-contexts -o coverage.json
    ```
-3. Re-run fermut with same flags
+3. Re-run fermut with same flags (match `--coverage` to whichever file
+   you wrote)
 
 ### Stage 7 — Cache behavior
 
@@ -331,7 +435,7 @@ jq -r '.outcomes | to_entries[] | select(.value.status=="survived") | (.key + 1)
 : > .fermut/explain-all.jsonl
 while IFS= read -r idx; do
   <fermut> explain .fermut/last.json "$idx" \
-    --tests "$PWD/tests" --coverage "$PWD/coverage.json" \
+    --tests "$PWD/tests" --coverage "$PWD/.coverage" \
     --format json 2>/dev/null | jq -c '.' >> .fermut/explain-all.jsonl
 done < .fermut/survivor_indices.txt
 ```
@@ -353,7 +457,7 @@ Per-file batch: 6–15 tests typically kill 10–30 mutants. Keyword-dispatch (`
 
 | Phase | Small/med backend | Large backend |
 |---|---|---|
-| Coverage gen (full pytest + json export) | ~40–60s | ~90s |
+| Coverage gen (`fermut coverage` / full pytest with `--cov-context=test`) | ~40–60s | ~90s |
 | Full baseline fermut run | 10–25 min | 60–90 min |
 | Per-iteration rerun (cache hits) | 30–60s | 5–15 min |
 | Per-iteration rerun (cache-reset miss) | 5–15 min | 30–60 min |
@@ -363,15 +467,15 @@ Per-file batch: 6–15 tests typically kill 10–30 mutants. Keyword-dispatch (`
 ## Common pitfalls
 
 1. **Release binary stale** — `explain`/`suggest` may be missing. Use debug.
-2. **Optional deps not installed** — pytest collection errors, empty coverage.json. Run `uv sync --all-extras` first.
+2. **Optional deps not installed** — pytest collection errors, empty `.coverage`. Run `uv sync --all-extras` first.
 3. **`--fail-under` is for CI score gates, not this loop** — it exists (score threshold instead of the default exit-nonzero-on-any-survivor), but the skill reads outcomes from JSON, so don't pass it here.
 4. **Relative paths** — auto-absolutized now (fixed); `$PWD/...` optional, not required.
 5. **`dynamic_context = test_function` produces wrong nodeid format** — use `pytest --cov-context=test`.
 6. **`--show-contexts` missing on `coverage json`** — fermut errors out.
 7. **Coverage filter drops everything** — path mismatch; verify mutant count via `jq '[.outcomes[] | select(.status != "skipped")] | length' .fermut/last.json`.
-8. **pytest not on PATH** — prepend `$PWD/.venv/bin`.
+8. **`pytest was not found on PATH`** — fermut found no venv to use; pass `--python /abs/path/to/venv` (or activate the venv).
 9. **Skipping a 100% kill-rate op lowers overall score** — see Stage 4 math. `break-continue-swap` and `remove-decorator` are common offenders.
-10. **Passing `src/` as PATH** — double-`src` path bug; pass project root.
+10. **Passing `src/` as the target** — prefer the project root so source-root, tests, and coverage keys stay consistent (coverage cwd is auto-detected, so this is consistency, not a path-join bug).
 11. **Polling the bg fermut process** — don't; the harness notifies on completion.
 12. **Iter rerun unexpectedly slow (10+ min)** — broad cache miss from tests in a shared dir. One-time, not a bug. See Stage 7.
 13. **Wasting tokens on `explain --llm` / `suggest`** — both hit the Anthropic API (`suggest` always; `explain` only with `--llm`); when Claude drives, that call is redundant and weaker. Use plain `explain --format json`.
@@ -381,7 +485,7 @@ Per-file batch: 6–15 tests typically kill 10–30 mutants. Keyword-dispatch (`
 ```bash
 PATH="$PWD/.venv/bin:$PATH" <fermut> run "$PWD" \
     --tests "$PWD/tests" \
-    --coverage "$PWD/coverage.json" \
+    --coverage "$PWD/.coverage" \
     --skip-ops keyword-arg-drop,constant-replace \
     --json .fermut/last.json \
     --no-history -q

@@ -1,6 +1,6 @@
 [package]
 name = "fermut"
-version = "0.2.2"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.83"
 authors = ["Kovant AB"]
@@ -15,9 +15,13 @@ categories = ["development-tools::testing", "command-line-utilities"]
 include = [
     "src/**/*",
     "examples/github-actions/pr-gate.yml",
-    "README.md",
-    "LICENSE-MIT",
-    "LICENSE-APACHE",
+    # `fermut install-skills` embeds these via include_bytes!.
+    "plugins/fermut/skills/*/SKILL.md",
+    # The pytest runner embeds the result-reporter plugin via include_str!.
+    "python/pytest_fermut/_fermut_reporter.py",
+    "/README.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
 ]
 
 [[bin]]
@@ -39,47 +43,96 @@ indicatif = "0.18"
 notify = "8"
 rayon = "1"
 reflink-copy = "0.1"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
+# sha2 0.11 / hmac 0.13 are the current RustCrypto majors (successors to the
+# long-stable 0.10/0.12 line). Deliberately on latest for the cache-integrity
+# HMAC-SHA256 path — same audited primitives, current API. Revisit only on a
+# RUSTSEC advisory or a breaking-API bump.
 sha2 = "0.11"
 hex = "0.4"
 hmac = "0.13"
 subtle = "2"
 similar = "3"
 tempfile = "3"
-thiserror = "2"
 toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2"
 wait-timeout = "0.2"
-ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+which = "8"
+# Minimal on purpose: the Anthropic client is a single stateless JSON POST, so
+# cookie storage and gzip (with their cookie_store / time / flate2 trees) are
+# dead weight. `rustls` brings TLS + webpki roots; `json` brings send/read_json.
+# The tests/deps_hygiene.rs guard fails if this set drifts back to defaults.
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 
 # Astral parser + AST + text-range crates. Pinned to a ruff release tag.
 # Bump the tag together to keep API consistency. Verify the tag exists at
 # https://github.com/astral-sh/ruff/tags before changing.
-ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.15.18" }
-ruff_python_ast    = { git = "https://github.com/astral-sh/ruff", tag = "0.15.18" }
-ruff_text_size     = { git = "https://github.com/astral-sh/ruff", tag = "0.15.18" }
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1" }
+ruff_python_ast    = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1" }
+ruff_text_size     = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1" }
 
 # Embedded ty checker. Same git tag as the parser above to share salsa
 # intern tables and avoid duplicate-crate hazards. Wired by
 # `src/filter/ty_embedded.rs`; the subprocess fallback in
 # `src/filter/ty.rs` covers the cases where `ty_project` construction
 # fails (pre-release API surface).
-ruff_db            = { git = "https://github.com/astral-sh/ruff", tag = "0.15.18", features = ["os"] }
-ruff_notebook      = { git = "https://github.com/astral-sh/ruff", tag = "0.15.18" }
-ty_project         = { git = "https://github.com/astral-sh/ruff", tag = "0.15.18" }
-ty_python_semantic = { git = "https://github.com/astral-sh/ruff", tag = "0.15.18" }
+ruff_db            = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1", features = ["os"], optional = true }
+ruff_notebook      = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1", optional = true }
+ty_project         = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1", optional = true }
+ty_python_semantic = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1", optional = true }
+
+[features]
+default = ["embedded-ty"]
+# In-process ty checker. Off only for the fuzz build (fuzz/), where ty is dead
+# weight that blows the sanitizer build's memory; the subprocess `ty` fallback
+# covers it.
+embedded-ty = ["dep:ruff_db", "dep:ruff_notebook", "dep:ty_project", "dep:ty_python_semantic"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_Foundation"] }
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+serde_json = "1"
+# Deterministic mtime control for the coverage-freshness guard tests (avoids
+# sleep-based ordering, which is flaky on coarse-resolution filesystems).
+filetime = "0.2"
+# Only to construct a `ureq::Error::Rustls` in the transport-retry test; must
+# track the rustls major ureq 3 links (0.23).
+rustls = "0.23"
+
+# Lint baseline. CI runs `cargo clippy -- -D warnings`, so every lint below is
+# an error in CI and locally/IDE, not just an advisory. Kept curated + green
+# rather than blanket `clippy::pedantic`, which currently fires ~40 lints
+# (mostly `cast_possible_truncation`) — tighten toward pedantic incrementally.
+[lints.rust]
+# No new `unsafe` without an explicit, reviewed opt-in. The only two FFI sites
+# (process-group kill in `runner/process_group.rs`) carry a scoped
+# `#[allow(unsafe_code)]` with a SAFETY note.
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"           # no stray `dbg!` in committed code
+todo = "warn"                # `todo!()` must not ship
+unimplemented = "warn"       # nor `unimplemented!()`
+mem_forget = "warn"
+verbose_file_reads = "warn"
+inefficient_to_string = "warn"
+lossy_float_literal = "warn"
+
+[lints.rustdoc]
+# `lib.rs` documents the module map with intra-doc links; fail the build if any
+# break so the doc can't silently drift from the code.
+broken_intra_doc_links = "deny"
 
 [profile.release]
 lto = "thin"

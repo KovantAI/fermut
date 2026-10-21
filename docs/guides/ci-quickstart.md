@@ -63,18 +63,27 @@ Two files:
 **`fermut.toml`** — pre-seeded from the `pr-gate` profile:
 
 - `diff_only = "main"` — only mutate changed lines vs the merge base.
-- Narrow op set (arith / compare / boundary / return-to-none).
-- `timeout = 15`, Hypothesis seed pinned.
+- Narrow op set (`arith-op-swap`, `compare-op-swap`, `boundary-shift`,
+  `return-value-to-none`).
+- `timeout = 15`. `hypothesis_seed` is pinned only when Hypothesis is a
+  declared dependency.
 
-**`.github/workflows/fermut.yml`** — the canonical PR-gate workflow.
-See [Integrations / GitHub Actions](integrations.md#github-actions)
-for the full YAML and a line-by-line explanation. Key points:
+**`.github/workflows/fermut.yml`** — the canonical PR-gate workflow
+(the same file as
+[`examples/github-actions/pr-gate.yml`](https://github.com/KovantAI/fermut/blob/main/examples/github-actions/pr-gate.yml)).
+Key points:
 
-- Triggers on `pull_request` for `**/*.py` changes only.
-- Installs deps, runs coverage with `--show-contexts` (per-test
-  coverage contexts power the per-mutant test selection).
-- Caches `.fermut/cache.json` keyed on lockfile + sources, so re-runs
-  on the same PR skip already-killed mutants.
+- Triggers on `pull_request` when `**/*.py`, `pyproject.toml` or
+  `fermut.toml` change.
+- Runs `uv sync`, installs `pytest-cov`, then `fermut coverage`, which
+  runs `pytest --cov --cov-context=test` and writes `.coverage` (fermut
+  reads it directly). The per-test contexts power the per-mutant test
+  selection.
+- Runs `fermut run --diff-only origin/<PR base>` and writes
+  `fermut-report.md` and `fermut-report.json`.
+- Has **no cache step**: every run starts cold. Use the
+  [`KovantAI/fermut` action](github-action.md) instead if you want
+  verdicts and coverage cached across runs.
 - Posts a sticky PR comment via `fermut pr-comment`. The comment
   updates in place on each re-run.
 
@@ -91,11 +100,15 @@ uses it to post.
 
 The first PR after wiring this up will produce one of three outcomes:
 
-- **Green, no comment.** The PR didn't touch Python or the diff had
-  no mutable code. Expected, not a failure.
+- **No run at all.** The PR touched no `.py`, `pyproject.toml` or
+  `fermut.toml`, so the workflow didn't trigger.
+- **Green, comment with `Score: N/A`.** The diff had no mutable code.
+  The comment is still posted. Expected, not a failure.
 - **Green, comment with score and zero survivors.** The happy path.
-- **Red, comment listing survivors.** Fix or `# fermut: ignore`
-  them. The comment links to `fermut explain` output for each one.
+- **Red, comment listing survivors.** Each survivor is one line with
+  its absolute `path:line`, operator and the `original → replacement`
+  edit. Run `fermut explain` locally on one for the full context, then
+  fix it or add a `# fermut: ignore[<op>]` marker.
 
 If you get **`errored` outcomes** in the comment instead of
 killed/survived, your tests probably have side effects on the source
@@ -107,7 +120,11 @@ The default `pr-gate` workflow blocks merges. If you'd rather watch
 the score for a week before flipping the gate on, follow the
 **measure-only** variant in
 **[projects.md / Step 3](projects.md#step-3-wire-ci-in-measure-only-mode)**.
-The difference is one line: `continue-on-error: true` on the job.
+For this hand-written workflow the difference is one line:
+`continue-on-error: true` on the job. Note it also hides setup failures
+(a broken install or coverage step shows green too). If you use the
+[`KovantAI/fermut` action](github-action.md#rolling-it-out) instead,
+prefer its `blocking: "false"` input, which only softens the gate.
 
 This is the recommended path for codebases that haven't run
 mutation testing before — see
@@ -126,7 +143,7 @@ earlier. To skip the second full-suite run on the critical path, pass
 
 ```sh
 fermut run src/ --tests tests/ --diff-only <base-ref> \
-    --coverage coverage.json --no-verify-baseline --markdown report.md --trend
+    --coverage .coverage --no-verify-baseline --markdown report.md --trend
 ```
 
 Only do this when the coverage step and the fermut step run in the **same job**
@@ -148,9 +165,9 @@ CLI, so any CI works — translate the steps:
 2. Install Python + the project's deps.
 3. Install fermut (`uv tool install fermut`, `pipx install fermut`,
    or `pip install fermut`).
-4. Run `pytest --cov=src --cov-context=test` then
-   `coverage json --show-contexts`.
-5. `fermut run src/ --tests tests/ --diff-only <base-ref> --coverage coverage.json --no-verify-baseline --markdown report.md --trend`
+4. Run `fermut coverage` to build a `.coverage` database (or, manually:
+   `pytest --cov=src --cov-context=test`, which writes `.coverage`).
+5. `fermut run src/ --tests tests/ --diff-only <base-ref> --coverage .coverage --no-verify-baseline --markdown report.md --trend`
    (`--no-verify-baseline` is safe here because step 4 already ran the full
    suite in this same job; drop it if your CI splits those steps across jobs.)
 6. Optional: post the markdown report to the PR via your platform's

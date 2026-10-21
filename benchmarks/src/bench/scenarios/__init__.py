@@ -1,4 +1,5 @@
 """Benchmark scenarios."""
+
 from __future__ import annotations
 
 from .cold import cold

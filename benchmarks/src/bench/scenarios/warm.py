@@ -9,9 +9,8 @@ So we always run one un-timed priming pass to populate the cache, then time a
 second pass — that second pass is the warm number. Worktree + venv are set up
 via an implicit cold run if missing, so warm is callable in isolation.
 """
-from __future__ import annotations
 
-from pathlib import Path
+from __future__ import annotations
 
 from .. import repos as repos_mod
 from .. import venv as venv_mod

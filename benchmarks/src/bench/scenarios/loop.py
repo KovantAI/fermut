@@ -8,6 +8,7 @@ file and reuse cached results for the rest of the repo.
 We require a prior cold run so caches exist; otherwise the first iteration
 becomes a disguised cold run and skews the average.
 """
+
 from __future__ import annotations
 
 from .. import repos as repos_mod
@@ -46,13 +47,15 @@ def loop(
             f"({timings[0].seconds:.1f}s)",
             flush=True,
         )
-        iteration_results.append({
-            "iteration": i,
-            "seconds": timings[0].seconds,
-            "score": result.score,
-            "mutants": result.mutants,
-            "returncode": result.returncode,
-        })
+        iteration_results.append(
+            {
+                "iteration": i,
+                "seconds": timings[0].seconds,
+                "score": result.score,
+                "mutants": result.mutants,
+                "returncode": result.returncode,
+            }
+        )
 
     seconds = [r["seconds"] for r in iteration_results]
     avg = sum(seconds) / len(seconds) if seconds else 0.0

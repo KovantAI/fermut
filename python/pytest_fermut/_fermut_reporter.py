@@ -50,7 +50,7 @@ def _emit(event):
         return
     if _fh is None:
         # Line-buffered: each event reaches the file as soon as it's written.
-        _fh = open(_path, "a", buffering=1, encoding="utf-8")
+        _fh = open(_path, "a", buffering=1, encoding="utf-8")  # noqa: SIM115
     event["pid"] = os.getpid()
     _fh.write(json.dumps(event, separators=(",", ":")) + "\n")
 
@@ -86,7 +86,10 @@ def pytest_load_initial_conftests(early_config, parser, args):
     err = outcome.excinfo[1]
     if type(err).__name__ == "ConftestImportFailure":
         # pytest 8+ keeps the underlying exception in ``cause``, 7.x in ``excinfo``.
-        cause = getattr(err, "cause", None) or (getattr(err, "excinfo", None) or (None, err))[1]
+        cause = (
+            getattr(err, "cause", None)
+            or (getattr(err, "excinfo", None) or (None, err))[1]
+        )
         _emit(
             {
                 "ev": "conftest_error",
@@ -116,7 +119,7 @@ def _switch_context(name):
             return False
         cov.switch_context(name)
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 - never break the user's test run
         return False
 
 

@@ -4,6 +4,7 @@ cosmic-ray needs an upfront TOML config and a sqlite session file. We
 generate both into the worktree on first run, then `init` + `exec` + `dump`.
 The dump output is parsed for the surviving-mutant percentage.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,7 +12,6 @@ from textwrap import dedent
 
 from ..config import RepoCfg
 from .base import Adapter, RunResult
-
 
 CONFIG_TEMPLATE = dedent("""\
     [cosmic-ray]
@@ -32,13 +32,17 @@ class CosmicRayAdapter(Adapter):
 
     def _write_config(self, worktree: Path, repo: RepoCfg) -> Path:
         cfg = worktree / "cosmic-ray.toml"
-        cfg.write_text(CONFIG_TEMPLATE.format(
-            src_path=repo.src_path,
-            test_path=repo.test_path,
-        ))
+        cfg.write_text(
+            CONFIG_TEMPLATE.format(
+                src_path=repo.src_path,
+                test_path=repo.test_path,
+            )
+        )
         return cfg
 
-    def run(self, repo: RepoCfg, worktree: Path, *, timeout: int | None = None) -> RunResult:
+    def run(
+        self, repo: RepoCfg, worktree: Path, *, timeout: int | None = None
+    ) -> RunResult:
         cfg = self._write_config(worktree, repo)
         session = worktree / "cosmic-ray.session.sqlite"
         # `init` seeds the session with all pending work items. Re-`init`

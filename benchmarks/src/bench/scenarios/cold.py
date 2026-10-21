@@ -4,9 +4,8 @@ Cold = nothing cached. We wipe the worktree, re-clone, install repo deps,
 install the tool (in a fresh venv), then run one full mutation pass. Each
 sub-phase is timed individually so the breakdown is visible.
 """
-from __future__ import annotations
 
-from pathlib import Path
+from __future__ import annotations
 
 from .. import repos as repos_mod
 from .. import venv as venv_mod
@@ -16,10 +15,9 @@ from ..config import RepoCfg, ToolCfg
 
 def cold(repo: RepoCfg, tool: ToolCfg, *, timeout: int | None = None) -> dict:
     """Run the cold scenario. Returns a JSON-serializable dict."""
-    phases: list[dict] = []
-
     # Phase 1: clone (fresh).
     from ..timing import Timing, timed
+
     timings: list[Timing] = []
     repos_mod.clean(tool.name, repo)
     with timed("clone", timings):

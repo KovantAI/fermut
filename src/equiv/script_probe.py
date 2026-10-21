@@ -31,7 +31,6 @@ import sys
 import tempfile
 import typing
 
-
 # Identifiers whose presence anywhere in the source disqualifies the file
 # from the probe. The list is deliberately broad: a single I/O call inside
 # the module is enough to corrupt the differential. False ineligibles are
@@ -129,13 +128,17 @@ def main() -> None:
         return
 
     try:
-        from hypothesis import HealthCheck, given, settings, strategies as st
+        from hypothesis import HealthCheck, given, settings
+        from hypothesis import strategies as st
     except ImportError:
         _emit("ineligible", "hypothesis not installed")
         return
 
     if _module_uses_banned(orig):
-        _emit("ineligible", "source uses an identifier outside the pure-function allowlist")
+        _emit(
+            "ineligible",
+            "source uses an identifier outside the pure-function allowlist",
+        )
         return
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -151,7 +154,7 @@ def main() -> None:
             try:
                 mod_orig = _load_module("_fermut_orig", orig_path)
                 mod_mut = _load_module("_fermut_mut", mut_path)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 _emit("ineligible", f"import failed: {type(exc).__name__}: {exc}")
                 return
             try:
@@ -176,7 +179,7 @@ def main() -> None:
         try:
             sig = inspect.signature(fn_orig)
             hints = typing.get_type_hints(fn_orig)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             _emit("ineligible", f"signature/hints failed: {exc}")
             return
 
@@ -193,7 +196,7 @@ def main() -> None:
                 return
             try:
                 kwarg_strategies[name] = st.from_type(hints[name])
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 _emit("ineligible", f"from_type({hints[name]!r}) failed: {exc}")
                 return
 
@@ -202,7 +205,7 @@ def main() -> None:
         def _call_safe(fn, kw):
             try:
                 return ("ok", fn(**kw))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 # Equate exceptions by type name + message string. Equal
                 # exceptions count as agreement so error-path-only mutations
                 # don't trigger false disagreements.
@@ -238,7 +241,7 @@ def main() -> None:
                 "differential disagreement",
                 counterexample=state["counterexample"],
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             _emit("error", f"{type(exc).__name__}: {exc}")
 
 

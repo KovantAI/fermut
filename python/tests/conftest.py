@@ -87,7 +87,9 @@ def green_suite(pytester):
 def run(pytester, *args):
     """Run pytest in-process with the plugin loaded explicitly (the tests run
     from a source checkout, where the entry point isn't installed)."""
-    return pytester.runpytest("-p", "pytest_fermut.plugin", "-p", "no:cacheprovider", *args)
+    return pytester.runpytest(
+        "-p", "pytest_fermut.plugin", "-p", "no:cacheprovider", *args
+    )
 
 
 @pytest.fixture

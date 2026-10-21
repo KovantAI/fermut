@@ -1,4 +1,5 @@
 """fermut adapter."""
+
 from __future__ import annotations
 
 import subprocess
@@ -78,7 +79,9 @@ class FermutAdapter(Adapter):
         # already importable (warm/loop/score_3pct re-entry).
         have_cov = subprocess.run(
             [self.python, "-c", "import pytest_cov"],
-            env=env, capture_output=True,
+            env=env,
+            capture_output=True,
+            check=False,
         )
         if have_cov.returncode != 0:
             subprocess.run(
@@ -92,16 +95,31 @@ class FermutAdapter(Adapter):
         # tree; tolerate a nonzero rc (xfail/flaky) since we only need the data
         # file to exist.
         cov_cmd = (
-            f"{repo.test_cmd} --cov={repo.src_path} "
-            f"--cov-context=test --cov-report="
+            f"{repo.test_cmd} --cov={repo.src_path} --cov-context=test --cov-report="
         )
         baseline = subprocess.run(
-            ["/bin/sh", "-c", cov_cmd], cwd=worktree, env=env, check=False,
-            capture_output=True, text=True,
+            ["/bin/sh", "-c", cov_cmd],
+            cwd=worktree,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
         )
         cj = subprocess.run(
-            [self.python, "-m", "coverage", "json", "--show-contexts", "-o", "coverage.json"],
-            cwd=worktree, env=env, check=False, capture_output=True, text=True,
+            [
+                self.python,
+                "-m",
+                "coverage",
+                "json",
+                "--show-contexts",
+                "-o",
+                "coverage.json",
+            ],
+            cwd=worktree,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
         )
         if cj.returncode != 0 or not cov.exists():
             # Almost always a test-collection failure (missing test dep) →
@@ -128,19 +146,26 @@ class FermutAdapter(Adapter):
         (worktree / ".fermut").mkdir(exist_ok=True)
         self._ensure_coverage(repo, worktree)
 
-    def run(self, repo: RepoCfg, worktree: Path, *, timeout: int | None = None) -> RunResult:
+    def run(
+        self, repo: RepoCfg, worktree: Path, *, timeout: int | None = None
+    ) -> RunResult:
         self._write_fermut_toml(repo, worktree)
         # fermut's --json writer does not create parent dirs; the cache lives
         # under <src>/.fermut, so the worktree-root .fermut may not exist yet.
         (worktree / ".fermut").mkdir(exist_ok=True)
         coverage = self._ensure_coverage(repo, worktree)
         argv = [
-            "fermut", "run", repo.src_path,
-            "--tests", repo.test_path,
-            "--format", "human",
+            "fermut",
+            "run",
+            repo.src_path,
+            "--tests",
+            repo.test_path,
+            "--format",
+            "human",
             # Survivor report consumed by the score_3pct scenario's
             # _survivor_dump (reads .fermut/report.json).
-            "--json", ".fermut/report.json",
+            "--json",
+            ".fermut/report.json",
         ]
         if coverage is not None:
             # Absolute path: fermut resolves coverage keys against the detected

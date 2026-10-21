@@ -1,4 +1,5 @@
 """Timing helpers shared across scenarios."""
+
 from __future__ import annotations
 
 import contextlib
@@ -20,7 +21,9 @@ class Timing:
 
 
 @contextlib.contextmanager
-def timed(label: str, sink: list[Timing], extra: dict | None = None, *, verbose: bool = True):
+def timed(
+    label: str, sink: list[Timing], extra: dict | None = None, *, verbose: bool = True
+):
     """Append a Timing row to `sink` when the block exits.
 
     Uses time.perf_counter — monotonic, sub-microsecond on macOS/Linux.

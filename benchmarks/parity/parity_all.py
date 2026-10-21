@@ -12,6 +12,7 @@ Also reports detection-loss (executed both, mutmut killed / fermut survived).
 
 Usage: parity_all.py [--reuse]   (--reuse skips regenerating existing JSON)
 """
+
 from __future__ import annotations
 
 import collections
@@ -20,12 +21,13 @@ import os
 import pathlib
 import subprocess
 import sys
+
 import tomllib
 
 HERE = pathlib.Path(__file__).parent
 sys.path.insert(0, str(HERE))
-from compare import load_fermut, norm, rel  # noqa: E402
-from map_operators import classify  # noqa: E402
+from compare import load_fermut, norm
+from map_operators import classify
 
 ROOT = pathlib.Path("/Users/drorasaf/code/fermut")
 BENCH = ROOT / "benchmarks"
@@ -34,7 +36,7 @@ VENVS = FIX / ".venvs"
 FERMUT = ROOT / "target" / "debug" / "fermut"
 REUSE = "--reuse" in sys.argv
 REPOS = ["pyjwt", "starlette", "markupsafe", "more-itertools", "click", "typer"]
-CFG = tomllib.load(open(BENCH / "configs" / "repos.toml", "rb"))
+CFG = tomllib.loads((BENCH / "configs" / "repos.toml").read_text())
 
 
 def gen_fermut(repo: str) -> pathlib.Path | None:
@@ -53,13 +55,27 @@ def gen_fermut(repo: str) -> pathlib.Path | None:
         (wt / "fermut.toml").write_text(
             "exclude = [\n" + "".join(f'  "{p}",\n' for p in excl) + "]\n"
         )
-    argv = [str(FERMUT), "run", c["src_path"], "--tests", c["test_path"],
-            "--coverage", str(cov.resolve()), "--no-verify-baseline",
-            "--no-history", "--no-cache", "--json", str(out), "-q"]
+    argv = [
+        str(FERMUT),
+        "run",
+        c["src_path"],
+        "--tests",
+        c["test_path"],
+        "--coverage",
+        str(cov.resolve()),
+        "--no-verify-baseline",
+        "--no-history",
+        "--no-cache",
+        "--json",
+        str(out),
+        "-q",
+    ]
     for ex in c.get("pytest_extra_args", []):
         argv.append(f"--pytest-arg={ex}")
     env = {**os.environ, "PATH": f"{venv}/bin:{os.environ['PATH']}"}
-    r = subprocess.run(argv, cwd=wt, env=env, capture_output=True, text=True)
+    r = subprocess.run(
+        argv, cwd=wt, env=env, capture_output=True, text=True, check=False
+    )
     if not out.exists():
         print(f"  [{repo}] fermut failed: {r.stderr[-300:]}")
         return None
@@ -75,15 +91,28 @@ def gen_mutmut(repo: str) -> pathlib.Path | None:
     if not (wt / "mutants").exists():
         print(f"  [{repo}] no mutmut run — skip")
         return None
-    subprocess.run([sys.executable, str(HERE / "extract_mutmut.py"),
-                    str(wt), str(venvbin), str(out)],
-                   capture_output=True, text=True)
+    subprocess.run(
+        [
+            sys.executable,
+            str(HERE / "extract_mutmut.py"),
+            str(wt),
+            str(venvbin),
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     return out if out.exists() else None
 
 
 def _mrel(p: str) -> str:
     """mutmut diff paths are already repo-root-relative — just normalize."""
-    return p.replace("\\", "/").lstrip("./") if p.startswith("./") else p.replace("\\", "/")
+    return (
+        p.replace("\\", "/").lstrip("./")
+        if p.startswith("./")
+        else p.replace("\\", "/")
+    )
 
 
 def analyze(repo: str, fpath: pathlib.Path, mpath: pathlib.Path) -> dict:
@@ -133,13 +162,17 @@ def main() -> None:
 
     # Cross-repo summary.
     print("\n## Per-repo summary (generation-level catalogue gap)\n")
-    print(f"{'repo':<16}{'fermut_gen':>11}{'mutmut':>8}{'true_holes':>11}"
-          f"{'hole%':>7}{'det_loss':>9}")
+    print(
+        f"{'repo':<16}{'fermut_gen':>11}{'mutmut':>8}{'true_holes':>11}"
+        f"{'hole%':>7}{'det_loss':>9}"
+    )
     agg_kind = collections.defaultdict(lambda: [0, 0])
     for repo, r in results.items():
         hp = 100 * r["true_holes"] // max(1, r["mutmut_total"])
-        print(f"{repo:<16}{r['fermut_gen']:>11}{r['mutmut_total']:>8}"
-              f"{r['true_holes']:>11}{hp:>6}%{r['detection_loss']:>9}")
+        print(
+            f"{repo:<16}{r['fermut_gen']:>11}{r['mutmut_total']:>8}"
+            f"{r['true_holes']:>11}{hp:>6}%{r['detection_loss']:>9}"
+        )
         for k, (t, h) in r["by_kind"].items():
             agg_kind[k][0] += t
             agg_kind[k][1] += h

@@ -348,9 +348,24 @@ struct KillerHit {
 /// deadline. Everything the per-mutant loop reads, in one place.
 fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     let filters = filter::build_chain(cfg)?;
-    let runner = runner::build(cfg);
+    let mut runner = runner::build(cfg);
 
-    preflight_baseline(cfg, runner.as_ref(), mutants)?;
+    let baseline_wall = preflight_baseline(cfg, runner.as_ref(), mutants)?;
+    if let (Some(factor), Some(wall)) = (cfg.timeout_factor, baseline_wall) {
+        let secs = budget_timeout_secs(cfg.timeout_secs, factor, wall);
+        info!(
+            baseline_secs = format!("{:.1}", wall.as_secs_f64()),
+            timeout_secs = secs,
+            "per-mutant timeout sized from the baseline (--timeout-factor)"
+        );
+        // Only the runner sees the budget. The cache scope and history hash
+        // keep the configured `timeout_secs` + factor: the budget moves a
+        // little every run and would otherwise miss the cache every time.
+        runner = runner::build(&Config {
+            timeout_secs: secs,
+            ..cfg.clone()
+        });
+    }
 
     // One read + at most one parse per unique file, deriving the cache-key
     // hash (always), the scope map (only in `scope` cache mode), and the source
@@ -514,15 +529,21 @@ fn dominator_score(cfg: &Config, outcomes: &[MutantOutcome]) -> Option<f64> {
 /// mutating. A red suite makes every covered mutant exit non-zero, which the
 /// runner counts as "killed" — yielding a confidently-wrong score near 100%.
 /// No-op when there's nothing to mutate or the user opted out.
-fn preflight_baseline(cfg: &Config, runner: &dyn Runner, mutants: &[Arc<Mutant>]) -> Result<()> {
+/// Returns how long the green baseline took (`None` when it didn't run).
+fn preflight_baseline(
+    cfg: &Config,
+    runner: &dyn Runner,
+    mutants: &[Arc<Mutant>],
+) -> Result<Option<Duration>> {
     if !cfg.verify_baseline || mutants.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     info!("verifying baseline: running the unmutated test suite");
+    let started = Instant::now();
     match runner.baseline()? {
         runner::BaselineStatus::Passed => {
             info!("baseline suite is green");
-            Ok(())
+            Ok(Some(started.elapsed()))
         }
         runner::BaselineStatus::Failed { output } => Err(anyhow::anyhow!(
             "baseline test suite is not green — aborting before mutation.\n\n\
@@ -534,6 +555,20 @@ fn preflight_baseline(cfg: &Config, runner: &dyn Runner, mutants: &[Arc<Mutant>]
              --- test output (tail) ---\n{output}"
         )),
     }
+}
+
+/// Fixed part of the `--timeout-factor` budget: interpreter start, imports and
+/// collection that a tiny suite's wall time barely reflects, plus slack for
+/// running beside other workers. ponytail: a constant (PIT and Stryker use
+/// 4–5 s too); make it configurable if a project needs more.
+const BUDGET_FLOOR_SECS: f64 = 5.0;
+
+/// Per-mutant timeout under `--timeout-factor`: `factor × baseline + floor`,
+/// rounded up to whole seconds and never above the configured `--timeout`.
+/// The baseline ran the whole suite; a mutant runs a subset of it.
+fn budget_timeout_secs(timeout_secs: u64, factor: f64, baseline: Duration) -> u64 {
+    let budget = (factor * baseline.as_secs_f64() + BUDGET_FLOOR_SECS).ceil() as u64;
+    budget.min(timeout_secs)
 }
 
 /// Testing-phase wall-clock ceiling from `--max-time`. `None` when unset.
@@ -998,6 +1033,13 @@ fn compute_scope_prefix(cfg: &Config) -> String {
     }
     h.update(b"|timeout=");
     h.update(cfg.timeout_secs.to_le_bytes());
+    // A budgeted timeout can turn a slow survivor into a timeout, so the
+    // factor (not the per-run budget, which moves with the baseline) scopes
+    // the verdicts. Fed only when set: existing entries keep their scope.
+    if let Some(f) = cfg.timeout_factor {
+        h.update(b"|timeout_factor=");
+        h.update(f.to_le_bytes());
+    }
     h.update(b"|hseed=");
     if let Some(s) = cfg.hypothesis_seed {
         h.update(s.to_le_bytes());
@@ -1737,6 +1779,7 @@ mod tests {
             verify_baseline: false,
             baseline_timeout_secs: 300,
             max_time_secs: None,
+            timeout_factor: None,
             record_kill_sets: None,
         }
     }
@@ -2100,6 +2143,23 @@ mod tests {
     fn killer_removed_from_covering_set_misses() {
         let (runner, _) = killed_then(|fx| fx.write_coverage(&[(1, &[TEST_B])]));
         assert_eq!(runner.runs(), 1, "test_a no longer covers the mutant");
+    }
+
+    #[test]
+    fn budget_scales_the_baseline_and_never_exceeds_timeout() {
+        let s = Duration::from_secs_f64;
+        assert_eq!(
+            budget_timeout_secs(30, 3.0, s(1.43)),
+            10,
+            "3 × 1.43 + 5 = 9.29 → 10"
+        );
+        assert_eq!(budget_timeout_secs(30, 1.0, s(0.0)), 5, "floor");
+        assert_eq!(
+            budget_timeout_secs(30, 3.0, s(9.0)),
+            30,
+            "capped at --timeout"
+        );
+        assert_eq!(budget_timeout_secs(60, 3.0, s(9.0)), 32);
     }
 
     #[test]

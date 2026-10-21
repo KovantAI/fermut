@@ -58,6 +58,7 @@ fermut run [PATH] [flags...]
 | `--smart-order`             | off                              | Force smart test ordering on over `smart_order = false` in config. Conflicts with `--no-smart-order`. |
 | `--no-pytest-plugin`        | on                               | Don't load fermut's reporter plugin into per-mutant pytest/rstest runs; infer outcomes from exit codes and output instead. See [Result reporter plugin](#result-reporter-plugin). |
 | `--max-time <SECS>`         | off (whole catalogue)            | Wall-clock ceiling on the testing phase. Evaluates highest-value mutants first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` (excluded from the score) instead of run — in-flight mutants finish. A predictable time ceiling for PR gates. See [Time-boxed runs](#time-boxed-runs-max-time). |
+| `--timeout-factor <F>`      | off (flat `--timeout`)           | Size each mutant's timeout from the baseline run: `min(--timeout, F × baseline wall + 5 s)`, so hung mutants stop in seconds. Needs the baseline. See [Timeout budgets](#timeout-budgets). |
 | `--record-kill-sets <PATH>` | off                              | [experimental] Write each mutant's full kill-set (every covering test that fails) to `PATH` as JSONL, the input to [`subsume`](subsume.md) and [`hom`](hom.md). Drops pytest's `-x`, so it is much slower. Pytest/rstest only. Pair with `--no-cache`: a cache hit runs nothing and records nothing. |
 | `--only-dominators`         | off                              | [experimental] Run dominator mutants from `.fermut/dominators.json` and infer the kills they imply; for nightly sweeps, refused with `--diff-only`/`--since`/`--record-kill-sets`. See [`fermut subsume`](subsume.md#fermut-run-only-dominators-experimental). |
 | `--audit-inferred <RATE>`   | `0.05`                           | Requires `--only-dominators` (the parser rejects it otherwise). Under `--only-dominators`: fraction of inferred kills re-run against their killing test; any that survives fails the run. |
@@ -164,6 +165,31 @@ The exit code still decides every other verdict. If the plugin produces no
 result, for example because it couldn't load, fermut warns once and falls
 back to exit codes, a `--collect-only` re-run for exit 4, and output parsing.
 `--no-pytest-plugin` (or `pytest_plugin = false`) forces that fallback.
+
+## Timeout budgets (`--timeout-factor`) { #timeout-budgets }
+
+A mutant that sends the code into an infinite loop runs until `--timeout`
+(30 s by default). On a suite that takes a second or two, that wait is most
+of the run: on more-itertools 85 hung mutants took 63% of all worker time.
+
+`--timeout-factor F` sizes the timeout from the baseline run instead. The
+baseline runs the whole suite once, and each mutant runs a subset of it, so
+an honest run fits in `F × baseline wall + 5 s` (5 s covers interpreter
+start-up and running beside the other workers). `--timeout` stays the upper
+limit. With a 1.4 s suite and `F = 3`, mutants get 10 s instead of 30 s.
+
+- **Verdicts.** A mutant that doesn't hang but makes the suite many times
+  slower now counts as timed out (detected) instead of survived. PIT and
+  Stryker treat it the same way. On more-itertools 2 of ~3,700 mutants
+  changed this way; that is why the flag is off by default.
+- **Needs the baseline.** With `--no-verify-baseline` there is nothing to
+  scale from, so every mutant uses the flat `--timeout` (fermut warns).
+- **History and cache.** The factor is part of the run's configuration, so
+  `fermut trend` shows turning it on as a config change. The computed budget
+  is not: it moves a little with each baseline and would otherwise invalidate
+  the cache on every run.
+
+Set it in config as `timeout_factor` under `[tool.fermut]`.
 
 ## Time-boxed runs (`--max-time`) { #time-boxed-runs-max-time }
 

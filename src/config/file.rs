@@ -96,6 +96,7 @@ pub struct FileConfig {
     /// (`time-budget`) once the deadline passes. Unset = run the whole
     /// catalogue. Set via `--max-time`.
     pub max_time: Option<u64>,
+    pub timeout_factor: Option<f64>,
     /// Glob patterns matched against paths relative to `source_root`. Files
     /// (and directories) matching any pattern are pruned during mutation
     /// collection. Examples: `"alembic/**"`, `"tests/integration/**"`,

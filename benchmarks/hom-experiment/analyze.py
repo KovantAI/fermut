@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """Phase-2 metrics for the HOM experiment: SSHOM density, decoupled rate, and a
 greedy net-FOM-reduction estimate."""
-import json, sys, collections
+
+import collections
+import json
+import pathlib
+import sys
 
 fom_path, hom_path = sys.argv[1], sys.argv[2]
 
-foms = [json.loads(l) for l in open(fom_path) if l.strip()]
+foms = [
+    json.loads(l) for l in pathlib.Path(fom_path).read_text().splitlines() if l.strip()
+]
 killed_foms = [f for f in foms if f["status"] == "killed" and f["kill_set"]]
 n_fom_total = len(foms)
 n_fom_killed = len(killed_foms)
 
-homs = [json.loads(l) for l in open(hom_path) if l.strip()]
+homs = [
+    json.loads(l) for l in pathlib.Path(hom_path).read_text().splitlines() if l.strip()
+]
 cls = collections.Counter(h["class"] for h in homs)
 n_run = len(homs)
 sshoms = [h for h in homs if h["class"] == "sshom"]
 
 import os
+
 print(f"=== {os.path.basename(hom_path)} — HOM (2nd order) ===")
 print(f"FOMs: {n_fom_total} total, {n_fom_killed} killed")
 print(f"candidate pairs run: {n_run}")
@@ -48,10 +57,13 @@ reduction = (n_fom_killed - new_count) / n_fom_killed * 100 if n_fom_killed else
 
 print(f"\nFOMs in >=1 SSHOM: {foms_in_sshom} / {n_fom_killed}")
 print(f"greedy collapse: {len(covered)} FOMs -> {chosen} SSHOMs")
-print(f"net FOM reduction (killed set): {reduction:.1f}%  "
-      f"({n_fom_killed} -> {new_count})")
+print(
+    f"net FOM reduction (killed set): {reduction:.1f}%  ({n_fom_killed} -> {new_count})"
+)
 
 # Cost: extra HOM runs vs the baseline FOM run.
 cost_ratio = (n_fom_total + n_run) / n_fom_total if n_fom_total else 0
-print(f"\ncost: {n_run} HOM runs on top of {n_fom_total} FOM runs "
-      f"= {cost_ratio:.1f}x the FOM pass")
+print(
+    f"\ncost: {n_run} HOM runs on top of {n_fom_total} FOM runs "
+    f"= {cost_ratio:.1f}x the FOM pass"
+)

@@ -1,17 +1,17 @@
 from src.calculator import (
-    add,
-    sub,
-    is_positive,
-    in_range,
     absval,
+    add,
     double_if_truthy,
-    is_none_or_member,
-    negate,
-    trim,
     first_neg,
-    squared_lambda,
+    in_range,
+    is_none_or_member,
+    is_positive,
+    negate,
     safe_div,
+    squared_lambda,
+    sub,
     sum_all,
+    trim,
 )
 
 

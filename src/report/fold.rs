@@ -102,7 +102,7 @@ pub fn survivors(outcomes: &[MutantOutcome]) -> Vec<&Mutant> {
     outcomes
         .iter()
         .filter_map(|o| match o {
-            MutantOutcome::Survived { mutant } => Some(mutant.as_ref()),
+            MutantOutcome::Survived { mutant, .. } => Some(mutant.as_ref()),
             _ => None,
         })
         .collect()

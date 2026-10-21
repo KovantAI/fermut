@@ -14,6 +14,10 @@
 //!   any session starts. No `--collect-only` probe re-run is needed.
 //! - **The killer.** The first failed test phase names the killing test, with
 //!   no stdout capture or `-rfE` summary parsing.
+//! - **The hang.** A run killed on timeout leaves a test that began but whose
+//!   session never finished: the test it hung in.
+//! - **Test time.** `dur` events (and failed phases' `dur`) sum to the time
+//!   spent inside tests, apart from process and collection overhead.
 //!
 //! The exit code stays authoritative for the verdict itself; this only refines
 //! it. A missing, empty, or unknown-schema file yields `None` and the runner
@@ -39,7 +43,7 @@ pub(crate) const RESULT_ENV: &str = "FERMUT_RESULT";
 const SCHEMA_VERSION: u64 = 1;
 
 /// What the reporter plugin observed during one run.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq)]
 pub(crate) struct RunResult {
     /// Collectors (test modules) that failed, by node id — an import error.
     pub collect_errors: Vec<String>,
@@ -52,6 +56,11 @@ pub(crate) struct RunResult {
     pub config_error: Option<bool>,
     /// Node ids of failed test phases, in the order they were reported.
     pub failures: Vec<String>,
+    /// The last test that began in a session that never finished. On a
+    /// timed-out run, the test it hung in.
+    pub unfinished: Option<String>,
+    /// Seconds spent in reported test phases (see [`crate::report::Timing`]).
+    pub test_secs: f64,
 }
 
 #[derive(Deserialize)]
@@ -63,6 +72,10 @@ struct Event {
     nodeid: Option<String>,
     #[serde(default)]
     project: Option<bool>,
+    #[serde(default)]
+    pid: u64,
+    #[serde(default)]
+    dur: Option<f64>,
 }
 
 impl RunResult {
@@ -80,6 +93,8 @@ impl RunResult {
     pub(crate) fn parse(text: &str) -> Option<Self> {
         let mut out = Self::default();
         let mut started = false;
+        // Latest `begin` per session (pid), dropped when that session finishes.
+        let mut running: Vec<(u64, String)> = Vec::new();
         for line in text.lines() {
             let Ok(event) = serde_json::from_str::<Event>(line) else {
                 continue;
@@ -104,13 +119,23 @@ impl RunResult {
                     }
                 }
                 "test" => {
+                    out.test_secs += event.dur.unwrap_or(0.0);
                     if let Some(id) = event.nodeid {
                         out.failures.push(id);
                     }
                 }
+                "dur" => out.test_secs += event.dur.unwrap_or(0.0),
+                "begin" => {
+                    if let Some(id) = event.nodeid {
+                        running.retain(|(pid, _)| *pid != event.pid);
+                        running.push((event.pid, id));
+                    }
+                }
+                "finish" => running.retain(|(pid, _)| *pid != event.pid),
                 _ => {}
             }
         }
+        out.unfinished = running.pop().map(|(_, id)| id);
         (started || out.conftest_error || out.config_error.is_some()).then_some(out)
     }
 
@@ -146,6 +171,50 @@ mod tests {
         assert_eq!(r.killer(), Some("tests/t.py::b[x - y]"));
         assert_eq!(r.failures.len(), 2);
         assert!(!r.import_broke());
+    }
+
+    #[test]
+    fn finished_session_has_no_unfinished_test_and_sums_test_time() {
+        let text = r#"{"v":1,"ev":"start","pid":1}
+{"ev":"begin","nodeid":"tests/t.py::a","pid":1}
+{"ev":"dur","nodeid":"tests/t.py::a","dur":0.25,"pid":1}
+{"ev":"begin","nodeid":"tests/t.py::b","pid":1}
+{"ev":"test","nodeid":"tests/t.py::b","when":"call","dur":0.5,"pid":1}
+{"ev":"finish","exit":1,"pid":1}
+"#;
+        let r = RunResult::parse(text).unwrap();
+        assert_eq!(r.unfinished, None);
+        assert!((r.test_secs - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn killed_run_names_the_test_it_hung_in() {
+        // Killed on timeout: `b` began after `a` passed, then nothing.
+        let text = r#"{"v":1,"ev":"start","pid":1}
+{"ev":"begin","nodeid":"tests/t.py::a","pid":1}
+{"ev":"dur","nodeid":"tests/t.py::a","dur":0.1,"pid":1}
+{"ev":"begin","nodeid":"tests/t.py::b","pid":1}
+"#;
+        let r = RunResult::parse(text).unwrap();
+        assert_eq!(r.unfinished.as_deref(), Some("tests/t.py::b"));
+    }
+
+    #[test]
+    fn hang_in_one_parallel_session_ignores_finished_sessions() {
+        let text = r#"{"v":1,"ev":"start","pid":1}
+{"v":1,"ev":"start","pid":2}
+{"ev":"begin","nodeid":"tests/t.py::slow","pid":2}
+{"ev":"begin","nodeid":"tests/t.py::fast","pid":1}
+{"ev":"finish","exit":0,"pid":1}
+"#;
+        let r = RunResult::parse(text).unwrap();
+        assert_eq!(r.unfinished.as_deref(), Some("tests/t.py::slow"));
+    }
+
+    #[test]
+    fn hang_before_any_test_names_nothing() {
+        let text = "{\"v\":1,\"ev\":\"start\",\"pid\":1}\n";
+        assert_eq!(RunResult::parse(text).unwrap().unfinished, None);
     }
 
     #[test]

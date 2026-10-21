@@ -42,7 +42,7 @@ use super::{
 };
 use crate::config::IsolationMode;
 use crate::mutator::Mutant;
-use crate::report::MutantOutcome;
+use crate::report::{MutantOutcome, Timing};
 
 /// The unittest default (`TestLoader.testMethodPrefix` aside, discovery's own
 /// default glob). Deliberately broader than the old hardcoded `test_*.py`; a
@@ -132,9 +132,10 @@ impl Runner for UnittestRunner {
             // the terminal. The baseline run still captures output for
             // diagnosis.
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            let started = std::time::Instant::now();
             let mut child = cmd.spawn().context("spawning python -m unittest")?;
 
-            match child
+            let outcome = match child
                 .wait_timeout(self.timeout)
                 .context("waiting on unittest")?
             {
@@ -156,7 +157,13 @@ impl Runner for UnittestRunner {
                     let _ = child.wait();
                     Ok(MutantOutcome::timed_out(mutant.clone()))
                 }
-            }
+            };
+            outcome.map(|o| {
+                o.with_timing(Timing {
+                    duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    test_ms: None,
+                })
+            })
         })
     }
 

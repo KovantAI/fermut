@@ -6,7 +6,10 @@ commits, under two identities:
   - strict : content + line — position-sensitive (a lower bound on stability).
 Also reports killed-FOM-set Jaccard (loose) as the ceiling: SSHOMs can't persist
 more than their constituent mutants do."""
-import json, sys, os
+
+import json
+import os
+import sys
 
 OUT = sys.argv[1]
 SHAS = sys.argv[2:]  # chronological
@@ -25,18 +28,20 @@ def load(sha):
     fom = os.path.join(OUT, f"{sha}-fom.jsonl")
     sshom_loose, sshom_strict, foms = set(), set(), set()
     if os.path.exists(hom):
-        for l in open(hom):
-            r = json.loads(l)
-            if r.get("class") != "sshom":
-                continue
-            c1, c2 = content(r["f1_id"]), content(r["f2_id"])
-            sshom_loose.add(frozenset((c1, c2)))
-            sshom_strict.add(frozenset(((c1, r["line1"]), (c2, r["line2"]))))
+        with open(hom) as fh:
+            for l in fh:
+                r = json.loads(l)
+                if r.get("class") != "sshom":
+                    continue
+                c1, c2 = content(r["f1_id"]), content(r["f2_id"])
+                sshom_loose.add(frozenset((c1, c2)))
+                sshom_strict.add(frozenset(((c1, r["line1"]), (c2, r["line2"]))))
     if os.path.exists(fom):
-        for l in open(fom):
-            r = json.loads(l)
-            if r.get("status") == "killed":
-                foms.add(content(r["mutant_id"]))
+        with open(fom) as fh:
+            for l in fh:
+                r = json.loads(l)
+                if r.get("status") == "killed":
+                    foms.add(content(r["mutant_id"]))
     return sshom_loose, sshom_strict, foms
 
 
@@ -46,14 +51,18 @@ def jac(a, b):
     return len(a & b) / len(a | b)
 
 
-print(f"{'transition':<20} {'fom_J':>6} {'sshom_loose_J':>13} {'sshom_strict_J':>14}  n_sshom")
-prev = None
+print(
+    f"{'transition':<20} {'fom_J':>6} {'sshom_loose_J':>13} {'sshom_strict_J':>14}  n_sshom"
+)
+prev = psha = None
 for sha in SHAS:
     cur = load(sha)
     n = len(cur[0])
     if prev is not None:
         pl, ps, pf = prev
         cl, cs, cf = cur
-        print(f"{psha}->{sha:<12} {jac(pf,cf):>6.2f} {jac(pl,cl):>13.2f} {jac(ps,cs):>14.2f}  {n}")
+        print(
+            f"{psha}->{sha:<12} {jac(pf, cf):>6.2f} {jac(pl, cl):>13.2f} {jac(ps, cs):>14.2f}  {n}"
+        )
     prev = cur
     psha = sha

@@ -16,6 +16,7 @@ minimal mutant survived are skipped: the model makes no claim there.
 usage: gate.py report.json [report.json ...]
 exit 1 if any violation.
 """
+
 import collections
 import json
 import sys
@@ -52,7 +53,9 @@ def main(paths):
             for s, m in muts:
                 if not m["site"]["minimal"] and s not in DETECTED:
                     violations.append((path, file, m))
-    print(f"sites: {total_sites}, all-minimal-killed: {checked}, violations: {len(violations)}")
+    print(
+        f"sites: {total_sites}, all-minimal-killed: {checked}, violations: {len(violations)}"
+    )
     for path, file, m in violations:
         print(
             f"  {file}:{m['line']} [{m['operator']}] "

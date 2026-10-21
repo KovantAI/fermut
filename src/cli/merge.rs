@@ -2,13 +2,13 @@
 //! shared `i/n` shard-spec parser used by both the CLI flag and the config
 //! file value.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
 use crate::filter::shard::SHARD_FILTER_NAME;
-use crate::report::{MutantOutcome, Report, ReportFormat, ReportSinks};
+use crate::report::{MutantOutcome, Report, ReportFormat, ReportSinks, Shard};
 
 /// A `Skipped { filter: "shard" }` outcome is not a verdict — it is the
 /// placeholder a sharded run emits for every mutant *outside* its own slice.
@@ -69,21 +69,116 @@ pub(super) fn parse_shard_spec(s: &str) -> Result<(u32, u32), String> {
     Ok((i, n))
 }
 
+/// Checks the shard specs the input reports recorded: every shard comes from
+/// the same `n`, and every index `1..=n` is present. `--expect-shards N` makes
+/// it strict: every input must record a shard, `n` must be `N`, and no index
+/// may repeat.
+#[derive(Default)]
+struct ShardCheck {
+    expect: Option<u32>,
+    total: Option<u32>,
+    seen: BTreeSet<u32>,
+    untagged: usize,
+}
+
+impl ShardCheck {
+    fn add(&mut self, path: &Path, shard: Option<Shard>) -> Result<()> {
+        let Some(Shard { index, total }) = shard else {
+            if self.expect.is_some() {
+                bail!(
+                    "{} records no shard spec; --expect-shards needs every input to come \
+                     from `fermut run --shard i/n` with a fermut that records it",
+                    path.display()
+                );
+            }
+            self.untagged += 1;
+            return Ok(());
+        };
+        if let Some(n) = self.expect.filter(|&n| n != total) {
+            bail!(
+                "{} is shard {index}/{total}, but --expect-shards is {n}",
+                path.display()
+            );
+        }
+        match self.total {
+            Some(t) if t != total => bail!(
+                "{} is shard {index}/{total}, but an earlier input is from a {t}-shard run. \
+                 Reports from different shard counts don't partition the same way.",
+                path.display()
+            ),
+            _ => self.total = Some(total),
+        }
+        if !self.seen.insert(index) && self.expect.is_some() {
+            bail!(
+                "shard {index}/{total} appears more than once ({})",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// Fails on a missing index. Skipped when an input recorded no spec: it
+    /// may be the shard that looks missing.
+    fn finish(&self) -> Result<()> {
+        let Some(total) = self.total.filter(|_| self.untagged == 0) else {
+            return Ok(());
+        };
+        let missing: Vec<String> = (1..=total)
+            .filter(|i| !self.seen.contains(i))
+            .map(|i| format!("{i}/{total}"))
+            .collect();
+        if !missing.is_empty() {
+            bail!(
+                "missing shard report(s): {}. The merged score would cover only part \
+                 of the mutant universe.",
+                missing.join(", ")
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Gates on the merged report, beyond the shard checks.
+#[derive(Default)]
+pub(super) struct MergeGates {
+    /// `--expect-shards`: the exact number of shards the inputs must cover.
+    pub expect_shards: Option<u32>,
+    /// `--max-errored`: fail when more mutants than this errored.
+    pub max_errored: Option<usize>,
+}
+
 pub(super) fn merge_reports(
     inputs: &[PathBuf],
     sinks: &ReportSinks,
     history: Option<&PathBuf>,
     config_hash: Option<String>,
     project_root: &Path,
+    gates: &MergeGates,
 ) -> Result<()> {
+    let mut shards = ShardCheck {
+        expect: gates.expect_shards,
+        ..ShardCheck::default()
+    };
     // Read + parse lazily so `combine_outcomes` holds only one report's
     // outcomes plus the running map at a time. A sharded report is the whole
     // mutant universe, so eagerly collecting all N would be an N× blow-up.
-    let reports = inputs
-        .iter()
-        .map(|path| -> Result<Vec<MutantOutcome>> { Ok(crate::report::load(path)?.outcomes) });
+    let mut hashes = Vec::with_capacity(inputs.len());
+    let mut durations = Vec::with_capacity(inputs.len());
+    let reports = inputs.iter().map(|path| -> Result<Vec<MutantOutcome>> {
+        let report = crate::report::load(path)?;
+        shards.add(path, report.shard)?;
+        hashes.push(report.config_hash);
+        durations.push(report.duration_ms);
+        Ok(report.outcomes)
+    });
     let outcomes = combine_outcomes(reports)?;
-    let merged = Report::new(outcomes);
+    shards.finish()?;
+    let mut merged = Report::new(outcomes);
+    merged.config_hash = shared_config_hash(hashes)?;
+    // Total work across shards. `None` if any shard predates the field, rather
+    // than a sum that silently undercounts.
+    merged.duration_ms = durations.into_iter().sum();
+    let config_hash = config_hash.or_else(|| merged.config_hash.clone());
 
     sinks.write_all(&merged)?;
     if !sinks.any() && history.is_none() {
@@ -91,16 +186,35 @@ pub(super) fn merge_reports(
         merged.print(ReportFormat::Json);
     }
 
+    // Gates run after the reports are written, so a failed merge still leaves
+    // them to inspect, but before the history entry, so it's never recorded.
+    let errored = merged.counts().errored;
+    if let Some(max) = gates.max_errored.filter(|&max| errored > max) {
+        bail!(
+            "{errored} mutant(s) errored (--max-errored {max}): the merged score is untrustworthy"
+        );
+    }
+    if history.is_some() && merged.is_scoreless() {
+        bail!(
+            "no mutant was scored, so the score is N/A, not 100%. Refusing to write a \
+             history entry that would record a vacuous 100% in the trend."
+        );
+    }
+
     // Emit a complete history entry from the merged report. This is what lets a
     // sharded CI run record its trend point WITHOUT harvesting one shard's
     // history line as a template: git sha/branch come from the merge checkout
     // (the same commit the shards ran on), `fermut_version` is stamped
-    // automatically, and the counts are the merged full-universe totals. The
-    // one thing merge can't derive is `config_hash` — the run's config lives in
-    // the shard jobs — so the caller passes it via `--config-hash`.
+    // automatically, and the counts are the merged full-universe totals.
+    // `config_hash` is the one the shards agree on (see `shared_config_hash`)
+    // unless the caller overrides it with `--config-hash`.
     if let Some(p) = history {
-        let entry =
-            crate::history::HistoryEntry::from_report(&merged, project_root, None, config_hash);
+        let entry = crate::history::HistoryEntry::from_report(
+            &merged,
+            project_root,
+            merged.duration_ms,
+            config_hash,
+        );
         let line = serde_json::to_string(&entry).context("serializing merged history entry")?;
         // Single staged entry, overwrite (not append): re-running merge must not
         // stack duplicate lines in the staging file.
@@ -108,6 +222,24 @@ pub(super) fn merge_reports(
             .with_context(|| format!("writing {}", p.display()))?;
     }
     Ok(())
+}
+
+/// The `config_hash` every input report carries, ignoring `--shard` (see
+/// [`Report::config_hash`]). Shards that disagree ran different configs, so
+/// their union is not one run and merging it would record a meaningless score.
+/// `None` when any input predates the field.
+fn shared_config_hash(hashes: Vec<Option<String>>) -> Result<Option<String>> {
+    let Some(hashes) = hashes.into_iter().collect::<Option<Vec<_>>>() else {
+        return Ok(None);
+    };
+    if let Some(other) = hashes.iter().find(|h| **h != hashes[0]) {
+        bail!(
+            "input reports were produced with different configs (config_hash {} vs {other}). \
+             Every shard must run with the same flags and fermut.toml; re-run the odd one out.",
+            hashes[0]
+        );
+    }
+    Ok(hashes.into_iter().next())
 }
 
 /// Combine per-report outcome lists into one, in first-seen id order.
@@ -241,6 +373,7 @@ mod tests {
             Some(&hist),
             Some("deadbeef".into()),
             tmp.path(),
+            &MergeGates::default(),
         )
         .unwrap();
 
@@ -257,6 +390,106 @@ mod tests {
         assert_eq!(entry.killed, 2);
         assert_eq!(entry.survived, 1);
         assert_eq!(entry.total, Some(3));
+    }
+
+    fn shard(index: u32, total: u32) -> Option<Shard> {
+        Some(Shard { index, total })
+    }
+
+    fn check(expect: Option<u32>, inputs: &[Option<Shard>]) -> Result<()> {
+        let mut c = ShardCheck {
+            expect,
+            ..ShardCheck::default()
+        };
+        for s in inputs {
+            c.add(Path::new("r.json"), *s)?;
+        }
+        c.finish()
+    }
+
+    #[test]
+    fn shard_check_accepts_a_complete_set_and_unsharded_inputs() {
+        check(None, &[shard(2, 2), shard(1, 2)]).unwrap();
+        check(Some(2), &[shard(2, 2), shard(1, 2)]).unwrap();
+        check(None, &[None, None]).unwrap();
+        // Re-merging the same shard is idempotent without --expect-shards.
+        check(None, &[shard(1, 2), shard(1, 2), shard(2, 2)]).unwrap();
+    }
+
+    #[test]
+    fn shard_check_rejects_missing_mixed_and_duplicate_shards() {
+        let err = |e: Option<u32>, i: &[Option<Shard>]| check(e, i).unwrap_err().to_string();
+        assert!(err(None, &[shard(1, 3), shard(3, 3)]).contains("2/3"));
+        assert!(err(None, &[shard(1, 16), shard(2, 8)]).contains("16-shard"));
+        assert!(err(Some(2), &[shard(1, 2), shard(1, 2)]).contains("more than once"));
+        assert!(err(Some(4), &[shard(1, 2), shard(2, 2)]).contains("--expect-shards is 4"));
+        assert!(err(Some(1), &[None]).contains("no shard spec"));
+        assert!(err(Some(3), &[shard(1, 3), shard(2, 3)]).contains("3/3"));
+    }
+
+    #[test]
+    fn untagged_input_suspends_the_missing_index_check() {
+        // An older report records no spec; it may be the shard that looks missing.
+        check(None, &[shard(1, 2), None]).unwrap();
+    }
+
+    fn merge_one(report: Report, history: bool, gates: &MergeGates) -> Result<tempfile::TempDir> {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path();
+        let p = tmp.join("s.json");
+        report.write_json(&p).unwrap();
+        let hist = tmp.join("entry.json");
+        merge_reports(
+            &[p],
+            &ReportSinks {
+                json: Some(tmp.join("c.json")),
+                ..Default::default()
+            },
+            history.then_some(&hist),
+            None,
+            tmp,
+            gates,
+        )
+        .map(|()| dir)
+    }
+
+    #[test]
+    fn max_errored_fails_after_writing_reports_but_before_history() {
+        let r = Report::new(vec![
+            MutantOutcome::killed(mutant("a")),
+            MutantOutcome::error(mutant("b"), "boom".into()),
+        ]);
+        let gates = MergeGates {
+            max_errored: Some(0),
+            ..MergeGates::default()
+        };
+        let err = merge_one(r.clone(), true, &gates).unwrap_err();
+        assert!(err.to_string().contains("1 mutant(s) errored"), "{err}");
+        let ok = MergeGates {
+            max_errored: Some(1),
+            ..MergeGates::default()
+        };
+        let dir = merge_one(r, true, &ok).unwrap();
+        assert!(dir.path().join("entry.json").exists());
+    }
+
+    #[test]
+    fn scoreless_merge_writes_no_history_entry() {
+        let r = Report::new(vec![MutantOutcome::skipped(mutant("a"), "ty")]);
+        let err = merge_one(r.clone(), true, &MergeGates::default()).unwrap_err();
+        assert!(err.to_string().contains("N/A"), "{err}");
+        // Without --history a scoreless merge is fine: it's just a report.
+        merge_one(r, false, &MergeGates::default()).unwrap();
+    }
+
+    #[test]
+    fn sharded_report_round_trips_its_shard_spec() {
+        let mut r = Report::new(vec![MutantOutcome::killed(mutant("a"))]);
+        r.shard = shard(2, 4);
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("s.json");
+        r.write_json(&p).unwrap();
+        assert_eq!(crate::report::load(&p).unwrap().shard, shard(2, 4));
     }
 
     #[test]
@@ -276,12 +509,109 @@ mod tests {
                 Some(&hist),
                 None,
                 tmp.path(),
+                &MergeGates::default(),
             )
             .unwrap();
         }
         // Re-running merge leaves exactly one staged line, not two.
         let raw = std::fs::read_to_string(&hist).unwrap();
         assert_eq!(raw.lines().filter(|l| !l.trim().is_empty()).count(), 1);
+    }
+
+    /// Writes one report per hash, merges them with `--history`, and returns
+    /// the merge result plus the staged entry's `config_hash`.
+    fn merge_hashed(hashes: &[Option<&str>], explicit: Option<&str>) -> Result<Option<String>> {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths: Vec<PathBuf> = hashes
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                let mut r = Report::new(vec![MutantOutcome::killed(mutant(&format!("m{i}")))]);
+                r.config_hash = h.map(str::to_string);
+                let p = tmp.path().join(format!("s{i}.json"));
+                r.write_json(&p).unwrap();
+                p
+            })
+            .collect();
+        let hist = tmp.path().join("entry.json");
+        merge_reports(
+            &paths,
+            &ReportSinks {
+                json: Some(tmp.path().join("c.json")),
+                ..Default::default()
+            },
+            Some(&hist),
+            explicit.map(str::to_string),
+            tmp.path(),
+            &MergeGates::default(),
+        )?;
+        let raw = std::fs::read_to_string(&hist).unwrap();
+        let entry: crate::history::HistoryEntry = serde_json::from_str(raw.trim()).unwrap();
+        Ok(entry.config_hash)
+    }
+
+    /// Merges one report per duration with `--history` and returns the staged
+    /// entry's `duration_ms`.
+    fn merge_durations(durations: &[Option<u64>]) -> Option<u64> {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths: Vec<PathBuf> = durations
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let mut r = Report::new(vec![MutantOutcome::killed(mutant(&format!("m{i}")))]);
+                r.duration_ms = *d;
+                let p = tmp.path().join(format!("s{i}.json"));
+                r.write_json(&p).unwrap();
+                p
+            })
+            .collect();
+        let hist = tmp.path().join("entry.json");
+        merge_reports(
+            &paths,
+            &ReportSinks::default(),
+            Some(&hist),
+            None,
+            tmp.path(),
+            &MergeGates::default(),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(&hist).unwrap();
+        let entry: crate::history::HistoryEntry = serde_json::from_str(raw.trim()).unwrap();
+        entry.duration_ms
+    }
+
+    #[test]
+    fn merge_sums_shard_durations() {
+        assert_eq!(merge_durations(&[Some(1000), Some(250)]), Some(1250));
+    }
+
+    #[test]
+    fn merge_leaves_duration_unset_when_a_shard_predates_it() {
+        assert_eq!(merge_durations(&[Some(1000), None]), None);
+    }
+
+    #[test]
+    fn merge_stamps_the_hash_the_shards_agree_on() {
+        let got = merge_hashed(&[Some("abc"), Some("abc")], None).unwrap();
+        assert_eq!(got.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn merge_refuses_shards_with_different_configs() {
+        let err = merge_hashed(&[Some("abc"), Some("xyz")], None).unwrap_err();
+        assert!(err.to_string().contains("different configs"), "{err}");
+    }
+
+    #[test]
+    fn merge_explicit_config_hash_overrides_the_shards() {
+        let got = merge_hashed(&[Some("abc"), Some("abc")], Some("override")).unwrap();
+        assert_eq!(got.as_deref(), Some("override"));
+    }
+
+    #[test]
+    fn merge_leaves_hash_unset_when_a_shard_predates_it() {
+        let got = merge_hashed(&[Some("abc"), None], None).unwrap();
+        assert_eq!(got, None);
     }
 
     fn shard_skip(id: &str) -> MutantOutcome {
@@ -454,6 +784,17 @@ pub(crate) struct MergeArgs {
     /// Defaults to the current directory (the merge checkout).
     #[arg(long, value_name = "DIR", default_value = ".")]
     pub(crate) project: std::path::PathBuf,
+
+    /// Require exactly N shards: every input must record its shard (from
+    /// `fermut run --shard i/n`), all with total N, each index once. Without
+    /// it, merge still refuses mixed shard totals and a missing index.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    pub(crate) expect_shards: Option<u32>,
+
+    /// Fail when more than N mutants errored in the merged report. The
+    /// reports are still written; the `--history` entry is not.
+    #[arg(long, value_name = "N")]
+    pub(crate) max_errored: Option<usize>,
 }
 
 /// Dispatch handler: nests the output-path flags into a [`ReportSinks`] and
@@ -468,6 +809,8 @@ pub(crate) fn run(args: MergeArgs) -> Result<()> {
         history,
         config_hash,
         project,
+        expect_shards,
+        max_errored,
     } = args;
     merge_reports(
         &inputs,
@@ -480,5 +823,9 @@ pub(crate) fn run(args: MergeArgs) -> Result<()> {
         history.as_ref(),
         config_hash,
         &project,
+        &MergeGates {
+            expect_shards,
+            max_errored,
+        },
     )
 }

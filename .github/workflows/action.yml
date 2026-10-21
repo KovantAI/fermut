@@ -152,7 +152,10 @@ jobs:
           test "$SCORED" -gt 0
           test -z "$DELTA"
           test "$(wc -l < "$HISTORY")" -eq 1
-          jq -e '.killed + .survived > 0 and .git_sha != null' "$HISTORY"
+          # config_hash comes from the shards, not an input; survivor_ids
+          # stay off the persisted history.
+          jq -e '.killed + .survived > 0 and .git_sha != null and .config_hash != null
+                 and (has("survivor_ids") | not)' "$HISTORY"
       - name: Round-trip the history branch store
         env:
           ENTRY: ${{ steps.fermut.outputs.history }}

@@ -5,6 +5,7 @@ is the current git HEAD plus, when the tree is dirty, a digest of the working
 changes — so clean rebuilds reuse the same wheel across runs and dirty
 edits invalidate the cache automatically.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -32,9 +33,14 @@ def ensure_fermut_wheel(repo_root: Path, wheel_root: Path) -> Path:
     target_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [
-            "maturin", "build", "--release", "--strip",
-            "--manifest-path", str(repo_root / "Cargo.toml"),
-            "--out", str(target_dir),
+            "maturin",
+            "build",
+            "--release",
+            "--strip",
+            "--manifest-path",
+            str(repo_root / "Cargo.toml"),
+            "--out",
+            str(target_dir),
         ],
         check=True,
     )
@@ -59,5 +65,7 @@ def _cache_key(repo_root: Path) -> str:
 def _git(repo_root: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-C", str(repo_root), *args],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout

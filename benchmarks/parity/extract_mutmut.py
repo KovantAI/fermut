@@ -9,6 +9,7 @@ fan-out runs once.
 Usage:
     extract_mutmut.py <mutmut-worktree> <venv-bin> <out.json>
 """
+
 from __future__ import annotations
 
 import json
@@ -55,13 +56,9 @@ def minimal_token_change(before: str, after: str) -> tuple[str, str]:
         i += 1
     # common suffix
     j = 0
-    while (
-        j < len(b) - i
-        and j < len(a) - i
-        and b[len(b) - 1 - j] == a[len(a) - 1 - j]
-    ):
+    while j < len(b) - i and j < len(a) - i and b[len(b) - 1 - j] == a[len(a) - 1 - j]:
         j += 1
-    return b[i:len(b) - j].strip(), a[i:len(a) - j].strip()
+    return b[i : len(b) - j].strip(), a[i : len(a) - j].strip()
 
 
 def parse_show(text: str) -> dict | None:
@@ -114,7 +111,7 @@ def parse_show(text: str) -> dict | None:
 def show_one(args) -> dict | None:
     mid, status, worktree, mutmut = args
     text = subprocess.run(
-        [mutmut, "show", mid], cwd=worktree, capture_output=True, text=True
+        [mutmut, "show", mid], cwd=worktree, capture_output=True, text=True, check=False
     ).stdout
     parsed = parse_show(text)
     if parsed is None:

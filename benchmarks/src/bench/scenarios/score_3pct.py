@@ -17,6 +17,7 @@ Hard requirements:
 If `claude` is missing we fall back to recording the baseline only, with
 `status == "skipped_no_claude"` so report aggregation still works.
 """
+
 from __future__ import annotations
 
 import json
@@ -30,7 +31,6 @@ from .. import venv as venv_mod
 from ..adapters import build as build_adapter
 from ..config import RepoCfg, ToolCfg
 from .cold import cold
-
 
 CLAUDE_PROMPT = """\
 You are improving a Python test suite to kill mutation-testing survivors.
@@ -83,9 +83,12 @@ def _survivor_dump(tool: str, worktree: Path) -> str:
     if tool == "mutmut":
         try:
             return subprocess.check_output(
-                ["mutmut", "results"], cwd=worktree, text=True, timeout=60,
+                ["mutmut", "results"],
+                cwd=worktree,
+                text=True,
+                timeout=60,
             )
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             return ""
     if tool == "cosmic-ray":
         session = worktree / "cosmic-ray.session.sqlite"
@@ -93,9 +96,11 @@ def _survivor_dump(tool: str, worktree: Path) -> str:
             try:
                 return subprocess.check_output(
                     ["cosmic-ray", "dump", str(session)],
-                    cwd=worktree, text=True, timeout=60,
+                    cwd=worktree,
+                    text=True,
+                    timeout=60,
                 )
-            except Exception:
+            except (subprocess.SubprocessError, OSError):
                 return ""
     return ""
 
@@ -119,6 +124,7 @@ def _drive_claude(prompt: str, worktree: Path, *, timeout: int = 1800) -> str:
             text=True,
             timeout=timeout,
             capture_output=True,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         return "timeout"
@@ -160,8 +166,12 @@ def score_3pct(
 
     try:
         return _score_3pct_inner(
-            repo, tool, adapter,
-            delta_target=delta_target, max_iterations=max_iterations, timeout=timeout,
+            repo,
+            tool,
+            adapter,
+            delta_target=delta_target,
+            max_iterations=max_iterations,
+            timeout=timeout,
         )
     finally:
         # Always restore the worktree, even on early return / timeout / error,
@@ -184,7 +194,9 @@ def _score_3pct_inner(
 
     print("  -- baseline warm run", flush=True)
     baseline = adapter.run(repo, worktree, timeout=timeout)
-    print(f"    -> baseline score={baseline.score} ({baseline.seconds:.1f}s)", flush=True)
+    print(
+        f"    -> baseline score={baseline.score} ({baseline.seconds:.1f}s)", flush=True
+    )
     if baseline.score is None:
         return {
             "scenario": "score_3pct",
@@ -199,7 +211,9 @@ def _score_3pct_inner(
     timed_out = False
 
     for i in range(max_iterations):
-        print(f"  -- iteration {i + 1}/{max_iterations}: claude writing tests", flush=True)
+        print(
+            f"  -- iteration {i + 1}/{max_iterations}: claude writing tests", flush=True
+        )
         survivors = _survivor_dump(tool.name, worktree)
         prompt = CLAUDE_PROMPT.format(
             repo=repo.name,
@@ -210,7 +224,10 @@ def _score_3pct_inner(
         claude_start = time.perf_counter()
         claude_status = _drive_claude(prompt, worktree)
         claude_dur = time.perf_counter() - claude_start
-        print(f"    -> claude {claude_status} ({claude_dur:.1f}s); re-running mutation", flush=True)
+        print(
+            f"    -> claude {claude_status} ({claude_dur:.1f}s); re-running mutation",
+            flush=True,
+        )
         if claude_status == "timeout":
             # Don't sink the cell — Claude just ran long. Stop iterating and
             # report what we have, marked so the partial result is obvious.
@@ -222,7 +239,9 @@ def _score_3pct_inner(
                 "scenario": "score_3pct",
                 "tool": tool.name,
                 "repo": repo.name,
-                "status": "skipped_no_claude" if claude_status == "missing" else "claude_failed",
+                "status": "skipped_no_claude"
+                if claude_status == "missing"
+                else "claude_failed",
                 "baseline_score": baseline.score,
                 "iterations": iterations,
             }
@@ -235,19 +254,23 @@ def _score_3pct_inner(
             adapter.clear_cache(worktree)
 
         result = adapter.run(repo, worktree, timeout=timeout)
-        delta = None if result.score is None else round(result.score - baseline.score, 2)
+        delta = (
+            None if result.score is None else round(result.score - baseline.score, 2)
+        )
         print(
             f"    -> score={result.score} delta={delta} mutation={result.seconds:.1f}s",
             flush=True,
         )
-        iterations.append({
-            "iteration": i,
-            "claude_seconds": round(claude_dur, 3),
-            "mutation_seconds": round(result.seconds, 3),
-            "score": result.score,
-            "mutants": result.mutants,
-            "delta": delta,
-        })
+        iterations.append(
+            {
+                "iteration": i,
+                "claude_seconds": round(claude_dur, 3),
+                "mutation_seconds": round(result.seconds, 3),
+                "score": result.score,
+                "mutants": result.mutants,
+                "delta": delta,
+            }
+        )
         if result.score is not None:
             score = result.score
             if score - baseline.score >= delta_target:
@@ -260,8 +283,10 @@ def _score_3pct_inner(
         "tool": tool.name,
         "repo": repo.name,
         "status": (
-            "reached" if reached
-            else "partial_claude_timeout" if timed_out
+            "reached"
+            if reached
+            else "partial_claude_timeout"
+            if timed_out
             else "exhausted_iterations"
         ),
         "baseline_score": baseline.score,

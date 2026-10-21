@@ -130,7 +130,9 @@ def _child_env(config):
     # fermut logs progress at info; inside a pytest session show only warnings
     # and errors unless pytest itself is verbose. An explicit RUST_LOG wins.
     if "RUST_LOG" not in env:
-        env["RUST_LOG"] = "fermut=info" if config.getoption("verbose") > 0 else "fermut=warn"
+        env["RUST_LOG"] = (
+            "fermut=info" if config.getoption("verbose") > 0 else "fermut=warn"
+        )
     return env
 
 
@@ -145,19 +147,31 @@ def _refresh_coverage(state, config, root):
         has_cov = False
     if not has_cov:
         state.lines.append(
-            ({"yellow": True}, "pytest-cov not installed: mutants run the whole suite "
-             "(slow). `pip install pytest-cov` to select tests by coverage.")
+            (
+                {"yellow": True},
+                (
+                    "pytest-cov not installed: mutants run the whole suite "
+                    "(slow). `pip install pytest-cov` to select tests by coverage."
+                ),
+            )
         )
         return
     cmd = [state.binary, "coverage", root, "--python", sys.executable, "-q"]
     with tempfile.TemporaryFile() as log:
-        rc = subprocess.call(cmd, cwd=root, env=_child_env(config), stdout=log, stderr=log)
+        rc = subprocess.call(
+            cmd, cwd=root, env=_child_env(config), stdout=log, stderr=log
+        )
         if rc != 0:
             log.seek(0)
             tail = log.read().decode("utf-8", "replace").strip().splitlines()[-5:]
             state.lines.append(
-                ({"yellow": True}, "`fermut coverage` exited %d; mutating with "
-                 "whatever coverage exists:" % rc)
+                (
+                    {"yellow": True},
+                    (
+                        f"`fermut coverage` exited {rc}; mutating with "
+                        "whatever coverage exists:"
+                    ),
+                )
             )
             state.lines.extend(({}, "  " + line) for line in tail)
 
@@ -194,26 +208,42 @@ def _relative(path, root):
 def _summarize(state, report, root, show):
     s = report["summary"]
     score = s.get("mutation_score")
-    score_text = "n/a" if score is None else "%.1f%%" % score
+    score_text = "n/a" if score is None else f"{score:.1f}%"
     state.lines.append(
-        ({"bold": True}, "mutation score %s: %d killed, %d survived, %d timed out, "
-         "%d errored (%d skipped)" % (score_text, s.get("killed", 0), s.get("survived", 0),
-                                      s.get("timed_out", 0), s.get("errored", 0),
-                                      s.get("skipped", 0)))
+        (
+            {"bold": True},
+            (
+                f"mutation score {score_text}: {s.get('killed', 0)} killed, "
+                f"{s.get('survived', 0)} survived, {s.get('timed_out', 0)} timed out, "
+                f"{s.get('errored', 0)} errored ({s.get('skipped', 0)} skipped)"
+            ),
+        )
     )
-    survivors = [o["mutant"] for o in report.get("outcomes", []) if o.get("status") == "survived"]
+    survivors = [
+        o["mutant"] for o in report.get("outcomes", []) if o.get("status") == "survived"
+    ]
     if not survivors or show <= 0:
         return
     survivors.sort(key=lambda m: (m.get("file", ""), m.get("line", 0)))
     shown = survivors[:show]
-    head = "surviving mutants" if len(shown) == len(survivors) else (
-        "surviving mutants (%d of %d)" % (len(shown), len(survivors)))
+    head = (
+        "surviving mutants"
+        if len(shown) == len(survivors)
+        else f"surviving mutants ({len(shown)} of {len(survivors)})"
+    )
     state.lines.append(({}, head + ":"))
     for m in shown:
         state.lines.append(
-            ({"red": True}, "  %s:%s [%s] `%s` -> `%s`" % (
-                _relative(m.get("file", "?"), root), m.get("line", "?"),
-                m.get("operator", "?"), m.get("original", ""), m.get("replacement", "")))
+            (
+                {"red": True},
+                "  {}:{} [{}] `{}` -> `{}`".format(
+                    _relative(m.get("file", "?"), root),
+                    m.get("line", "?"),
+                    m.get("operator", "?"),
+                    m.get("original", ""),
+                    m.get("replacement", ""),
+                ),
+            )
         )
     state.lines.append(({}, "`fermut next` ranks which survivors to kill first."))
 
@@ -229,13 +259,15 @@ def pytest_sessionfinish(session, exitstatus):
         return
     root = _rootdir(config)
     capman = config.pluginmanager.getplugin("capturemanager")
-    uncaptured = capman.global_and_fixture_disabled() if capman else contextlib.nullcontext()
+    uncaptured = (
+        capman.global_and_fixture_disabled() if capman else contextlib.nullcontext()
+    )
     fd, report_path = tempfile.mkstemp(prefix="fermut-", suffix=".json")
     os.close(fd)
     try:
         with uncaptured:
             _refresh_coverage(state, config, root)
-            sys.stderr.write("\nfermut: mutation testing %s\n" % root)
+            sys.stderr.write(f"\nfermut: mutation testing {root}\n")
             sys.stderr.flush()
             # stdout carries fermut's human report, rebuilt below from the
             # JSON; stderr (progress, warnings, errors) streams through.
@@ -250,7 +282,7 @@ def pytest_sessionfinish(session, exitstatus):
         os.unlink(report_path)
     if report is None:
         # No report means fermut failed before scoring (its error is on stderr).
-        state.lines.append(({"red": True}, "fermut exited %d without a report" % rc))
+        state.lines.append(({"red": True}, f"fermut exited {rc} without a report"))
         session.exitstatus = pytest.ExitCode.INTERNAL_ERROR
         return
     state.report = report

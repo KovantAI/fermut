@@ -68,7 +68,8 @@ when navigating an unfamiliar area.
    you change. Tests live in `#[cfg(test)] mod tests {}` at the bottom of
    each file (see e.g. `src/mutator/operators.rs`).
 4. **Run `cargo fmt --all` and `cargo clippy --all-targets --all-features --
-   -D warnings`** — same gates CI runs.
+   -D warnings`**, plus `ruff format` if you touched Python — same gates CI
+   runs.
 5. **Update `CHANGELOG.md`** under `## [Unreleased]` if your change is
    user-visible.
 6. **Open a PR** against `main`. CI runs fmt, clippy, test, and the MSRV
@@ -129,6 +130,9 @@ when navigating an unfamiliar area.
 ## Style
 
 - **Rustfmt**: `rustfmt.toml` is committed; CI rejects unformatted code.
+- **Ruff**: Python is formatted with `ruff format` (config in
+  `pyproject.toml`, version pinned in `.pre-commit-config.yaml`); the
+  pre-commit CI job rejects unformatted code. Lint rules are not enforced.
 - **Clippy**: `-D warnings`. No `#[allow]` annotations unless justified
   in-context. Don't use `#[allow]` to skip clippy lints — fix them.
 - **Tracing**: prefer `tracing::info!` / `warn!` over `println!` for

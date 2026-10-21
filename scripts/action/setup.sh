@@ -20,8 +20,8 @@ check_fail_under "${FAIL_UNDER:-}"
 if [ -n "${REGRESSION:-}" ] && ! [[ "$REGRESSION" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
   die "fail-on-regression must be a non-negative number of score points, got \"$REGRESSION\"."
 fi
-if [ -n "${MAX_ERRORED:-}" ] && ! [[ "$MAX_ERRORED" =~ ^[0-9]+$ ]]; then
-  die "max-errored must be a non-negative integer, got \"$MAX_ERRORED\"."
+if [ -n "${MAX_ERRORED:-}" ] && ! [[ "$MAX_ERRORED" =~ ^[0-9]+$|^[0-9]+(\.[0-9]+)?%$ ]]; then
+  die "max-errored must be a non-negative integer or a percentage like \"0.5%\", got \"$MAX_ERRORED\"."
 fi
 
 if [ -n "${BRANCH+x}" ] && [ -z "$BRANCH" ]; then

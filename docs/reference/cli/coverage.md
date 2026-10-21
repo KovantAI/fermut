@@ -29,6 +29,28 @@ rebuild. fermut reads the
 | `--python <path>`    | auto-discover                            | Interpreter or virtualenv to run pytest with (`<python> -m pytest`) — coverage generation with no `pytest` on PATH. Same discovery as [`fermut run`](run.md#python-interpreter). |
 | `--pytest-arg <arg>` | none                                     | Extra argument forwarded to pytest. Repeatable.                                                 |
 
+## Import-time lines
+
+Lines that run when a module is imported (module-level code, decorators,
+class bodies, default arguments) execute while pytest collects the test
+modules, before any test runs. A bare `pytest --cov --cov-context=test`
+records them under the empty `""` context, which names no test, so their
+mutants are skipped as uncovered. On more-itertools that is 512 mutants a
+full sweep would score.
+
+`fermut coverage` loads fermut's reporter plugin into the coverage run, which
+records those lines under `<test module>|collect`. A mutant there runs the
+whole test module that imported it. Python imports a module once, so only the
+first test module to import a source file gets its import-time lines. fermut
+therefore also selects every test module that runs any of that file's lines
+at runtime. On more-itertools this scores 496 of the 512, each with the
+same verdict a full sweep gives (443 killed, 53 survived). Selecting only the
+first importer left 19 false survivors. The other 16 are on lines no test
+context covers, and stay skipped.
+
+A `.coverage` built by an older fermut (or a bare `pytest --cov`) is rebuilt
+in full once to pick this up.
+
 ## Incremental correctness
 
 `pytest --cov-append` *unions* coverage data per context. For a

@@ -13,7 +13,7 @@ the job summary.
 | `KovantAI/fermut/trend` | Combine shard reports, record a score history, and gate on regressions |
 
 All four are released under the repository's tags. Pin to a release
-tag such as `@v0.6.0`. With no `fermut-version` input, each action
+tag such as `@v0.6.1`. With no `fermut-version` input, each action
 installs the fermut release that matches a `vX.Y.Z` tag. Any other ref,
 including a commit SHA or a branch, installs the latest fermut from
 PyPI, so a SHA pin should also set `fermut-version` explicitly.
@@ -62,7 +62,7 @@ jobs:
       - uses: actions/checkout@<sha>
         with:
           fetch-depth: 0     # optional: the action deepens a shallow clone itself
-      - uses: KovantAI/fermut@v0.6.0
+      - uses: KovantAI/fermut@v0.6.1
         with:
           fail-under: "80"
 ```
@@ -91,7 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@<sha>
-      - uses: KovantAI/fermut@v0.6.0
+      - uses: KovantAI/fermut@v0.6.1
         with:
           warm-only: "true"
 ```
@@ -107,7 +107,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@<sha>
-      - uses: KovantAI/fermut@v0.6.0
+      - uses: KovantAI/fermut@v0.6.1
         with:
           warm-only: "true"
 
@@ -120,7 +120,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@<sha>
-      - uses: KovantAI/fermut/sweep@v0.6.0
+      - uses: KovantAI/fermut/sweep@v0.6.1
         with:
           shard: ${{ matrix.shard }}/4
 
@@ -128,7 +128,7 @@ jobs:
     needs: shard
     runs-on: ubuntu-latest
     steps:
-      - uses: KovantAI/fermut/merge@v0.6.0
+      - uses: KovantAI/fermut/merge@v0.6.1
         with:
           fail-under: "70"
 ```
@@ -169,7 +169,7 @@ jobs:
       contents: write   # push the fermut-history branch
     steps:
       - uses: actions/checkout@<sha>
-      - uses: KovantAI/fermut/trend@v0.6.0
+      - uses: KovantAI/fermut/trend@v0.6.1
         with:
           fail-on-regression: "1"
 ```
@@ -177,8 +177,8 @@ jobs:
 `trend` merges the shard reports, turns the merged report into one
 history entry, and appends it to `.fermut/history.jsonl`. It writes
 `fermut trend` to the job summary and fails when the score dropped more
-than `fail-on-regression` points against the previous run on the same
-branch. It needs a checkout, because the entry's git sha and branch are
+than `fail-on-regression` points against the previous comparable run
+(see below). It needs a checkout, because the entry's git sha and branch are
 read from it.
 
 It refuses to record a run that would corrupt the trend, and fails
@@ -195,7 +195,10 @@ wrote no history entry.
 
 History lives on the `fermut-history` orphan branch, one file per run
 under `entries/` (`<timestamp>-<sha>.json`), so concurrent runs never
-conflict and nothing evicts it. Only runs on the default branch push to
+conflict and nothing evicts it. Entries are recorded without
+`survivor_ids`, which would add about 1MB per run on a large suite, so
+`fermut trend --diff` shows no new survivors on this history; the
+merged report in the `<artifact-name>-trend` artifact lists them. Only runs on the default branch push to
 it, which is why the job needs `contents: write` (see
 [Permissions](#permissions)). If a ruleset covers every branch, exempt
 `fermut-history` or pass a token that may bypass it as `token`;
@@ -203,7 +206,11 @@ otherwise the push is rejected. An unreachable branch fails the job
 rather than starting an empty trend.
 
 `delta` and the regression gate compare against the previous entry on
-the **same branch** (entries with no recorded branch match any branch).
+the **same branch** (entries with no recorded branch match any branch)
+with the **same `config_hash` and fermut version**. Either one moves the
+score without the tests changing, so a config edit or a fermut upgrade
+re-baselines: that run has no comparable prior, `delta` is empty, and
+the gate applies again from the next run.
 A run on another named branch restores the default branch's history but
 finds no earlier entry of its own, so `delta` is empty and
 `fail-on-regression` never fires there. Set `history-branch: ""` to
@@ -216,18 +223,18 @@ upload.
 |---|---|---|
 | `fail-on-regression` | — | Max score drop in points vs the previous run. Empty disables it |
 | `fail-under` | — | Absolute score floor. Unlike `merge`, survivors alone never fail a trend run |
-| `max-errored` | — | Refuse to record a run with more errored mutants than this |
+| `max-errored` | — | Refuse to record a run with more errored mutants than this: a count (`"0"`) or a share of tested mutants (`"0.5%"`) |
 | `history-path` | `.fermut/history.jsonl` | History file, relative to `working-directory` |
 | `history-branch` | `fermut-history` | Orphan branch holding the history. Change it to start a new trend; empty disables persistence |
 | `default-branch` | repository default | The only branch whose runs push the history |
 | `token` | `github.token` | Reads and pushes `history-branch`. Needs `contents: write` on the default branch |
-| `config-hash` | — | Stamped into each entry. Change it when the sweep's shape changes, so `fermut trend` flags the break |
+| `config-hash` | — | Override for the entry's `config_hash`. Empty uses the one the shards agree on (their config with `--shard` ignored) |
 | `limit` | `20` | Trend rows in the job summary |
 
 `trend` also takes `working-directory`, `artifact-name`, `blocking` and
 `fermut-version`. It outputs `score`, `scored`, `killed`, `survived`,
 `errored` and `report-json` (no `report-markdown`), plus `delta`
-(points vs the previous run on the same branch, empty when there is
+(points vs the previous comparable run, empty when there is
 none), `recorded`, and `history` (the history file path).
 
 ## Inputs
@@ -269,7 +276,7 @@ with the credentials scoped to that step, and set `install-command: ""`:
   env:
     UV_INDEX_PRIVATE_PASSWORD: ${{ secrets.REGISTRY_TOKEN }}
   run: uv sync --dev
-- uses: KovantAI/fermut@v0.6.0
+- uses: KovantAI/fermut@v0.6.1
   with:
     install-command: ""
 ```

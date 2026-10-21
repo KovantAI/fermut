@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Gates a recorded trend point: an optional absolute floor, then the
 # regression gate (`fermut trend --fail-on-regression`, which compares the
-# newest entry with the previous scored entry on the same branch).
+# newest entry with the previous scored entry on the same branch, config_hash
+# and fermut_version).
 #
 # env: FERMUT, HISTORY, BLOCKING, FAIL_UNDER, SCORE, REGRESSION, DELTA
 source "$(dirname "$0")/lib.sh"
@@ -11,6 +12,9 @@ if [ -n "$FAIL_UNDER" ]; then
     || gate_fail "Mutation score $SCORE% is below fail-under $FAIL_UNDER%."
 fi
 
+if [ -n "$REGRESSION" ] && [ -z "$DELTA" ]; then
+  echo "::notice title=fermut trend::No earlier run on this branch shares this run's config_hash and fermut version, so this run is the new regression baseline."
+fi
 if [ -n "$REGRESSION" ]; then
   set +e
   msg=$("$FERMUT" trend --history-path "$HISTORY" --all --format json \

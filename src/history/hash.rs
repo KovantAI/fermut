@@ -32,6 +32,18 @@ fn rel_to(root: &Path, p: &Path) -> String {
 /// Format-versioned (`v2|…`) so we can rev the shape without colliding with
 /// older entries; bump the prefix if the inputs ever change.
 pub fn config_hash(cfg: &Config) -> String {
+    hash_with_shard(cfg, cfg.shard)
+}
+
+/// [`config_hash`] of the whole run, ignoring `--shard`. Every shard of one
+/// run shares it, and it equals an unsharded run's `config_hash`, so it is
+/// what `fermut merge` stamps on the merged entry: the union of all `n` shards
+/// is the whole universe, comparable to an unsharded run.
+pub fn universe_hash(cfg: &Config) -> String {
+    hash_with_shard(cfg, None)
+}
+
+fn hash_with_shard(cfg: &Config, shard: Option<(u32, u32)>) -> String {
     let mut h = Sha256::new();
     // v2: folds in the mutant-universe / comparability inputs the score
     // actually depends on but v1 ignored — parity operators, diff scope
@@ -155,7 +167,7 @@ pub fn config_hash(cfg: &Config) -> String {
     // full run. Index + total both matter — different shards test different
     // mutants.
     h.update(b"|shard=");
-    match cfg.shard {
+    match shard {
         Some((index, total)) => {
             h.update(index.to_le_bytes());
             h.update(b"/");
@@ -431,5 +443,22 @@ mod tests {
             ..cfg()
         });
         assert_eq!(a, b, "same relative suite across checkouts must match");
+    }
+
+    #[test]
+    fn universe_hash_ignores_shard_only() {
+        // Every shard of one run, at any shard count, shares the unsharded
+        // run's hash — that is what makes a merged run comparable to it.
+        let full = config_hash(&cfg());
+        for shard in [Some((1, 4)), Some((3, 4)), Some((1, 16)), None] {
+            assert_eq!(universe_hash(&Config { shard, ..cfg() }), full);
+        }
+        // Anything else still moves it.
+        let sampled = Config {
+            sample_ratio: Some(0.1),
+            shard: Some((1, 4)),
+            ..cfg()
+        };
+        assert_ne!(universe_hash(&sampled), full);
     }
 }

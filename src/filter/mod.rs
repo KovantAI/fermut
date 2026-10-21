@@ -218,8 +218,11 @@ pub fn build_chain(cfg: &Config) -> Result<Vec<Box<dyn Filter>>> {
         )?));
     }
 
-    if let Some(ctx) = &cfg.coverage {
+    if let Some(ctx) = cfg.coverage_unselected.as_ref().or(cfg.coverage.as_ref()) {
         chain.push(Box::new(coverage::CoverageFilter::new(ctx.clone())));
+    }
+    if let (Some(_), Some(narrowed)) = (&cfg.coverage_unselected, &cfg.coverage) {
+        chain.push(Box::new(coverage::SelectionFilter::new(narrowed.clone())));
     }
 
     if cfg.ruff_filter {
@@ -336,6 +339,7 @@ mod chain_order_tests {
             since: None,
             coverage_path: None,
             coverage: None,
+            coverage_unselected: None,
             hypothesis_seed: None,
             pytest_args: Vec::new(),
             cache: false,

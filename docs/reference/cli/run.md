@@ -47,6 +47,7 @@ fermut run [PATH] [flags...]
 | `--no-diff-only`            | off                              | Override `diff_only`/`since` from config — force full sweep. Mutually exclusive with `--diff-only` and `--since`. |
 | `--coverage [path]`         | flag absent: auto-discover `.coverage`; bare `--coverage`: `coverage.json` | Per-mutant test selection from coverage contexts. Accepts a `.coverage` SQLite DB or a `coverage.json` export (format sniffed). Auto-discovery of `.coverage` at the project root happens only when the flag is absent; a bare `--coverage` with no path means `coverage.json`. See [Coverage](#coverage-integration). |
 | `--no-coverage`             | off                              | Override `coverage` from config — disable coverage filtering for this run. Mutually exclusive with `--coverage`. |
+| `--select-tests <FILE>`     | off                              | Only use the tests listed in `FILE`. Mutants that only unselected tests cover are skipped as `selection`. The run isn't recorded in history. Needs coverage. See [Selecting tests](#select-tests). |
 | `--exclude <GLOB>`          | none, repeatable                 | Glob patterns excluding paths from mutation collection (relative to source root). Example: `--exclude 'alembic/**' --exclude 'tests/integration/**'`. When passed at least once, replaces config `exclude` (no merge). |
 | `--no-equiv-detect`         | detector on                      | Skip the equivalent-mutant detector (AST patterns + CPython bytecode). Survivors are not post-processed; equivalents stay counted. |
 | `--cache-scope file\|scope` | `file`                           | Cache-key granularity. `file` hashes the whole file's AST; `scope` hashes the enclosing top-level def/class only, so sibling-function edits keep cache hits. `scope` can return stale verdicts when one test indirectly exercises another function. |
@@ -275,6 +276,27 @@ the run in that case.
 When coverage is wired, the filter chain skips any mutant whose line has
 zero test contexts, and the pytest runner narrows the invocation per
 mutant to only the tests that exercised the mutated line.
+
+## Selecting tests (`--select-tests`) { #select-tests }
+
+`--select-tests FILE` restricts the run to a subset of the suite.
+[`pytest --fermut`](../../guides/pytest-plugin.md#narrowing-to-the-tests-you-selected)
+uses it to pass on the session's selection. `FILE` lists one pytest node id
+per line, either with an absolute test-file path
+(`/repo/tests/test_x.py::TestA::test_b[1]`) or relative to the project root
+(`tests/test_x.py::TestA::test_b[1]`). Absolute paths outside the project
+root are dropped with a warning.
+
+- Each mutant runs only the selected tests among those that cover it.
+- A mutant that some test covers, but no selected test, is skipped as
+  `selection`. It is never run and doesn't count in the score. A line no test
+  covers at all is still a `coverage` skip.
+- Lines that run only at import time (recorded per test module) select only
+  that module's selected tests, never the whole module.
+- The run isn't appended to history: a score against a subset of the suite
+  isn't comparable with full runs.
+- It needs coverage data. Without it fermut warns, ignores the file and runs
+  every mutant against the whole suite.
 
 ## Incremental runs (`--since`)
 

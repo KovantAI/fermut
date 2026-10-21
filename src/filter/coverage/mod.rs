@@ -53,8 +53,10 @@ use crate::mutator::Mutant;
 
 mod order;
 mod parse;
+mod select;
 
 pub(crate) use parse::{has_table, is_sqlite};
+pub use select::{read_selection, SelectionFilter, SELECTION_FILTER};
 
 /// Per-file, per-line index of test node ids that touched the line.
 #[derive(Debug, Default)]
@@ -202,7 +204,7 @@ mod tests {
         p
     }
 
-    fn make_mutant(file: PathBuf, line: u32) -> Mutant {
+    pub(super) fn make_mutant(file: PathBuf, line: u32) -> Mutant {
         crate::mutator::Mutant {
             id: "id".into(),
             file,

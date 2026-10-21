@@ -185,7 +185,7 @@ pub(crate) fn rank_report(
     let coverage_selected = report
         .outcomes
         .iter()
-        .any(|o| matches!(o, MutantOutcome::Skipped { filter, .. } if filter == "coverage"));
+        .any(|o| matches!(o, MutantOutcome::Skipped { filter, .. } if filter == "coverage" || filter == crate::filter::coverage::SELECTION_FILTER));
 
     let mut entries = rank(&survivors, denom);
     for e in &mut entries {

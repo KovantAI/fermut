@@ -245,7 +245,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         }
     }
 
-    let coverage = match &coverage_path {
+    let mut coverage = match &coverage_path {
         Some(p) => Some(crate::filter::coverage::CoverageContexts::from_path(
             p,
             &source_root,
@@ -253,6 +253,26 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         )?),
         None => None,
     };
+    // `--select-tests` narrows `coverage` to the allowlist; the full contexts
+    // stay behind for the coverage filter (see `filter::coverage::select`).
+    let mut coverage_unselected = None;
+    if let Some(list) = &f.select_tests {
+        match coverage.take() {
+            Some(full) => {
+                let selected = crate::filter::coverage::read_selection(list, full.node_root())?;
+                info!(
+                    tests = selected.len(),
+                    "narrowing test selection to --select-tests"
+                );
+                coverage = Some(full.select(&selected));
+                coverage_unselected = Some(full);
+            }
+            None => warn!(
+                "--select-tests needs coverage data to map tests to lines; ignoring it, \
+                 mutants run against the full suite"
+            ),
+        }
+    }
 
     let hypothesis_seed = cli_hypothesis_seed.or(file.hypothesis_seed);
     let pytest_args = if !cli_pytest_args.is_empty() {
@@ -285,6 +305,11 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     };
 
     let history = if cli_no_history {
+        false
+    } else if coverage_unselected.is_some() {
+        // A score against a test subset isn't comparable with full runs;
+        // recording it would corrupt the trend baseline.
+        info!("not recording history: --select-tests narrows the test set");
         false
     } else {
         file.history.unwrap_or(true)
@@ -391,6 +416,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         since,
         coverage_path,
         coverage,
+        coverage_unselected,
         hypothesis_seed,
         pytest_args,
         cache,
@@ -607,6 +633,7 @@ mod tests {
             no_diff_only: false,
             coverage: None,
             no_coverage: false,
+            select_tests: None,
             experimental: false,
             parity: false,
             operators: None,
@@ -970,6 +997,36 @@ mod tests {
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
         assert!(cfg.diff_base.is_none(), "diff_base = {:?}", cfg.diff_base);
         assert!(cfg.since.is_none());
+    }
+
+    #[test]
+    fn select_tests_narrows_coverage_and_disables_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("pyproject.toml"), "").unwrap();
+        let src = root.join("m.py");
+        std::fs::write(&src, "x = 1\ny = 2\n").unwrap();
+        let cov = root.join("coverage.json");
+        let doc = serde_json::json!({"files": {src.to_str().unwrap(): {"contexts": {
+            "1": ["tests/test_a.py::t|run"],
+            "2": ["tests/test_b.py::t|run"],
+        }}}});
+        std::fs::write(&cov, doc.to_string()).unwrap();
+        let sel = root.join("sel.txt");
+        std::fs::write(&sel, "tests/test_a.py::t\n").unwrap();
+        let mut f = empty_filter();
+        f.coverage = Some(cov);
+        f.select_tests = Some(sel);
+        let cfg = call_with_filter(root.clone(), None, f).unwrap();
+        assert!(!cfg.history, "a narrowed run must not record history");
+        let full = cfg
+            .coverage_unselected
+            .as_ref()
+            .expect("full contexts kept");
+        let narrowed = cfg.coverage.as_ref().unwrap();
+        assert!(full.tests_for(&src, 2).is_some());
+        assert!(narrowed.tests_for(&src, 2).is_none());
+        assert!(narrowed.tests_for(&src, 1).is_some());
     }
 
     #[test]

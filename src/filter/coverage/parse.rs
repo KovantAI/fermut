@@ -314,6 +314,17 @@ impl CoverageContexts {
             ));
         }
 
+        Ok(Arc::new(Self::from_map(map, canonical_project)))
+    }
+
+    /// Index a built `file → line → node ids` map: computes the per-test
+    /// breadth maps. Shared by the coverage readers and
+    /// [`select`](Self::select), so a narrowed copy orders its tests from its
+    /// own (narrowed) breadth.
+    pub(super) fn from_map(
+        map: HashMap<PathBuf, HashMap<u32, Vec<String>>>,
+        node_root: PathBuf,
+    ) -> Self {
         // Per-test breadth: count the `(file, line)` cells each node id covers,
         // both globally and per file. One pass over the built map — cheap, done
         // once at load. The per-file counts drive smart ordering; the global
@@ -330,13 +341,13 @@ impl CoverageContexts {
             }
         }
 
-        Ok(Arc::new(Self {
+        Self {
             map,
             canonical_cache: RwLock::new(HashMap::new()),
             test_breadth,
             file_test_breadth,
-            node_root: canonical_project,
-        }))
+            node_root,
+        }
     }
 }
 

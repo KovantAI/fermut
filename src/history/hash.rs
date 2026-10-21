@@ -248,6 +248,7 @@ mod tests {
             since: None,
             coverage_path: None,
             coverage: None,
+            coverage_unselected: None,
             hypothesis_seed: None,
             pytest_args: Vec::new(),
             cache: false,

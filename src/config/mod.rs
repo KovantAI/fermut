@@ -50,6 +50,11 @@ pub struct Config {
     /// pytest runner narrows the invocation to the listed test ids per mutant
     /// and the coverage filter skips mutants whose line has no context.
     pub coverage: Option<Arc<CoverageContexts>>,
+    /// The full, un-narrowed contexts when `--select-tests` narrowed
+    /// [`Self::coverage`] to an allowlist; `None` otherwise. Only the coverage
+    /// filter reads it (an uncovered line stays a `coverage` skip); everything
+    /// else follows the narrowed `coverage`.
+    pub coverage_unselected: Option<Arc<CoverageContexts>>,
     pub hypothesis_seed: Option<u64>,
     pub pytest_args: Vec<String>,
     pub cache: bool,

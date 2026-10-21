@@ -6,8 +6,14 @@ available), runs ``fermut run`` with this interpreter, prints the score and
 the top survivors in pytest's terminal summary, and fails the session when the
 mutation gate fails. What gets mutated, and how, comes from the project's
 fermut config (``[tool.fermut]`` / ``fermut.toml``), exactly as for
-``fermut run``; pytest's own test selection only decides whether the suite is
-green.
+``fermut run``.
+
+A session that selected a subset of the suite (paths, node ids, ``-k``,
+``-m``, ``--deselect``, ...) is *narrowed*: only its tests are run against the
+mutants (``fermut run --select-tests``), and mutants none of them cover are
+skipped as ``selection``. A session that ran the whole suite green already
+proved what fermut's baseline run would, so that run is skipped
+(``--no-verify-baseline``) unless ``--fermut-verify-baseline`` is given.
 
 Inert unless ``--fermut`` is given, inside an xdist worker, and inside any
 suite run fermut itself spawns (``FERMUT_CHILD`` is set), so ``--fermut`` in
@@ -15,6 +21,7 @@ suite run fermut itself spawns (``FERMUT_CHILD`` is set), so ``--fermut`` in
 """
 
 import contextlib
+import glob
 import json
 import os
 import shutil
@@ -69,6 +76,13 @@ def pytest_addoption(parser):
         help="don't refresh per-test coverage with `fermut coverage` first.",
     )
     group.addoption(
+        "--fermut-verify-baseline",
+        action="store_true",
+        default=False,
+        help="run fermut's baseline check even after a green session that ran "
+        "the whole suite (by default it is skipped as redundant).",
+    )
+    group.addoption(
         "--fermut-show",
         metavar="N",
         type=int,
@@ -82,6 +96,9 @@ class _FermutState:
         self.binary = binary
         self.lines = []  # (markup, text) for the terminal summary
         self.report = None
+        # Absolute node ids ("<abs test file>::<name>") the session selected,
+        # or None when the session ran the whole suite.
+        self.selected = None
 
 
 def _active(config):
@@ -117,6 +134,75 @@ def pytest_configure(config):
             "environment (e.g. `uv add --dev fermut`) or set FERMUT_BIN."
         )
     config.stash[_STATE] = _FermutState(binary)
+
+
+# Options that select a subset of the collected tests. Any of them set means
+# the session ran less than the whole suite. Some come from plugins that may
+# be disabled (cacheprovider: --lf), hence the getoption default.
+_SELECTION_OPTIONS = (
+    "keyword",
+    "markexpr",
+    "deselect",
+    "ignore",
+    "ignore_glob",
+    "lf",
+    "stepwise",
+)
+
+
+def _narrowed(config):
+    """Whether the session selected less than the whole suite.
+
+    Besides the selection options, every argument's path must be the rootdir
+    or a ``testpaths`` entry: ``pytest tests`` and ``pytest .`` run the whole
+    suite, a file, a node id or a subdirectory (including running pytest from
+    one) does not. Over-detecting is safe: it only costs a narrowed run.
+    """
+    if any(config.getoption(name, None) for name in _SELECTION_OPTIONS):
+        return True
+    root = os.path.realpath(_rootdir(config))
+    whole = {root}
+    for entry in config.getini("testpaths"):
+        whole.update(os.path.realpath(p) for p in glob.glob(os.path.join(root, entry)))
+    cwd = str(config.invocation_params.dir)
+    for arg in config.args:
+        path = arg.split("::", 1)[0]
+        if "::" in arg or os.path.realpath(os.path.join(cwd, path)) not in whole:
+            return True
+    return False
+
+
+def _baseline_proven(config):
+    """Whether this (green) session already ran what fermut's baseline would:
+    the whole suite. Narrowed sessions prove only a subset."""
+    return not config.getoption("fermut_verify_baseline") and not _narrowed(config)
+
+
+def _absolute_id(root, nodeid):
+    """``tests/test_x.py::test_a`` → ``<root>/tests/test_x.py::test_a``.
+    fermut re-roots it onto its own project root, which can differ from
+    pytest's rootdir."""
+    path, sep, rest = nodeid.partition("::")
+    return os.path.join(root, path) + sep + rest
+
+
+def pytest_collection_finish(session):
+    state = session.config.stash.get(_STATE, None)
+    if state is None or not _narrowed(session.config):
+        return
+    root = _rootdir(session.config)
+    state.selected = [_absolute_id(root, item.nodeid) for item in session.items]
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_node_collection_finished(node, ids):
+    # Under xdist the controller collects nothing; each worker reports the
+    # ids it collected (after -k/-m). They are all the same list.
+    state = node.config.stash.get(_STATE, None)
+    if state is None or state.selected or not _narrowed(node.config):
+        return
+    root = _rootdir(node.config)
+    state.selected = [_absolute_id(root, nodeid) for nodeid in ids]
 
 
 def _rootdir(config):
@@ -176,15 +262,20 @@ def _refresh_coverage(state, config, root):
             state.lines.extend(({}, "  " + line) for line in tail)
 
 
-def _run_command(state, config, report_path):
+def _run_command(state, config, report_path, selection_path=None, skip_baseline=False):
     cmd = [state.binary, "run", "--python", sys.executable, "--json", report_path]
+    if selection_path:
+        cmd += ["--select-tests", selection_path]
+    extra = config.getoption("fermut_arg")
+    if skip_baseline and "--no-verify-baseline" not in extra:
+        cmd.append("--no-verify-baseline")
     since = config.getoption("fermut_since")
     if since:
         cmd += ["--since", since]
     min_score = config.getoption("fermut_min_score")
     if min_score is not None:
         cmd += ["--fail-under", repr(min_score)]
-    cmd += config.getoption("fermut_arg")
+    cmd += extra
     return cmd
 
 
@@ -209,6 +300,16 @@ def _summarize(state, report, root, show):
     s = report["summary"]
     score = s.get("mutation_score")
     score_text = "n/a" if score is None else f"{score:.1f}%"
+    if state.selected is not None:
+        outside = sum(
+            1
+            for o in report.get("outcomes", [])
+            if o.get("status") == "skipped" and o.get("filter") == "selection"
+        )
+        score_text += (
+            f" ({len(state.selected)} selected tests, "
+            f"{outside} mutants outside the selection)"
+        )
     state.lines.append(
         (
             {"bold": True},
@@ -264,7 +365,14 @@ def pytest_sessionfinish(session, exitstatus):
     )
     fd, report_path = tempfile.mkstemp(prefix="fermut-", suffix=".json")
     os.close(fd)
+    selection_path = None
     try:
+        if state.selected is not None:
+            fd, selection_path = tempfile.mkstemp(
+                prefix="fermut-select-", suffix=".txt"
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.writelines(nodeid + "\n" for nodeid in state.selected)
         with uncaptured:
             _refresh_coverage(state, config, root)
             sys.stderr.write(f"\nfermut: mutation testing {root}\n")
@@ -272,7 +380,13 @@ def pytest_sessionfinish(session, exitstatus):
             # stdout carries fermut's human report, rebuilt below from the
             # JSON; stderr (progress, warnings, errors) streams through.
             rc = subprocess.call(
-                _run_command(state, config, report_path),
+                _run_command(
+                    state,
+                    config,
+                    report_path,
+                    selection_path,
+                    skip_baseline=_baseline_proven(config),
+                ),
                 cwd=root,
                 env=_child_env(config),
                 stdout=subprocess.DEVNULL,
@@ -280,6 +394,8 @@ def pytest_sessionfinish(session, exitstatus):
         report = _load_report(report_path)
     finally:
         os.unlink(report_path)
+        if selection_path:
+            os.unlink(selection_path)
     if report is None:
         # No report means fermut failed before scoring (its error is on stderr).
         state.lines.append(({"red": True}, f"fermut exited {rc} without a report"))

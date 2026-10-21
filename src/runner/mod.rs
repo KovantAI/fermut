@@ -161,6 +161,13 @@ pub(crate) fn configure_mirror_cmd(cmd: &mut std::process::Command, mirror: &Mir
     cmd.env("PYTHONPATH", mirror_pythonpath(mirror)?);
     cmd.env("PYTHONDONTWRITEBYTECODE", "1");
     sanitize_python_env(cmd);
+    // A pytest temp root per mirror. Parallel sessions sharing
+    // `$TMPDIR/pytest-of-$USER` race in its numbered-dir cleanup; the
+    // "(rm_rf) error removing" / `FileNotFoundError` warnings that leaves fail
+    // the run under `filterwarnings = error` (pallets, pyjwt): ~2% of runs of
+    // a passing suite at 14 workers, each a false kill. A mirror runs one
+    // pytest at a time, so its own root can't race.
+    cmd.env("PYTEST_DEBUG_TEMPROOT", &mirror.pytest_temproot);
     Ok(())
 }
 
@@ -349,6 +356,12 @@ pub(crate) struct Mirror {
     pub root: PathBuf,
     pub tests: PathBuf,
     pub project_root: PathBuf,
+    /// `project_root` resolved: the form pytest prints, since it starts from
+    /// `getcwd()`. Paths inside node ids recorded in the real project use it.
+    project_real: String,
+    /// pytest's temp root for runs in this mirror (`PYTEST_DEBUG_TEMPROOT`),
+    /// beside the project copy. See [`configure_mirror_cmd`].
+    pub pytest_temproot: PathBuf,
     /// Directory beside (not inside) the project copy holding fermut's pytest
     /// reporter plugin and its per-run result files. Kept out of `root` so it
     /// can't be collected, imported by the project, or swept into a test path.
@@ -415,19 +428,54 @@ impl Mirror {
         copy_dir_all(&project_root, &root, mode)?;
         let tests_rel = tests.strip_prefix(&project_root).unwrap_or(tests);
         let tests_in_mirror = root.join(tests_rel);
+        // Short name: tmp_path lands under it, and AF_UNIX socket paths in
+        // tests are limited to ~104 bytes.
+        let pytest_temproot = base.join("t");
+        std::fs::create_dir_all(&pytest_temproot)
+            .with_context(|| format!("mkdir -p {}", pytest_temproot.display()))?;
         let plugin_dir = base.join("fermut-plugin");
         std::fs::create_dir_all(&plugin_dir)
             .with_context(|| format!("mkdir -p {}", plugin_dir.display()))?;
         let module = plugin_dir.join(format!("{}.py", pytest_result::REPORTER_MODULE));
         std::fs::write(&module, pytest_result::REPORTER_SOURCE)
             .with_context(|| format!("writing {}", module.display()))?;
+        let project_real = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.clone())
+            .to_string_lossy()
+            .into_owned();
         Ok(Self {
             _workdir: workdir,
             root,
             tests: tests_in_mirror,
             project_root,
+            project_real,
+            pytest_temproot,
             plugin_dir,
         })
+    }
+
+    /// A node id recorded in the real project, as pytest names it in this
+    /// mirror. Parametrize ids can embed an absolute path (werkzeug:
+    /// `test_from_directory[/repo/tests/res-test.txt]`); in the mirror pytest
+    /// generates the mirror's path instead, so the recorded id would not
+    /// resolve (pytest exit 4, scored `error`). Only the part after the first
+    /// `::` is rewritten; the file part is relative.
+    pub(crate) fn id_into_mirror(&self, id: &str) -> String {
+        match id.split_once("::") {
+            Some((file, rest)) if rest.contains(&self.project_real) => format!(
+                "{file}::{}",
+                rest.replace(&self.project_real, &self.root.to_string_lossy())
+            ),
+            _ => id.to_string(),
+        }
+    }
+
+    /// pytest output or reporter results from a run in this mirror, with the
+    /// mirror path mapped back to the real project's, so node ids it names
+    /// (killer, kill-set, `hung_in`) match the recorded coverage ids.
+    pub(crate) fn text_from_mirror(&self, text: &str) -> String {
+        text.replace(&*self.root.to_string_lossy(), &self.project_real)
     }
 }
 
@@ -919,6 +967,58 @@ mod tests {
         let mirror = Mirror::build(&tests, IsolationMode::Auto).unwrap();
         let mirrored = mirror.root.join("app.py");
         assert_eq!(fs::read(&mirrored).unwrap(), fs::read(&src).unwrap());
+    }
+
+    /// Parallel pytest sessions sharing one temp root race in its cleanup, a
+    /// false kill under `filterwarnings = error`; each mirror gets its own.
+    #[test]
+    fn mirror_commands_get_a_private_pytest_temp_root() {
+        let (_tmp, _root, tests, _src) = fake_project();
+        let a = Mirror::build(&tests, IsolationMode::Auto).unwrap();
+        let b = Mirror::build(&tests, IsolationMode::Auto).unwrap();
+        let mut cmd = std::process::Command::new("true");
+        crate::runner::configure_mirror_cmd(&mut cmd, &a).unwrap();
+        let env: std::collections::HashMap<_, _> = cmd.get_envs().collect();
+        let root = env[std::ffi::OsStr::new("PYTEST_DEBUG_TEMPROOT")].unwrap();
+        assert_eq!(std::path::Path::new(root), a.pytest_temproot);
+        assert!(a.pytest_temproot.is_dir(), "pytest needs the root to exist");
+        assert!(
+            !a.pytest_temproot.starts_with(&a.root),
+            "outside the project copy"
+        );
+        assert_ne!(a.pytest_temproot, b.pytest_temproot);
+    }
+
+    /// werkzeug parametrizes on absolute paths, so the recorded id carries the
+    /// project's path; in the mirror pytest names the same test with the
+    /// mirror's path. Ids go in rewritten and results come back mapped.
+    #[test]
+    fn node_ids_with_an_embedded_project_path_round_trip_through_the_mirror() {
+        let (_tmp, root, tests, _src) = fake_project();
+        let mirror = Mirror::build(&tests, IsolationMode::Auto).unwrap();
+        let real = root.canonicalize().unwrap();
+        let recorded = format!(
+            "tests/test_f.py::test_dir[{}/tests/res-a.txt]",
+            real.display()
+        );
+        let in_mirror = mirror.id_into_mirror(&recorded);
+        assert_eq!(
+            in_mirror,
+            format!(
+                "tests/test_f.py::test_dir[{}/tests/res-a.txt]",
+                mirror.root.display()
+            )
+        );
+        assert_eq!(
+            mirror.text_from_mirror(&format!("FAILED {in_mirror} - boom")),
+            format!("FAILED {recorded} - boom")
+        );
+        // Ids without the path, and the file part, are left alone.
+        assert_eq!(
+            mirror.id_into_mirror("tests/test_f.py::test_x[1]"),
+            "tests/test_f.py::test_x[1]"
+        );
+        assert_eq!(mirror.id_into_mirror("-x"), "-x");
     }
 
     /// pytest prints test ids relative to its resolved cwd, so a mirror path

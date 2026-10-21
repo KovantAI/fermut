@@ -294,10 +294,10 @@ impl PytestRunner {
                 if capture && !args.iter().any(|a| a == "-rfE") {
                     args.push("-rfE".to_string());
                 }
-                for a in &args {
-                    cmd.arg(a);
-                }
                 let sole = (!capture && args.len() == 1).then(|| args[0].clone());
+                for a in &args {
+                    cmd.arg(mirror.id_into_mirror(a));
+                }
                 (capture, sole)
             }
             Selection::Sweep => {
@@ -507,8 +507,9 @@ struct MutantCommand {
 struct ResultFile(PathBuf);
 
 impl ResultFile {
-    fn read(&self) -> Option<RunResult> {
-        RunResult::read(&self.0)
+    fn read(&self, mirror: &super::Mirror) -> Option<RunResult> {
+        let bytes = std::fs::read(&self.0).ok()?;
+        RunResult::parse(&mirror.text_from_mirror(&String::from_utf8_lossy(&bytes)))
     }
 }
 
@@ -522,10 +523,14 @@ impl Drop for ResultFile {
 /// exited on its own yet left no usable result, the plugin failed to load in
 /// this environment: warn once per process (the run still gets a verdict via
 /// the exit-code fallback) so a silently degraded run is visible.
-fn read_reported(result: Option<&ResultFile>, exited: bool) -> Option<RunResult> {
+fn read_reported(
+    mirror: &super::Mirror,
+    result: Option<&ResultFile>,
+    exited: bool,
+) -> Option<RunResult> {
     static WARNED: AtomicBool = AtomicBool::new(false);
     let file = result?;
-    let reported = file.read();
+    let reported = file.read(mirror);
     if reported.is_none() && exited && !WARNED.swap(true, Ordering::Relaxed) {
         tracing::warn!(
             "fermut's pytest reporter plugin produced no result; falling back to \
@@ -785,9 +790,10 @@ impl Runner for PytestRunner {
             let result = result.map(ResultFile);
             let started = Instant::now();
             let child = cmd.spawn().context("spawning test runner")?;
-            let waited = wait_draining_stdout(child, self.timeout, kill_group)?;
+            let (status, output) = wait_draining_stdout(child, self.timeout, kill_group)?;
+            let waited = (status, output.map(|o| mirror.text_from_mirror(&o)));
             let wall = started.elapsed();
-            let reported = read_reported(result.as_ref(), waited.0.is_some());
+            let reported = read_reported(mirror, result.as_ref(), waited.0.is_some());
             // Exit 4 is ambiguous under node-id selection (see `exit.rs`). The
             // reporter plugin saw whether test code failed to import; without
             // its result (plugin off or failed to load) the mutant is still
@@ -837,9 +843,10 @@ impl Runner for PytestRunner {
             let result = result.map(ResultFile);
             let started = Instant::now();
             let child = cmd.spawn().context("spawning audit run")?;
-            let waited = wait_draining_stdout(child, self.timeout, kill_group)?;
+            let (status, output) = wait_draining_stdout(child, self.timeout, kill_group)?;
+            let waited = (status, output.map(|o| mirror.text_from_mirror(&o)));
             let wall = started.elapsed();
-            let reported = read_reported(result.as_ref(), waited.0.is_some());
+            let reported = read_reported(mirror, result.as_ref(), waited.0.is_some());
             Ok(self
                 .classify_run(
                     mutant,
@@ -1642,14 +1649,21 @@ mod tests {
     #[test]
     fn result_file_is_removed_on_drop_and_paths_are_unique() {
         let tmp = tempfile::tempdir().unwrap();
+        let tests = tmp.path().join("tests");
+        std::fs::create_dir_all(&tests).unwrap();
+        std::fs::write(tmp.path().join("pyproject.toml"), "").unwrap();
+        let mirror = crate::runner::build_mirror(&tests, IsolationMode::Copy).unwrap();
         let a = next_result_path(tmp.path());
         let b = next_result_path(tmp.path());
         assert_ne!(a, b);
         std::fs::write(&a, "{\"v\":1,\"ev\":\"start\"}\n").unwrap();
         let file = ResultFile(a.clone());
-        assert!(file.read().is_some());
+        assert!(file.read(&mirror).is_some());
         drop(file);
         assert!(!a.exists());
+        assert!(ResultFile(tmp.path().join("absent.jsonl"))
+            .read(&mirror)
+            .is_none());
     }
 
     #[cfg(unix)]

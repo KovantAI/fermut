@@ -8,6 +8,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+### Changed
+- `KovantAI/fermut/trend` persists the history on a `fermut-history`
+  orphan branch (one file per run under `entries/`) instead of the Actions
+  cache, which evicted it after 7 days unused. The job now needs
+  `permissions: contents: write`. New `history-branch` and `token` inputs
+  replace `history-cache` and `cache-key-prefix`.
+
 ## [0.6.0] - 2026-10-20
 
 ### Added

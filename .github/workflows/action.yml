@@ -137,9 +137,9 @@ jobs:
           artifact-name: selftest
           fail-on-regression: "1"
           max-errored: "0"
-          # A per-run namespace: the history starts empty, so the run is
-          # deterministic and never compares against another commit's sample.
-          cache-key-prefix: selftest-${{ github.run_id }}
+          # This job holds a read-only token and its history must start
+          # empty, so it persists nothing; the branch store is tested below.
+          history-branch: ""
       - name: Assert trend outputs
         env:
           RECORDED: ${{ steps.fermut.outputs.recorded }}
@@ -153,6 +153,20 @@ jobs:
           test -z "$DELTA"
           test "$(wc -l < "$HISTORY")" -eq 1
           jq -e '.killed + .survived > 0 and .git_sha != null' "$HISTORY"
+      - name: Round-trip the history branch store
+        env:
+          ENTRY: ${{ steps.fermut.outputs.history }}
+        run: |
+          # A local bare repo stands in for the GitHub remote.
+          git init -q --bare "$RUNNER_TEMP/remote.git"
+          store() { GITHUB_SERVER_URL="file://$RUNNER_TEMP" GITHUB_REPOSITORY=remote \
+                    BRANCH=fermut-history TOKEN= HISTORY="$RUNNER_TEMP/h.jsonl" \
+                    bash scripts/action/history-branch.sh "$@"; }
+          store read && test ! -s "$RUNNER_TEMP/h.jsonl"
+          store write && store write   # the re-run is a no-op
+          store read
+          test "$(wc -l < "$RUNNER_TEMP/h.jsonl")" -eq 1
+          cmp "$RUNNER_TEMP/h.jsonl" "$ENTRY"
 
   pr:
     if: github.event_name == 'pull_request'

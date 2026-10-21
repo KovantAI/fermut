@@ -357,6 +357,17 @@ pub struct Report {
     /// written report.
     #[serde(skip)]
     pub inferred_audit_failures: usize,
+    /// The run's [`crate::history::universe_hash`]: its `config_hash` with
+    /// `--shard` ignored, so every shard of one run carries the same value.
+    /// `fermut merge` checks the shards agree and stamps it on the merged
+    /// history entry. `None` on reports from before this field.
+    #[serde(default)]
+    pub config_hash: Option<String>,
+    /// Wall-clock of the run that produced this report, in milliseconds.
+    /// `fermut merge` sums it across shards: total work, not elapsed time.
+    /// `None` on reports from before this field.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
 }
 
 // Hand-written so JSON output carries a derived `summary` object alongside
@@ -368,10 +379,16 @@ impl Serialize for Report {
         #[derive(Serialize)]
         struct View<'a> {
             summary: Summary,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            config_hash: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            duration_ms: Option<u64>,
             outcomes: &'a [MutantOutcome],
         }
         View {
             summary: self.summary(),
+            config_hash: self.config_hash.as_deref(),
+            duration_ms: self.duration_ms,
             outcomes: &self.outcomes,
         }
         .serialize(serializer)
@@ -385,6 +402,8 @@ impl Report {
             outcomes,
             dominator_score: None,
             inferred_audit_failures: 0,
+            config_hash: None,
+            duration_ms: None,
         }
     }
 

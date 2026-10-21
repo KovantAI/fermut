@@ -189,11 +189,18 @@ fn parse_id_file(id: &str) -> Option<&str> {
 }
 
 /// Positive point-drop between `current` and the most recent entry in
-/// `prior` on the same branch. When either side has no recorded branch
-/// we treat the pair as comparable (best effort — better signal than
-/// skipping the gate entirely on detached HEAD / pre-git-tagged
-/// entries). Returns `None` when there is no comparable prior or the
-/// score didn't regress.
+/// `prior` on the same branch with the same `config_hash` and
+/// `fermut_version`. When either side has no recorded branch we treat the
+/// pair as comparable (best effort — better signal than skipping the gate
+/// entirely on detached HEAD / pre-git-tagged entries). Returns `None` when
+/// there is no comparable prior or the score didn't regress.
+///
+/// The config and version must match because either one moves the score
+/// without the tests changing: `config_hash` covers the mutant universe
+/// (ops, filters, sample, exclude, …) and a fermut upgrade can add or change
+/// operators. A mismatch re-baselines: the first run under a new pair has no
+/// prior and the gate is silent, rather than reporting a tool change as a
+/// regression.
 ///
 /// Takes `current` separately from `prior` because the regression gate
 /// must reason about the in-memory run, not whatever the history file
@@ -209,12 +216,17 @@ pub fn regression_against(prior: &[HistoryEntry], current: &HistoryEntry) -> Opt
         return None;
     }
     let current_branch = current.git_branch.as_deref();
-    let prev = prior.iter().rev().filter(|e| e.is_comparable()).find(|e| {
-        match (e.git_branch.as_deref(), current_branch) {
+    let prev = prior
+        .iter()
+        .rev()
+        .filter(|e| e.is_comparable())
+        .filter(|e| {
+            e.config_hash == current.config_hash && e.fermut_version == current.fermut_version
+        })
+        .find(|e| match (e.git_branch.as_deref(), current_branch) {
             (Some(a), Some(b)) => a == b,
             _ => true,
-        }
-    })?;
+        })?;
     let drop = prev.mutation_score - current.mutation_score;
     if drop > 0.0 {
         Some(drop)
@@ -459,6 +471,40 @@ mod tests {
         ];
         let current = mk(85.0, Some("main"));
         assert_eq!(regression_against(&prior, &current), Some(5.0));
+    }
+
+    fn mk_scoped(score: f64, hash: &str, version: &str) -> HistoryEntry {
+        let mut e = mk(score, Some("main"));
+        e.config_hash = Some(hash.into());
+        e.fermut_version = Some(version.into());
+        e
+    }
+
+    #[test]
+    fn regression_against_walks_back_to_matching_config_and_version() {
+        // The newest prior ran a different config, so the gate skips it and
+        // compares with the last run under this run's config + version.
+        let prior = vec![
+            mk_scoped(90.0, "h1", "0.6.0"),
+            mk_scoped(99.0, "h2", "0.6.0"),
+        ];
+        let current = mk_scoped(85.0, "h1", "0.6.0");
+        assert_eq!(regression_against(&prior, &current), Some(5.0));
+    }
+
+    #[test]
+    fn regression_against_rebaselines_on_config_or_version_change() {
+        // A fermut upgrade or a config edit moves the score without the tests
+        // changing: no comparable prior, so the gate is silent.
+        let prior = vec![mk_scoped(90.0, "h1", "0.6.0")];
+        assert_eq!(
+            regression_against(&prior, &mk_scoped(50.0, "h1", "0.7.0")),
+            None
+        );
+        assert_eq!(
+            regression_against(&prior, &mk_scoped(50.0, "h2", "0.6.0")),
+            None
+        );
     }
 
     #[test]

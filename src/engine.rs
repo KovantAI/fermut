@@ -462,11 +462,13 @@ fn persist(
 
     let mut report = Report::new(outcomes);
     report.dominator_score = dominator_score(cfg, &report.outcomes);
+    report.config_hash = Some(crate::history::universe_hash(cfg));
+    report.duration_ms = u64::try_from(started.elapsed().as_millis()).ok();
 
     let entry = if cfg.history {
-        let duration_ms = u64::try_from(started.elapsed().as_millis()).ok();
         let hash = crate::history::config_hash(cfg);
-        let entry = HistoryEntry::from_report(&report, &cfg.source_root, duration_ms, Some(hash));
+        let entry =
+            HistoryEntry::from_report(&report, &cfg.source_root, report.duration_ms, Some(hash));
         if let Err(e) = crate::history::append(&cfg.history_path, &entry) {
             // Never let history-log IO sink the run — `fermut run` already
             // has a final report; trend tracking is observational. The

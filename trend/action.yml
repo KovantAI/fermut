@@ -35,7 +35,9 @@
 # Takes the place of KovantAI/fermut/merge in a trend workflow. It merges the
 # `<artifact-name>-shard-*` reports, turns the merged report into one history
 # entry, appends it to `.fermut/history.jsonl`, writes the trend to the job
-# summary, and gates on a score drop vs the previous run on the same branch.
+# summary, and gates on a score drop vs the previous run on the same branch,
+# with the same config_hash and fermut version. A config edit or a fermut
+# upgrade re-baselines instead of reading as a regression.
 #
 # History persists on the `history-branch` orphan branch, one file per run
 # under entries/. Only the default branch pushes to it, so the job needs
@@ -66,7 +68,7 @@ inputs:
     required: false
     default: "fermut-report"
   fail-on-regression:
-    description: "Fail when the score dropped more than this many points vs the previous run on the same branch. Empty disables the regression gate."
+    description: "Fail when the score dropped more than this many points vs the previous run on the same branch, config_hash and fermut version. Empty disables the regression gate."
     required: false
     default: ""
   fail-under:
@@ -74,7 +76,7 @@ inputs:
     required: false
     default: ""
   max-errored:
-    description: "Refuse to record the run when more mutants than this errored. Empty allows any number."
+    description: 'Refuse to record the run when more mutants than this errored: a count ("0") or a percentage of tested mutants ("0.5%"). Empty allows any number.'
     required: false
     default: ""
   blocking:
@@ -99,10 +101,10 @@ inputs:
     default: ${{ github.token }}
   config-hash:
     description: >-
-      config_hash to stamp into the entry, so `fermut trend` can flag runs whose
-      configuration changed. Shards cannot supply one (each hashes its own
-      slice), so pass any stable string that changes with the sweep's shape,
-      e.g. a hash of your sweep inputs. Empty leaves it unset.
+      Override for the entry's config_hash. Empty uses the hash the shards
+      agree on: their run config with --shard ignored, so it changes whenever
+      the mutant universe does (ops, filters, sample, exclude, tests) and
+      matches an unsharded run. Shards that disagree fail the merge.
     required: false
     default: ""
   limit:
@@ -133,7 +135,7 @@ outputs:
     description: "Mutants that errored. Excluded from the score."
     value: ${{ steps.stats.outputs.errored }}
   delta:
-    description: 'Score change in points vs the previous run on the same branch, or "" when there is none.'
+    description: 'Score change in points vs the previous comparable run (same branch, config_hash and fermut version), or "" when there is none.'
     value: ${{ steps.record.outputs.delta }}
   recorded:
     description: '"true" when the run was appended to the history.'

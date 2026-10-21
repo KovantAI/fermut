@@ -162,14 +162,23 @@ pub(super) fn merge_reports(
     // Read + parse lazily so `combine_outcomes` holds only one report's
     // outcomes plus the running map at a time. A sharded report is the whole
     // mutant universe, so eagerly collecting all N would be an N× blow-up.
+    let mut hashes = Vec::with_capacity(inputs.len());
+    let mut durations = Vec::with_capacity(inputs.len());
     let reports = inputs.iter().map(|path| -> Result<Vec<MutantOutcome>> {
         let report = crate::report::load(path)?;
         shards.add(path, report.shard)?;
+        hashes.push(report.config_hash);
+        durations.push(report.duration_ms);
         Ok(report.outcomes)
     });
     let outcomes = combine_outcomes(reports)?;
     shards.finish()?;
-    let merged = Report::new(outcomes);
+    let mut merged = Report::new(outcomes);
+    merged.config_hash = shared_config_hash(hashes)?;
+    // Total work across shards. `None` if any shard predates the field, rather
+    // than a sum that silently undercounts.
+    merged.duration_ms = durations.into_iter().sum();
+    let config_hash = config_hash.or_else(|| merged.config_hash.clone());
 
     sinks.write_all(&merged)?;
     if !sinks.any() && history.is_none() {
@@ -196,12 +205,16 @@ pub(super) fn merge_reports(
     // sharded CI run record its trend point WITHOUT harvesting one shard's
     // history line as a template: git sha/branch come from the merge checkout
     // (the same commit the shards ran on), `fermut_version` is stamped
-    // automatically, and the counts are the merged full-universe totals. The
-    // one thing merge can't derive is `config_hash` — the run's config lives in
-    // the shard jobs — so the caller passes it via `--config-hash`.
+    // automatically, and the counts are the merged full-universe totals.
+    // `config_hash` is the one the shards agree on (see `shared_config_hash`)
+    // unless the caller overrides it with `--config-hash`.
     if let Some(p) = history {
-        let entry =
-            crate::history::HistoryEntry::from_report(&merged, project_root, None, config_hash);
+        let entry = crate::history::HistoryEntry::from_report(
+            &merged,
+            project_root,
+            merged.duration_ms,
+            config_hash,
+        );
         let line = serde_json::to_string(&entry).context("serializing merged history entry")?;
         // Single staged entry, overwrite (not append): re-running merge must not
         // stack duplicate lines in the staging file.
@@ -209,6 +222,24 @@ pub(super) fn merge_reports(
             .with_context(|| format!("writing {}", p.display()))?;
     }
     Ok(())
+}
+
+/// The `config_hash` every input report carries, ignoring `--shard` (see
+/// [`Report::config_hash`]). Shards that disagree ran different configs, so
+/// their union is not one run and merging it would record a meaningless score.
+/// `None` when any input predates the field.
+fn shared_config_hash(hashes: Vec<Option<String>>) -> Result<Option<String>> {
+    let Some(hashes) = hashes.into_iter().collect::<Option<Vec<_>>>() else {
+        return Ok(None);
+    };
+    if let Some(other) = hashes.iter().find(|h| **h != hashes[0]) {
+        bail!(
+            "input reports were produced with different configs (config_hash {} vs {other}). \
+             Every shard must run with the same flags and fermut.toml; re-run the odd one out.",
+            hashes[0]
+        );
+    }
+    Ok(hashes.into_iter().next())
 }
 
 /// Combine per-report outcome lists into one, in first-seen id order.
@@ -485,6 +516,102 @@ mod tests {
         // Re-running merge leaves exactly one staged line, not two.
         let raw = std::fs::read_to_string(&hist).unwrap();
         assert_eq!(raw.lines().filter(|l| !l.trim().is_empty()).count(), 1);
+    }
+
+    /// Writes one report per hash, merges them with `--history`, and returns
+    /// the merge result plus the staged entry's `config_hash`.
+    fn merge_hashed(hashes: &[Option<&str>], explicit: Option<&str>) -> Result<Option<String>> {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths: Vec<PathBuf> = hashes
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                let mut r = Report::new(vec![MutantOutcome::killed(mutant(&format!("m{i}")))]);
+                r.config_hash = h.map(str::to_string);
+                let p = tmp.path().join(format!("s{i}.json"));
+                r.write_json(&p).unwrap();
+                p
+            })
+            .collect();
+        let hist = tmp.path().join("entry.json");
+        merge_reports(
+            &paths,
+            &ReportSinks {
+                json: Some(tmp.path().join("c.json")),
+                ..Default::default()
+            },
+            Some(&hist),
+            explicit.map(str::to_string),
+            tmp.path(),
+            &MergeGates::default(),
+        )?;
+        let raw = std::fs::read_to_string(&hist).unwrap();
+        let entry: crate::history::HistoryEntry = serde_json::from_str(raw.trim()).unwrap();
+        Ok(entry.config_hash)
+    }
+
+    /// Merges one report per duration with `--history` and returns the staged
+    /// entry's `duration_ms`.
+    fn merge_durations(durations: &[Option<u64>]) -> Option<u64> {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths: Vec<PathBuf> = durations
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let mut r = Report::new(vec![MutantOutcome::killed(mutant(&format!("m{i}")))]);
+                r.duration_ms = *d;
+                let p = tmp.path().join(format!("s{i}.json"));
+                r.write_json(&p).unwrap();
+                p
+            })
+            .collect();
+        let hist = tmp.path().join("entry.json");
+        merge_reports(
+            &paths,
+            &ReportSinks::default(),
+            Some(&hist),
+            None,
+            tmp.path(),
+            &MergeGates::default(),
+        )
+        .unwrap();
+        let raw = std::fs::read_to_string(&hist).unwrap();
+        let entry: crate::history::HistoryEntry = serde_json::from_str(raw.trim()).unwrap();
+        entry.duration_ms
+    }
+
+    #[test]
+    fn merge_sums_shard_durations() {
+        assert_eq!(merge_durations(&[Some(1000), Some(250)]), Some(1250));
+    }
+
+    #[test]
+    fn merge_leaves_duration_unset_when_a_shard_predates_it() {
+        assert_eq!(merge_durations(&[Some(1000), None]), None);
+    }
+
+    #[test]
+    fn merge_stamps_the_hash_the_shards_agree_on() {
+        let got = merge_hashed(&[Some("abc"), Some("abc")], None).unwrap();
+        assert_eq!(got.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn merge_refuses_shards_with_different_configs() {
+        let err = merge_hashed(&[Some("abc"), Some("xyz")], None).unwrap_err();
+        assert!(err.to_string().contains("different configs"), "{err}");
+    }
+
+    #[test]
+    fn merge_explicit_config_hash_overrides_the_shards() {
+        let got = merge_hashed(&[Some("abc"), Some("abc")], Some("override")).unwrap();
+        assert_eq!(got.as_deref(), Some("override"));
+    }
+
+    #[test]
+    fn merge_leaves_hash_unset_when_a_shard_predates_it() {
+        let got = merge_hashed(&[Some("abc"), None], None).unwrap();
+        assert_eq!(got, None);
     }
 
     fn shard_skip(id: &str) -> MutantOutcome {

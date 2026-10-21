@@ -32,7 +32,7 @@ pub(crate) use entry::trend_step;
 pub use entry::HistoryEntry;
 #[cfg(test)]
 pub use entry::CURRENT_SCHEMA_V;
-pub use hash::config_hash;
+pub use hash::{config_hash, universe_hash};
 pub(crate) use io::iso8601_now;
 pub use io::{append, load, load_with_stats};
 pub use paths::{default_history_path, resolve_root};

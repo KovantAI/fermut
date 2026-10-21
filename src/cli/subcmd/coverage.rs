@@ -60,6 +60,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::loader::LoadedConfig;
 use crate::filter::coverage::has_table;
+use crate::runner::python::absolute_program;
 
 /// Current fingerprint-sidecar schema version. `load_fingerprints` rejects any
 /// sidecar not stamped with exactly this value, so bumping it here genuinely
@@ -700,13 +701,14 @@ fn run_pytest(
     // With an interpreter, go through `<python> -m pytest` so coverage runs
     // on that interpreter's pytest-cov with no reliance on PATH; otherwise a
     // bare `pytest` console script (historical behavior).
+    // Resolved here: `current_dir` below would make a relative PATH entry miss.
     let mut cmd = match python {
         Some(py) => {
-            let mut c = Command::new(py);
+            let mut c = Command::new(absolute_program(py));
             c.arg("-m").arg("pytest");
             c
         }
-        None => Command::new("pytest"),
+        None => Command::new(absolute_program(Path::new("pytest"))),
     };
     crate::runner::sanitize_python_env(&mut cmd);
     cmd.current_dir(base_dir);

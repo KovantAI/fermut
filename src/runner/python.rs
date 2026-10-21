@@ -162,6 +162,37 @@ fn program_on_path(name: &str, path: Option<&std::ffi::OsStr>) -> bool {
         })
 }
 
+/// `program` as a path that still names the same file after the runner
+/// changes into the mirror. A bare name is looked up on `PATH` here, because
+/// the child resolves it only after `current_dir`, against the mirror, so a
+/// relative `PATH` entry (`../venv/bin`) would miss. A name not found is
+/// returned as-is for the spawn to report.
+pub(crate) fn absolute_program(program: &Path) -> PathBuf {
+    match std::env::current_dir() {
+        Ok(cwd) => absolute_program_in(program, std::env::var_os("PATH").as_deref(), &cwd),
+        Err(_) => program.to_path_buf(),
+    }
+}
+
+fn absolute_program_in(program: &Path, path: Option<&std::ffi::OsStr>, cwd: &Path) -> PathBuf {
+    if program.is_absolute() {
+        return program.to_path_buf();
+    }
+    if program.components().count() > 1 {
+        return cwd.join(program);
+    }
+    path.into_iter()
+        .flat_map(std::env::split_paths)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .flat_map(|dir| {
+            let c = cwd.join(dir).join(program);
+            let exe = c.with_extension("exe");
+            [c, exe]
+        })
+        .find(|c| is_executable_file(c))
+        .unwrap_or_else(|| program.to_path_buf())
+}
+
 /// Whether `path` is a regular file that is actually runnable: on Unix it must
 /// carry an executable bit (matching `which` semantics, so a non-executable
 /// file named `python3` on PATH isn't mistaken for an interpreter); on other
@@ -287,6 +318,30 @@ mod tests {
         make_exe(&bin.join("python3"));
         let path = std::ffi::OsString::from(&bin);
         assert_eq!(interpreter_in(None, Some(&path)), PathBuf::from("python3"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn absolute_program_resolves_relative_path_entries_against_cwd() {
+        let root = tmp("abs-prog");
+        let bin = root.join("venv/bin");
+        fs::create_dir_all(&bin).unwrap();
+        make_exe(&bin.join("pytest"));
+        let cwd = root.join("proj");
+        fs::create_dir_all(&cwd).unwrap();
+        let path = std::ffi::OsString::from("../venv/bin");
+        let found = absolute_program_in(Path::new("pytest"), Some(&path), &cwd);
+        assert_eq!(found, cwd.join("../venv/bin/pytest"));
+        assert!(found.is_absolute());
+        // Not found → unchanged, so the spawn error still names it.
+        let none = absolute_program_in(Path::new("nope"), Some(&path), &cwd);
+        assert_eq!(none, PathBuf::from("nope"));
+        // A relative path with a separator is anchored to cwd; absolute passes.
+        assert_eq!(
+            absolute_program_in(Path::new("x/python"), None, &cwd),
+            cwd.join("x/python")
+        );
+        assert_eq!(absolute_program_in(&bin, None, &cwd), bin);
         fs::remove_dir_all(&root).unwrap();
     }
 

@@ -19,10 +19,23 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 - `pytest --fermut-verify-baseline`.
 
 ### Changed
+- **`minimal` is the default operator profile.** Ordering compares and
+  `and`/`or` used as a condition now get the mutants no other mutant
+  subsumes (`a < b` → `<=`, `!=`, `False`) instead of the easily killed swaps
+  (`>`, `>=`, `and` ↔ `or`). Expect scores to drop where a suite never tries
+  one kind of input; mutant counts rise 0.3–6%. The switch shows in
+  `fermut trend` as a config change, not a regression. The subsumption gate
+  found 0 violations on 245 fully checked sites across 11 repos. Set
+  `operators = "classic"` (or `--operators classic`) to keep the old
+  operators.
 - `pytest --fermut` skips fermut's baseline run after a green session that
   ran the whole suite (it already proved the suite green). On pyjwt with a
   warm cache this halves the run (10.5 s → 5.6 s). `--fermut-verify-baseline`
   restores it.
+
+### Deprecated
+- Operator profile name `default`: it now means `classic` and warns. It will
+  be removed in a later release.
 
 ### Fixed
 - Uneven worker load: mutants were split into fixed contiguous ranges per

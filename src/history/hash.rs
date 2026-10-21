@@ -110,9 +110,10 @@ fn hash_with_shard(cfg: &Config, shard: Option<(u32, u32)>) -> String {
     h.update(b"|parity=");
     h.update(if cfg.parity { &b"on"[..] } else { &b"off"[..] });
     // The operator profile changes the ROR/logical mutant set. Fed only when
-    // not `default`, so every existing default-profile history entry keeps
-    // its hash (no spurious "config changed" step in `trend`).
-    if cfg.operator_profile != crate::config::OperatorProfile::Default {
+    // not `classic` (the default before 0.7), so classic history entries keep
+    // their hash, and the switch of the default to `minimal` shows in `trend`
+    // as a config step, not a score regression.
+    if cfg.operator_profile != crate::config::OperatorProfile::Classic {
         h.update(b"|profile=");
         h.update(cfg.operator_profile.name().as_bytes());
     }
@@ -258,7 +259,7 @@ mod tests {
             pytest_plugin: false,
             kill_order_path: PathBuf::from(".fermut/kill-order.json"),
             dominators_path: PathBuf::from(".fermut/dominators.json"),
-            operator_profile: crate::config::OperatorProfile::Default,
+            operator_profile: crate::config::OperatorProfile::Classic,
             only_dominators: false,
             inferred_audit_rate: 0.0,
             history: false,
@@ -284,6 +285,17 @@ mod tests {
     #[test]
     fn config_hash_is_stable_for_identical_config() {
         assert_eq!(config_hash(&cfg()), config_hash(&cfg()));
+    }
+
+    #[test]
+    fn classic_profile_keeps_the_pre_0_7_default_hash() {
+        // `classic` was `default` before 0.7 and must not feed the profile, so
+        // existing history entries keep their hash. Pinned: any change here
+        // splits every classic user's trend history.
+        assert_eq!(
+            config_hash(&cfg()),
+            "c29d34cf6454f0a0d75c3a752c654fb4603818a70b88ea7d3ff25fe2e24d45c8"
+        );
     }
 
     #[test]
@@ -357,7 +369,7 @@ mod tests {
         });
         assert_ne!(
             base, minimal,
-            "minimal-profile run must differ from default"
+            "minimal-profile run must differ from classic"
         );
         assert_ne!(minimal, full, "profiles must hash apart");
         let inferred = config_hash(&Config {

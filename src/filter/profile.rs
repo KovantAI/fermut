@@ -28,7 +28,7 @@ impl Filter for ProfileFilter {
     fn admits(&self, m: &Mutant) -> Result<bool> {
         let op = m.operator;
         Ok(match self.profile {
-            OperatorProfile::Default => !op.is_profile_gated(),
+            OperatorProfile::Classic => !op.is_profile_gated(),
             OperatorProfile::Full => op != Operator::RegionRest,
             // At a modelled site keep only the dominators; everything else
             // (untagged sites, other operators) is untouched.
@@ -64,8 +64,8 @@ mod tests {
 
     #[test]
     fn default_profile_keeps_todays_compare_and_bool_mutants() {
-        assert_eq!(kept(OperatorProfile::Default, LT), vec!["<=", ">", ">="]);
-        assert_eq!(kept(OperatorProfile::Default, AND), vec!["or"]);
+        assert_eq!(kept(OperatorProfile::Classic, LT), vec!["<=", ">", ">="]);
+        assert_eq!(kept(OperatorProfile::Classic, AND), vec!["or"]);
     }
 
     #[test]
@@ -102,7 +102,7 @@ mod tests {
         // survive `minimal` unchanged.
         let src = "def f(a, b, c):\n    if a < b < c:\n        return a or b or c\n";
         for p in [
-            OperatorProfile::Default,
+            OperatorProfile::Classic,
             OperatorProfile::Minimal,
             OperatorProfile::Full,
         ] {

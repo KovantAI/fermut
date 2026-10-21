@@ -48,3 +48,56 @@ All within the ±10% acceptance band.
   with `--coverage` gives the same result (3 sites, 1 checked, 0 violations).
 - starlette ran with `test_lifespan_with_on_events` deselected (baseline failure on
   this env).
+
+---
+
+# Widened gate (2026-10-21, issue #28)
+
+Branch `features/pytest/fermut`, release build. Same rule and `gate.py`, run
+under `--operators ror-all --ops <site-tagged ops>` with coverage, on six more
+repos picked for stronger suites and float/numpy comparisons. Python 3.12,
+fresh venvs (the fixture venvs broke when Homebrew removed python@3.13).
+
+## Result: 0 violations
+
+| repo | ref | sites | all-minimal-detected (checked) | violations |
+|---|---|---|---|---|
+| more-itertools | v10.5.0 | 137 | 58 | 0 |
+| jinja2 | 3.1.6 | 116 | 33 | 0 |
+| flask | 3.1.3 | 50 | 19 | 0 |
+| werkzeug | 3.1.8 | 171 | 34 | 0 |
+| uncertainties (float, NaN, numpy) | 1764673 | 37 | 22 | 0 |
+| pyquaternion (numpy) | 99025c1 | 20 | 0 | 0 |
+| **total** | | **531** | **166** | **0** |
+
+With the 2026-10-07 run: **831 sites, 245 checked, 0 violations, 11 repos.**
+
+## Mutant count (classic → minimal), `fermut list`
+
+| repo | classic | minimal | Δ | full |
+|---|---|---|---|---|
+| more-itertools | 3753 | 3843 | +2.4% | 4060 |
+| jinja2 | 6333 | 6525 | +3.0% | 6639 |
+| flask | 2848 | 2948 | +3.5% | 2990 |
+| werkzeug | 10466 | 10772 | +2.9% | 10959 |
+| uncertainties | 2641 | 2692 | +1.9% | 2746 |
+| pyquaternion | 1761 | 1766 | +0.3% | 1803 |
+
+## Setup notes
+
+- Each repo got a `fermut.toml` (`source_root`, `tests`) and a fresh
+  `fermut coverage`.
+- flask: `pytest<8` (its `tests/test_cli.py` imports `_pytest.monkeypatch.notset`),
+  `--deselect tests/test_reqctx.py::test_bad_environ_raises_bad_request`
+  (fails against the installed werkzeug).
+- werkzeug: `--deselect "tests/test_serving.py::test_server[unix socket]"`
+  (AF_UNIX path too long under the temp dir). 124 mutants errored with pytest
+  exit 4 (usage error) under node-id selection. The gate skips errored
+  mutants, so they only shrink the checked count. Cause not investigated.
+- uncertainties: `-e .[arrays]` plus scipy.
+- pyquaternion: `numpy<2` (it predates numpy 2); tests live in
+  `pyquaternion/test`, excluded from mutation. Its suite killed every minimal
+  mutant at no site, so numpy comparisons remain untested in practice.
+- Run with a private `TMPDIR`: a leftover mode-000 directory in the shared
+  `pytest-of-$USER` temp root made pytest warn at session end, which the
+  pallets repos' `filterwarnings = error` turns into a failed baseline.

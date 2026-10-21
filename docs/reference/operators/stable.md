@@ -7,9 +7,9 @@ markers).
 | Operator             | Example                                                            |
 |----------------------|--------------------------------------------------------------------|
 | `arith-op-swap`      | `a + b` → `a - b`; bitwise `&` → `\|`, `<<` → `>>`                 |
-| `compare-op-swap`    | `a < b` → `a >= b` **and** `a > b` (each direction emits both flipped + non-strict-flipped pairs); `==` ↔ `!=`, `is` ↔ `is not`, `in` ↔ `not in` |
+| `compare-op-swap`    | `a < b` → `a >= b` **and** `a > b` (ordering compares only under `--operators classic`; the default `minimal` profile replaces them, see [profiles](profiles.md)) (each direction emits both flipped + non-strict-flipped pairs); `==` ↔ `!=`, `is` ↔ `is not`, `in` ↔ `not in` |
 | `boundary-shift`     | `<` ↔ `<=`, `>` ↔ `>=` (fires alongside `compare-op-swap` — a single `<` produces 3 mutants total: `>`, `>=`, `<=`) |
-| `bool-op-swap`       | `x and y` → `x or y`                                               |
+| `bool-op-swap`       | `x and y` → `x or y` (where the value is used only as a condition, `minimal` replaces it with `bool-operand-drop` / `bool-const`) |
 | `unary-op-swap`      | `-x` → `+x`, `not x` → `x`, `~x` → `x`                             |
 | `aug-assign-swap`    | `x += y` → `x -= y`, `//=` → `/=`, `&=` → `\|=`                    |
 | `constant-replace`   | `True` ↔ `False`, `""` → `"fermut"`                                |

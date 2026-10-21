@@ -145,6 +145,9 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     let tce = cli_tce || file.tce.unwrap_or(false);
     let experimental = f.experimental || file.experimental.unwrap_or(false);
     let parity = f.parity || file.parity.unwrap_or(false);
+    if matches!(f.operators, Some(crate::cli::OperatorProfileCli::Default)) {
+        warn!("{}", crate::config::DEPRECATED_DEFAULT_PROFILE);
+    }
     let operator_profile = f
         .operators
         .map(Into::into)
@@ -1144,11 +1147,15 @@ mod tests {
         use crate::config::OperatorProfile;
         let tmp = tempfile::tempdir().unwrap();
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
-        assert_eq!(cfg.operator_profile, OperatorProfile::Default);
+        assert_eq!(
+            cfg.operator_profile,
+            OperatorProfile::Minimal,
+            "minimal is the default"
+        );
 
-        std::fs::write(tmp.path().join("fermut.toml"), "operators = \"minimal\"\n").unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "operators = \"classic\"\n").unwrap();
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
-        assert_eq!(cfg.operator_profile, OperatorProfile::Minimal);
+        assert_eq!(cfg.operator_profile, OperatorProfile::Classic);
 
         let f = FilterArgs {
             operators: Some(crate::cli::OperatorProfileCli::Full),
@@ -1156,6 +1163,29 @@ mod tests {
         };
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
         assert_eq!(cfg.operator_profile, OperatorProfile::Full, "CLI wins");
+    }
+
+    #[test]
+    fn deprecated_default_profile_name_means_classic() {
+        use crate::config::OperatorProfile;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "operators = \"default\"\n").unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert_eq!(
+            cfg.operator_profile,
+            OperatorProfile::Classic,
+            "config file"
+        );
+
+        let f = FilterArgs {
+            operators: Some(crate::cli::OperatorProfileCli::Default),
+            ..empty_filter()
+        };
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
+        assert_eq!(cfg.operator_profile, OperatorProfile::Classic, "CLI");
+
+        std::fs::write(tmp.path().join("fermut.toml"), "operators = \"bogus\"\n").unwrap();
+        assert!(call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).is_err());
     }
 
     #[test]

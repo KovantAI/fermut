@@ -83,6 +83,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         no_pytest_plugin: cli_no_pytest_plugin,
         max_time: cli_max_time,
         timeout_factor: cli_timeout_factor,
+        baseline_secs: cli_baseline_secs,
         record_kill_sets: cli_record_kill_sets,
         only_dominators,
         audit_inferred,
@@ -402,16 +403,23 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         .or(file.baseline_timeout)
         .unwrap_or(DEFAULT_BASELINE_TIMEOUT_SECS);
     let max_time_secs = cli_max_time.or(file.max_time);
+    if let Some(s) = cli_baseline_secs {
+        anyhow::ensure!(
+            s.is_finite() && s >= 0.0,
+            "--baseline-secs must be a non-negative number of seconds (got {s})"
+        );
+    }
     let timeout_factor = cli_timeout_factor.or(file.timeout_factor);
     if let Some(f) = timeout_factor {
         anyhow::ensure!(
             f.is_finite() && f >= 1.0,
             "timeout factor must be at least 1 (got {f}): it scales the time the whole suite took"
         );
-        if !verify_baseline {
+        if !verify_baseline && cli_baseline_secs.is_none() {
             warn!(
                 "--timeout-factor needs the baseline run to size timeouts; with \
-                 --no-verify-baseline every mutant uses the flat --timeout"
+                 --no-verify-baseline (and no --baseline-secs) every mutant uses \
+                 the flat --timeout"
             );
         }
     }
@@ -460,6 +468,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         baseline_timeout_secs,
         max_time_secs,
         timeout_factor,
+        baseline_secs: cli_baseline_secs,
         record_kill_sets: cli_record_kill_sets.map(absolutize),
         only_dominators,
         inferred_audit_rate: audit_inferred.unwrap_or(crate::config::DEFAULT_CACHE_AUDIT_RATE),
@@ -842,6 +851,7 @@ mod tests {
             no_pytest_plugin: false,
             max_time: None,
             timeout_factor: None,
+            baseline_secs: None,
             record_kill_sets: None,
             only_dominators: false,
             audit_inferred: None,
@@ -1216,6 +1226,14 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("at least 1"), "{err}");
+
+        let mut args = run_args(empty_filter());
+        args.baseline_secs = Some(1.5);
+        let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
+        assert_eq!(cfg.baseline_secs, Some(1.5));
+        let mut args = run_args(empty_filter());
+        args.baseline_secs = Some(-1.0);
+        assert!(build_config(tmp.path().to_path_buf(), args).is_err());
     }
 
     #[test]

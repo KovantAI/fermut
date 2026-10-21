@@ -29,6 +29,7 @@ import subprocess
 import sys
 import sysconfig
 import tempfile
+import time
 
 import pytest
 
@@ -99,6 +100,14 @@ class _FermutState:
         # Absolute node ids ("<abs test file>::<name>") the session selected,
         # or None when the session ran the whole suite.
         self.selected = None
+        # For fermut's timeout budget when its own baseline is skipped: when
+        # the session started (collection included) and the summed duration
+        # of every test phase (under xdist the wall time is only a share).
+        self.started = time.monotonic()
+        self.test_secs = 0.0
+
+    def suite_secs(self):
+        return max(time.monotonic() - self.started, self.test_secs)
 
 
 def _active(config):
@@ -134,6 +143,7 @@ def pytest_configure(config):
             "environment (e.g. `uv add --dev fermut`) or set FERMUT_BIN."
         )
     config.stash[_STATE] = _FermutState(binary)
+    config.pluginmanager.register(_TestTime(config.stash[_STATE]))
 
 
 # Options that select a subset of the collected tests. Any of them set means
@@ -184,6 +194,18 @@ def _absolute_id(root, nodeid):
     pytest's rootdir."""
     path, sep, rest = nodeid.partition("::")
     return os.path.join(root, path) + sep + rest
+
+
+class _TestTime:
+    """Sums every test phase's duration into the session state. Registered
+    only for an active session; on the xdist controller it sees every
+    worker's reports."""
+
+    def __init__(self, state):
+        self.state = state
+
+    def pytest_runtest_logreport(self, report):
+        self.state.test_secs += report.duration
 
 
 def pytest_collection_finish(session):
@@ -262,13 +284,27 @@ def _refresh_coverage(state, config, root):
             state.lines.extend(({}, "  " + line) for line in tail)
 
 
-def _run_command(state, config, report_path, selection_path=None, skip_baseline=False):
+def _run_command(
+    state,
+    config,
+    report_path,
+    selection_path=None,
+    skip_baseline=False,
+    suite_secs=None,
+):
     cmd = [state.binary, "run", "--python", sys.executable, "--json", report_path]
     if selection_path:
         cmd += ["--select-tests", selection_path]
     extra = config.getoption("fermut_arg")
-    if skip_baseline and "--no-verify-baseline" not in extra:
-        cmd.append("--no-verify-baseline")
+    if skip_baseline:
+        if "--no-verify-baseline" not in extra:
+            cmd.append("--no-verify-baseline")
+        # This session stands in for the skipped baseline when fermut sizes
+        # `--timeout-factor` timeouts (ignored without one).
+        if suite_secs is not None and not any(
+            a.startswith("--baseline-secs") for a in extra
+        ):
+            cmd.append(f"--baseline-secs={suite_secs:.3f}")
     since = config.getoption("fermut_since")
     if since:
         cmd += ["--since", since]
@@ -358,6 +394,8 @@ def pytest_sessionfinish(session, exitstatus):
     if exitstatus != 0:
         state.lines.append(({"yellow": True}, "skipped: the test suite did not pass"))
         return
+    # Before the coverage refresh, which would count toward it.
+    suite_secs = state.suite_secs()
     root = _rootdir(config)
     capman = config.pluginmanager.getplugin("capturemanager")
     uncaptured = (
@@ -386,6 +424,7 @@ def pytest_sessionfinish(session, exitstatus):
                     report_path,
                     selection_path,
                     skip_baseline=_baseline_proven(config),
+                    suite_secs=suite_secs,
                 ),
                 cwd=root,
                 env=_child_env(config),

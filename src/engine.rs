@@ -350,7 +350,8 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     let filters = filter::build_chain(cfg)?;
     let mut runner = runner::build(cfg);
 
-    let baseline_wall = preflight_baseline(cfg, runner.as_ref(), mutants)?;
+    let baseline_wall = preflight_baseline(cfg, runner.as_ref(), mutants)?
+        .or_else(|| cfg.baseline_secs.map(Duration::from_secs_f64));
     if let (Some(factor), Some(wall)) = (cfg.timeout_factor, baseline_wall) {
         let secs = budget_timeout_secs(cfg.timeout_secs, factor, wall);
         info!(
@@ -1780,6 +1781,7 @@ mod tests {
             baseline_timeout_secs: 300,
             max_time_secs: None,
             timeout_factor: None,
+            baseline_secs: None,
             record_kill_sets: None,
         }
     }

@@ -9,6 +9,14 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Added
+- `--timeout-factor F` (config `timeout_factor`): size each mutant's timeout
+  from the baseline run, `min(--timeout, F × baseline wall + 5 s)`, so hung
+  mutants stop in seconds instead of at the flat 30 s. Off by default. With
+  `F = 3`: more-itertools 314 s → 162 s, pyjwt 79 s → 59 s, jinja2
+  272 s → 236 s. Verdicts unchanged except that a mutant which only makes
+  the suite many times slower counts as timed out (2 of ~3,800 mutants on
+  more-itertools). `--baseline-secs` supplies the suite time when fermut's
+  baseline is skipped; `pytest --fermut` passes its session time.
 - `pytest --fermut` narrows to the session's selection: with a path, node
   id, `-k`, `-m`, `--deselect` and similar, only the selected tests run
   against the mutants, and mutants none of them cover are skipped as

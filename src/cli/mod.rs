@@ -346,6 +346,12 @@ pub(crate) struct RunConfigArgs {
     #[arg(long, value_name = "FACTOR")]
     pub timeout_factor: Option<f64>,
 
+    /// Wall time of a green whole-suite run you already did (seconds). With
+    /// `--no-verify-baseline` it stands in for the baseline when sizing
+    /// `--timeout-factor` timeouts. `pytest --fermut` passes its session time.
+    #[arg(long, value_name = "SECS")]
+    pub baseline_secs: Option<f64>,
+
     /// [experimental] Record each mutant's full kill-set (the covering tests that
     /// fail) to <PATH> as JSONL. Drops pytest's `-x`, so a killed mutant runs
     /// every selected test instead of stopping at the first — markedly slower.

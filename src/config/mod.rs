@@ -156,6 +156,11 @@ pub struct Config {
     /// that only makes the suite many times slower becomes `timed_out`
     /// (detected) instead of `survived`. Set via `--timeout-factor`.
     pub timeout_factor: Option<f64>,
+    /// Wall time (seconds) of a green whole-suite run the caller already did,
+    /// e.g. the `pytest --fermut` session. Sizes the `timeout_factor` budget
+    /// when fermut skips its own baseline (`--no-verify-baseline`); a baseline
+    /// fermut runs itself wins. Set via `--baseline-secs`.
+    pub baseline_secs: Option<f64>,
     /// Experiment hook: when `Some(path)`, the pytest runner drops `-x` and
     /// records, per mutant, the FULL set of covering tests that fail (the
     /// mutant's kill-set `K(m)`), writing one JSON object per mutant to `path`

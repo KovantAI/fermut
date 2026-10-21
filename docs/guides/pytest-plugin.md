@@ -109,6 +109,11 @@ specific fermut binary.
   `--fermut-verify-baseline` if fermut's config runs the suite differently
   from your session (e.g. `runner = "unittest"`, or `pytest_args` that change
   outcomes).
+- **Timeout budgets.** With `timeout_factor` in your fermut config (or
+  `--fermut-arg=--timeout-factor=3`), the session's duration stands in for
+  the skipped baseline when sizing each mutant's timeout
+  (`--baseline-secs`). See
+  [Timeout budgets](../reference/cli/run.md#timeout-budgets).
 - **pytest-xdist.** Only the controller runs fermut, once. fermut parallelizes
   mutants itself. Narrowing works under `-n` too.
 - **`--collect-only`** never triggers a mutation run.

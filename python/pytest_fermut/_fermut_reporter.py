@@ -21,8 +21,15 @@ several pytest sessions that append to the same file):
 - ``{"ev":"dur","nodeid":...,"dur":...}`` -- a passing test's call duration
 - ``{"ev":"finish","exit":N}`` -- session finished
 
-Standard library only; this file is embedded in the fermut binary and must run
-on every Python and pytest version fermut supports.
+With ``FERMUT_COLLECT_CONTEXT`` set (``fermut coverage`` sets it), the plugin
+also records import-time coverage: while a test module is collected, the
+coverage context is ``<module nodeid>|collect``, so source lines that run when
+the module imports them (module-level code, decorators, class bodies, default
+arguments) are linked to that module instead of the anonymous ``""`` context.
+
+Standard library only (``coverage`` is imported only in that mode, where it is
+already running); this file is embedded in the fermut binary and must run on
+every Python and pytest version fermut supports.
 """
 
 import json
@@ -33,6 +40,7 @@ import pytest
 SCHEMA_VERSION = 1
 
 _path = os.environ.get("FERMUT_RESULT")
+_collect_context = bool(os.environ.get("FERMUT_COLLECT_CONTEXT"))
 _fh = None
 
 
@@ -95,6 +103,35 @@ def pytest_load_initial_conftests(early_config, parser, args):
             "project": _raised_in_project(err, root),
         }
     )
+
+
+def _switch_context(name):
+    """Switch the running coverage measurement's context. False when coverage
+    isn't measuring (not installed, not started, or too old to switch)."""
+    try:
+        import coverage
+
+        cov = coverage.Coverage.current()
+        if cov is None:
+            return False
+        cov.switch_context(name)
+        return True
+    except Exception:
+        return False
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_make_collect_report(collector):
+    # Only test modules import the code under test. pytest-cov leaves the
+    # context at "" until the first test runs, so "" is what to restore.
+    switched = (
+        _collect_context
+        and isinstance(collector, pytest.Module)
+        and _switch_context(collector.nodeid + "|collect")
+    )
+    yield
+    if switched:
+        _switch_context("")
 
 
 def pytest_sessionstart(session):

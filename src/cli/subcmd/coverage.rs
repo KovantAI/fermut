@@ -65,7 +65,10 @@ use crate::filter::coverage::has_table;
 /// sidecar not stamped with exactly this value, so bumping it here genuinely
 /// forces a full rebuild after a format change (an older/newer sidecar is
 /// discarded rather than deserialized into incompatible semantics).
-const CURRENT_FP_V: u32 = 1;
+///
+/// v2: import-time lines are recorded under `<test module>|collect` instead of
+/// `""`; the rebuild gives an existing DB those contexts.
+const CURRENT_FP_V: u32 = 2;
 
 /// Content fingerprints of the test AND source trees, stored beside the
 /// `.coverage` DB so the incremental refresh can tell what actually changed by
@@ -717,6 +720,12 @@ fn run_pytest(
     cmd.env("COVERAGE_FILE", db_path);
     cmd.arg(format!("--cov={}", cov_target.display()));
     cmd.arg("--cov-context=test");
+    // fermut's reporter plugin records import-time coverage under
+    // `<test module>|collect` instead of the anonymous `""` context, so
+    // mutants in module-level code get a test module to run. Must outlive
+    // the pytest run.
+    let plugin_dir = tempfile::tempdir().context("creating reporter plugin dir")?;
+    inject_collect_context(&mut cmd, plugin_dir.path())?;
     if append {
         cmd.arg("--cov-append");
     }
@@ -745,10 +754,32 @@ fn run_pytest(
     Ok(status.success())
 }
 
+/// Load fermut's reporter plugin (written into `plugin_dir`) with
+/// `FERMUT_COLLECT_CONTEXT` set, so collecting a test module records the
+/// lines its imports run as `<module>|collect`. The plugin dir goes last on
+/// `PYTHONPATH` so it never shadows project modules.
+fn inject_collect_context(cmd: &mut Command, plugin_dir: &Path) -> Result<()> {
+    use crate::runner::pytest_result::{REPORTER_MODULE, REPORTER_SOURCE};
+    let file = plugin_dir.join(format!("{REPORTER_MODULE}.py"));
+    std::fs::write(&file, REPORTER_SOURCE)
+        .with_context(|| format!("writing {}", file.display()))?;
+    let mut paths: Vec<PathBuf> = std::env::var_os("PYTHONPATH")
+        .map(|v| std::env::split_paths(&v).collect())
+        .unwrap_or_default();
+    paths.push(plugin_dir.to_path_buf());
+    cmd.env(
+        "PYTHONPATH",
+        std::env::join_paths(paths).context("joining PYTHONPATH")?,
+    );
+    cmd.env("FERMUT_COLLECT_CONTEXT", "1");
+    cmd.arg("-p").arg(REPORTER_MODULE);
+    Ok(())
+}
+
 /// Delete every context whose pytest node id belongs to one of `prefixes`
 /// (a test-file path like `tests/test_a.py`), plus its `line_bits`/`arc`
-/// rows. Returns how many context rows were removed. Matches both the bare
-/// path and any `path::...` node id.
+/// rows. Returns how many context rows were removed. Matches the bare path,
+/// any `path::...` node id, and the module's `path|collect` context.
 fn purge_contexts(db_path: &Path, prefixes: &[String]) -> Result<usize> {
     use rusqlite::Connection;
     if prefixes.is_empty() {
@@ -762,11 +793,14 @@ fn purge_contexts(db_path: &Path, prefixes: &[String]) -> Result<usize> {
     let mut removed = 0usize;
     for prefix in prefixes {
         let like = format!("{prefix}::%");
+        // The module's import-time context, `<file>|collect`.
+        let collect = format!("{prefix}|collect");
         // Collect matching context ids first.
         let ids: Vec<i64> = {
-            let mut stmt =
-                conn.prepare("SELECT id FROM context WHERE context = ?1 OR context LIKE ?2")?;
-            let rows = stmt.query_map((prefix, &like), |r| r.get::<_, i64>(0))?;
+            let mut stmt = conn.prepare(
+                "SELECT id FROM context WHERE context = ?1 OR context LIKE ?2 OR context = ?3",
+            )?;
+            let rows = stmt.query_map((prefix, &like, &collect), |r| r.get::<_, i64>(0))?;
             rows.filter_map(|r| r.ok()).collect()
         };
         for id in ids {
@@ -989,12 +1023,15 @@ mod tests {
             "INSERT INTO context (id, context) VALUES
                 (1, 'tests/test_a.py::test_x|run'),
                 (2, 'tests/test_a.py::test_y|run'),
-                (3, 'tests/test_b.py::test_z|run')",
+                (3, 'tests/test_b.py::test_z|run'),
+                (4, 'tests/test_a.py|collect'),
+                (5, 'tests/test_a.pyx|collect')",
             (),
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO line_bits (file_id, context_id, numbits) VALUES (1,1,x'02'),(1,2,x'04'),(1,3,x'08')",
+            "INSERT INTO line_bits (file_id, context_id, numbits) VALUES \
+             (1,1,x'02'),(1,2,x'04'),(1,3,x'08'),(1,4,x'01'),(1,5,x'01')",
             (),
         )
         .unwrap();
@@ -1007,7 +1044,7 @@ mod tests {
         let db = make_db(tmp.path());
 
         let removed = purge_contexts(&db, &["tests/test_a.py".to_string()]).unwrap();
-        assert_eq!(removed, 2); // test_x and test_y
+        assert_eq!(removed, 3); // test_x, test_y and the module's collect context
 
         let conn = Connection::open(&db).unwrap();
         let remaining: Vec<String> = conn
@@ -1017,13 +1054,16 @@ mod tests {
             .unwrap()
             .filter_map(|r| r.ok())
             .collect();
-        assert_eq!(remaining, vec!["tests/test_b.py::test_z|run".to_string()]);
+        assert_eq!(
+            remaining,
+            vec!["tests/test_b.py::test_z|run", "tests/test_a.pyx|collect"]
+        );
 
-        // line_bits for purged contexts gone; test_b's bits remain.
+        // line_bits for purged contexts gone; the others' bits remain.
         let bits: i64 = conn
             .query_row("SELECT count(*) FROM line_bits", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(bits, 1);
+        assert_eq!(bits, 2);
     }
 
     #[test]
@@ -1151,7 +1191,7 @@ mod tests {
         let db = tmp.path().join(".coverage");
         assert!(load_fingerprints(&db).is_none());
         let fp = Fingerprints {
-            v: 1,
+            v: CURRENT_FP_V,
             tests: BTreeMap::from([("tests/t.py".to_string(), "h".to_string())]),
             sources: BTreeMap::from([("src/s.py".to_string(), "h2".to_string())]),
         };

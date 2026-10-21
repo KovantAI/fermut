@@ -893,6 +893,44 @@ mod tests {
     }
 
     #[test]
+    fn collect_context_selects_the_importing_test_module() {
+        // `fermut coverage` records import-time lines under `<module>|collect`.
+        let tmp = tempfile::tempdir().unwrap();
+        let py = tmp.path().join("foo.py");
+        std::fs::write(&py, "X = 1\ndef f():\n    return X\n").unwrap();
+        std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+        std::fs::write(tmp.path().join("tests/test_a.py"), "def test_x(): pass\n").unwrap();
+
+        let db = tmp.path().join(".coverage");
+        write_cov_db(
+            &db,
+            &[
+                ("foo.py", "tests/test_a.py|collect", &[1, 2]),
+                ("foo.py", "tests/test_a.py::test_x|run", &[3]),
+                // Imported foo first, so it alone got the collect context.
+                ("foo.py", "tests/test_z.py|collect", &[1]),
+                // Runs foo at runtime but never collected its import.
+                ("foo.py", "tests/test_b.py::test_y|run", &[3]),
+            ],
+        );
+        let ctx = CoverageContexts::from_path(&db, tmp.path(), tmp.path()).unwrap();
+        // Import-time lines also select every module exercising foo at runtime.
+        assert_eq!(
+            ctx.tests_for(&py, 1).unwrap(),
+            &["tests/test_a.py", "tests/test_b.py", "tests/test_z.py"]
+        );
+        assert_eq!(
+            ctx.tests_for(&py, 2).unwrap(),
+            &["tests/test_a.py", "tests/test_b.py"]
+        );
+        // Runtime lines keep their own tests only.
+        assert_eq!(
+            ctx.tests_for(&py, 3).unwrap(),
+            &["tests/test_a.py::test_x", "tests/test_b.py::test_y"]
+        );
+    }
+
+    #[test]
     fn reads_branch_coverage_arcs() {
         // `branch = true`: coverage.py leaves `line_bits` empty and records
         // `arc(fromno, tono)` instead. Executed lines are the positive arc

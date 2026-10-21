@@ -9,6 +9,11 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Changed
+- `fermut coverage` records import-time lines (module-level code, decorators,
+  class bodies, default arguments) under `<test module>|collect`, so their
+  mutants are tested instead of skipped as uncovered. On more-itertools this
+  scores 496 previously skipped mutants. Expect scores to move. An existing
+  `.coverage` is rebuilt in full once.
 - `fermut merge --history` refuses to write an entry for a merge that scored
   no mutants (N/A), instead of recording a vacuous 100%.
 

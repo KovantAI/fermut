@@ -1166,27 +1166,38 @@ fn coverage_refresh_prunes_deleted_source_file() {
 #[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn coverage_refresh_rebuilds_import_time_lines_of_changed_source() {
-    // Import-time lines live under the shared `""` context, which `--cov-append`
-    // unions. Shifting a source's lines must not leave its old line numbers
-    // marked executed: the count of import-time lines stays the same.
+    // Import-time lines live under `<test module>|collect` (or the shared `""`
+    // context for imports outside collection), which `--cov-append` unions.
+    // Shifting a source's lines must not leave its old line numbers marked
+    // executed: the count of import-time lines stays the same.
     let tmp = tempfile::tempdir().unwrap();
     let sample = tmp.path().join("sample");
     copy_dir(&sample_path(), &sample);
     let coverage = sample.join(".coverage");
     let import_time_lines = || -> u32 {
         let conn = rusqlite::Connection::open(&coverage).unwrap();
-        conn.query_row(
-            "SELECT lb.numbits FROM line_bits lb \
-             JOIN context c ON c.id = lb.context_id \
-             JOIN file f ON f.id = lb.file_id \
-             WHERE c.context = '' AND f.path LIKE '%calculator.py'",
-            [],
-            |r| r.get::<_, Vec<u8>>(0),
-        )
-        .unwrap()
-        .iter()
-        .map(|b| b.count_ones())
-        .sum()
+        let mut stmt = conn
+            .prepare(
+                "SELECT lb.numbits FROM line_bits lb \
+                 JOIN context c ON c.id = lb.context_id \
+                 JOIN file f ON f.id = lb.file_id \
+                 WHERE (c.context = '' OR c.context LIKE '%|collect') \
+                 AND f.path LIKE '%calculator.py'",
+            )
+            .unwrap();
+        let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0)).unwrap();
+        // Union per line: two contexts may both have run the same line.
+        let mut lines = std::collections::BTreeSet::new();
+        for bits in rows {
+            for (i, b) in bits.unwrap().iter().enumerate() {
+                for bit in 0..8 {
+                    if b & (1 << bit) != 0 {
+                        lines.insert(i * 8 + bit);
+                    }
+                }
+            }
+        }
+        lines.len() as u32
     };
     let refresh = || {
         Command::cargo_bin("fermut")

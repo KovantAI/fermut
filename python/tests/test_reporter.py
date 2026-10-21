@@ -9,7 +9,9 @@ import os
 
 import pytest
 
-PLUGIN_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pytest_fermut")
+PLUGIN_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pytest_fermut"
+)
 
 
 @pytest.fixture
@@ -22,7 +24,9 @@ def report(pytester, monkeypatch, tmp_path):
     def run(*args):
         if result_path.exists():
             result_path.unlink()
-        res = pytester.runpytest_subprocess("-p", "_fermut_reporter", "-p", "no:cacheprovider", *args)
+        res = pytester.runpytest_subprocess(
+            "-p", "_fermut_reporter", "-p", "no:cacheprovider", *args
+        )
         events = []
         if result_path.exists():
             events = [json.loads(line) for line in result_path.read_text().splitlines()]
@@ -71,7 +75,9 @@ def test_setup_error(broken):
 
 
 def test_import_error_under_node_ids_is_a_collect_event(pytester, report):
-    pytester.makepyfile(test_a="import nonexistent_module_xyz\n\ndef test_x():\n    pass\n")
+    pytester.makepyfile(
+        test_a="import nonexistent_module_xyz\n\ndef test_x():\n    pass\n"
+    )
     ret, events = report("-x", "test_a.py::test_x")
     assert ret == 4
     assert any(e["ev"] == "collect" and e["nodeid"] == "test_a.py" for e in events)
@@ -97,7 +103,9 @@ def test_conftest_import_failure_is_reported_before_any_session(pytester, report
 def test_config_error_from_project_code_is_flagged(pytester, report):
     # A filterwarnings entry naming a warning class in the project imports it
     # while pytest configures; if that module raises, the run dies there.
-    pytester.makepyfile(proj="raise ValueError('broken at import')\nclass W(Warning):\n    pass\n")
+    pytester.makepyfile(
+        proj="raise ValueError('broken at import')\nclass W(Warning):\n    pass\n"
+    )
     pytester.makeini("[pytest]\nfilterwarnings = ignore::proj.W\n")
     pytester.makepyfile(test_a="def test_x():\n    pass\n")
     ret, events = report()
@@ -118,6 +126,8 @@ def test_inert_without_result_env(pytester, monkeypatch, tmp_path):
     monkeypatch.delenv("FERMUT_RESULT", raising=False)
     monkeypatch.setenv("PYTHONPATH", PLUGIN_DIR)
     pytester.makepyfile(test_a="def test_ok():\n    pass\n")
-    res = pytester.runpytest_subprocess("-p", "_fermut_reporter", "-p", "no:cacheprovider")
+    res = pytester.runpytest_subprocess(
+        "-p", "_fermut_reporter", "-p", "no:cacheprovider"
+    )
     assert res.ret == 0
     assert list(pytester.path.glob("*.jsonl")) == []

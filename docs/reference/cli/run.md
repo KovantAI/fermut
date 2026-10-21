@@ -32,7 +32,7 @@ fermut run [PATH] [flags...]
 | `--annotate`                | auto in GHA                      | Emit `::error` / `::warning` annotations for CI.                     |
 | `--watch`                   | off                              | Re-run on every `.py` change until Ctrl+C.                            |
 | `--format human\|json`      | `human`                          | stdout output format.                                                |
-| `--json <p>`                | none                             | Also write JSON report. A `killed` outcome carries an optional `killer` (the killing test's node id) when pytest coverage selection could name it. |
+| `--json <p>`                | none                             | Also write JSON report. A `killed` outcome carries an optional `killer` (the killing test's node id) when pytest coverage selection could name it. A `timed_out` outcome carries an optional `hung_in` (the test running when the timeout hit; needs the reporter plugin). Every outcome that ran a test carries `duration_ms` (wall time, spawn to exit) and, with the reporter plugin, `test_ms` (time inside tests; `duration_ms - test_ms` is process, import and collection overhead). A cached verdict keeps the timing of the run that produced it. |
 | `--junit <p>`               | none                             | Also write JUnit XML.                                                |
 | `--html <p>`                | none                             | Also write self-contained HTML report.                                |
 | `--markdown <p>`            | none                             | Also write Markdown summary (for PR comments).                        |

@@ -8,10 +8,10 @@ plain JSON under `mutants/`. Score comes from
 The adapter writes a per-worktree `setup.cfg` `[mutmut]` block before
 running so each repo gets the right `source_paths` + pytest test selection.
 """
+
 from __future__ import annotations
 
 import json
-import shlex
 from configparser import ConfigParser
 from pathlib import Path
 
@@ -64,7 +64,9 @@ class MutmutAdapter(Adapter):
         with cfg_path.open("w") as fh:
             cp.write(fh)
 
-    def run(self, repo: RepoCfg, worktree: Path, *, timeout: int | None = None) -> RunResult:
+    def run(
+        self, repo: RepoCfg, worktree: Path, *, timeout: int | None = None
+    ) -> RunResult:
         self._write_config(repo, worktree)
         result = self._exec(["mutmut", "run"], cwd=worktree, timeout=timeout)
         # Materialize stats. Failure here doesn't sink the run — the
@@ -94,7 +96,11 @@ class MutmutAdapter(Adapter):
             data = json.loads(path.read_text())
         except (OSError, ValueError):
             return None, None
-        killed = int(data.get("killed", 0)) + int(data.get("suspicious", 0)) + int(data.get("timeout", 0))
+        killed = (
+            int(data.get("killed", 0))
+            + int(data.get("suspicious", 0))
+            + int(data.get("timeout", 0))
+        )
         survived = int(data.get("survived", 0))
         scored = killed + survived
         if scored == 0:

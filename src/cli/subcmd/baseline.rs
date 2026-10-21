@@ -278,7 +278,7 @@ fn read_line_coverage(interp: &std::path::Path, path: &std::path::Path) -> Optio
 fn top_survivor_files(report: &Report, top: usize) -> Vec<FileSurvivors> {
     let mut by_file: BTreeMap<String, usize> = BTreeMap::new();
     for o in &report.outcomes {
-        if let MutantOutcome::Survived { mutant } = o {
+        if let MutantOutcome::Survived { mutant, .. } = o {
             *by_file
                 .entry(mutant.file.display().to_string())
                 .or_default() += 1;

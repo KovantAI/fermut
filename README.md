@@ -8,6 +8,7 @@ _Line coverage tells you which lines run. fermut tells you which lines your test
 
 [![CI](https://github.com/KovantAI/fermut/actions/workflows/ci.yml/badge.svg)](https://github.com/KovantAI/fermut/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/KovantAI/fermut/graph/badge.svg)](https://codecov.io/gh/KovantAI/fermut)
+[![Mutation (pytest plugin)](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/KovantAI/fermut/badges/mutation-plugin.json)](https://github.com/KovantAI/fermut/actions/workflows/mutation.yml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/KovantAI/fermut/badge)](https://scorecard.dev/viewer/?uri=github.com/KovantAI/fermut)
 [![PyPI](https://img.shields.io/pypi/v/fermut.svg)](https://pypi.org/project/fermut/)
 [![Downloads](https://static.pepy.tech/badge/fermut/month)](https://pepy.tech/project/fermut)

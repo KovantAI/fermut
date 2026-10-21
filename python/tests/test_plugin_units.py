@@ -5,8 +5,7 @@ import sys
 import textwrap
 
 import pytest
-
-import pytest_fermut.plugin as plugin
+from pytest_fermut import plugin
 
 RED, BOLD, RESET = "\x1b[31m", "\x1b[1m", "\x1b[0m"
 YELLOW = "\x1b[33m"
@@ -30,19 +29,31 @@ def help_text(pytester):
 
 def test_help_documents_every_option(pytester):
     text = help_text(pytester)
-    assert "mutation testing (fermut): --fermut after a green test session, run fermut " \
+    assert (
+        "mutation testing (fermut): --fermut after a green test session, run fermut "
         "mutation testing and fail the session if the mutation gate fails." in text
-    assert "--fermut-since=REF only mutate lines changed since this git ref " \
+    )
+    assert (
+        "--fermut-since=REF only mutate lines changed since this git ref "
         "(fermut run --since)." in text
-    assert "--fermut-min-score=PCT fail only when the mutation score is below PCT " \
-        "(fermut run --fail-under). Without it any survivor fails, unless the " \
+    )
+    assert (
+        "--fermut-min-score=PCT fail only when the mutation score is below PCT "
+        "(fermut run --fail-under). Without it any survivor fails, unless the "
         "fermut config sets fail_under." in text
-    assert "--fermut-arg=ARG extra argument for `fermut run` (repeatable), e.g. " \
+    )
+    assert (
+        "--fermut-arg=ARG extra argument for `fermut run` (repeatable), e.g. "
         "--fermut-arg=--sample=0.2" in text
-    assert "--fermut-no-coverage don't refresh per-test coverage with `fermut coverage` " \
+    )
+    assert (
+        "--fermut-no-coverage don't refresh per-test coverage with `fermut coverage` "
         "first." in text
-    assert "--fermut-show=N number of surviving mutants to list in the summary " \
+    )
+    assert (
+        "--fermut-show=N number of surviving mutants to list in the summary "
         "(default 10)." in text
+    )
 
 
 def test_option_defaults(pytester):
@@ -101,7 +112,12 @@ def test_run_command_without_min_score_has_no_fail_under():
     state = plugin._FermutState("fermut")
     config = StubConfig(fermut_since=None, fermut_min_score=None, fermut_arg=[])
     assert plugin._run_command(state, config, "r.json") == [
-        "fermut", "run", "--python", sys.executable, "--json", "r.json"
+        "fermut",
+        "run",
+        "--python",
+        sys.executable,
+        "--json",
+        "r.json",
     ]
 
 
@@ -114,7 +130,9 @@ def test_load_report_rejects_non_reports(tmp_path, content):
 
 def test_load_report_reads_utf8(tmp_path):
     path = tmp_path / "r.json"
-    path.write_bytes(json.dumps({"summary": {}, "x": "é"}, ensure_ascii=False).encode("utf-8"))
+    path.write_bytes(
+        json.dumps({"summary": {}, "x": "é"}, ensure_ascii=False).encode("utf-8")
+    )
     assert plugin._load_report(str(path)) == {"summary": {}, "x": "é"}
 
 
@@ -125,7 +143,9 @@ def test_load_report_missing_file(tmp_path):
 def test_relative(tmp_path, monkeypatch):
     root = tmp_path / "root"
     monkeypatch.chdir(tmp_path)
-    assert plugin._relative(str(root / "src" / "m.py"), str(root)) == os.path.join("src", "m.py")
+    assert plugin._relative(str(root / "src" / "m.py"), str(root)) == os.path.join(
+        "src", "m.py"
+    )
     outside = str(tmp_path / "other" / "m.py")
     assert plugin._relative(outside, str(root)) == outside
 
@@ -138,26 +158,44 @@ def summarize(report, show=10, root="/r"):
 
 def test_summarize_defaults_missing_counts_to_zero():
     assert summarize({"summary": {}}) == [
-        ({"bold": True}, "mutation score n/a: 0 killed, 0 survived, 0 timed out, 0 errored (0 skipped)")
+        (
+            {"bold": True},
+            "mutation score n/a: 0 killed, 0 survived, 0 timed out, 0 errored (0 skipped)",
+        )
     ]
 
 
 def test_summarize_reads_each_count():
-    summary = {"mutation_score": 50.0, "killed": 1, "survived": 2, "timed_out": 3,
-               "errored": 4, "skipped": 5}
+    summary = {
+        "mutation_score": 50.0,
+        "killed": 1,
+        "survived": 2,
+        "timed_out": 3,
+        "errored": 4,
+        "skipped": 5,
+    }
     assert summarize({"summary": summary}) == [
-        ({"bold": True}, "mutation score 50.0%: 1 killed, 2 survived, 3 timed out, 4 errored (5 skipped)")
+        (
+            {"bold": True},
+            "mutation score 50.0%: 1 killed, 2 survived, 3 timed out, 4 errored (5 skipped)",
+        )
     ]
 
 
 def test_summarize_ignores_non_survivors_and_tolerates_missing_outcomes():
-    report = {"summary": {}, "outcomes": [{"status": "killed", "mutant": {}}, {"mutant": {}}]}
+    report = {
+        "summary": {},
+        "outcomes": [{"status": "killed", "mutant": {}}, {"mutant": {}}],
+    }
     assert len(summarize(report)) == 1
     assert len(summarize({"summary": {}}, show=0)) == 1
 
 
 def test_summarize_show_zero_lists_nothing():
-    report = {"summary": {}, "outcomes": [{"status": "survived", "mutant": {"file": "/r/a.py"}}]}
+    report = {
+        "summary": {},
+        "outcomes": [{"status": "survived", "mutant": {"file": "/r/a.py"}}],
+    }
     assert len(summarize(report, show=0)) == 1
     assert len(summarize(report, show=1)) == 4
 
@@ -168,9 +206,18 @@ def test_summarize_sorts_and_defaults_missing_fields():
         {"file": "/r/b.py", "line": 0},
         {"file": "/r/b.py"},
         {"line": 7},
-        {"file": "/r/a.py", "line": 2, "operator": "op", "original": "<", "replacement": ">"},
+        {
+            "file": "/r/a.py",
+            "line": 2,
+            "operator": "op",
+            "original": "<",
+            "replacement": ">",
+        },
     ]
-    report = {"summary": {}, "outcomes": [{"status": "survived", "mutant": m} for m in mutants]}
+    report = {
+        "summary": {},
+        "outcomes": [{"status": "survived", "mutant": m} for m in mutants],
+    }
     lines = summarize(report)
     assert lines[1:] == [
         ({}, "surviving mutants:"),
@@ -206,15 +253,23 @@ def refresh(tmp_path, rc):
     root = tmp_path / "root"
     root.mkdir()
     state = plugin._FermutState(fake_binary(tmp_path, rc))
-    plugin._refresh_coverage(state, StubConfig(fermut_no_coverage=False, verbose=0), str(root))
+    plugin._refresh_coverage(
+        state, StubConfig(fermut_no_coverage=False, verbose=0), str(root)
+    )
     return state.lines, str(root)
 
 
 def test_refresh_coverage_failure_reports_the_log_tail(tmp_path, capfd):
     lines, root = refresh(tmp_path, 3)
     assert lines == [
-        ({"yellow": True}, "`fermut coverage` exited 3; mutating with whatever coverage exists:"),
-        ({}, "  line3"), ({}, "  line4"), ({}, "  line5"), ({}, "  line6"),
+        (
+            {"yellow": True},
+            "`fermut coverage` exited 3; mutating with whatever coverage exists:",
+        ),
+        ({}, "  line3"),
+        ({}, "  line4"),
+        ({}, "  line5"),
+        ({}, "  line6"),
         ({}, "  fake-stdout " + root),
     ]
     out, err = capfd.readouterr()
@@ -225,11 +280,14 @@ def test_refresh_coverage_runs_in_the_root(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
     fake = tmp_path / "fake"
-    fake.write_text("#!%s\nimport os, sys\nsys.stderr.write(os.getcwd() + '\\n')\nsys.exit(1)\n"
-                    % sys.executable)
+    fake.write_text(
+        f"#!{sys.executable}\nimport os, sys\nsys.stderr.write(os.getcwd() + '\\n')\nsys.exit(1)\n"
+    )
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
     state = plugin._FermutState(str(fake))
-    plugin._refresh_coverage(state, StubConfig(fermut_no_coverage=False, verbose=0), str(root))
+    plugin._refresh_coverage(
+        state, StubConfig(fermut_no_coverage=False, verbose=0), str(root)
+    )
     assert os.path.realpath(state.lines[-1][1].strip()) == os.path.realpath(root)
 
 
@@ -245,7 +303,9 @@ def test_refresh_coverage_command(green_suite, fake_fermut, run_pytest):
     assert cov == ["coverage", str(green_suite.path), "--python", sys.executable, "-q"]
 
 
-def test_missing_pytest_cov_warns_in_yellow(green_suite, fake_fermut, run_pytest, monkeypatch):
+def test_missing_pytest_cov_warns_in_yellow(
+    green_suite, fake_fermut, run_pytest, monkeypatch
+):
     import importlib.util
 
     real_find_spec = importlib.util.find_spec
@@ -255,26 +315,38 @@ def test_missing_pytest_cov_warns_in_yellow(green_suite, fake_fermut, run_pytest
         lambda name, *a: None if name == "pytest_cov" else real_find_spec(name, *a),
     )
     result = run_pytest(green_suite, "--fermut", "--color=yes")
-    assert YELLOW + "pytest-cov not installed: mutants run the whole suite (slow). " \
-        "`pip install pytest-cov` to select tests by coverage." + RESET in result.stdout.str()
+    assert (
+        YELLOW + "pytest-cov not installed: mutants run the whole suite (slow). "
+        "`pip install pytest-cov` to select tests by coverage."
+        + RESET
+        in result.stdout.str()
+    )
 
 
 def test_missing_binary_message(green_suite, fake_fermut, run_pytest, monkeypatch):
     monkeypatch.setattr(plugin, "find_fermut", lambda: None)
     result = run_pytest(green_suite, "--fermut")
     result.stderr.fnmatch_lines(
-        ["ERROR: --fermut: the fermut binary was not found. Install fermut in this "
-         "environment (e.g. `uv add --dev fermut`) or set FERMUT_BIN."]
+        [
+            (
+                "ERROR: --fermut: the fermut binary was not found. Install fermut in this "
+                "environment (e.g. `uv add --dev fermut`) or set FERMUT_BIN."
+            )
+        ]
     )
 
 
 def test_red_suite_note_is_yellow(pytester, fake_fermut, run_pytest):
     pytester.makepyfile(test_bad="def test_bad():\n    assert False\n")
     result = run_pytest(pytester, "--fermut", "--color=yes")
-    assert YELLOW + "skipped: the test suite did not pass" + RESET in result.stdout.str()
+    assert (
+        YELLOW + "skipped: the test suite did not pass" + RESET in result.stdout.str()
+    )
 
 
-def test_session_markup_and_report_state(green_suite, fake_fermut, run_pytest, monkeypatch, capfd):
+def test_session_markup_and_report_state(
+    green_suite, fake_fermut, run_pytest, monkeypatch, capfd
+):
     monkeypatch.setenv("FAKE_FERMUT_MODE", "survivors")
     # Expose the report the plugin keeps for other plugins.
     green_suite.makeconftest(
@@ -293,7 +365,7 @@ def test_session_markup_and_report_state(green_suite, fake_fermut, run_pytest, m
     assert BOLD + "mutation score 80.0%" in out
     fd_out, _ = capfd.readouterr()
     assert "REPORT-KILLED 8" in out + fd_out
-    assert result.stderr.lines[-1] == "fermut: mutation testing %s" % green_suite.path
+    assert result.stderr.lines[-1] == f"fermut: mutation testing {green_suite.path}"
 
 
 def test_crash_message_is_red(green_suite, fake_fermut, run_pytest, monkeypatch):
@@ -308,8 +380,9 @@ def test_run_uses_rootdir_and_a_fermut_temp_report(
     monkeypatch.setenv("FAKE_FERMUT_MODE", "survivors")
     root = green_suite.mkdir("root")
     green_suite.makepyfile(**{"root/test_in_root": "def test_ok():\n    pass\n"})
-    result = run_pytest(green_suite, "--fermut", "--fermut-no-coverage", "--rootdir", str(root),
-                        "root")
+    result = run_pytest(
+        green_suite, "--fermut", "--fermut-no-coverage", "--rootdir", str(root), "root"
+    )
     argv = fake_fermut.run_call()["argv"]
     report = os.path.basename(argv[argv.index("--json") + 1])
     assert report.startswith("fermut-") and report.endswith(".json")

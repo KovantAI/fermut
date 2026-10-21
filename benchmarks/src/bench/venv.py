@@ -5,6 +5,7 @@ Keeps tool installs isolated (e.g. mutmut + cosmic-ray bring different click
 versions) and lets cold-vs-warm be controlled purely via cache wipes, not by
 re-installing the tool itself.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -19,7 +20,9 @@ def venv_for(tool: str, repo: str) -> Path:
     return VENVS / f"{tool}-{repo}"
 
 
-def ensure(tool: str, repo: str, *, fresh: bool = False, python: str | None = None) -> Path:
+def ensure(
+    tool: str, repo: str, *, fresh: bool = False, python: str | None = None
+) -> Path:
     """Return path to a usable venv. If `fresh`, recreate from scratch.
 
     When `python` is provided (e.g. "3.11"), uv creates the venv with that
@@ -29,6 +32,7 @@ def ensure(tool: str, repo: str, *, fresh: bool = False, python: str | None = No
     path = venv_for(tool, repo)
     if fresh and path.exists():
         import shutil
+
         shutil.rmtree(path)
     if not path.exists():
         VENVS.mkdir(parents=True, exist_ok=True)

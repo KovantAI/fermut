@@ -2,8 +2,7 @@ import importlib.util
 import sys
 
 import pytest
-
-import pytest_fermut.plugin as plugin
+from pytest_fermut import plugin
 
 HAS_PYTEST_COV = importlib.util.find_spec("pytest_cov") is not None
 
@@ -19,11 +18,15 @@ def test_passing_gate_reports_score(green_suite, fake_fermut, run_pytest, monkey
     monkeypatch.setenv("FAKE_FERMUT_MODE", "pass")
     result = run_pytest(green_suite, "--fermut", "--fermut-no-coverage")
     assert result.ret == 0
-    result.stdout.fnmatch_lines(["*= fermut =*", "mutation score 100.0%: 8 killed, 0 survived*"])
+    result.stdout.fnmatch_lines(
+        ["*= fermut =*", "mutation score 100.0%: 8 killed, 0 survived*"]
+    )
     assert "mutation gate failed" not in result.stdout.str()
 
 
-def test_survivors_fail_the_session_and_are_listed(green_suite, fake_fermut, run_pytest, monkeypatch):
+def test_survivors_fail_the_session_and_are_listed(
+    green_suite, fake_fermut, run_pytest, monkeypatch
+):
     monkeypatch.setenv("FAKE_FERMUT_MODE", "survivors")
     result = run_pytest(green_suite, "--fermut", "--fermut-no-coverage")
     assert result.ret == pytest.ExitCode.TESTS_FAILED
@@ -40,9 +43,13 @@ def test_survivors_fail_the_session_and_are_listed(green_suite, fake_fermut, run
     )
 
 
-def test_show_limits_listed_survivors(green_suite, fake_fermut, run_pytest, monkeypatch):
+def test_show_limits_listed_survivors(
+    green_suite, fake_fermut, run_pytest, monkeypatch
+):
     monkeypatch.setenv("FAKE_FERMUT_MODE", "survivors")
-    result = run_pytest(green_suite, "--fermut", "--fermut-no-coverage", "--fermut-show=1")
+    result = run_pytest(
+        green_suite, "--fermut", "--fermut-no-coverage", "--fermut-show=1"
+    )
     result.stdout.fnmatch_lines(["surviving mutants (1 of 2):"])
     assert "boundary-shift" not in result.stdout.str()
 
@@ -102,7 +109,9 @@ def test_coverage_is_refreshed_before_the_run(green_suite, fake_fermut, run_pyte
     assert calls[0]["child"] == "1"
 
 
-def test_without_pytest_cov_warns_and_runs_anyway(green_suite, fake_fermut, run_pytest, monkeypatch):
+def test_without_pytest_cov_warns_and_runs_anyway(
+    green_suite, fake_fermut, run_pytest, monkeypatch
+):
     real_find_spec = importlib.util.find_spec
     monkeypatch.setattr(
         importlib.util,
@@ -128,7 +137,9 @@ def test_inert_under_collect_only(green_suite, fake_fermut, run_pytest):
     assert fake_fermut.calls() == []
 
 
-def test_missing_binary_is_a_usage_error(green_suite, fake_fermut, run_pytest, monkeypatch):
+def test_missing_binary_is_a_usage_error(
+    green_suite, fake_fermut, run_pytest, monkeypatch
+):
     monkeypatch.setattr(plugin, "find_fermut", lambda: None)
     result = run_pytest(green_suite, "--fermut")
     assert result.ret == pytest.ExitCode.USAGE_ERROR

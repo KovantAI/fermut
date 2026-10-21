@@ -10,6 +10,7 @@ Adapters normalize them behind a small interface:
 
 Adapters live alongside this file; ADAPTERS in __init__.py is the registry.
 """
+
 from __future__ import annotations
 
 import os
@@ -93,7 +94,9 @@ class Adapter(ABC):
             elif path.exists():
                 path.unlink()
 
-    def _exec(self, argv: list[str], cwd: Path, timeout: int | None = None) -> RunResult:
+    def _exec(
+        self, argv: list[str], cwd: Path, timeout: int | None = None
+    ) -> RunResult:
         start = time.perf_counter()
         # stdin=DEVNULL: prevents OpenSSL / getpass-style prompts (e.g. httpx
         # encrypted-PEM tests under mutation) from hanging on the TTY.
@@ -103,6 +106,7 @@ class Adapter(ABC):
             env=self.env(),
             stdin=subprocess.DEVNULL,
             capture_output=True,
+            check=False,
             text=True,
             timeout=timeout,
         )
@@ -136,5 +140,7 @@ class Adapter(ABC):
         )
 
     @abstractmethod
-    def run(self, repo: RepoCfg, worktree: Path, *, timeout: int | None = None) -> RunResult:
+    def run(
+        self, repo: RepoCfg, worktree: Path, *, timeout: int | None = None
+    ) -> RunResult:
         """Run one mutation pass and return timing + score."""

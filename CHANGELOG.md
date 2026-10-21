@@ -9,11 +9,31 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Changed
+- `fermut coverage` records import-time lines (module-level code, decorators,
+  class bodies, default arguments) under `<test module>|collect`, so their
+  mutants are tested instead of skipped as uncovered. On more-itertools this
+  scores 496 previously skipped mutants. Expect scores to move. An existing
+  `.coverage` is rebuilt in full once.
+- `fermut merge --history` refuses to write an entry for a merge that scored
+  no mutants (N/A), instead of recording a vacuous 100%.
 - `KovantAI/fermut/trend` persists the history on a `fermut-history`
   orphan branch (one file per run under `entries/`) instead of the Actions
   cache, which evicted it after 7 days unused. The job now needs
   `permissions: contents: write`. New `history-branch` and `token` inputs
   replace `history-cache` and `cache-key-prefix`.
+
+### Added
+- A timed-out mutant names the test it hung in (`hung_in` in the JSON
+  report, and in the console, Markdown, HTML and GitHub annotation output).
+  Needs the pytest reporter plugin (on by default).
+- Per-mutant timing in the JSON report: `duration_ms` (wall time) on every
+  outcome that ran a test, plus `test_ms` (time inside tests) from the pytest
+  reporter plugin.
+- `fermut merge --expect-shards N` and `--max-errored N`. Sharded reports
+  now record their slice (`"shard": {"index", "total"}`), so merge refuses
+  mixed shard counts and a missing shard index even without the flag.
+- Mutation-score badge for the pytest plugin, published weekly by the
+  `Mutation (pytest plugin)` workflow.
 
 ## [0.6.0] - 2026-10-20
 

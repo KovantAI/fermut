@@ -16,6 +16,11 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   `.coverage` is rebuilt in full once.
 - `fermut merge --history` refuses to write an entry for a merge that scored
   no mutants (N/A), instead of recording a vacuous 100%.
+- `KovantAI/fermut/trend` persists the history on a `fermut-history`
+  orphan branch (one file per run under `entries/`) instead of the Actions
+  cache, which evicted it after 7 days unused. The job now needs
+  `permissions: contents: write`. New `history-branch` and `token` inputs
+  replace `history-cache` and `cache-key-prefix`.
 
 ### Added
 - A timed-out mutant names the test it hung in (`hung_in` in the JSON

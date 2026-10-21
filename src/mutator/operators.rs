@@ -46,9 +46,14 @@ pub enum Operator {
     // Minimal-profile operators — the region-model dominators the default set
     // lacks (see `region`). Always emitted by the visitor; the `--operators`
     // profile filter keeps them only under `minimal` / `full`.
+    // Serialized under their CLI names; the aliases read reports written
+    // before the names were unified.
+    #[serde(rename = "ror-equality", alias = "relational-to-equality")]
     RelationalToEquality,
+    #[serde(rename = "ror-const", alias = "compare-to-const")]
     CompareToConst,
     BoolOperandDrop,
+    #[serde(rename = "bool-const", alias = "bool-op-to-const")]
     BoolOpToConst,
     /// The remaining region-model forms of a site, so the subsumption gate can
     /// check all 7 ROR mutants. Kept only under the hidden `ror-all` profile.
@@ -342,6 +347,20 @@ mod tests {
             let bare = op.name().strip_prefix("exp:").unwrap_or(op.name());
             assert_eq!(Operator::from_name(bare), Some(*op));
         }
+    }
+
+    #[test]
+    fn json_name_is_cli_name_without_prefix() {
+        for op in Operator::all() {
+            let bare = op
+                .name()
+                .strip_prefix("exp:")
+                .or_else(|| op.name().strip_prefix("parity:"))
+                .unwrap_or(op.name());
+            assert_eq!(serde_json::to_value(op).unwrap(), bare, "{op:?}");
+        }
+        let old: Operator = serde_json::from_str("\"relational-to-equality\"").unwrap();
+        assert_eq!(old, Operator::RelationalToEquality);
     }
 
     /// Stable operator names (no `exp:` / `parity:` prefix), from the enum.

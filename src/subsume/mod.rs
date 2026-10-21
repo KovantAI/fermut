@@ -675,9 +675,8 @@ mod tests {
         assert!(err.contains(":1:"), "{err}");
     }
 
-    /// Golden numbers from the Python prototype behind
-    /// `plan-firstorder-dominator-subsumption.md`, on the kill-sets committed
-    /// under `benchmarks/hom-experiment/data/`.
+    /// Golden numbers from the original Python prototype, on the kill-sets
+    /// committed under `benchmarks/hom-experiment/data/`.
     #[test]
     fn reproduces_prototype_dominator_counts_on_recorded_data() {
         let cases = [

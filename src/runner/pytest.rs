@@ -333,14 +333,17 @@ impl PytestRunner {
 
     /// Record this mutant's full kill-set (the covering tests that failed) into
     /// the shared sink for the engine to write out. Only called under
-    /// `--record-kill-sets`, where `-x` is dropped and stdout always captured, so
-    /// the `-rfE` summary lists every failure — the mutant's `K(m)`. The verdict
+    /// `--record-kill-sets`, where `-x` is dropped, so every failure is seen —
+    /// the mutant's `K(m)`. The failures come from the reporter plugin's result
+    /// when it loaded, else from the `-rfE` summary in the (always captured)
+    /// stdout. The verdict
     /// is derived the same way [`classify_run`] derives it, so the recorded
     /// `status` matches the report; `kill_set` is populated only on a real kill.
     fn record_kill_set(
         &self,
         mutant: &Arc<Mutant>,
         waited: &(Option<ExitStatus>, Option<String>),
+        reported: Option<&RunResult>,
         import_broke: bool,
         key_file: &str,
         key_op: &'static str,
@@ -350,10 +353,13 @@ impl PytestRunner {
             Some(s) => match classify_exit(TestTool::Pytest, s.code()) {
                 ExitVerdict::Survived => ("survived", Vec::new()),
                 ExitVerdict::Killed => {
-                    let mut ids = output
-                        .as_deref()
-                        .map(crate::kill_order::parse_all_failed)
-                        .unwrap_or_default();
+                    let mut ids = match reported {
+                        Some(r) => r.failures.clone(),
+                        None => output
+                            .as_deref()
+                            .map(crate::kill_order::parse_all_failed)
+                            .unwrap_or_default(),
+                    };
                     // Dedupe preserving first-seen order: a parametrized test can
                     // list the same nodeid once per failing param, but the
                     // kill-set is a set of tests.
@@ -794,7 +800,14 @@ impl Runner for PytestRunner {
                     None => self.probe_collection_failure(mirror, mutant, &key_file, key_op),
                 };
             if self.record_kill_sets {
-                self.record_kill_set(mutant, &waited, import_broke, &key_file, key_op);
+                self.record_kill_set(
+                    mutant,
+                    &waited,
+                    reported.as_ref(),
+                    import_broke,
+                    &key_file,
+                    key_op,
+                );
             }
             Ok(self
                 .classify_run(
@@ -886,7 +899,11 @@ fn hypothesis_importable(python: Option<&Path>) -> bool {
 /// rstest is a native binary with no importable `rstest` module, so
 /// `-m rstest` can't work: use the `rstest` next to the interpreter (the
 /// venv's `bin/`/`Scripts/`) when present, else the one on PATH.
+///
+/// Programs are resolved against `PATH` here (see
+/// [`super::python::absolute_program`]): the run happens from the mirror.
 pub(crate) fn framework_command(python: Option<&Path>, exe: &str) -> Command {
+    use super::python::absolute_program;
     if exe == "rstest" {
         let beside = python.and_then(Path::parent).map(|d| {
             d.join("rstest")
@@ -894,16 +911,16 @@ pub(crate) fn framework_command(python: Option<&Path>, exe: &str) -> Command {
         });
         return match beside.filter(|p| p.is_file()) {
             Some(p) => Command::new(p),
-            None => Command::new("rstest"),
+            None => Command::new(absolute_program(Path::new("rstest"))),
         };
     }
     match python {
         Some(py) => {
-            let mut cmd = Command::new(py);
+            let mut cmd = Command::new(absolute_program(py));
             cmd.arg("-m").arg(exe);
             cmd
         }
-        None => Command::new(exe),
+        None => Command::new(absolute_program(Path::new(exe))),
     }
 }
 
@@ -1368,7 +1385,10 @@ mod tests {
         r.python = Some(py.clone());
         // No venv binary beside the interpreter → PATH lookup, never `-m`.
         let cmd = r.framework_command();
-        assert_eq!(cmd.get_program(), "rstest");
+        assert_eq!(
+            cmd.get_program(),
+            crate::runner::python::absolute_program(Path::new("rstest")).as_os_str()
+        );
         assert_eq!(cmd.get_args().count(), 0);
         let bin = tmp
             .path()
@@ -1467,6 +1487,32 @@ mod tests {
     fn exited(code: i32) -> Option<ExitStatus> {
         use std::os::unix::process::ExitStatusExt;
         Some(ExitStatus::from_raw(code << 8))
+    }
+
+    /// Kill-set recording reads every failure from the reporter plugin when it
+    /// loaded, and falls back to the `-rfE` summary otherwise.
+    #[cfg(unix)]
+    #[test]
+    fn kill_set_prefers_plugin_failures_over_stdout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = runner(false, breadth_ctx(tmp.path()));
+        let m = Arc::new(mutant_in(tmp.path()));
+        let stdout = "=== short test summary info ===\nFAILED t.py::from_stdout - boom\n";
+        let waited = (exited(1), Some(stdout.to_string()));
+        let reported = RunResult {
+            failures: vec!["t.py::a".into(), "t.py::b".into(), "t.py::a".into()],
+            ..RunResult::default()
+        };
+        r.record_kill_set(&m, &waited, Some(&reported), false, "foo.py", "op");
+        r.record_kill_set(&m, &waited, None, false, "foo.py", "op");
+        let sets: Vec<_> = r.take_kill_sets().into_iter().map(|k| k.kill_set).collect();
+        assert_eq!(
+            sets,
+            vec![
+                vec!["t.py::a".to_string(), "t.py::b".to_string()],
+                vec!["t.py::from_stdout".to_string()],
+            ]
+        );
     }
 
     #[cfg(unix)]

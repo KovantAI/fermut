@@ -1,5 +1,7 @@
 # Record a sharded fermut sweep as one trend point and gate on regressions.
 #
+#   permissions:
+#     contents: read              # warm and shard run mutated code: read-only
 #   jobs:
 #     warm:                       # build the coverage DB once
 #       runs-on: ubuntu-latest
@@ -22,6 +24,8 @@
 #     trend:
 #       needs: shard
 #       runs-on: ubuntu-latest
+#       permissions:              # replaces the workflow-level block
+#         contents: write         # push the history branch
 #       steps:
 #         - uses: actions/checkout@<sha>
 #         - uses: KovantAI/fermut/trend@v0.6.0
@@ -33,13 +37,14 @@
 # entry, appends it to `.fermut/history.jsonl`, writes the trend to the job
 # summary, and gates on a score drop vs the previous run on the same branch.
 #
-# History persists in the Actions cache. Only the default branch saves it; a
-# run on another branch restores it but the regression gate compares only
-# entries on the same branch, so it has no prior to gate against. The cache
-# evicts entries unused for 7 days: schedule at least weekly, or set
-# `history-cache: "false"` and persist `history-path` yourself (commit it, or
-# keep it on a branch). A run whose record step succeeds also uploads the
-# history in the `<artifact-name>-trend` artifact.
+# History persists on the `history-branch` orphan branch, one file per run
+# under entries/. Only the default branch pushes to it, so the job needs
+# `contents: write` there; a run on another branch reads it but the regression
+# gate compares only entries on the same branch, so it has no prior to gate
+# against. This job runs no tests, so the write token never meets mutated code.
+# Set `history-branch: ""` to persist `history-path` yourself. A run whose
+# record step succeeds also uploads the history in the `<artifact-name>-trend`
+# artifact.
 #
 # Refuses to record a point with no scored mutants (a vacuous 100%), with more
 # than `max-errored` errored mutants, or onto a history file with malformed
@@ -80,18 +85,18 @@ inputs:
     description: "History file, relative to working-directory."
     required: false
     default: ".fermut/history.jsonl"
-  history-cache:
-    description: '"true" restores the history from the Actions cache and saves it back on the default branch. "false" leaves persisting history-path to you.'
+  history-branch:
+    description: 'Orphan branch the history persists on, one file per run under entries/. Change it to start a new trend. Empty leaves persisting history-path to you.'
     required: false
-    default: "true"
+    default: "fermut-history"
   default-branch:
-    description: "The branch whose runs save the history. Only it writes the cache."
+    description: "The branch whose runs push to history-branch."
     required: false
     default: ${{ github.event.repository.default_branch }}
-  cache-key-prefix:
-    description: "History cache namespace. Change it to start a new trend."
+  token:
+    description: "Token that reads and pushes history-branch. Needs contents: write on the default branch."
     required: false
-    default: "fermut"
+    default: ${{ github.token }}
   config-hash:
     description: >-
       config_hash to stamp into the entry, so `fermut trend` can flag runs whose
@@ -148,7 +153,6 @@ runs:
       shell: bash
       env:
         BOOL_blocking: ${{ inputs.blocking }}
-        BOOL_history_cache: ${{ inputs.history-cache }}
         FAIL_UNDER: ${{ inputs.fail-under }}
         REGRESSION: ${{ inputs.fail-on-regression }}
         MAX_ERRORED: ${{ inputs.max-errored }}
@@ -203,14 +207,14 @@ runs:
         HEADING: "fermut merged report"
       run: bash "$GITHUB_ACTION_PATH/../scripts/action/stats.sh"
 
-    # One immutable cache entry per run; restore-keys picks the newest.
-    - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-      if: inputs.history-cache == 'true'
-      with:
-        path: ${{ inputs.working-directory }}/${{ inputs.history-path }}
-        key: ${{ inputs.cache-key-prefix }}-history-${{ inputs.default-branch }}-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: |
-          ${{ inputs.cache-key-prefix }}-history-${{ inputs.default-branch }}-
+    - name: Restore history
+      if: inputs.history-branch != ''
+      shell: bash
+      env:
+        BRANCH: ${{ inputs.history-branch }}
+        TOKEN: ${{ inputs.token }}
+        HISTORY: ${{ github.workspace }}/${{ inputs.working-directory }}/${{ inputs.history-path }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/history-branch.sh" read
 
     - name: Record trend point
       id: record
@@ -227,15 +231,18 @@ runs:
         BLOCKING: ${{ inputs.blocking }}
       run: bash "$GITHUB_ACTION_PATH/../scripts/action/trend-record.sh"
 
-    # Saved before the gate, so a regression is still recorded.
-    - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+    # Pushed before the gate, so a regression is still recorded.
+    - name: Push history
       if: >-
-        inputs.history-cache == 'true'
+        inputs.history-branch != ''
         && steps.record.outputs.recorded == 'true'
         && github.ref == format('refs/heads/{0}', inputs.default-branch)
-      with:
-        path: ${{ inputs.working-directory }}/${{ inputs.history-path }}
-        key: ${{ inputs.cache-key-prefix }}-history-${{ inputs.default-branch }}-${{ github.run_id }}-${{ github.run_attempt }}
+      shell: bash
+      env:
+        BRANCH: ${{ inputs.history-branch }}
+        TOKEN: ${{ inputs.token }}
+        ENTRY: ${{ steps.setup.outputs.out_abs }}/entry.json
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/history-branch.sh" write
 
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       with:

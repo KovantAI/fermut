@@ -1,0 +1,13 @@
+# Minimum mutation score, as a whole-number percentage of caught / (caught + missed).
+# Enforced against this one number by both Mutants (weekly) — the whole crate on
+# `main`, the real signal — and Mutants (PR diff), when the diff has enough mutants
+# to mean anything.
+#
+# Raise it once the weekly run has cleared the new value twice. Never lower it to
+# turn a build green: the drop is the signal, not the problem.
+#
+# Seeded low. Measured locally at 63% (822/1285 scored) over 1407 of 2192 mutants;
+# the unmeasured remainder is mostly src/cli/subcmd/*, which scored worse, so the
+# true figure is likely a few points under. The first full weekly run replaces this
+# estimate with a measurement.
+50

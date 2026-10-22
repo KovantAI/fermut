@@ -282,6 +282,12 @@ def test_selection_file_is_removed(two_files, fake_fermut, run_pytest):
     assert not os.path.exists(argv[argv.index("--select-tests") + 1])
 
 
+def test_narrowed_session_without_fermut_is_inert(two_files, fake_fermut, run_pytest):
+    result = run_pytest(two_files, "-k", "one")
+    assert result.ret == 0
+    assert fake_fermut.calls() == []
+
+
 @pytest.mark.skipif(not HAS_XDIST, reason="needs pytest-xdist")
 def test_xdist_selection_comes_from_the_workers(two_files, fake_fermut, monkeypatch):
     # Under -n the controller collects nothing; the ids come from the workers.

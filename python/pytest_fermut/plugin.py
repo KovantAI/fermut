@@ -154,9 +154,7 @@ def _narrowed(config):
     from one) does not. Over-detecting never mis-scores, but a narrowed run
     isn't recorded in history, so ``testpaths`` is expanded as pytest does.
     """
-    if any(config.getoption(name, None) for name in _SELECTION_OPTIONS):
-        return True
-    if any("::" in arg for arg in config.args):
+    if any(config.getoption(name, False) for name in _SELECTION_OPTIONS):
         return True
     root = os.path.realpath(_rootdir(config))
     entries = {
@@ -173,8 +171,7 @@ def _absolute_id(root, nodeid):
     """``tests/test_x.py::test_a`` → ``<root>/tests/test_x.py::test_a``.
     fermut re-roots it onto its own project root, which can differ from
     pytest's rootdir."""
-    path, sep, rest = nodeid.partition("::")
-    return os.path.join(root, path) + sep + rest
+    return os.path.join(root, nodeid)
 
 
 def pytest_collection_finish(session):
@@ -255,7 +252,7 @@ def _refresh_coverage(state, config, root):
 
 def _run_command(state, config, report_path, selection_path=None):
     cmd = [state.binary, "run", "--python", sys.executable, "--json", report_path]
-    if selection_path:
+    if selection_path is not None:
         cmd += ["--select-tests", selection_path]
     since = config.getoption("fermut_since")
     if since:
@@ -356,11 +353,9 @@ def pytest_sessionfinish(session, exitstatus):
     selection_path = None
     try:
         if state.selected is not None:
-            fd, selection_path = tempfile.mkstemp(
-                prefix="fermut-select-", suffix=".txt"
-            )
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.writelines(nodeid + "\n" for nodeid in state.selected)
+            fd, selection_path = tempfile.mkstemp()
+            with os.fdopen(fd, "wb") as fh:
+                fh.write("".join(f"{n}\n" for n in state.selected).encode())
         with uncaptured:
             _refresh_coverage(state, config, root)
             sys.stderr.write(f"\nfermut: mutation testing {root}\n")
@@ -376,7 +371,7 @@ def pytest_sessionfinish(session, exitstatus):
         report = _load_report(report_path)
     finally:
         os.unlink(report_path)
-        if selection_path:
+        if selection_path is not None:
             os.unlink(selection_path)
     if report is None:
         # No report means fermut failed before scoring (its error is on stderr).

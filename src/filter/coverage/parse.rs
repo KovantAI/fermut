@@ -298,10 +298,12 @@ impl CoverageContexts {
                      outside project_root {}. Tests appear to live in a sibling \
                      package; point `--project-root` at the directory that \
                      contains them (or the monorepo root) so pytest can resolve \
-                     the rebased node ids.",
+                     the rebased node ids. If the tests do live under it, fermut \
+                     resolved the coverage paths wrongly: please report it at {}",
                     path.display(),
                     dropped_outside,
                     project_root.display(),
+                    crate::ISSUES_URL,
                 ));
             }
             return Err(anyhow::anyhow!(

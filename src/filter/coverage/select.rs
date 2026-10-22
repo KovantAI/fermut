@@ -72,10 +72,33 @@ pub fn read_selection(path: &Path, node_root: &Path) -> Result<BTreeSet<String>>
 /// `file` as a `/`-separated node-id path relative to `node_root`, or `None`
 /// when an absolute `file` lies outside it. A relative `file` is taken as
 /// already relative to `node_root`.
+///
+/// Paths are resolved the way pytest builds node ids: `..` lexically, and
+/// symlinks below the root (a linked test file *or* directory) never, since
+/// pytest names a test by its link. Only an alias of the root itself
+/// (`/var` → `/private/var`) is resolved, by finding the ancestor that
+/// canonicalizes to `node_root`.
 fn relative_node_path(file: &Path, node_root: &Path) -> Option<String> {
     let rel = if file.is_absolute() {
-        let canonical = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
-        canonical.strip_prefix(node_root).ok()?.to_path_buf()
+        let mut lexical = std::path::PathBuf::new();
+        for c in file.components() {
+            match c {
+                Component::ParentDir => {
+                    lexical.pop();
+                }
+                Component::CurDir => {}
+                c => lexical.push(c),
+            }
+        }
+        match lexical.strip_prefix(node_root) {
+            Ok(rel) => rel.to_path_buf(),
+            Err(_) => {
+                let root = lexical
+                    .ancestors()
+                    .find(|a| a.canonicalize().is_ok_and(|c| c == node_root))?;
+                lexical.strip_prefix(root).ok()?.to_path_buf()
+            }
+        }
     } else {
         file.to_path_buf()
     };
@@ -134,13 +157,20 @@ fn selected_for<'a>(id: &str, selected: &'a BTreeSet<String>) -> Vec<&'a String>
 /// Skips mutants no selected test covers. Chained right after
 /// [`super::CoverageFilter`] (which runs on the full contexts), so it only
 /// sees covered mutants and its skips mean "outside the selection".
+///
+/// It checks the line the *full* contexts matched — the mutant's own line,
+/// else its statement's first line — not `narrowed.tests_for_mutant`:
+/// narrowing drops lines, and the statement-line fallback would then admit a
+/// mutant on a line only unselected tests run, via selected tests that never
+/// reach it (a false survivor).
 pub struct SelectionFilter {
+    full: Arc<CoverageContexts>,
     narrowed: Arc<CoverageContexts>,
 }
 
 impl SelectionFilter {
-    pub fn new(narrowed: Arc<CoverageContexts>) -> Self {
-        Self { narrowed }
+    pub fn new(full: Arc<CoverageContexts>, narrowed: Arc<CoverageContexts>) -> Self {
+        Self { full, narrowed }
     }
 }
 
@@ -150,10 +180,14 @@ impl Filter for SelectionFilter {
     }
 
     fn admits(&self, m: &Mutant) -> Result<bool> {
-        let admitted = self
-            .narrowed
-            .tests_for_mutant(m)
-            .is_some_and(|t| !t.is_empty());
+        let covered =
+            |c: &CoverageContexts, line| c.tests_for(&m.file, line).is_some_and(|t| !t.is_empty());
+        let line = if covered(&self.full, m.line) {
+            m.line
+        } else {
+            m.stmt_line
+        };
+        let admitted = line != 0 && covered(&self.narrowed, line);
         if !admitted {
             debug!(
                 file = %m.file.display(),
@@ -188,6 +222,54 @@ mod tests {
     fn ids(c: &CoverageContexts, line: u32) -> Option<Vec<&str>> {
         c.tests_for(Path::new("/p/src/m.py"), line)
             .map(|v| v.iter().map(String::as_str).collect())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_test_file_keeps_its_link_name() {
+        // pytest names a symlinked test by the link, so must the selection.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("shared")).unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(root.join("shared/test_x.py"), "").unwrap();
+        std::os::unix::fs::symlink("../shared/test_x.py", root.join("tests/test_link.py")).unwrap();
+        let link = root.join("tests/test_link.py");
+        assert_eq!(
+            relative_node_path(&link, &root).as_deref(),
+            Some("tests/test_link.py")
+        );
+        // A symlinked root (`/var` → `/private/var`) still resolves.
+        let alias = tmp.path().parent().unwrap().join(format!(
+            "{}-alias",
+            root.file_name().unwrap().to_string_lossy()
+        ));
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let got = relative_node_path(&alias.join("tests/test_link.py"), &root);
+        let got_dir = relative_node_path(&alias.join("tests/link/test_y.py"), &root);
+        std::fs::remove_file(&alias).unwrap();
+        assert_eq!(got.as_deref(), Some("tests/test_link.py"));
+        assert_eq!(got_dir.as_deref(), Some("tests/link/test_y.py"));
+        // Symlinked test directories keep their link name, whether the link
+        // points inside the root or outside it.
+        std::fs::create_dir_all(root.join("tests/real")).unwrap();
+        std::os::unix::fs::symlink("real", root.join("tests/link")).unwrap();
+        assert_eq!(
+            relative_node_path(&root.join("tests/link/test_y.py"), &root).as_deref(),
+            Some("tests/link/test_y.py")
+        );
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("tests/integration")).unwrap();
+        assert_eq!(
+            relative_node_path(&root.join("tests/integration/test_z.py"), &root).as_deref(),
+            Some("tests/integration/test_z.py")
+        );
+        // A test outside pytest's rootdir: `<rootdir>/../tests/...`.
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        assert_eq!(
+            relative_node_path(&root.join("sub/../tests/test_link.py"), &root).as_deref(),
+            Some("tests/test_link.py")
+        );
     }
 
     #[test]
@@ -225,11 +307,30 @@ mod tests {
     #[test]
     fn selection_filter_skips_covered_but_unselected() {
         let full = ctx(&[(1, &["t/a.py::x"]), (2, &["t/b.py::z"])]);
-        let f = SelectionFilter::new(full.select(&set(&["t/b.py::z"])));
+        let full = Arc::new(full);
+        let f = SelectionFilter::new(full.clone(), full.select(&set(&["t/b.py::z"])));
         let at = |line| super::super::tests::make_mutant(PathBuf::from("/p/src/m.py"), line);
         assert!(!f.admits(&at(1)).unwrap());
         assert!(f.admits(&at(2)).unwrap());
         assert_eq!(f.name(), "selection");
+    }
+
+    #[test]
+    fn selection_filter_ignores_statement_line_of_a_dropped_line() {
+        // `sorted(items,\n    key=lambda v: v.x)`: line 2 (the lambda) runs
+        // only under unselected t/a.py::x; line 1 under selected t/b.py::z.
+        let full = Arc::new(ctx(&[
+            (1, &["t/a.py::x", "t/b.py::z"]),
+            (2, &["t/a.py::x"]),
+        ]));
+        let f = SelectionFilter::new(full.clone(), full.select(&set(&["t/b.py::z"])));
+        let mut m = super::super::tests::make_mutant(PathBuf::from("/p/src/m.py"), 2);
+        m.stmt_line = 1;
+        assert!(!f.admits(&m).unwrap(), "t/b.py::z never runs line 2");
+        // A line the full contexts don't cover still falls back to its statement.
+        let mut m = super::super::tests::make_mutant(PathBuf::from("/p/src/m.py"), 3);
+        m.stmt_line = 1;
+        assert!(f.admits(&m).unwrap());
     }
 
     #[test]

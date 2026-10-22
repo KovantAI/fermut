@@ -200,6 +200,32 @@ def test_testpaths_are_the_whole_suite(pytester, fake_fermut, run_pytest):
         assert fake_fermut.run_call()["selected"] is None, args
 
 
+def test_one_of_several_testpaths_is_narrowed(pytester, fake_fermut, run_pytest):
+    pytester.makeini("[pytest]\ntestpaths = tests integration\n")
+    for name in ("tests", "integration"):
+        pytester.mkdir(name).joinpath(f"test_{name}.py").write_text(
+            f"def test_{name}():\n    pass\n"
+        )
+    run_pytest(pytester, "--fermut", "--fermut-no-coverage", "tests")
+    assert _selected(fake_fermut, pytester) == ["tests/test_tests.py::test_tests"]
+    fake_fermut.log.unlink()
+    run_pytest(pytester, "--fermut", "--fermut-no-coverage", "integration", "tests")
+    assert fake_fermut.run_call()["selected"] is None
+
+
+def test_recursive_testpaths_glob_is_the_whole_suite(pytester, fake_fermut, run_pytest):
+    # pytest expands testpaths with recursive=True; so must the plugin.
+    pytester.makeini("[pytest]\ntestpaths = src/**/tests\n")
+    for pkg in ("a", "a/b"):
+        d = pytester.path.joinpath("src", pkg, "tests")
+        d.mkdir(parents=True)
+        d.joinpath(f"test_{pkg.replace('/', '_')}.py").write_text(
+            "def test_t():\n    pass\n"
+        )
+    run_pytest(pytester, "--fermut", "--fermut-no-coverage")
+    assert fake_fermut.run_call()["selected"] is None
+
+
 def test_running_from_a_subdirectory_is_narrowed(
     pytester, fake_fermut, run_pytest, monkeypatch
 ):
@@ -282,23 +308,12 @@ def test_xdist_selection_comes_from_the_workers(two_files, fake_fermut, monkeypa
     ]
 
 
-# --- skipping fermut's redundant baseline run ---
+# --- fermut's baseline run ---
 
 
-def test_whole_suite_session_skips_the_baseline(green_suite, fake_fermut, run_pytest):
+def test_whole_suite_session_keeps_the_baseline(green_suite, fake_fermut, run_pytest):
+    # A green session outside fermut's mirror doesn't prove it green inside.
     run_pytest(green_suite, "--fermut", "--fermut-no-coverage")
-    assert "--no-verify-baseline" in fake_fermut.run_call()["argv"]
-
-
-def test_narrowed_session_keeps_the_baseline(two_files, fake_fermut, run_pytest):
-    run_pytest(two_files, "--fermut", "--fermut-no-coverage", "-k", "one")
-    assert "--no-verify-baseline" not in fake_fermut.run_call()["argv"]
-
-
-def test_verify_baseline_flag_keeps_the_baseline(green_suite, fake_fermut, run_pytest):
-    run_pytest(
-        green_suite, "--fermut", "--fermut-no-coverage", "--fermut-verify-baseline"
-    )
     assert "--no-verify-baseline" not in fake_fermut.run_call()["argv"]
 
 

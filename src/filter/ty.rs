@@ -270,7 +270,9 @@ impl TyFilter {
             anyhow!(
                 "ty subprocess path requested but ty binary not on PATH \
                  (embedded mode is active; this only fires if a code path \
-                 forgets to use the embedded pool)"
+                 forgets to use the embedded pool). This is a fermut bug: \
+                 please report it at {}",
+                crate::ISSUES_URL
             )
         })?;
         let mut cmd = Command::new(bin);

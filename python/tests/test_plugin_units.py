@@ -51,11 +51,6 @@ def test_help_documents_every_option(pytester):
         "first." in text
     )
     assert (
-        "--fermut-verify-baseline run fermut's baseline check even after a green "
-        "session that ran the whole suite (by default it is skipped as "
-        "redundant)." in text
-    )
-    assert (
         "--fermut-show=N number of surviving mutants to list in the summary "
         "(default 10)." in text
     )
@@ -69,7 +64,6 @@ def test_option_defaults(pytester):
     assert config.getoption("fermut_arg") == []
     assert config.getoption("fermut_no_coverage") is False
     assert config.getoption("fermut_show") == 10
-    assert config.getoption("fermut_verify_baseline") is False
 
 
 def test_option_types(pytester):

@@ -295,10 +295,13 @@ fn combine_outcomes(
                         bail!(
                             "conflicting verdicts for mutant {:?}: {} vs {}. \
                              Shard reports must cover disjoint mutant sets; overlapping or \
-                             non-shard inputs cannot be merged unambiguously.",
+                             non-shard inputs cannot be merged unambiguously. If every input \
+                             is a different shard of one `fermut run --shard i/n` config, \
+                             fermut split them wrongly: please report it at {}",
                             outcome.mutant().id,
                             existing.status_label(),
                             outcome.status_label(),
+                            crate::ISSUES_URL,
                         );
                     }
                 }
@@ -319,7 +322,10 @@ fn combine_outcomes(
         bail!(
             "{residual} mutant(s) remain shard-skipped after merging {report_count} report(s): no \
              input supplied a real verdict for them, so a shard is missing. The merged score would \
-             cover only part of the mutant universe. Include every shard's report and re-run."
+             cover only part of the mutant universe. Include every shard's report and re-run. \
+             If every shard's report is already included, fermut split them wrongly: please \
+             report it at {}",
+            crate::ISSUES_URL
         );
     }
 

@@ -175,8 +175,14 @@ bytecode is identical to the original's. The worked example above
 (`amount + 0` → `amount - 0`) compiles to different bytecode, so it
 stays `SURVIVED` and needs the inline marker.
 
-`src/equiv/` also contains an LLM judge (`llm.rs`). It isn't wired
-into the pipeline yet, and no flag enables it.
+An LLM can't *prove* equivalence, so the LLM judge isn't a layer here
+and never changes the score. Instead, `fermut autofix --triage` and
+`fermut suggest --triage` use it to triage survivors. A survivor it
+judges equivalent gets no generated test and a suggested
+`# fermut: ignore[...]` marker for you to review. For the others, its
+explanation of the difference steers test generation. `--triage audit`
+measures how often it's wrong on your code. See
+[`autofix` → Triage](../reference/cli/autofix.md#triage).
 
 Disable the whole pass with `--no-equiv-detect` or
 `equiv_detect = false`. Useful when you want to see the raw,

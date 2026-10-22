@@ -45,6 +45,9 @@ pub struct PromptContext {
     pub source_snippet: String,
     pub enclosing_symbol: Option<String>,
     pub sample_tests: Vec<SampleTest>,
+    /// How the mutant behaves differently, from the equivalence judge
+    /// (`--triage`): steers the generated test at the actual gap.
+    pub hint: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +63,7 @@ impl PromptContext {
             source_snippet: String::new(),
             enclosing_symbol: None,
             sample_tests: Vec::new(),
+            hint: None,
         }
     }
 }
@@ -108,6 +112,11 @@ fn render_user(m: &Mutant, ctx: &PromptContext) -> String {
                 redact(&s.body),
             ));
         }
+    }
+    if let Some(hint) = &ctx.hint {
+        out.push_str("\nBehavioural difference to test (from a reviewer):\n");
+        out.push_str(&redact(hint.trim()));
+        out.push('\n');
     }
     out.push_str(
         "\nWrite a pytest function that kills this mutation. \
@@ -211,6 +220,7 @@ mod tests {
                 path: "tests/test_calc.py".into(),
                 body: "def test_existing():\n    assert True".into(),
             }],
+            hint: None,
         };
         let req = build_suggest_prompt(&m, &ctx, "claude-test");
         assert_eq!(req.model, "claude-test");
@@ -220,6 +230,24 @@ mod tests {
         assert!(req.user.contains("src/calc.py"));
         assert!(req.user.contains("tests/test_calc.py"));
         assert!(req.system.contains("pytest"));
+    }
+
+    #[test]
+    fn judge_hint_reaches_the_generation_prompt() {
+        let ctx = PromptContext {
+            hint: Some(
+                "fails when x == hi\nAn input that tells them apart: in_range(5, 0, 5)".into(),
+            ),
+            ..PromptContext::empty()
+        };
+        let user = build_suggest_prompt(&mutant(), &ctx, "x").user;
+        assert!(user.contains("Behavioural difference to test"), "{user}");
+        assert!(user.contains("in_range(5, 0, 5)"), "{user}");
+        assert!(
+            !build_suggest_prompt(&mutant(), &PromptContext::empty(), "x")
+                .user
+                .contains("Behavioural difference")
+        );
     }
 
     #[test]

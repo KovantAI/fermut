@@ -52,10 +52,6 @@ impl BytecodeIdentity {
 }
 
 impl EquivDetector for BytecodeIdentity {
-    fn name(&self) -> &'static str {
-        "bytecode-identity"
-    }
-
     fn detect(&self, mutant: &Mutant, source: &str) -> EquivVerdict {
         let mutated = patch_source(source, mutant.range, &mutant.replacement);
         if mutated == source {

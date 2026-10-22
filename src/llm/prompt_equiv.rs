@@ -1,7 +1,7 @@
-//! Prompt builder for Layer 5 — the LLM equivalence judge.
+//! Prompt builder for the LLM equivalence judge ([`crate::equiv::llm`]).
 //!
 //! Returns an [`LlmRequest`] whose system message constrains the model to a
-//! strict JSON envelope so [`crate::equiv::llm::LlmJudge`] can parse without
+//! strict JSON envelope so the judge can parse without
 //! markdown gymnastics. Comments in the surrounding source are stripped
 //! before being sent, both because they bloat the prompt and because a
 //! `# this is equivalent` comment in user code is otherwise a free
@@ -10,10 +10,6 @@
 use super::client::LlmRequest;
 use super::redact::redact;
 use crate::mutator::Mutant;
-
-/// Bump when the prompt wording changes in a way that should invalidate
-/// cached verdicts. Embedded in the cache key by [`crate::equiv::llm`].
-pub const PROMPT_TEMPLATE_VERSION: u32 = 1;
 
 const SYSTEM: &str = "You are a Python static-analysis assistant deciding whether a mutated \
 piece of code is BEHAVIORALLY EQUIVALENT to the original — i.e. produces the same return value, \

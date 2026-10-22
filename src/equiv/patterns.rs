@@ -51,10 +51,6 @@ impl AstPatterns {
 }
 
 impl EquivDetector for AstPatterns {
-    fn name(&self) -> &'static str {
-        "ast-patterns"
-    }
-
     fn detect(&self, mutant: &Mutant, source: &str) -> EquivVerdict {
         match mutant.operator {
             Operator::ArithOpSwap => check_arith(mutant, source),

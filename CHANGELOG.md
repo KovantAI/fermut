@@ -25,6 +25,15 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   node ids (what `pytest --fermut` passes). Such runs aren't recorded in
   history.
 - `pytest --fermut-verify-baseline`.
+- `fermut autofix --triage skip|audit` and `fermut suggest --triage …`: an
+  LLM equivalence judge triages each survivor before a test is generated
+  (one extra, cached call). With `skip`, a survivor judged equivalent gets
+  no test (autofix outcome `likely-equivalent`) and a suggested
+  `# fermut: ignore[...]` marker; for the others, the judge's explanation of
+  the behavioural difference goes into the generation prompt. `audit`
+  still generates for every survivor and reports how many judged-equivalent
+  ones were killed anyway. Off by default; the mutation score never
+  changes.
 
 ### Changed
 - **`minimal` is the default operator profile.** Ordering compares and

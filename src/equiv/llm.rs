@@ -1,106 +1,196 @@
-//! Layer 5 — LLM equivalence judge.
+//! LLM equivalence judge, used as survivor **triage** in `fermut autofix` and
+//! `fermut suggest` (`--triage skip|audit`). Never part of the scoring
+//! pipeline: a model's opinion can't prove equivalence, so the mutation score
+//! is untouched. What it buys is effort: a survivor the judge calls equivalent
+//! isn't worth a test-generation call, and for one it calls different, its
+//! explanation (and counterexample) tells the generator what to test. Meta's
+//! ACH runs the same LLM-as-judge step before writing tests.
 //!
-//! Calls a [`crate::llm::LlmClient`] with the prompt from
-//! [`crate::llm::prompt_equiv`] and turns the model's strict-JSON response
-//! into an [`EquivVerdict`]. Off by default; opt in via
-//! `EquivPipeline::with_llm(...)`.
+//! Three outcomes, kept apart on purpose:
 //!
-//! ## Confidence clamp
+//! - [`Triage::Equivalent`]: the model says equivalent, with no counterexample
+//!   and confidence at least [`MIN_EQUIVALENT_CONFIDENCE`].
+//! - [`Triage::Different`]: the model says not equivalent.
+//! - [`Triage::Unknown`]: the call failed, the answer didn't parse, it
+//!   contradicted itself (equivalent *with* a counterexample), or it said
+//!   equivalent without enough confidence. Callers proceed as if untriaged.
 //!
-//! Models systematically over-report confidence on equivalence questions.
-//! We accept the verdict only when the model self-reports `>= MIN_CONFIDENCE`
-//! and we clamp the reported number into a calibrated band
-//! `[CLAMP_LOW, CLAMP_HIGH]` before handing it to the aggregator. The band
-//! is wide enough that a high-confidence LLM verdict still needs a
-//! corroborating signal (pattern, probe) to clear the pipeline's 0.85
-//! threshold — by design.
-//!
-//! ## Failure handling
-//!
-//! Any non-success path — transport error, schema mismatch, refusal,
-//! counterexample-present-but-equivalent-true — collapses to
-//! [`EquivVerdict::NotEquivalent`]. The layer is precision-biased; silence
-//! is the safe default.
+//! Prompt: [`crate::llm::prompt_equiv`] (precision-biased, comments stripped,
+//! secrets redacted), with the enclosing function as context. Responses go
+//! through the same cache as `suggest`, so re-triaging costs nothing.
 
-use std::sync::Arc;
+use std::sync::Mutex;
 
-use super::{EquivDetector, EquivVerdict};
-use crate::llm::{prompt_equiv::build_equivalence_prompt, LlmClient};
+use serde::Serialize;
+
+use crate::llm::cache::LlmCache;
+use crate::llm::prompt::{cache_key, file_sha256, PromptContext};
+use crate::llm::prompt_equiv::build_equivalence_prompt;
+use crate::llm::{complete_cached, ClientCell, LlmCallOpts, TriageMode};
 use crate::mutator::Mutant;
 
-/// Floor on the model's self-reported confidence. Below this, treat the
-/// response as no-signal regardless of `equivalent` flag.
-const MIN_REPORTED_CONFIDENCE: f32 = 0.80;
+/// Minimum self-reported confidence for an `Equivalent` verdict. High on
+/// purpose: a wrong "equivalent" hides a real test gap, a missed one only
+/// costs a generation call. ponytail: a constant; make it a flag once
+/// `--triage audit` data says where the precision knee is.
+const MIN_EQUIVALENT_CONFIDENCE: f32 = 0.9;
 
-/// Calibration band that the model's confidence is clamped into before
-/// being handed to the pipeline aggregator. Re-fit per model after the
-/// first 100 labelled judgements (see eval-corpus section in the design
-/// doc).
-const CLAMP_LOW: f32 = 0.50;
-const CLAMP_HIGH: f32 = 0.80;
+/// Context lines on each side of the mutant when it isn't inside a `def`.
+const FALLBACK_SURROUND_LINES: usize = 20;
 
-/// Default surrounding-source window (lines on each side of the mutation).
-const DEFAULT_SURROUND_LINES: usize = 20;
+/// Longest enclosing function sent whole; longer ones fall back to the
+/// surrounding window so a huge function can't blow up the prompt.
+const MAX_FUNCTION_LINES: usize = 200;
 
-pub struct LlmJudge {
-    client: Arc<dyn LlmClient>,
-    model: String,
-    surround_lines: usize,
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Triage {
+    Equivalent {
+        reason: String,
+        confidence: f32,
+    },
+    Different {
+        reason: String,
+        counterexample: Option<String>,
+    },
+    Unknown {
+        why: String,
+    },
 }
 
-impl LlmJudge {
-    pub fn new(client: Arc<dyn LlmClient>) -> Self {
-        Self {
-            client,
-            model: crate::llm::DEFAULT_MODEL.to_string(),
-            surround_lines: DEFAULT_SURROUND_LINES,
+impl Triage {
+    /// What to tell the test generator, when the judge found a difference.
+    pub(crate) fn generation_hint(&self) -> Option<String> {
+        let Triage::Different {
+            reason,
+            counterexample,
+        } = self
+        else {
+            return None;
+        };
+        let mut hint = reason.trim().to_string();
+        if let Some(c) = counterexample {
+            hint.push_str(&format!("\nAn input that tells them apart: {c}"));
         }
+        (!hint.trim().is_empty()).then_some(hint)
     }
 
-    pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        self.model = model.into();
-        self
-    }
-
-    pub fn with_surround_lines(mut self, n: usize) -> Self {
-        self.surround_lines = n;
-        self
+    pub(crate) fn summary(&self, cached: bool) -> TriageSummary {
+        let (verdict, reason, counterexample, confidence) = match self {
+            Triage::Equivalent { reason, confidence } => {
+                ("equivalent", reason.clone(), None, Some(*confidence))
+            }
+            Triage::Different {
+                reason,
+                counterexample,
+            } => ("different", reason.clone(), counterexample.clone(), None),
+            Triage::Unknown { why } => ("unknown", why.clone(), None, None),
+        };
+        TriageSummary {
+            verdict,
+            reason,
+            counterexample,
+            confidence,
+            cached,
+        }
     }
 }
 
-impl EquivDetector for LlmJudge {
-    fn name(&self) -> &'static str {
-        "llm-judge"
-    }
+/// The triage verdict as `autofix` / `suggest` report it (JSON contract).
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct TriageSummary {
+    /// `equivalent`, `different` or `unknown`.
+    pub verdict: &'static str,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counterexample: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+    pub cached: bool,
+}
 
-    fn detect(&self, mutant: &Mutant, source: &str) -> EquivVerdict {
-        let snippet = surround(source, mutant.line as usize, self.surround_lines);
-        let req = build_equivalence_prompt(mutant, &snippet, None, &self.model);
-        let resp = match self.client.complete(&req) {
-            Ok(r) => r,
-            Err(_) => return EquivVerdict::NotEquivalent,
+/// Ask the judge whether `m` is equivalent to the original. `source` is the
+/// unmutated file. Returns the verdict and whether it came from the cache.
+pub(crate) fn triage(
+    m: &Mutant,
+    source: &str,
+    opts: &LlmCallOpts,
+    client_cell: &ClientCell,
+    cache: &Mutex<LlmCache>,
+) -> (Triage, bool) {
+    let context = enclosing_function(source, m.line as usize)
+        .unwrap_or_else(|| surround(source, m.line as usize, FALLBACK_SURROUND_LINES));
+    let req = build_equivalence_prompt(m, &context, None, &opts.model);
+    let sha = file_sha256(&m.file).unwrap_or_default();
+    let key = cache_key(&m.id, &sha, &format!("{}\n{}", req.system, req.user));
+    let (response, cached) = complete_cached(&req, key, opts, client_cell, cache);
+    let verdict = match response {
+        Ok(text) => classify(&text),
+        Err(e) => Triage::Unknown {
+            why: format!("judge call failed: {e}"),
+        },
+    };
+    (verdict, cached)
+}
+
+/// The pre-generation step `autofix` and `suggest` share. Under `mode`,
+/// triage `m`, put a "different" verdict's explanation into `ctx.hint`, and
+/// say whether to skip generation (`skip` mode, judged equivalent). Returns
+/// the verdict to report (`None` when triage is off).
+pub(crate) fn before_generation(
+    mode: TriageMode,
+    m: &Mutant,
+    ctx: &mut PromptContext,
+    opts: &LlmCallOpts,
+    client_cell: &ClientCell,
+    cache: &Mutex<LlmCache>,
+) -> (Option<TriageSummary>, bool) {
+    if mode == TriageMode::Off {
+        return (None, false);
+    }
+    let (verdict, cached) = match std::fs::read_to_string(&m.file) {
+        Ok(source) => triage(m, &source, opts, client_cell, cache),
+        Err(e) => (
+            Triage::Unknown {
+                why: format!("reading {}: {e}", m.file.display()),
+            },
+            false,
+        ),
+    };
+    ctx.hint = verdict.generation_hint();
+    let skip = mode == TriageMode::Skip && matches!(verdict, Triage::Equivalent { .. });
+    (Some(verdict.summary(cached)), skip)
+}
+
+/// The inline marker that tells fermut to stop generating this mutant, for a
+/// user who agrees it's equivalent (`docs/reference/operators/inline-ignore.md`).
+pub(crate) fn ignore_marker(file: impl std::fmt::Display, line: u32, operator: &str) -> String {
+    format!("{file}:{line}  # fermut: ignore[{operator}]")
+}
+
+fn classify(text: &str) -> Triage {
+    let Some(v) = parse_verdict(text) else {
+        return Triage::Unknown {
+            why: "judge response was not the expected JSON".into(),
         };
-        let Some(parsed) = parse_verdict(&resp) else {
-            return EquivVerdict::NotEquivalent;
-        };
-        // Contract: a counterexample means equivalent must be false.
-        // Treat the contradiction as no-signal rather than trusting either
-        // half of an inconsistent response.
-        if parsed.equivalent && parsed.counterexample.is_some() {
-            return EquivVerdict::NotEquivalent;
-        }
-        if !parsed.equivalent {
-            return EquivVerdict::NotEquivalent;
-        }
-        if parsed.confidence < MIN_REPORTED_CONFIDENCE {
-            return EquivVerdict::NotEquivalent;
-        }
-        let clamped = clamp(parsed.confidence, CLAMP_LOW, CLAMP_HIGH);
-        EquivVerdict::LikelyEquivalent {
-            confidence: clamped,
-            reason: parsed.reason,
-            source: "llm-judge",
-        }
+    };
+    match (v.equivalent, v.counterexample) {
+        (true, Some(_)) => Triage::Unknown {
+            why: "judge contradicted itself (equivalent, with a counterexample)".into(),
+        },
+        (true, None) if v.confidence < MIN_EQUIVALENT_CONFIDENCE => Triage::Unknown {
+            why: format!(
+                "judge leaned equivalent at confidence {:.2} (< {MIN_EQUIVALENT_CONFIDENCE})",
+                v.confidence
+            ),
+        },
+        (true, None) => Triage::Equivalent {
+            reason: v.reason,
+            confidence: v.confidence,
+        },
+        (false, counterexample) => Triage::Different {
+            reason: v.reason,
+            counterexample,
+        },
     }
 }
 
@@ -117,8 +207,7 @@ fn parse_verdict(text: &str) -> Option<ParsedVerdict> {
     if end <= start {
         return None;
     }
-    let blob = &text[start..=end];
-    let v: serde_json::Value = serde_json::from_str(blob).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text[start..=end]).ok()?;
     let equivalent = v.get("equivalent")?.as_bool()?;
     let confidence = v.get("confidence")?.as_f64()? as f32;
     if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
@@ -142,14 +231,34 @@ fn parse_verdict(text: &str) -> Option<ParsedVerdict> {
     })
 }
 
-fn clamp(x: f32, lo: f32, hi: f32) -> f32 {
-    if x < lo {
-        lo
-    } else if x > hi {
-        hi
-    } else {
-        x
+/// The `def` (or `async def`) block enclosing 1-based `line`: the nearest
+/// less-indented `def` above it, through the last line indented deeper than
+/// that `def`. `None` at module or class scope, or when the function is
+/// longer than [`MAX_FUNCTION_LINES`].
+fn enclosing_function(source: &str, line: usize) -> Option<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let idx = line.checked_sub(1).filter(|&i| i < lines.len())?;
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let mut floor = indent(lines[idx]);
+    let def = (0..=idx).rev().find(|&i| {
+        let l = lines[i];
+        if l.trim().is_empty() || (i != idx && indent(l) >= floor) {
+            return false;
+        }
+        floor = floor.min(indent(l));
+        let t = l.trim_start();
+        t.starts_with("def ") || t.starts_with("async def ")
+    })?;
+    // Decorators above the def belong to it.
+    let mut start = def;
+    while start > 0 && lines[start - 1].trim_start().starts_with('@') {
+        start -= 1;
     }
+    let def_indent = indent(lines[def]);
+    let end = (def + 1..lines.len())
+        .find(|&i| !lines[i].trim().is_empty() && indent(lines[i]) <= def_indent)
+        .unwrap_or(lines.len());
+    (end - start <= MAX_FUNCTION_LINES).then(|| lines[start..end].join("\n"))
 }
 
 fn surround(source: &str, line: usize, span: usize) -> String {
@@ -167,43 +276,46 @@ fn surround(source: &str, line: usize, span: usize) -> String {
 mod tests {
     use super::*;
     use crate::llm::client::LlmRequest;
+    use crate::llm::LlmClient;
     use crate::mutator::Operator;
     use anyhow::{anyhow, Result};
     use ruff_text_size::{TextRange, TextSize};
     use std::path::PathBuf;
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     struct CannedClient {
-        response: Mutex<Result<String, String>>,
+        response: std::result::Result<String, String>,
+        calls: AtomicUsize,
         last_user: Mutex<Option<String>>,
     }
 
     impl CannedClient {
-        fn ok(body: &str) -> Self {
-            Self {
-                response: Mutex::new(Ok(body.to_string())),
+        fn ok(body: &str) -> Arc<Self> {
+            Arc::new(Self {
+                response: Ok(body.to_string()),
+                calls: AtomicUsize::new(0),
                 last_user: Mutex::new(None),
-            }
+            })
         }
-        fn err(msg: &str) -> Self {
-            Self {
-                response: Mutex::new(Err(msg.to_string())),
+        fn err(msg: &str) -> Arc<Self> {
+            Arc::new(Self {
+                response: Err(msg.to_string()),
+                calls: AtomicUsize::new(0),
                 last_user: Mutex::new(None),
-            }
+            })
         }
     }
 
     impl LlmClient for CannedClient {
         fn complete(&self, req: &LlmRequest) -> Result<String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
             *self.last_user.lock().unwrap() = Some(req.user.clone());
-            match &*self.response.lock().unwrap() {
-                Ok(s) => Ok(s.clone()),
-                Err(e) => Err(anyhow!(e.clone())),
-            }
+            self.response.clone().map_err(|e| anyhow!(e))
         }
     }
 
-    fn mutant() -> Mutant {
+    fn mutant(line: u32) -> Mutant {
         Mutant {
             id: "t".into(),
             file: PathBuf::from("t.py"),
@@ -211,122 +323,141 @@ mod tests {
             range: TextRange::new(TextSize::from(0), TextSize::from(1)),
             original: "+".into(),
             replacement: "-".into(),
-            line: 1,
-            stmt_line: 1,
+            line,
+            stmt_line: line,
             site: None,
         }
     }
 
+    fn opts(no_cache: bool) -> LlmCallOpts {
+        LlmCallOpts {
+            model: "m".into(),
+            no_cache,
+            cache_path: std::env::temp_dir().join(format!(
+                "fermut-triage-{}-{}.json",
+                std::process::id(),
+                no_cache
+            )),
+        }
+    }
+
+    fn run(client: &Arc<CannedClient>, source: &str, line: u32) -> Triage {
+        let cell: ClientCell = std::sync::OnceLock::new();
+        let _ = cell.set(Ok(client.clone() as Arc<dyn LlmClient>));
+        triage(
+            &mutant(line),
+            source,
+            &opts(true),
+            &cell,
+            &Mutex::new(LlmCache::default()),
+        )
+        .0
+    }
+
+    const SRC: &str = "def f(x):\n    return x + 0\n";
+
     #[test]
-    fn high_confidence_equivalent_maps_to_clamped_likely() {
-        let client = Arc::new(CannedClient::ok(
-            r#"{"equivalent": true, "confidence": 0.99, "reason": "identity", "counterexample": null}"#,
-        ));
-        let judge = LlmJudge::new(client);
-        let v = judge.detect(&mutant(), "def f(x): return x + 0\n");
-        match v {
-            EquivVerdict::LikelyEquivalent {
-                confidence, source, ..
-            } => {
-                assert!((confidence - CLAMP_HIGH).abs() < 1e-6);
-                assert_eq!(source, "llm-judge");
+    fn confident_equivalent_is_equivalent() {
+        let c = CannedClient::ok(
+            r#"{"equivalent": true, "confidence": 0.95, "reason": "adds zero", "counterexample": null}"#,
+        );
+        assert_eq!(
+            run(&c, SRC, 2),
+            Triage::Equivalent {
+                reason: "adds zero".into(),
+                confidence: 0.95
             }
-            other => panic!("expected LikelyEquivalent, got {other:?}"),
+        );
+    }
+
+    #[test]
+    fn hesitant_equivalent_is_unknown() {
+        let c = CannedClient::ok(
+            r#"{"equivalent": true, "confidence": 0.85, "reason": "maybe", "counterexample": null}"#,
+        );
+        assert!(matches!(run(&c, SRC, 2), Triage::Unknown { .. }));
+    }
+
+    #[test]
+    fn not_equivalent_is_different_with_a_generation_hint() {
+        let c = CannedClient::ok(
+            r#"{"equivalent": false, "confidence": 0.9, "reason": "off by one at the boundary", "counterexample": "f(3)"}"#,
+        );
+        let t = run(&c, SRC, 2);
+        assert_eq!(
+            t,
+            Triage::Different {
+                reason: "off by one at the boundary".into(),
+                counterexample: Some("f(3)".into())
+            }
+        );
+        let hint = t.generation_hint().unwrap();
+        assert!(
+            hint.contains("off by one") && hint.contains("f(3)"),
+            "{hint}"
+        );
+    }
+
+    #[test]
+    fn contradiction_malformed_and_transport_errors_are_unknown() {
+        for c in [
+            CannedClient::ok(
+                r#"{"equivalent": true, "confidence": 0.99, "reason": "?", "counterexample": "x=1"}"#,
+            ),
+            CannedClient::ok("no json here"),
+            CannedClient::ok(
+                r#"{"equivalent": true, "confidence": 1.7, "reason": "x", "counterexample": null}"#,
+            ),
+            CannedClient::err("boom"),
+        ] {
+            let t = run(&c, SRC, 2);
+            assert!(matches!(t, Triage::Unknown { .. }), "{t:?}");
+            assert!(t.generation_hint().is_none());
         }
     }
 
     #[test]
-    fn equivalent_false_maps_to_not_equivalent() {
-        let client = Arc::new(CannedClient::ok(
-            r#"{"equivalent": false, "confidence": 0.95, "reason": "off by one", "counterexample": "1"}"#,
-        ));
-        let judge = LlmJudge::new(client);
-        assert_eq!(
-            judge.detect(&mutant(), "def f(x): return x + 1\n"),
-            EquivVerdict::NotEquivalent
+    fn a_cached_verdict_makes_no_call() {
+        let c = CannedClient::ok(
+            r#"{"equivalent": false, "confidence": 0.9, "reason": "r", "counterexample": null}"#,
+        );
+        let cell: ClientCell = std::sync::OnceLock::new();
+        let _ = cell.set(Ok(c.clone() as Arc<dyn LlmClient>));
+        let cache = Mutex::new(LlmCache::default());
+        let o = opts(false);
+        let first = triage(&mutant(2), SRC, &o, &cell, &cache);
+        let second = triage(&mutant(2), SRC, &o, &cell, &cache);
+        assert_eq!((first.1, second.1), (false, true));
+        assert_eq!(first.0, second.0);
+        assert_eq!(c.calls.load(Ordering::Relaxed), 1);
+        let _ = std::fs::remove_file(&o.cache_path);
+    }
+
+    #[test]
+    fn prompt_carries_the_whole_enclosing_function() {
+        let c = CannedClient::ok("{}");
+        let src = "import os\n\n@cache\ndef outer(a):\n    b = a * 2\n\n    if b > 3:\n        return b + 1\n    return 0\n\nZ = 1\n";
+        run(&c, src, 8);
+        let user = c.last_user.lock().unwrap().clone().unwrap();
+        assert!(user.contains("@cache\ndef outer(a):"), "{user}");
+        assert!(user.contains("return 0"), "{user}");
+        assert!(
+            !user.contains("import os") && !user.contains("Z = 1"),
+            "{user}"
         );
     }
 
     #[test]
-    fn low_reported_confidence_treated_as_no_signal() {
-        let client = Arc::new(CannedClient::ok(
-            r#"{"equivalent": true, "confidence": 0.4, "reason": "guess", "counterexample": null}"#,
-        ));
-        let judge = LlmJudge::new(client);
-        assert_eq!(
-            judge.detect(&mutant(), "def f(x): return x + 0\n"),
-            EquivVerdict::NotEquivalent
-        );
+    fn enclosing_function_skips_nested_scopes_and_module_level() {
+        let src = "class C:\n    def m(self, x):\n        def inner():\n            return 1\n        return x < 2\n";
+        let f = enclosing_function(src, 5).unwrap();
+        assert!(f.starts_with("    def m(self, x):"), "{f}");
+        assert!(enclosing_function("x = 1\ny = 2\n", 2).is_none());
     }
 
     #[test]
-    fn contradictory_equivalent_true_with_counterexample_rejected() {
-        let client = Arc::new(CannedClient::ok(
-            r#"{"equivalent": true, "confidence": 0.99, "reason": "?", "counterexample": "x=1"}"#,
-        ));
-        let judge = LlmJudge::new(client);
-        assert_eq!(
-            judge.detect(&mutant(), "def f(x): return x + 0\n"),
-            EquivVerdict::NotEquivalent
-        );
-    }
-
-    #[test]
-    fn malformed_json_yields_not_equivalent() {
-        let client = Arc::new(CannedClient::ok("not even json, really"));
-        let judge = LlmJudge::new(client);
-        assert_eq!(
-            judge.detect(&mutant(), "def f(): pass\n"),
-            EquivVerdict::NotEquivalent
-        );
-    }
-
-    #[test]
-    fn out_of_range_confidence_rejected() {
-        let client = Arc::new(CannedClient::ok(
-            r#"{"equivalent": true, "confidence": 1.7, "reason": "x", "counterexample": null}"#,
-        ));
-        let judge = LlmJudge::new(client);
-        assert_eq!(
-            judge.detect(&mutant(), "def f(): pass\n"),
-            EquivVerdict::NotEquivalent
-        );
-    }
-
-    #[test]
-    fn transport_error_yields_not_equivalent() {
-        let client = Arc::new(CannedClient::err("boom"));
-        let judge = LlmJudge::new(client);
-        assert_eq!(
-            judge.detect(&mutant(), "def f(): pass\n"),
-            EquivVerdict::NotEquivalent
-        );
-    }
-
-    #[test]
-    fn confidence_at_floor_clamped_into_band_low() {
-        // Reported 0.80 → above floor; clamped result also 0.80 (band top).
-        let client = Arc::new(CannedClient::ok(
-            r#"{"equivalent": true, "confidence": 0.80, "reason": "ok", "counterexample": null}"#,
-        ));
-        let judge = LlmJudge::new(client);
-        match judge.detect(&mutant(), "def f(): pass\n") {
-            EquivVerdict::LikelyEquivalent { confidence, .. } => {
-                assert!((confidence - CLAMP_HIGH).abs() < 1e-6);
-            }
-            other => panic!("expected LikelyEquivalent, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn surround_handles_line_past_eof_gracefully() {
-        let s = surround("a\nb\nc\n", 99, 2);
-        assert!(s.contains("c"));
-    }
-
-    #[test]
-    fn surround_clips_at_start_of_file() {
-        let s = surround("a\nb\nc\nd\ne\n", 1, 2);
-        assert_eq!(s, "a\nb\nc");
+    fn surround_clips_at_the_file_edges() {
+        assert_eq!(surround("a\nb\nc\nd\ne\n", 1, 2), "a\nb\nc");
+        assert!(surround("a\nb\nc\n", 99, 2).contains('c'));
     }
 }

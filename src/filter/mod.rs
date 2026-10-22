@@ -221,8 +221,11 @@ pub fn build_chain(cfg: &Config) -> Result<Vec<Box<dyn Filter>>> {
     if let Some(ctx) = cfg.coverage_unselected.as_ref().or(cfg.coverage.as_ref()) {
         chain.push(Box::new(coverage::CoverageFilter::new(ctx.clone())));
     }
-    if let (Some(_), Some(narrowed)) = (&cfg.coverage_unselected, &cfg.coverage) {
-        chain.push(Box::new(coverage::SelectionFilter::new(narrowed.clone())));
+    if let (Some(full), Some(narrowed)) = (&cfg.coverage_unselected, &cfg.coverage) {
+        chain.push(Box::new(coverage::SelectionFilter::new(
+            full.clone(),
+            narrowed.clone(),
+        )));
     }
 
     if cfg.ruff_filter {

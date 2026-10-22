@@ -42,6 +42,12 @@ pub(crate) mod test_tree;
 pub(crate) mod util;
 pub(crate) mod watch;
 
+/// Where to report a broken internal assumption. Error messages that mean
+/// "fermut guessed wrong about this project" end with it, and so does the
+/// panic hook in `main.rs`.
+#[doc(hidden)]
+pub const ISSUES_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/issues");
+
 /// The CLI entry point — the crate's only supported public API (`main.rs`).
 pub use cli::Cli;
 

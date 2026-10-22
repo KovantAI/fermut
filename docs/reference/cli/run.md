@@ -295,6 +295,11 @@ root are dropped with a warning.
   that module's selected tests, never the whole module.
 - The run isn't appended to history: a score against a subset of the suite
   isn't comparable with full runs.
+- The baseline check (`verify_baseline`) runs only the selected tests, or
+  the whole suite, with a warning, when there are too many of them to pass
+  on the command line.
+- A selection that covers none of the code under mutation is an error: every
+  mutant would be skipped and the run would pass while testing nothing.
 - It needs coverage data. Without it fermut warns, ignores the file and runs
   every mutant against the whole suite.
 

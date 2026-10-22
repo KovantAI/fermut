@@ -125,6 +125,11 @@ impl CoverageContexts {
         &self.node_root
     }
 
+    /// Every test node id that executed some covered line.
+    pub fn test_ids(&self) -> impl Iterator<Item = &String> {
+        self.test_breadth.keys()
+    }
+
     /// Test node ids that executed `file:line`, or `None` if none recorded.
     /// Caller distinguishes "no contexts → skip mutant" from "selection empty".
     ///

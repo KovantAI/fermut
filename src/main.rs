@@ -9,6 +9,16 @@ use clap::Parser;
 const STACK_SIZE: usize = 256 * 1024 * 1024;
 
 fn main() -> Result<()> {
+    // A panic is a fermut bug, never the user's project: say where to report it.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_hook(info);
+        eprintln!(
+            "\nfermut hit an internal error. This is a fermut bug, not a problem with \
+             your project: please report it, with the message above, at {}",
+            fermut::ISSUES_URL
+        );
+    }));
     std::thread::Builder::new()
         .stack_size(STACK_SIZE)
         .spawn(run)

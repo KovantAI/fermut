@@ -75,6 +75,9 @@ pub struct PytestRunner {
     /// structured result (see [`super::pytest_result`]) instead of parsing
     /// stdout. Off → the exit-code + `-rfE` path only.
     plugin: bool,
+    /// `--select-tests`: the baseline runs only these node ids (the tests
+    /// mutants will be run against), not the whole suite. `None` → full suite.
+    baseline_ids: Option<Vec<String>>,
 }
 
 /// Construction parameters for [`PytestRunner`], bundled so the runner is
@@ -98,6 +101,7 @@ pub struct PytestConfig {
     pub learn_killer: bool,
     pub key_base: PathBuf,
     pub plugin: bool,
+    pub baseline_ids: Option<Vec<String>>,
 }
 
 impl PytestRunner {
@@ -120,6 +124,7 @@ impl PytestRunner {
             learn_killer,
             key_base,
             plugin,
+            baseline_ids,
         } = config;
         // pytest rejects `--hypothesis-seed` outright ("unrecognized
         // arguments") when the Hypothesis plugin isn't installed, which would
@@ -149,6 +154,7 @@ impl PytestRunner {
             learn_killer,
             key_base,
             plugin,
+            baseline_ids,
         }
     }
 
@@ -878,12 +884,35 @@ impl Runner for PytestRunner {
         for arg in &self.extra_args {
             cmd.arg(arg);
         }
-        cmd.arg(&mirror.tests);
+        match self.baseline_ids.as_deref().filter(|ids| fits_argv(ids)) {
+            Some(ids) => {
+                cmd.args(ids);
+            }
+            None => {
+                if self.baseline_ids.is_some() {
+                    tracing::warn!(
+                        "--select-tests: too many selected tests to pass on the command \
+                         line; the baseline runs the whole suite instead"
+                    );
+                }
+                cmd.arg(&mirror.tests);
+            }
+        }
         cmd.current_dir(&mirror.root);
         with_new_process_group(&mut cmd);
         cmd.env("PYTHONPATH", mirror_pythonpath(&mirror)?);
         run_baseline_with_timeout(cmd, self.baseline_timeout)
     }
+}
+
+/// Command-line budget for baseline node ids, well under the OS limit
+/// (Windows: 32K chars for the whole command; macOS: 1 MiB `ARG_MAX`
+/// shared with the environment).
+const ARGV_BUDGET: usize = if cfg!(windows) { 16 * 1024 } else { 256 * 1024 };
+
+/// Whether `ids` fit [`ARGV_BUDGET`] as separate arguments.
+fn fits_argv(ids: &[String]) -> bool {
+    ids.iter().map(|id| id.len() + 1).sum::<usize>() <= ARGV_BUDGET
 }
 
 /// Whether the test interpreter can `import hypothesis`. A probe that can't
@@ -1366,7 +1395,15 @@ mod tests {
             learn_killer: false,
             key_base: PathBuf::from("."),
             plugin: false,
+            baseline_ids: None,
         })
+    }
+
+    #[test]
+    fn baseline_ids_over_the_argv_budget_do_not_fit() {
+        let id = "tests/test_x.py::test_case".to_string();
+        assert!(fits_argv(&vec![id.clone(); 10]));
+        assert!(!fits_argv(&vec![id; ARGV_BUDGET]));
     }
 
     #[cfg(unix)]

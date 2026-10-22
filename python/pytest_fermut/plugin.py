@@ -11,9 +11,10 @@ fermut config (``[tool.fermut]`` / ``fermut.toml``), exactly as for
 A session that selected a subset of the suite (paths, node ids, ``-k``,
 ``-m``, ``--deselect``, ...) is *narrowed*: only its tests are run against the
 mutants (``fermut run --select-tests``), and mutants none of them cover are
-skipped as ``selection``. A session that ran the whole suite green already
-proved what fermut's baseline run would, so that run is skipped
-(``--no-verify-baseline``) unless ``--fermut-verify-baseline`` is given.
+skipped as ``selection``. fermut still runs its baseline (only the selected
+tests, for a narrowed session) inside its mirror: a green pytest session
+doesn't prove the suite is green there (different ``PYTHONPATH``, isolation,
+``FERMUT_CHILD``). ``--fermut-arg=--no-verify-baseline`` skips it.
 
 Inert unless ``--fermut`` is given, inside an xdist worker, and inside any
 suite run fermut itself spawns (``FERMUT_CHILD`` is set), so ``--fermut`` in
@@ -74,13 +75,6 @@ def pytest_addoption(parser):
         action="store_true",
         default=False,
         help="don't refresh per-test coverage with `fermut coverage` first.",
-    )
-    group.addoption(
-        "--fermut-verify-baseline",
-        action="store_true",
-        default=False,
-        help="run fermut's baseline check even after a green session that ran "
-        "the whole suite (by default it is skipped as redundant).",
     )
     group.addoption(
         "--fermut-show",
@@ -153,29 +147,26 @@ _SELECTION_OPTIONS = (
 def _narrowed(config):
     """Whether the session selected less than the whole suite.
 
-    Besides the selection options, every argument's path must be the rootdir
-    or a ``testpaths`` entry: ``pytest tests`` and ``pytest .`` run the whole
-    suite, a file, a node id or a subdirectory (including running pytest from
-    one) does not. Over-detecting is safe: it only costs a narrowed run.
+    Besides the selection options, the arguments must be the rootdir or
+    *every* ``testpaths`` entry: ``pytest .`` runs the whole suite, and so
+    does ``pytest tests`` when ``tests`` is the only entry; one of several
+    entries, a file, a node id or a subdirectory (including running pytest
+    from one) does not. Over-detecting never mis-scores, but a narrowed run
+    isn't recorded in history, so ``testpaths`` is expanded as pytest does.
     """
     if any(config.getoption(name, None) for name in _SELECTION_OPTIONS):
         return True
+    if any("::" in arg for arg in config.args):
+        return True
     root = os.path.realpath(_rootdir(config))
-    whole = {root}
-    for entry in config.getini("testpaths"):
-        whole.update(os.path.realpath(p) for p in glob.glob(os.path.join(root, entry)))
+    entries = {
+        os.path.realpath(p)
+        for entry in config.getini("testpaths")
+        for p in glob.glob(os.path.join(root, entry), recursive=True)
+    }
     cwd = str(config.invocation_params.dir)
-    for arg in config.args:
-        path = arg.split("::", 1)[0]
-        if "::" in arg or os.path.realpath(os.path.join(cwd, path)) not in whole:
-            return True
-    return False
-
-
-def _baseline_proven(config):
-    """Whether this (green) session already ran what fermut's baseline would:
-    the whole suite. Narrowed sessions prove only a subset."""
-    return not config.getoption("fermut_verify_baseline") and not _narrowed(config)
+    args = {os.path.realpath(os.path.join(cwd, arg)) for arg in config.args}
+    return root not in args and args != entries
 
 
 def _absolute_id(root, nodeid):
@@ -262,20 +253,17 @@ def _refresh_coverage(state, config, root):
             state.lines.extend(({}, "  " + line) for line in tail)
 
 
-def _run_command(state, config, report_path, selection_path=None, skip_baseline=False):
+def _run_command(state, config, report_path, selection_path=None):
     cmd = [state.binary, "run", "--python", sys.executable, "--json", report_path]
     if selection_path:
         cmd += ["--select-tests", selection_path]
-    extra = config.getoption("fermut_arg")
-    if skip_baseline and "--no-verify-baseline" not in extra:
-        cmd.append("--no-verify-baseline")
     since = config.getoption("fermut_since")
     if since:
         cmd += ["--since", since]
     min_score = config.getoption("fermut_min_score")
     if min_score is not None:
         cmd += ["--fail-under", repr(min_score)]
-    cmd += extra
+    cmd += config.getoption("fermut_arg")
     return cmd
 
 
@@ -380,13 +368,7 @@ def pytest_sessionfinish(session, exitstatus):
             # stdout carries fermut's human report, rebuilt below from the
             # JSON; stderr (progress, warnings, errors) streams through.
             rc = subprocess.call(
-                _run_command(
-                    state,
-                    config,
-                    report_path,
-                    selection_path,
-                    skip_baseline=_baseline_proven(config),
-                ),
+                _run_command(state, config, report_path, selection_path),
                 cwd=root,
                 env=_child_env(config),
                 stdout=subprocess.DEVNULL,

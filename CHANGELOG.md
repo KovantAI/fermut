@@ -15,7 +15,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   `selection`. The summary shows the counts. Works under pytest-xdist.
 - `fermut run --select-tests FILE`: restrict the run to the listed pytest
   node ids (what `pytest --fermut` passes). Such runs aren't recorded in
-  history.
+  history. Its baseline check runs only the selected tests, so a broken
+  test outside the selection doesn't abort the run. A selection that covers
+  none of the code under mutation is an error, not a vacuous N/A pass.
+- Errors that can mean fermut guessed wrong about a project (a baseline that
+  fails only under fermut, merge conflicts between shards of one config,
+  coverage paths all outside the project root) and any panic now point to
+  the GitHub issue tracker.
 - `pytest --fermut-verify-baseline`.
 
 ### Changed

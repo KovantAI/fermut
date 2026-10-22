@@ -267,7 +267,24 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
                     tests = selected.len(),
                     "narrowing test selection to --select-tests"
                 );
-                coverage = Some(full.select(&selected));
+                let narrowed = full.select(&selected);
+                // An empty narrowing skips every mutant as `selection` and the
+                // run scores N/A — a green gate that tested nothing. Refuse it.
+                if narrowed.test_ids().next().is_none() {
+                    anyhow::bail!(
+                        "--select-tests {}: per the coverage data (node root {}), none of \
+                         its {} test(s) execute the code under mutation, so no mutant \
+                         would be tested. Select tests that exercise it, or refresh \
+                         coverage (`fermut coverage`). If they do exercise it and \
+                         coverage is fresh, fermut mis-mapped the node ids: please \
+                         report it at {}",
+                        list.display(),
+                        full.node_root().display(),
+                        selected.len(),
+                        crate::ISSUES_URL,
+                    );
+                }
+                coverage = Some(narrowed);
                 coverage_unselected = Some(full);
             }
             None => warn!(
@@ -1030,6 +1047,28 @@ mod tests {
         assert!(full.tests_for(&src, 2).is_some());
         assert!(narrowed.tests_for(&src, 2).is_none());
         assert!(narrowed.tests_for(&src, 1).is_some());
+    }
+
+    #[test]
+    fn select_tests_covering_nothing_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("pyproject.toml"), "").unwrap();
+        let src = root.join("m.py");
+        std::fs::write(&src, "x = 1\n").unwrap();
+        let cov = root.join("coverage.json");
+        let doc = serde_json::json!({"files": {src.to_str().unwrap(): {"contexts": {
+            "1": ["tests/test_a.py::t|run"],
+        }}}});
+        std::fs::write(&cov, doc.to_string()).unwrap();
+        let sel = root.join("sel.txt");
+        std::fs::write(&sel, "tests/test_other.py::t\n").unwrap();
+        let mut f = empty_filter();
+        f.coverage = Some(cov);
+        f.select_tests = Some(sel);
+        let err = call_with_filter(root, None, f).unwrap_err().to_string();
+        assert!(err.contains("no mutant would be tested"), "{err}");
+        assert!(err.contains(crate::ISSUES_URL), "{err}");
     }
 
     #[test]

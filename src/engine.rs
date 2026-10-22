@@ -531,7 +531,10 @@ fn preflight_baseline(cfg: &Config, runner: &dyn Runner, mutants: &[Arc<Mutant>]
              falsely high mutation score. Fix the suite (run your tests \
              until they pass) or, if you accept the risk, re-run with \
              --no-verify-baseline.\n\n\
-             --- test output (tail) ---\n{output}"
+             If the same tests pass when you run them yourself, fermut's \
+             copy of the project broke them: please report it at {}\n\n\
+             --- test output (tail) ---\n{output}",
+            crate::ISSUES_URL
         )),
     }
 }

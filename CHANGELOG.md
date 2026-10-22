@@ -33,7 +33,8 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   (`>`, `>=`, `and` ↔ `or`). Expect scores to drop where a suite never tries
   one kind of input; mutant counts rise 0.3–6%. The switch shows in
   `fermut trend` as a config change, not a regression. The subsumption gate
-  found 0 violations on 245 fully checked sites across 11 repos. Set
+  found 0 violations on 366 fully checked sites across 13 repos, 23 of
+  them comparing numpy or pandas values. Set
   `operators = "classic"` (or `--operators classic`) to keep the old
   operators.
 - `pytest --fermut` skips fermut's baseline run after a green session that

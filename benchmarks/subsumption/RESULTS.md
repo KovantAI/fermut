@@ -65,12 +65,14 @@ fresh venvs (the fixture venvs broke when Homebrew removed python@3.13).
 | more-itertools | v10.5.0 | 137 | 58 | 0 |
 | jinja2 | 3.1.6 | 116 | 33 | 0 |
 | flask | 3.1.3 | 50 | 19 | 0 |
-| werkzeug | 3.1.8 | 171 | 34 | 0 |
+| werkzeug | 3.1.8 | 188 | 42 | 0 |
 | uncertainties (float, NaN, numpy) | 1764673 | 37 | 22 | 0 |
 | pyquaternion (numpy) | 99025c1 | 20 | 0 | 0 |
-| **total** | | **531** | **166** | **0** |
+| **total** | | **548** | **174** | **0** |
 
-With the 2026-10-07 run: **831 sites, 245 checked, 0 violations, 11 repos.**
+werkzeug: rerun after the mirror node-id fix (124 mutants had errored with
+pytest exit 4; first run: 171 sites, 34 checked). With the 2026-10-07 run:
+**848 sites, 253 checked, 0 violations, 11 repos.**
 
 ## Mutant count (classic → minimal), `fermut list`
 
@@ -91,9 +93,10 @@ With the 2026-10-07 run: **831 sites, 245 checked, 0 violations, 11 repos.**
   `--deselect tests/test_reqctx.py::test_bad_environ_raises_bad_request`
   (fails against the installed werkzeug).
 - werkzeug: `--deselect "tests/test_serving.py::test_server[unix socket]"`
-  (AF_UNIX path too long under the temp dir). 124 mutants errored with pytest
-  exit 4 (usage error) under node-id selection. The gate skips errored
-  mutants, so they only shrink the checked count. Cause not investigated.
+  (AF_UNIX path too long under the temp dir). The first run had 124 mutants
+  error with pytest exit 4: tests parametrized on absolute paths got a
+  different node id in fermut's mirror. Fixed (mirror node-id rewriting);
+  the table shows the rerun.
 - uncertainties: `-e .[arrays]` plus scipy.
 - pyquaternion: `numpy<2` (it predates numpy 2); tests live in
   `pyquaternion/test`, excluded from mutation. Its suite killed every minimal
@@ -101,3 +104,46 @@ With the 2026-10-07 run: **831 sites, 245 checked, 0 violations, 11 repos.**
 - Run with a private `TMPDIR`: a leftover mode-000 directory in the shared
   `pytest-of-$USER` temp root made pytest warn at session end, which the
   pallets repos' `filterwarnings = error` turns into a failed baseline.
+
+---
+
+# numpy gate (2026-10-22)
+
+pyquaternion checked no site, so numpy was still unchecked. Two more repos,
+picked for numpy/pandas comparisons and strong suites:
+
+| repo | ref | sites | checked | violations |
+|---|---|---|---|---|
+| pvlib-python | v0.13.1 | 349 | 49 | 0 |
+| pint | 0.24.4 | 125 | 64 | 0 |
+| **total** | | **474** | **113** | **0** |
+
+**All runs: 1322 sites, 366 checked, 0 violations, 13 repos.**
+
+## Which checked sites compare numpy values
+
+`probe_types.py` rewrites every single-op ordering compare (`<` `<=` `>`
+`>=`) in a copy of the package into a call that records its operands' runtime
+types, then runs the suite once (pass counts identical to the unprobed run).
+Joined to the gate by position:
+
+| checked site compares | pvlib | pint | total |
+|---|---|---|---|
+| numpy arrays | 16 | 0 | 16 |
+| pandas objects | 5 | 0 | 5 |
+| numpy scalars | 0 | 2 | 2 |
+| plain Python values | 7 | 14 | 21 |
+| `and`/`or` sites (not probed) | 21 | 48 | 69 |
+
+So 23 checked sites compare numpy or pandas values at runtime, with 0
+violations. Of pvlib's 301 compare sites the suite executes, 242 compare
+numpy/pandas values; most aren't checked because a `minimal` mutant survives
+there (the model makes no claim).
+
+## Setup notes
+
+- pvlib: `.[test]`, `pytest<9` (its string `testpaths` is rejected by
+  pytest 9), `pandas<3` (`'M'` offset alias removed).
+- pint: `.[testbase,numpy]`, `numpy<2` (0.24.4 calls `np.trapz`); tests live
+  in `pint/testsuite`, excluded from mutation;
+  `--ignore=pint/testsuite/benchmarks` (pytest-benchmark, ~150 s).

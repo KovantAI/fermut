@@ -94,12 +94,13 @@ used as a plain `True`/`False`. Python doesn't always do that:
 ## Evidence { #evidence }
 
 `benchmarks/subsumption/gate.py` runs every form of each site and checks that
-whenever the `minimal` mutants all die, the others die too. Across 11 repos
+whenever the `minimal` mutants all die, the others die too. Across 13 repos
 (click, pyjwt, starlette, typer, markupsafe, more-itertools, jinja2, flask,
-werkzeug, uncertainties, pyquaternion): 831 sites, 245 with every `minimal`
-mutant killed, **0 violations**. uncertainties adds float-heavy comparisons
-(22 checked sites). numpy comparisons stay thin: pyquaternion's suite killed
-no site fully. Details in `benchmarks/subsumption/RESULTS.md`.
+werkzeug, uncertainties, pyquaternion, pvlib, pint): 1322 sites, 366 with
+every `minimal` mutant killed, **0 violations**. A runtime type probe shows
+23 of the checked sites compare numpy arrays, pandas objects or numpy scalars,
+and uncertainties adds float-heavy comparisons. Details in
+`benchmarks/subsumption/RESULTS.md`.
 
 ## Folded survivors
 

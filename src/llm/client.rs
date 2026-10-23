@@ -232,7 +232,12 @@ impl LlmClient for AnthropicClient {
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| anyhow!("Anthropic API: no attempts made")))
+        Err(last_err.unwrap_or_else(|| {
+            anyhow!(
+                "Anthropic API: no attempts made (a fermut bug: please report it at {})",
+                crate::ISSUES_URL
+            )
+        }))
     }
 }
 

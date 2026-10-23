@@ -47,9 +47,37 @@ The session fails (exit 1) when the mutation gate fails, the same gate
    from your fermut config (`[tool.fermut]` or `fermut.toml`), exactly as for
    `fermut run`.
 
-pytest's own test selection (paths, `-k`, `-m`) only decides whether the
-suite is green. It doesn't narrow the mutation run, which picks tests per
-mutant from coverage.
+## Narrowing to the tests you selected
+
+When you select part of the suite, only the selected tests run against the
+mutants:
+
+```sh
+pytest tests/test_parser.py --fermut     # a file (or a node id)
+pytest -k "parse and not slow" --fermut  # -k, -m, --deselect, --ignore, --lf, --sw
+```
+
+Mutants that only unselected tests cover are skipped as `selection`; they
+count like coverage-skipped mutants, not in the score. The summary says how
+many tests and mutants that left:
+
+```text
+mutation score 75.3% (22 selected tests, 2120 mutants outside the selection): 320 killed, 105 survived, …
+```
+
+The score answers "do *these* tests kill the mutants they reach?" A mutant
+that another test kills can survive here. Because it isn't comparable with a
+full run, a narrowed run is **not recorded in history** (`fermut trend`).
+
+`pytest`, `pytest .` and `pytest <every testpaths entry>` run the whole
+suite and are not narrowed; naming only some `testpaths` entries is. Running pytest from a subdirectory is narrowed, since pytest
+then collects only that directory. Narrowing needs per-test coverage
+(pytest-cov); without it fermut warns and runs every mutant against the whole
+suite.
+
+Under the hood the plugin writes the selected node ids to a file and passes
+`fermut run --select-tests <file>`; see
+[`--select-tests`](../reference/cli/run.md#select-tests).
 
 ## Options
 
@@ -72,8 +100,15 @@ specific fermut binary.
   coverage, per-mutant runs) with `FERMUT_CHILD=1`, and the plugin stays
   inert there. Putting `--fermut` in `addopts` is safe, though it makes every
   pytest run a mutation run.
+- **A second baseline run.** fermut runs the unmutated suite once more
+  before mutating, inside its own mirror, to refuse a red suite. Your green
+  session doesn't prove that: the mirror runs with a different `PYTHONPATH`
+  and isolation, so a test that leans on a file the mirror doesn't copy can
+  pass for you and fail there, and every mutant it covers would then score
+  as killed. A narrowed session's baseline runs only the selected tests.
+  `--fermut-arg=--no-verify-baseline` skips it, at that risk.
 - **pytest-xdist.** Only the controller runs fermut, once. fermut parallelizes
-  mutants itself.
+  mutants itself. Narrowing works under `-n` too.
 - **`--collect-only`** never triggers a mutation run.
 - **Exit codes.** A failed gate exits 1, like failing tests. If fermut itself
   fails before producing a report (bad config, missing tools), the session

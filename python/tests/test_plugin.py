@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import sys
 
 import pytest
@@ -149,3 +150,185 @@ def test_missing_binary_is_a_usage_error(
 def test_find_fermut_prefers_env(monkeypatch, tmp_path):
     monkeypatch.setenv("FERMUT_BIN", str(tmp_path / "custom"))
     assert plugin.find_fermut() == str(tmp_path / "custom")
+
+
+# --- narrowing to the session's selection (`fermut run --select-tests`) ---
+
+HAS_XDIST = importlib.util.find_spec("xdist") is not None
+
+
+@pytest.fixture
+def two_files(pytester):
+    pytester.makepyfile(
+        test_a="import pytest\n\n"
+        "def test_one():\n    pass\n\n"
+        "@pytest.mark.parametrize('x', [1, 2])\n"
+        "def test_param(x):\n    pass\n",
+        test_b="import pytest\n\n@pytest.mark.slow\ndef test_two():\n    pass\n",
+    )
+    return pytester
+
+
+def _selected(fake_fermut, pytester):
+    """The run's selection as rootdir-relative node ids, or None."""
+    selected = fake_fermut.run_call()["selected"]
+    if selected is None:
+        return None
+    root = os.path.realpath(pytester.path)
+    rel = []
+    for line in selected:
+        path, sep, rest = line.partition("::")
+        assert os.path.isabs(path), line
+        rel.append(os.path.relpath(os.path.realpath(path), root) + sep + rest)
+    return rel
+
+
+@pytest.mark.parametrize("args", [(), (".",), ("{root}",)])
+def test_whole_suite_is_not_narrowed(two_files, fake_fermut, run_pytest, args):
+    args = [a.format(root=two_files.path) for a in args]
+    run_pytest(two_files, "--fermut", "--fermut-no-coverage", *args)
+    assert "--select-tests" not in fake_fermut.run_call()["argv"]
+
+
+def test_testpaths_are_the_whole_suite(pytester, fake_fermut, run_pytest):
+    pytester.makeini("[pytest]\ntestpaths = tests\n")
+    pytester.mkdir("tests")
+    pytester.path.joinpath("tests", "test_t.py").write_text("def test_t():\n    pass\n")
+    for args in [(), ("tests",)]:
+        fake_fermut.log.unlink(missing_ok=True)
+        run_pytest(pytester, "--fermut", "--fermut-no-coverage", *args)
+        assert fake_fermut.run_call()["selected"] is None, args
+
+
+def test_one_of_several_testpaths_is_narrowed(pytester, fake_fermut, run_pytest):
+    pytester.makeini("[pytest]\ntestpaths = tests integration\n")
+    for name in ("tests", "integration"):
+        pytester.mkdir(name).joinpath(f"test_{name}.py").write_text(
+            f"def test_{name}():\n    pass\n"
+        )
+    run_pytest(pytester, "--fermut", "--fermut-no-coverage", "tests")
+    assert _selected(fake_fermut, pytester) == ["tests/test_tests.py::test_tests"]
+    fake_fermut.log.unlink()
+    run_pytest(pytester, "--fermut", "--fermut-no-coverage", "integration", "tests")
+    assert fake_fermut.run_call()["selected"] is None
+
+
+def test_recursive_testpaths_glob_is_the_whole_suite(pytester, fake_fermut, run_pytest):
+    # pytest expands testpaths with recursive=True; so must the plugin.
+    pytester.makeini("[pytest]\ntestpaths = src/**/tests\n")
+    for pkg in ("a", "a/b"):
+        d = pytester.path.joinpath("src", pkg, "tests")
+        d.mkdir(parents=True)
+        d.joinpath(f"test_{pkg.replace('/', '_')}.py").write_text(
+            "def test_t():\n    pass\n"
+        )
+    run_pytest(pytester, "--fermut", "--fermut-no-coverage")
+    assert fake_fermut.run_call()["selected"] is None
+
+
+def test_running_from_a_subdirectory_is_narrowed(
+    pytester, fake_fermut, run_pytest, monkeypatch
+):
+    # No args → pytest collects the invocation dir, here a subdirectory.
+    pytester.makeini("[pytest]\n")
+    pytester.makepyfile(test_top="def test_top():\n    pass\n")
+    sub = pytester.mkdir("sub")
+    sub.joinpath("test_sub.py").write_text("def test_sub():\n    pass\n")
+    monkeypatch.chdir(sub)
+    run_pytest(pytester, "--fermut", "--fermut-no-coverage")
+    assert _selected(fake_fermut, pytester) == ["sub/test_sub.py::test_sub"]
+
+
+@pytest.mark.parametrize(
+    "args, expected",
+    [
+        (
+            ("test_a.py",),
+            [
+                "test_a.py::test_one",
+                "test_a.py::test_param[1]",
+                "test_a.py::test_param[2]",
+            ],
+        ),
+        (
+            ("test_a.py::test_param",),
+            ["test_a.py::test_param[1]", "test_a.py::test_param[2]"],
+        ),
+        (("-k", "param and 2"), ["test_a.py::test_param[2]"]),
+        (("-m", "slow"), ["test_b.py::test_two"]),
+        (
+            ("--deselect", "test_a.py::test_one"),
+            [
+                "test_a.py::test_param[1]",
+                "test_a.py::test_param[2]",
+                "test_b.py::test_two",
+            ],
+        ),
+    ],
+)
+def test_selection_narrows_the_run(two_files, fake_fermut, run_pytest, args, expected):
+    result = run_pytest(two_files, "--fermut", "--fermut-no-coverage", *args)
+    assert sorted(_selected(fake_fermut, two_files)) == expected
+    result.stdout.fnmatch_lines(
+        [
+            f"mutation score *({len(expected)} selected tests, 3 mutants outside the selection)*"
+        ]
+    )
+
+
+def test_selection_file_is_removed(two_files, fake_fermut, run_pytest):
+    run_pytest(two_files, "--fermut", "--fermut-no-coverage", "-k", "one")
+    argv = fake_fermut.run_call()["argv"]
+    assert not os.path.exists(argv[argv.index("--select-tests") + 1])
+
+
+def test_narrowed_session_without_fermut_is_inert(two_files, fake_fermut, run_pytest):
+    result = run_pytest(two_files, "-k", "one")
+    assert result.ret == 0
+    assert fake_fermut.calls() == []
+
+
+@pytest.mark.skipif(not HAS_XDIST, reason="needs pytest-xdist")
+def test_xdist_selection_comes_from_the_workers(two_files, fake_fermut, monkeypatch):
+    # Under -n the controller collects nothing; the ids come from the workers.
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    monkeypatch.setenv(
+        "PYTHONPATH", here + os.pathsep + os.environ.get("PYTHONPATH", "")
+    )
+    result = two_files.runpytest_subprocess(
+        "-p",
+        "pytest_fermut.plugin",
+        "-p",
+        "no:cacheprovider",
+        "-n",
+        "2",
+        "--fermut",
+        "--fermut-no-coverage",
+        "-k",
+        "param",
+    )
+    assert result.ret == 0, result.stdout.str()
+    assert sorted(_selected(fake_fermut, two_files)) == [
+        "test_a.py::test_param[1]",
+        "test_a.py::test_param[2]",
+    ]
+
+
+# --- fermut's baseline run ---
+
+
+def test_whole_suite_session_keeps_the_baseline(green_suite, fake_fermut, run_pytest):
+    # A green session outside fermut's mirror doesn't prove it green inside.
+    run_pytest(green_suite, "--fermut", "--fermut-no-coverage")
+    assert "--no-verify-baseline" not in fake_fermut.run_call()["argv"]
+
+
+def test_no_verify_baseline_is_not_passed_twice(green_suite, fake_fermut, run_pytest):
+    # fermut (clap) rejects a repeated flag.
+    run_pytest(
+        green_suite,
+        "--fermut",
+        "--fermut-no-coverage",
+        "--fermut-arg=--no-verify-baseline",
+    )
+    assert fake_fermut.run_call()["argv"].count("--no-verify-baseline") == 1

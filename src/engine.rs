@@ -531,7 +531,10 @@ fn preflight_baseline(cfg: &Config, runner: &dyn Runner, mutants: &[Arc<Mutant>]
              falsely high mutation score. Fix the suite (run your tests \
              until they pass) or, if you accept the risk, re-run with \
              --no-verify-baseline.\n\n\
-             --- test output (tail) ---\n{output}"
+             If the same tests pass when you run them yourself, fermut's \
+             copy of the project broke them: please report it at {}\n\n\
+             --- test output (tail) ---\n{output}",
+            crate::ISSUES_URL
         )),
     }
 }
@@ -564,8 +567,15 @@ fn evaluate_all_with(
     let progress = make_progress_bar(mutants.len() as u64);
     let pool = build_pool(cfg.jobs)?;
     let outcomes: Vec<MutantOutcome> = pool.install(|| {
+        // One mutant per rayon task: a default split hands each thread a
+        // contiguous range it runs to the end, unstealable. Mutant cost is
+        // clumpy (skips are free, a file's survivors slow), so one heavy
+        // range left a single worker grinding alone — `--select-tests` on
+        // pyjwt spent 78 of 128 s with one pytest running. Per-item tasks
+        // cost nothing next to a ~300 ms pytest spawn.
         mutants
             .par_iter()
+            .with_max_len(1)
             .map(|m| {
                 let outcome = step(m);
                 if let Some(pb) = &progress {
@@ -1701,6 +1711,7 @@ mod tests {
             since: None,
             coverage_path: None,
             coverage: None,
+            coverage_unselected: None,
             hypothesis_seed: None,
             pytest_args: Vec::new(),
             cache: false,
@@ -1990,6 +2001,18 @@ mod tests {
             cache_audit_rate: audit_rate.unwrap_or(0.0),
             ..fx.config(RunnerKind::Pytest, true)
         };
+        eval_with(fx, &cfg, runner, cache, src_hash, audit_rate.is_some())
+    }
+
+    fn eval_with(
+        fx: &ScopeFixture,
+        cfg: &Config,
+        runner: &dyn Runner,
+        cache: &Mutex<Cache>,
+        src_hash: &str,
+        audit: bool,
+    ) -> (MutantOutcome, CacheStats) {
+        let cfg = cfg.clone();
         let m = Arc::new(fx.mutant(1));
         let mut hashes = HashMap::new();
         hashes.insert(m.file.clone(), src_hash.to_string());
@@ -2013,7 +2036,7 @@ mod tests {
             killer_hits: &killer_hits,
         };
         let mut outcomes = vec![evaluate(&ctx, &m)];
-        if audit_rate.is_some() {
+        if audit {
             audit_killer_hits(&cfg, &ctx, &[m], &mut outcomes).unwrap();
         }
         (outcomes.pop().unwrap(), stats)
@@ -2080,6 +2103,41 @@ mod tests {
     fn killer_removed_from_covering_set_misses() {
         let (runner, _) = killed_then(|fx| fx.write_coverage(&[(1, &[TEST_B])]));
         assert_eq!(runner.runs(), 1, "test_a no longer covers the mutant");
+    }
+
+    #[test]
+    fn killer_outside_select_tests_is_no_killer_hit() {
+        // A full run caches a kill by test_a. A `--select-tests` run that
+        // selected only test_b must not report test_a's kill: the narrowed
+        // contexts don't list test_a, so `compute_killer_scope` refuses it.
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &ScriptRunner::killing(Some(TEST_A)),
+            &cache,
+            "src-1",
+            None,
+        );
+        let full = fx.config(RunnerKind::Pytest, true);
+        let narrowed = full
+            .coverage
+            .as_ref()
+            .unwrap()
+            .select(&std::iter::once(TEST_B.to_string()).collect());
+        let cfg = Config {
+            coverage_unselected: full.coverage.clone(),
+            coverage: Some(narrowed),
+            ..full
+        };
+        let runner = ScriptRunner::surviving();
+        let (outcome, stats) = eval_with(&fx, &cfg, &runner, &cache, "src-1", false);
+        assert_eq!(runner.runs(), 1, "must re-run against the selection");
+        assert_eq!(stats.killer_hits.load(Ordering::Relaxed), 0);
+        assert!(
+            matches!(outcome, MutantOutcome::Survived { .. }),
+            "{outcome:?}"
+        );
     }
 
     #[test]

@@ -374,6 +374,80 @@ fn run_outcomes(proj: &std::path::Path, extra: &[&str]) -> Vec<serde_json::Value
 
 #[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn select_tests_skips_mutants_outside_the_selection() {
+    // `--select-tests` (what `pytest tests/test_a.py --fermut` passes): a
+    // mutant only an unselected test covers is skipped as `selection`, never
+    // run (so never a pytest exit 5 / `error`); a selected test still kills.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n",
+    );
+    write("src/pkg/__init__.py", "");
+    write(
+        "src/pkg/m.py",
+        "def fa(x):\n    return x + 1\n\n\ndef fb(x):\n    return x * 3\n",
+    );
+    write(
+        "tests/test_a.py",
+        "from pkg.m import fa\n\n\ndef test_fa():\n    assert fa(1) == 2\n",
+    );
+    write(
+        "tests/test_b.py",
+        "from pkg.m import fb\n\n\ndef test_fb():\n    assert fb(2) == 6\n",
+    );
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(proj)
+        .assert()
+        .success();
+    let selection = proj.join("selected.txt");
+    let test_a = proj.canonicalize().unwrap().join("tests/test_a.py");
+    std::fs::write(&selection, format!("{}::test_fa\n", test_a.display())).unwrap();
+
+    // Break the unselected test after recording coverage: the baseline
+    // verifies only the selection, so this must not abort the run.
+    write(
+        "tests/test_b.py",
+        "from pkg.m import fb\n\n\ndef test_fb():\n    assert fb(2) == 7\n",
+    );
+
+    let outcomes = run_outcomes(proj, &["--select-tests", selection.to_str().unwrap()]);
+    let at_line = |line: u32| -> Vec<&serde_json::Value> {
+        outcomes
+            .iter()
+            .filter(|o| o["mutant"]["line"] == line)
+            .collect()
+    };
+    assert!(
+        outcomes.iter().all(|o| o["status"] != "error"),
+        "no mutant may error: {outcomes:#?}"
+    );
+    let fa = at_line(2);
+    assert!(
+        !fa.is_empty() && fa.iter().all(|o| o["status"] == "killed"),
+        "{fa:#?}"
+    );
+    let fb = at_line(6);
+    assert!(
+        !fb.is_empty()
+            && fb
+                .iter()
+                .all(|o| o["status"] == "skipped" && o["filter"] == "selection"),
+        "fb is covered only by unselected test_b: {fb:#?}"
+    );
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn conftest_import_break_is_killed_and_plugin_matches_fallback() {
     // A conftest that imports the mutated module fails before pytest starts a
     // session (exit 4, no node-id error). That must be a kill, both through

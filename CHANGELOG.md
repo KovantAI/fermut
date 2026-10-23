@@ -8,6 +8,28 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+### Added
+- `pytest --fermut` narrows to the session's selection: with a path, node
+  id, `-k`, `-m`, `--deselect` and similar, only the selected tests run
+  against the mutants, and mutants none of them cover are skipped as
+  `selection`. The summary shows the counts. Works under pytest-xdist.
+- `fermut run --select-tests FILE`: restrict the run to the listed pytest
+  node ids (what `pytest --fermut` passes). Such runs aren't recorded in
+  history. Its baseline check runs only the selected tests, so a broken
+  test outside the selection doesn't abort the run. A selection that covers
+  none of the code under mutation is an error, not a vacuous N/A pass.
+- Errors that can mean fermut guessed wrong about a project (a baseline that
+  fails only under fermut, merge conflicts between shards of one config,
+  coverage paths all outside the project root) and any panic now point to
+  the GitHub issue tracker.
+
+### Fixed
+- Uneven worker load: mutants were split into fixed contiguous ranges per
+  worker, so a range of slow mutants could leave one pytest running alone
+  for most of the run. Each mutant is now scheduled on its own. A full
+  more-itertools run dropped from ~515 s to ~310 s and a narrowed pyjwt run
+  from 128 s to 48 s, with the same scores.
+
 ## [0.6.1] - 2026-10-21
 
 ### Added

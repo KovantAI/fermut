@@ -17,11 +17,17 @@ FAKE_FERMUT = textwrap.dedent(
     import json, os, sys
 
     args = sys.argv[1:]
+    # The plugin deletes the --select-tests file after the run: log its lines.
+    selected = None
+    if "--select-tests" in args:
+        with open(args[args.index("--select-tests") + 1]) as fh:
+            selected = fh.read().splitlines()
     with open(os.environ["FAKE_FERMUT_LOG"], "a") as fh:
         fh.write(json.dumps({{
             "argv": args,
             "child": os.environ.get("FERMUT_CHILD"),
             "rust_log": os.environ.get("RUST_LOG"),
+            "selected": selected,
         }}) + "\\n")
     if args[0] != "run":
         sys.exit(0)
@@ -40,7 +46,9 @@ FAKE_FERMUT = textwrap.dedent(
         "summary": {{"total": 10, "killed": 8, "survived": len(survivors), "timed_out": 0,
                     "skipped": 0, "equivalent": 0, "errored": 0,
                     "mutation_score": 100.0 * 8 / (8 + len(survivors)), "scored": 8 + len(survivors)}},
-        "outcomes": [{{"status": "survived", "mutant": m}} for m in survivors],
+        "outcomes": [{{"status": "survived", "mutant": m}} for m in survivors]
+        + ([{{"status": "skipped", "filter": "selection", "mutant": {{}}}}] * 3
+           if selected is not None else []),
     }}
     with open(args[args.index("--json") + 1], "w") as fh:
         json.dump(report, fh)

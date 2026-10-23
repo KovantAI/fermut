@@ -53,8 +53,10 @@ use crate::mutator::Mutant;
 
 mod order;
 mod parse;
+mod select;
 
 pub(crate) use parse::{has_table, is_sqlite};
+pub use select::{read_selection, SelectionFilter, SELECTION_FILTER};
 
 /// Per-file, per-line index of test node ids that touched the line.
 #[derive(Debug, Default)]
@@ -121,6 +123,11 @@ impl CoverageContexts {
     /// resolves to `node_root().join("path/to/test_x.py")`.
     pub fn node_root(&self) -> &Path {
         &self.node_root
+    }
+
+    /// Every test node id that executed some covered line.
+    pub fn test_ids(&self) -> impl Iterator<Item = &String> {
+        self.test_breadth.keys()
     }
 
     /// Test node ids that executed `file:line`, or `None` if none recorded.
@@ -202,7 +209,7 @@ mod tests {
         p
     }
 
-    fn make_mutant(file: PathBuf, line: u32) -> Mutant {
+    pub(super) fn make_mutant(file: PathBuf, line: u32) -> Mutant {
         crate::mutator::Mutant {
             id: "id".into(),
             file,

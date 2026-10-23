@@ -301,6 +301,17 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
     let record_kill_sets = cfg.record_kill_sets.is_some();
     let kill_set_sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let key_base = cfg.source_root.clone();
+    // `--select-tests`: verify only the tests mutants will run against — a
+    // broken test outside the selection must not abort a narrowed run.
+    let baseline_ids = cfg
+        .coverage_unselected
+        .as_ref()
+        .and(cfg.coverage.as_ref())
+        .map(|narrowed| {
+            let mut ids: Vec<String> = narrowed.test_ids().cloned().collect();
+            ids.sort();
+            ids
+        });
     // `rstest` is a pytest-CLI-compatible drop-in, so it reuses the pytest
     // runner wholesale — only the framework executable name differs.
     let pytest_compatible = |exe: &'static str| -> Box<dyn Runner> {
@@ -323,6 +334,7 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
             learn_killer: cfg.cache && cfg.coverage.is_some(),
             key_base: key_base.clone(),
             plugin: cfg.pytest_plugin,
+            baseline_ids: baseline_ids.clone(),
         }))
     };
     match cfg.runner {

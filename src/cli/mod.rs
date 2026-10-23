@@ -116,6 +116,14 @@ pub(crate) struct FilterArgs {
     #[arg(long, conflicts_with = "coverage")]
     pub no_coverage: bool,
 
+    /// Only use these tests: a file with one pytest node id per line
+    /// (`<abs test file>::<name>`, or relative to the project root). Mutants
+    /// that only unselected tests cover are skipped as `selection`. Requires
+    /// coverage; the run isn't recorded in history (its score isn't
+    /// comparable). `pytest --fermut` passes the session's selection here.
+    #[arg(long, value_name = "FILE", conflicts_with = "no_coverage")]
+    pub select_tests: Option<PathBuf>,
+
     /// Include experimental operators (exception swaps, loop iteration).
     #[arg(long)]
     pub experimental: bool,

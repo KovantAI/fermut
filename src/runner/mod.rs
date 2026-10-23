@@ -368,9 +368,12 @@ pub(crate) struct Mirror {
     pub root: PathBuf,
     pub tests: PathBuf,
     pub project_root: PathBuf,
-    /// `project_root` resolved: the form pytest prints, since it starts from
-    /// `getcwd()`. Paths inside node ids recorded in the real project use it.
+    /// `project_root` resolved, as it appears inside a node id (pytest starts
+    /// from `getcwd()` and escapes the id; see [`id_path`]). Ids recorded in
+    /// the real project embed it.
     project_real: String,
+    /// `root` as it appears inside a node id, for mapping ids.
+    root_shown: String,
     /// pytest's temp root for runs in this mirror (`PYTEST_DEBUG_TEMPROOT`),
     /// beside the project copy. See [`configure_mirror_cmd`].
     pub pytest_temproot: PathBuf,
@@ -451,17 +454,19 @@ impl Mirror {
         let module = plugin_dir.join(format!("{}.py", pytest_result::REPORTER_MODULE));
         std::fs::write(&module, pytest_result::REPORTER_SOURCE)
             .with_context(|| format!("writing {}", module.display()))?;
-        let project_real = project_root
-            .canonicalize()
-            .unwrap_or_else(|_| project_root.clone())
-            .to_string_lossy()
-            .into_owned();
+        let project_real = id_path(
+            &project_root
+                .canonicalize()
+                .unwrap_or_else(|_| project_root.clone()),
+        );
+        let root_shown = id_path(&root);
         Ok(Self {
             _workdir: workdir,
             root,
             tests: tests_in_mirror,
             project_root,
             project_real,
+            root_shown,
             pytest_temproot,
             plugin_dir,
         })
@@ -475,11 +480,11 @@ impl Mirror {
     /// `::` is rewritten; the file part is relative.
     pub(crate) fn id_into_mirror(&self, id: &str) -> String {
         match id.split_once("::") {
-            Some((file, rest)) if rest.contains(&self.project_real) => format!(
+            Some((file, rest)) => format!(
                 "{file}::{}",
-                rest.replace(&self.project_real, &self.root.to_string_lossy())
+                replace_path(rest, &self.project_real, &self.root_shown)
             ),
-            _ => id.to_string(),
+            None => id.to_string(),
         }
     }
 
@@ -487,8 +492,74 @@ impl Mirror {
     /// mirror path mapped back to the real project's, so node ids it names
     /// (killer, kill-set, `hung_in`) match the recorded coverage ids.
     pub(crate) fn text_from_mirror(&self, text: &str) -> String {
-        text.replace(&*self.root.to_string_lossy(), &self.project_real)
+        replace_path(text, &self.root_shown, &self.project_real)
     }
+}
+
+/// A resolved path as it appears inside a pytest node id: in Python's form
+/// ([`shown_path`]), escaped the way pytest escapes string parametrize
+/// values (`unicode_escape`: `C:\\x`, `Jos\xe9`).
+fn id_path(p: &Path) -> String {
+    py_unicode_escape(&shown_path(p))
+}
+
+/// Python's `s.encode("unicode_escape").decode("ascii")`.
+fn py_unicode_escape(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            ' '..='~' => out.push(c),
+            c if (c as u32) < 0x100 => write!(out, "\\x{:02x}", c as u32).unwrap(),
+            c if (c as u32) < 0x10000 => write!(out, "\\u{:04x}", c as u32).unwrap(),
+            c => write!(out, "\\U{:08x}", c as u32).unwrap(),
+        }
+    }
+    out
+}
+
+/// A resolved path as Python prints it. Windows `canonicalize` returns the
+/// verbatim form (`\\?\C:\x`, `\\?\UNC\host\share`); `os.getcwd()` gives
+/// `C:\x` / `\\host\share`, so ids would never match the verbatim string.
+fn shown_path(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if let Some(unc) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+    }
+}
+
+/// `text` with each occurrence of the path `from` replaced by `to`, where the
+/// match is a whole path: `/repo` maps `/repo/x` and `[/repo]`, not the
+/// sibling `/repo2/x` or the relative `fixtures/repo/x`. (A parametrize value
+/// that is itself `/repo/...` is still mapped; text can't tell them apart.)
+fn replace_path(text: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for (i, _) in text.match_indices(from) {
+        let end = i + from.len();
+        // `-` joins parametrize values (`[1-/repo/x]`), so it may precede.
+        let starts = text[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || "_./\\".contains(c)));
+        let ends = text[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_alphanumeric() || "_-.".contains(c)));
+        if starts && ends {
+            out.push_str(&text[last..i]);
+            out.push_str(to);
+            last = end;
+        }
+    }
+    out.push_str(&text[last..]);
+    out
 }
 
 /// RAII guard: restores the original mirror file bytes on drop.
@@ -725,8 +796,8 @@ fn clone_file(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_patch, copy_dir_all, sanitize_python_env, tail_lines, Mirror, PatchGuard, CHILD_ENV,
-        SANITIZED_ENV_VARS,
+        apply_patch, copy_dir_all, py_unicode_escape, replace_path, sanitize_python_env,
+        shown_path, tail_lines, Mirror, PatchGuard, CHILD_ENV, SANITIZED_ENV_VARS,
     };
 
     #[test]
@@ -1031,6 +1102,48 @@ mod tests {
             "tests/test_f.py::test_x[1]"
         );
         assert_eq!(mirror.id_into_mirror("-x"), "-x");
+        // A sibling directory sharing the prefix is not the project.
+        let sibling = format!("tests/test_f.py::test_dir[{}2/a.txt]", real.display());
+        assert_eq!(mirror.id_into_mirror(&sibling), sibling);
+    }
+
+    /// Only whole paths are mapped: not a sibling sharing the prefix, not a
+    /// relative path that happens to contain it.
+    #[test]
+    fn replace_path_maps_whole_paths_only() {
+        let r = |t: &str| replace_path(t, "/app", "/m");
+        assert_eq!(r("t::k[/app/x]"), "t::k[/m/x]");
+        assert_eq!(r("t::k[1-/app/x]"), "t::k[1-/m/x]");
+        assert_eq!(r("/app"), "/m");
+        assert_eq!(
+            r("t::k[fixtures/app/cfg.json]"),
+            "t::k[fixtures/app/cfg.json]"
+        );
+        assert_eq!(r("t::k[/app2/x]"), "t::k[/app2/x]");
+        assert_eq!(r("t::k[x/app]"), "t::k[x/app]");
+    }
+
+    #[test]
+    fn shown_path_drops_the_windows_verbatim_prefix() {
+        let s = |p: &str| shown_path(std::path::Path::new(p));
+        assert_eq!(s(r"\\?\C:\proj"), r"C:\proj");
+        assert_eq!(s(r"\\?\UNC\host\share\proj"), r"\\host\share\proj");
+        assert_eq!(s("/private/var/proj"), "/private/var/proj");
+    }
+
+    /// Node ids carry string params `unicode_escape`d, so the mapped paths
+    /// must be too (Windows separators, non-ASCII home dirs).
+    #[test]
+    fn id_paths_are_escaped_like_pytest_ids() {
+        assert_eq!(py_unicode_escape(r"C:\proj"), r"C:\\proj");
+        assert_eq!(py_unicode_escape("/Users/José"), r"/Users/Jos\xe9");
+        assert_eq!(py_unicode_escape("a\tΩ😀"), r"a\t\u03a9\U0001f600");
+        assert_eq!(py_unicode_escape("/repo/x y'\""), "/repo/x y'\"");
+        // Width switches at U+0100 and U+10000.
+        assert_eq!(
+            py_unicode_escape("\u{ff}\u{100}\u{ffff}\u{10000}"),
+            r"\xff\u0100\uffff\U00010000"
+        );
     }
 
     /// pytest prints test ids relative to its resolved cwd, so a mirror path

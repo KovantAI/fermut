@@ -514,8 +514,15 @@ struct ResultFile(PathBuf);
 
 impl ResultFile {
     fn read(&self, mirror: &super::Mirror) -> Option<RunResult> {
+        // Map the parsed ids, not the raw JSON: there the path is escaped
+        // (Windows `\\`), so a text replace would miss it or break a string.
         let bytes = std::fs::read(&self.0).ok()?;
-        RunResult::parse(&mirror.text_from_mirror(&String::from_utf8_lossy(&bytes)))
+        let mut r = RunResult::parse(&String::from_utf8_lossy(&bytes))?;
+        let map = |id: &mut String| *id = mirror.text_from_mirror(id);
+        r.collect_errors.iter_mut().for_each(map);
+        r.failures.iter_mut().for_each(map);
+        r.unfinished.iter_mut().for_each(map);
+        Some(r)
     }
 }
 
@@ -886,7 +893,7 @@ impl Runner for PytestRunner {
         }
         match self.baseline_ids.as_deref().filter(|ids| fits_argv(ids)) {
             Some(ids) => {
-                cmd.args(ids);
+                cmd.args(ids.iter().map(|id| mirror.id_into_mirror(id)));
             }
             None => {
                 if self.baseline_ids.is_some() {
@@ -1631,6 +1638,133 @@ mod tests {
         assert_eq!(o.hung_in(), Some("tests/t.py::loops"));
         let o = r.classify_run(&m, (None, None), None, false, None, "foo.py", "op");
         assert!(matches!(o, MutantOutcome::TimedOut { hung_in: None, .. }));
+    }
+
+    /// An audit runs the patched mirror against the recorded killer alone; a
+    /// failing run reproduces the kill, credited to that killer.
+    #[cfg(unix)]
+    #[test]
+    fn audit_reruns_only_the_killer_in_the_patched_mirror() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(proj.join("tests")).unwrap();
+        std::fs::write(proj.join("pyproject.toml"), "").unwrap();
+        // Stands in for `python -m pytest`: fails, as the killer would.
+        let py = tmp.path().join("python");
+        std::fs::write(&py, "#!/bin/sh\necho FAILED \"$PWD\"\nexit 1\n").unwrap();
+        std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = runner(false, breadth_ctx(&proj));
+        r.tests = proj.join("tests");
+        r.python = Some(py);
+        let m = Arc::new(mutant_in(&proj));
+        let src = std::fs::read(&m.file).unwrap();
+        let o = r.audit(&m, "tests/t.py::k").unwrap().unwrap();
+        assert!(matches!(o, MutantOutcome::Killed { .. }), "{o:?}");
+        assert_eq!(o.killer(), Some("tests/t.py::k"));
+        assert_eq!(
+            std::fs::read(&m.file).unwrap(),
+            src,
+            "patched in the mirror"
+        );
+    }
+
+    /// A lone selected id with no output capture names the killer; several
+    /// ids don't. Ids carrying the project path are passed in mirror form.
+    #[test]
+    fn sole_killer_only_for_a_single_uncaptured_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(proj.join("tests")).unwrap();
+        std::fs::write(proj.join("pyproject.toml"), "").unwrap();
+        let mut r = runner(false, breadth_ctx(&proj));
+        r.tests = proj.join("tests");
+        let mirror = crate::runner::build_mirror(&r.tests, IsolationMode::Copy).unwrap();
+        // Line 2: covered by two tests.
+        let m = Mutant {
+            line: 2,
+            ..mutant_in(&proj)
+        };
+        let many = r
+            .build_mutant_command(&mirror, &m, "foo.py", "op", None)
+            .unwrap();
+        assert_eq!(many.sole, None);
+        let killer = format!("tests/t.py::k[{}/x]", proj.display());
+        let one = r
+            .build_mutant_command(&mirror, &m, "foo.py", "op", Some(&killer))
+            .unwrap();
+        assert_eq!(one.sole.as_deref(), Some(killer.as_str()));
+        let passed = format!("tests/t.py::k[{}/x]", mirror.root.display());
+        assert!(one.cmd.get_args().any(|a| a == passed.as_str()));
+    }
+
+    /// `--select-tests` ids come from the real project; an id embedding its
+    /// path must reach the baseline in mirror form or pytest can't resolve it.
+    #[cfg(unix)]
+    #[test]
+    fn baseline_passes_selected_ids_in_mirror_form() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().canonicalize().unwrap().join("proj");
+        std::fs::create_dir_all(proj.join("tests")).unwrap();
+        std::fs::write(proj.join("pyproject.toml"), "").unwrap();
+        // Stands in for `python -m pytest`: records its argv and the cwd
+        // (the mirror root), then passes.
+        let argv = tmp.path().join("argv");
+        let py = tmp.path().join("python");
+        std::fs::write(
+            &py,
+            format!(
+                "#!/bin/sh\npwd -P > '{0}'\nfor a in \"$@\"; do echo \"$a\"; done >> '{0}'\n",
+                argv.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = runner(false, breadth_ctx(&proj));
+        r.tests = proj.join("tests");
+        r.python = Some(py);
+        let id = |root: &Path| format!("tests/t.py::k[{}/x]", root.display());
+        r.baseline_ids = Some(vec![id(&proj)]);
+        r.baseline().unwrap();
+        let out = std::fs::read_to_string(&argv).unwrap();
+        let mut lines = out.lines();
+        let mirror_root = Path::new(lines.next().unwrap());
+        assert!(lines.any(|a| a == id(mirror_root)), "{out}");
+    }
+
+    /// The reporter's result is read through the mirror: node ids it names
+    /// come back in the real project's path. Mapped after parsing, so a path
+    /// JSON must escape (`"` here, `\` on Windows) still round-trips.
+    #[test]
+    fn read_reported_maps_result_ids_out_of_the_mirror() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().canonicalize().unwrap().join(r#"p"q"#);
+        std::fs::create_dir_all(proj.join("tests")).unwrap();
+        std::fs::write(proj.join("pyproject.toml"), "").unwrap();
+        let mirror = crate::runner::build_mirror(&proj.join("tests"), IsolationMode::Copy).unwrap();
+        let path = next_result_path(tmp.path());
+        let id = |root: &Path| format!("tests/t.py::k[{}/x]", root.display());
+        let event = |ev: &str, nodeid: &Path| {
+            serde_json::json!({"ev": ev, "nodeid": id(nodeid), "pid": 1}).to_string()
+        };
+        std::fs::write(
+            &path,
+            [
+                r#"{"v":1,"ev":"start","pid":1}"#.to_string(),
+                event("collect", &mirror.root),
+                event("test", &mirror.root),
+                event("begin", &mirror.root),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let file = ResultFile(path);
+        let got = read_reported(&mirror, Some(&file), true).unwrap();
+        assert_eq!(got.collect_errors, vec![id(&proj)]);
+        assert_eq!(got.failures, vec![id(&proj)]);
+        assert_eq!(got.unfinished, Some(id(&proj)));
+        assert!(read_reported(&mirror, None, true).is_none());
     }
 
     #[test]

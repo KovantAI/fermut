@@ -69,8 +69,8 @@ The score answers "do *these* tests kill the mutants they reach?" A mutant
 that another test kills can survive here. Because it isn't comparable with a
 full run, a narrowed run is **not recorded in history** (`fermut trend`).
 
-`pytest`, `pytest .` and `pytest <testpaths entry>` run the whole suite and
-are not narrowed. Running pytest from a subdirectory is narrowed, since pytest
+`pytest`, `pytest .` and `pytest <every testpaths entry>` run the whole
+suite and are not narrowed; naming only some `testpaths` entries is. Running pytest from a subdirectory is narrowed, since pytest
 then collects only that directory. Narrowing needs per-test coverage
 (pytest-cov); without it fermut warns and runs every mutant against the whole
 suite.
@@ -88,7 +88,6 @@ Under the hood the plugin writes the selected node ids to a file and passes
 | `--fermut-min-score PCT` | Fail only when the score is below `PCT` (`--fail-under`). |
 | `--fermut-arg ARG` | Pass `ARG` to `fermut run`. Repeatable, e.g. `--fermut-arg=--sample=0.2`. |
 | `--fermut-no-coverage` | Skip the `fermut coverage` refresh. |
-| `--fermut-verify-baseline` | Run fermut's baseline check even after a green whole-suite session. |
 | `--fermut-show N` | List at most `N` survivors (default 10). |
 
 fermut's own logs show warnings and errors only; run `pytest -v` to see its
@@ -101,18 +100,18 @@ specific fermut binary.
   coverage, per-mutant runs) with `FERMUT_CHILD=1`, and the plugin stays
   inert there. Putting `--fermut` in `addopts` is safe, though it makes every
   pytest run a mutation run.
-- **No second baseline run.** fermut normally runs the unmutated suite once
-  before mutating, to refuse a red suite. After a green session that ran the
-  whole suite the plugin skips that run (`--no-verify-baseline`), which is
-  most of the time a warm-cache `pytest --fermut` takes. A narrowed session
-  proves only its subset, so fermut still runs the baseline then. Pass
-  `--fermut-verify-baseline` if fermut's config runs the suite differently
-  from your session (e.g. `runner = "unittest"`, or `pytest_args` that change
-  outcomes).
+- **A second baseline run.** fermut runs the unmutated suite once more
+  before mutating, inside its own mirror, to refuse a red suite. Your green
+  session doesn't prove that: the mirror runs with a different `PYTHONPATH`
+  and isolation, so a test that leans on a file the mirror doesn't copy can
+  pass for you and fail there, and every mutant it covers would then score
+  as killed. A narrowed session's baseline runs only the selected tests.
+  `--fermut-arg=--no-verify-baseline` skips it, at that risk.
 - **Timeout budgets.** With `timeout_factor` in your fermut config (or
-  `--fermut-arg=--timeout-factor=3`), the session's duration stands in for
-  the skipped baseline when sizing each mutant's timeout
-  (`--baseline-secs`). See
+  `--fermut-arg=--timeout-factor=3`), fermut sizes each mutant's timeout
+  from its baseline run. If you skip that run with
+  `--fermut-arg=--no-verify-baseline`, a whole-suite session's duration
+  stands in (`--baseline-secs`). See
   [Timeout budgets](../reference/cli/run.md#timeout-budgets).
 - **pytest-xdist.** Only the controller runs fermut, once. fermut parallelizes
   mutants itself. Narrowing works under `-n` too.

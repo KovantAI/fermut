@@ -59,7 +59,7 @@ fermut run [PATH] [flags...]
 | `--no-pytest-plugin`        | on                               | Don't load fermut's reporter plugin into per-mutant pytest/rstest runs; infer outcomes from exit codes and output instead. See [Result reporter plugin](#result-reporter-plugin). |
 | `--max-time <SECS>`         | off (whole catalogue)            | Wall-clock ceiling on the testing phase. Evaluates highest-value mutants first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` (excluded from the score) instead of run — in-flight mutants finish. A predictable time ceiling for PR gates. See [Time-boxed runs](#time-boxed-runs-max-time). |
 | `--timeout-factor <F>`      | off (flat `--timeout`)           | Size each mutant's timeout from the baseline run: `min(--timeout, F × baseline wall + 5 s)`, so hung mutants stop in seconds. Needs the baseline. See [Timeout budgets](#timeout-budgets). |
-| `--baseline-secs <SECS>`    | none                             | Wall time of a green whole-suite run you already did. With `--no-verify-baseline` it sizes `--timeout-factor` timeouts in place of fermut's own baseline (which wins when it runs). `pytest --fermut` passes its session time. |
+| `--baseline-secs <SECS>`    | none                             | Wall time of a green whole-suite run you already did. With `--no-verify-baseline` it sizes `--timeout-factor` timeouts in place of fermut's own baseline (which wins when it runs). `pytest --fermut --fermut-arg=--no-verify-baseline` passes its session time. |
 | `--record-kill-sets <PATH>` | off                              | [experimental] Write each mutant's full kill-set (every covering test that fails) to `PATH` as JSONL, the input to [`subsume`](subsume.md) and [`hom`](hom.md). Drops pytest's `-x`, so it is much slower. Pytest/rstest only. Pair with `--no-cache`: a cache hit runs nothing and records nothing. |
 | `--only-dominators`         | off                              | [experimental] Run dominator mutants from `.fermut/dominators.json` and infer the kills they imply; for nightly sweeps, refused with `--diff-only`/`--since`/`--record-kill-sets`. See [`fermut subsume`](subsume.md#fermut-run-only-dominators-experimental). |
 | `--audit-inferred <RATE>`   | `0.05`                           | Requires `--only-dominators` (the parser rejects it otherwise). Under `--only-dominators`: fraction of inferred kills re-run against their killing test; any that survives fails the run. |
@@ -187,8 +187,9 @@ limit. With a 1.4 s suite and `F = 3`, mutants get 10 s instead of 30 s.
   scale from, so every mutant uses the flat `--timeout` (fermut warns),
   unless `--baseline-secs SECS` gives the wall time of a green whole-suite run
   you already did. [`pytest --fermut`](../../guides/pytest-plugin.md) does
-  this: it skips fermut's baseline and passes its own session time (the summed
-  test time under pytest-xdist, since a mutant runs serially).
+  this when given `--fermut-arg=--no-verify-baseline` on a whole-suite
+  session: it passes its own session time (the summed test time under
+  pytest-xdist, since a mutant runs serially).
 - **History and cache.** The factor is part of the run's configuration, so
   `fermut trend` shows turning it on as a config change. The computed budget
   is not: it moves a little with each baseline and would otherwise invalidate
@@ -326,6 +327,11 @@ root are dropped with a warning.
   that module's selected tests, never the whole module.
 - The run isn't appended to history: a score against a subset of the suite
   isn't comparable with full runs.
+- The baseline check (`verify_baseline`) runs only the selected tests, or
+  the whole suite, with a warning, when there are too many of them to pass
+  on the command line.
+- A selection that covers none of the code under mutation is an error: every
+  mutant would be skipped and the run would pass while testing nothing.
 - It needs coverage data. Without it fermut warns, ignores the file and runs
   every mutant against the whole suite.
 

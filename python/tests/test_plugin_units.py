@@ -51,11 +51,6 @@ def test_help_documents_every_option(pytester):
         "first." in text
     )
     assert (
-        "--fermut-verify-baseline run fermut's baseline check even after a green "
-        "session that ran the whole suite (by default it is skipped as "
-        "redundant)." in text
-    )
-    assert (
         "--fermut-show=N number of surviving mutants to list in the summary "
         "(default 10)." in text
     )
@@ -69,7 +64,6 @@ def test_option_defaults(pytester):
     assert config.getoption("fermut_arg") == []
     assert config.getoption("fermut_no_coverage") is False
     assert config.getoption("fermut_show") == 10
-    assert config.getoption("fermut_verify_baseline") is False
 
 
 def test_option_types(pytester):
@@ -169,6 +163,24 @@ def test_summarize_defaults_missing_counts_to_zero():
             "mutation score n/a: 0 killed, 0 survived, 0 timed out, 0 errored (0 skipped)",
         )
     ]
+
+
+def test_summarize_counts_only_selection_skips():
+    state = plugin._FermutState("fermut")
+    state.selected = ["/r/t.py::a", "/r/t.py::b"]
+    report = {
+        "summary": {},
+        "outcomes": [
+            {"status": "skipped", "filter": "selection"},
+            {"status": "skipped", "filter": "coverage"},
+            {"status": "killed", "filter": "selection"},
+        ],
+    }
+    plugin._summarize(state, report, "/r", 0)
+    assert "(2 selected tests, 1 mutants outside the selection)" in state.lines[0][1]
+    del report["outcomes"]
+    plugin._summarize(state, report, "/r", 0)
+    assert "(2 selected tests, 0 mutants outside the selection)" in state.lines[1][1]
 
 
 def test_summarize_reads_each_count():

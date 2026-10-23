@@ -1082,14 +1082,14 @@ mod tests {
         let real = root.canonicalize().unwrap();
         let recorded = format!(
             "tests/test_f.py::test_dir[{}/tests/res-a.txt]",
-            real.display()
+            super::id_path(&real)
         );
         let in_mirror = mirror.id_into_mirror(&recorded);
         assert_eq!(
             in_mirror,
             format!(
                 "tests/test_f.py::test_dir[{}/tests/res-a.txt]",
-                mirror.root.display()
+                super::id_path(&mirror.root)
             )
         );
         assert_eq!(
@@ -1103,7 +1103,10 @@ mod tests {
         );
         assert_eq!(mirror.id_into_mirror("-x"), "-x");
         // A sibling directory sharing the prefix is not the project.
-        let sibling = format!("tests/test_f.py::test_dir[{}2/a.txt]", real.display());
+        let sibling = format!(
+            "tests/test_f.py::test_dir[{}2/a.txt]",
+            super::id_path(&real)
+        );
         assert_eq!(mirror.id_into_mirror(&sibling), sibling);
     }
 

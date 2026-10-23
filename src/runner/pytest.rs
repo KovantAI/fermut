@@ -1689,12 +1689,12 @@ mod tests {
             .build_mutant_command(&mirror, &m, "foo.py", "op", None)
             .unwrap();
         assert_eq!(many.sole, None);
-        let killer = format!("tests/t.py::k[{}/x]", proj.display());
+        let killer = format!("tests/t.py::k[{}/x]", crate::runner::id_path(&proj));
         let one = r
             .build_mutant_command(&mirror, &m, "foo.py", "op", Some(&killer))
             .unwrap();
         assert_eq!(one.sole.as_deref(), Some(killer.as_str()));
-        let passed = format!("tests/t.py::k[{}/x]", mirror.root.display());
+        let passed = format!("tests/t.py::k[{}/x]", crate::runner::id_path(&mirror.root));
         assert!(one.cmd.get_args().any(|a| a == passed.as_str()));
     }
 
@@ -1739,12 +1739,15 @@ mod tests {
     #[test]
     fn read_reported_maps_result_ids_out_of_the_mirror() {
         let tmp = tempfile::tempdir().unwrap();
-        let proj = tmp.path().canonicalize().unwrap().join(r#"p"q"#);
+        // `"` is not a legal filename character on Windows, where the
+        // escaped `\\` separators already exercise the JSON escaping.
+        let name = if cfg!(windows) { "pq" } else { r#"p"q"# };
+        let proj = tmp.path().canonicalize().unwrap().join(name);
         std::fs::create_dir_all(proj.join("tests")).unwrap();
         std::fs::write(proj.join("pyproject.toml"), "").unwrap();
         let mirror = crate::runner::build_mirror(&proj.join("tests"), IsolationMode::Copy).unwrap();
         let path = next_result_path(tmp.path());
-        let id = |root: &Path| format!("tests/t.py::k[{}/x]", root.display());
+        let id = |root: &Path| format!("tests/t.py::k[{}/x]", crate::runner::id_path(root));
         let event = |ev: &str, nodeid: &Path| {
             serde_json::json!({"ev": ev, "nodeid": id(nodeid), "pid": 1}).to_string()
         };

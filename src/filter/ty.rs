@@ -690,8 +690,13 @@ mod tests {
     #[test]
     fn unparseable_ty_output_bypasses_the_filter() {
         let dir = tempfile::tempdir().unwrap();
-        // `true` prints nothing: not JSON, so the count is unknown.
-        let f = subprocess_filter("true", dir.path().join("c.json"));
+        // A silent `ty`: no output is not JSON, so the count is unknown.
+        // (Not `true`: GNU coreutils' `true --version` prints a banner.)
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.path().join("ty");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let f = subprocess_filter(bin.to_str().unwrap(), dir.path().join("c.json"));
         let src = dir.path().join("m.py");
         std::fs::write(&src, "x = 1\n").unwrap();
         assert_eq!(f.error_count(src.to_str().unwrap()).unwrap(), None);

@@ -16,15 +16,17 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   272 s → 236 s. Verdicts unchanged except that a mutant which only makes
   the suite many times slower counts as timed out (2 of ~3,800 mutants on
   more-itertools). `--baseline-secs` supplies the suite time when fermut's
-  baseline is skipped; `pytest --fermut` passes its session time.
+  baseline is skipped; a whole-suite `pytest --fermut` session passes its
+  time.
 - `pytest --fermut` narrows to the session's selection: with a path, node
   id, `-k`, `-m`, `--deselect` and similar, only the selected tests run
   against the mutants, and mutants none of them cover are skipped as
   `selection`. The summary shows the counts. Works under pytest-xdist.
 - `fermut run --select-tests FILE`: restrict the run to the listed pytest
   node ids (what `pytest --fermut` passes). Such runs aren't recorded in
-  history.
-- `pytest --fermut-verify-baseline`.
+  history. Its baseline check runs only the selected tests, so a broken
+  test outside the selection doesn't abort the run. A selection that covers
+  none of the code under mutation is an error, not a vacuous N/A pass.
 - `fermut autofix --triage skip|audit` and `fermut suggest --triage …`: an
   LLM equivalence judge triages each survivor before a test is generated
   (one extra, cached call). With `skip`, a survivor judged equivalent gets
@@ -34,6 +36,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   still generates for every survivor and reports how many judged-equivalent
   ones were killed anyway. Off by default; the mutation score never
   changes.
+- Errors that can mean fermut guessed wrong about a project (a baseline that
+  fails only under fermut, merge conflicts between shards of one config,
+  coverage paths all outside the project root) and any panic now point to
+  the GitHub issue tracker.
 
 ### Changed
 - **`minimal` is the default operator profile.** Ordering compares and
@@ -46,10 +52,6 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   them comparing numpy or pandas values. Set
   `operators = "classic"` (or `--operators classic`) to keep the old
   operators.
-- `pytest --fermut` skips fermut's baseline run after a green session that
-  ran the whole suite (it already proved the suite green). On pyjwt with a
-  warm cache this halves the run (10.5 s → 5.6 s). `--fermut-verify-baseline`
-  restores it.
 
 ### Deprecated
 - Operator profile name `default`: it now means `classic` and warns. It will

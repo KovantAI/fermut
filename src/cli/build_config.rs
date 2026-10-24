@@ -269,7 +269,24 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
                     tests = selected.len(),
                     "narrowing test selection to --select-tests"
                 );
-                coverage = Some(full.select(&selected));
+                let narrowed = full.select(&selected);
+                // An empty narrowing skips every mutant as `selection` and the
+                // run scores N/A — a green gate that tested nothing. Refuse it.
+                if narrowed.test_ids().next().is_none() {
+                    anyhow::bail!(
+                        "--select-tests {}: per the coverage data (node root {}), none of \
+                         its {} test(s) execute the code under mutation, so no mutant \
+                         would be tested. Select tests that exercise it, or refresh \
+                         coverage (`fermut coverage`). If they do exercise it and \
+                         coverage is fresh, fermut mis-mapped the node ids: please \
+                         report it at {}",
+                        list.display(),
+                        full.node_root().display(),
+                        selected.len(),
+                        crate::ISSUES_URL,
+                    );
+                }
+                coverage = Some(narrowed);
                 coverage_unselected = Some(full);
             }
             None => warn!(
@@ -418,8 +435,8 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         if !verify_baseline && cli_baseline_secs.is_none() {
             warn!(
                 "--timeout-factor needs the baseline run to size timeouts; with \
-                 --no-verify-baseline (and no --baseline-secs) every mutant uses \
-                 the flat --timeout"
+                 --no-verify-baseline (and no --baseline-secs or \
+                 FERMUT_BASELINE_SECS) every mutant uses the flat --timeout"
             );
         }
     }
@@ -1059,6 +1076,28 @@ mod tests {
     }
 
     #[test]
+    fn select_tests_covering_nothing_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("pyproject.toml"), "").unwrap();
+        let src = root.join("m.py");
+        std::fs::write(&src, "x = 1\n").unwrap();
+        let cov = root.join("coverage.json");
+        let doc = serde_json::json!({"files": {src.to_str().unwrap(): {"contexts": {
+            "1": ["tests/test_a.py::t|run"],
+        }}}});
+        std::fs::write(&cov, doc.to_string()).unwrap();
+        let sel = root.join("sel.txt");
+        std::fs::write(&sel, "tests/test_other.py::t\n").unwrap();
+        let mut f = empty_filter();
+        f.coverage = Some(cov);
+        f.select_tests = Some(sel);
+        let err = call_with_filter(root, None, f).unwrap_err().to_string();
+        assert!(err.contains("no mutant would be tested"), "{err}");
+        assert!(err.contains(crate::ISSUES_URL), "{err}");
+    }
+
+    #[test]
     fn cli_since_overrides_config_diff_only() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("fermut.toml"), "diff_only = \"main\"\n").unwrap();
@@ -1234,6 +1273,48 @@ mod tests {
         let mut args = run_args(empty_filter());
         args.baseline_secs = Some(-1.0);
         assert!(build_config(tmp.path().to_path_buf(), args).is_err());
+    }
+
+    /// What `f` logged on this thread.
+    fn logged(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let w = buf.clone();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(move || w.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(sub, f);
+        let bytes = buf.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn timeout_factor_warns_only_when_no_baseline_can_size_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let warns = |no_verify: bool, baseline_secs: Option<f64>| {
+            let mut args = run_args(empty_filter());
+            args.timeout_factor = Some(3.0);
+            args.no_verify_baseline = no_verify;
+            args.baseline_secs = baseline_secs;
+            logged(|| {
+                build_config(tmp.path().to_path_buf(), args).unwrap();
+            })
+            .contains("--timeout-factor needs the baseline run")
+        };
+        assert!(warns(true, None));
+        assert!(!warns(false, None), "baseline run sizes it");
+        assert!(!warns(true, Some(2.0)), "--baseline-secs sizes it");
     }
 
     #[test]

@@ -51,11 +51,6 @@ def test_help_documents_every_option(pytester):
         "first." in text
     )
     assert (
-        "--fermut-verify-baseline run fermut's baseline check even after a green "
-        "session that ran the whole suite (by default it is skipped as "
-        "redundant)." in text
-    )
-    assert (
         "--fermut-show=N number of surviving mutants to list in the summary "
         "(default 10)." in text
     )
@@ -69,7 +64,6 @@ def test_option_defaults(pytester):
     assert config.getoption("fermut_arg") == []
     assert config.getoption("fermut_no_coverage") is False
     assert config.getoption("fermut_show") == 10
-    assert config.getoption("fermut_verify_baseline") is False
 
 
 def test_option_types(pytester):
@@ -169,6 +163,24 @@ def test_summarize_defaults_missing_counts_to_zero():
             "mutation score n/a: 0 killed, 0 survived, 0 timed out, 0 errored (0 skipped)",
         )
     ]
+
+
+def test_summarize_counts_only_selection_skips():
+    state = plugin._FermutState("fermut")
+    state.selected = ["/r/t.py::a", "/r/t.py::b"]
+    report = {
+        "summary": {},
+        "outcomes": [
+            {"status": "skipped", "filter": "selection"},
+            {"status": "skipped", "filter": "coverage"},
+            {"status": "killed", "filter": "selection"},
+        ],
+    }
+    plugin._summarize(state, report, "/r", 0)
+    assert "(2 selected tests, 1 mutants outside the selection)" in state.lines[0][1]
+    del report["outcomes"]
+    plugin._summarize(state, report, "/r", 0)
+    assert "(2 selected tests, 0 mutants outside the selection)" in state.lines[1][1]
 
 
 def test_summarize_reads_each_count():
@@ -396,3 +408,33 @@ def test_run_uses_rootdir_and_a_fermut_temp_report(
     result.stdout.fnmatch_lines(["  src*m.py:1 [[]arith-op-swap[]] `+` -> `-`"])
     out, _ = capfd.readouterr()
     assert "fake-stdout" not in out + result.stdout.str()
+
+
+def test_find_fermut_prefers_env_then_scripts_dir_then_path(tmp_path, monkeypatch):
+    name = "fermut.exe" if os.name == "nt" else "fermut"
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    on_path = tmp_path / "bin"
+    on_path.mkdir()
+    exe = on_path / name
+    exe.write_text("")
+    exe.chmod(0o755)
+    monkeypatch.setattr(
+        plugin.sysconfig,
+        "get_path",
+        lambda kind: str(scripts) if kind == "scripts" else None,
+    )
+    monkeypatch.setenv("PATH", str(on_path))
+    monkeypatch.delenv(plugin.BIN_ENV, raising=False)
+    assert plugin.find_fermut() == str(exe)
+    (scripts / name).write_text("")
+    assert plugin.find_fermut() == str(scripts / name)
+    monkeypatch.setenv(plugin.BIN_ENV, "/explicit/fermut")
+    assert plugin.find_fermut() == "/explicit/fermut"
+
+
+def test_find_fermut_none_when_nowhere(tmp_path, monkeypatch):
+    monkeypatch.setattr(plugin.sysconfig, "get_path", lambda kind: str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.delenv(plugin.BIN_ENV, raising=False)
+    assert plugin.find_fermut() is None

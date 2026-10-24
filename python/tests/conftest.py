@@ -27,6 +27,7 @@ FAKE_FERMUT = textwrap.dedent(
             "argv": args,
             "child": os.environ.get("FERMUT_CHILD"),
             "rust_log": os.environ.get("RUST_LOG"),
+            "baseline_secs": os.environ.get("FERMUT_BASELINE_SECS"),
             "selected": selected,
         }}) + "\\n")
     if args[0] != "run":
@@ -83,6 +84,7 @@ def fake_fermut(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_FERMUT_LOG", str(log))
     monkeypatch.delenv("FERMUT_CHILD", raising=False)
     monkeypatch.delenv("RUST_LOG", raising=False)
+    monkeypatch.delenv("FERMUT_BASELINE_SECS", raising=False)
     return FakeFermut(path, log)
 
 

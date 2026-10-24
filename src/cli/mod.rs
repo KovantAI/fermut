@@ -340,16 +340,17 @@ pub(crate) struct RunConfigArgs {
 
     /// Size each mutant's timeout from the baseline run instead of using the
     /// flat `--timeout`: `min(--timeout, FACTOR × baseline wall + 5 s)`. Hung
-    /// mutants then stop in seconds. Needs the baseline (ignored with
-    /// `--no-verify-baseline`). A mutant that only slows the suite down past
+    /// mutants then stop in seconds. Needs the baseline, or `--baseline-secs`
+    /// with `--no-verify-baseline`. A mutant that only slows the suite down past
     /// the budget counts as timed out (detected). Try 3.
     #[arg(long, value_name = "FACTOR")]
     pub timeout_factor: Option<f64>,
 
-    /// Wall time of a green whole-suite run you already did (seconds). With
-    /// `--no-verify-baseline` it stands in for the baseline when sizing
-    /// `--timeout-factor` timeouts. `pytest --fermut` passes its session time.
-    #[arg(long, value_name = "SECS")]
+    /// Wall time of a green whole-suite run you already did (seconds). When
+    /// fermut's baseline is skipped it stands in for it when sizing
+    /// `--timeout-factor` timeouts; ignored without `--timeout-factor`.
+    /// `pytest --fermut` passes its session time through the env var.
+    #[arg(long, value_name = "SECS", env = "FERMUT_BASELINE_SECS")]
     pub baseline_secs: Option<f64>,
 
     /// [experimental] Record each mutant's full kill-set (the covering tests that

@@ -200,6 +200,32 @@ def test_testpaths_are_the_whole_suite(pytester, fake_fermut, run_pytest):
         assert fake_fermut.run_call()["selected"] is None, args
 
 
+def test_one_of_several_testpaths_is_narrowed(pytester, fake_fermut, run_pytest):
+    pytester.makeini("[pytest]\ntestpaths = tests integration\n")
+    for name in ("tests", "integration"):
+        pytester.mkdir(name).joinpath(f"test_{name}.py").write_text(
+            f"def test_{name}():\n    pass\n"
+        )
+    run_pytest(pytester, "--fermut", "--fermut-no-coverage", "tests")
+    assert _selected(fake_fermut, pytester) == ["tests/test_tests.py::test_tests"]
+    fake_fermut.log.unlink()
+    run_pytest(pytester, "--fermut", "--fermut-no-coverage", "integration", "tests")
+    assert fake_fermut.run_call()["selected"] is None
+
+
+def test_recursive_testpaths_glob_is_the_whole_suite(pytester, fake_fermut, run_pytest):
+    # pytest expands testpaths with recursive=True; so must the plugin.
+    pytester.makeini("[pytest]\ntestpaths = src/**/tests\n")
+    for pkg in ("a", "a/b"):
+        d = pytester.path.joinpath("src", pkg, "tests")
+        d.mkdir(parents=True)
+        d.joinpath(f"test_{pkg.replace('/', '_')}.py").write_text(
+            "def test_t():\n    pass\n"
+        )
+    run_pytest(pytester, "--fermut", "--fermut-no-coverage")
+    assert fake_fermut.run_call()["selected"] is None
+
+
 def test_running_from_a_subdirectory_is_narrowed(
     pytester, fake_fermut, run_pytest, monkeypatch
 ):
@@ -256,6 +282,12 @@ def test_selection_file_is_removed(two_files, fake_fermut, run_pytest):
     assert not os.path.exists(argv[argv.index("--select-tests") + 1])
 
 
+def test_narrowed_session_without_fermut_is_inert(two_files, fake_fermut, run_pytest):
+    result = run_pytest(two_files, "-k", "one")
+    assert result.ret == 0
+    assert fake_fermut.calls() == []
+
+
 @pytest.mark.skipif(not HAS_XDIST, reason="needs pytest-xdist")
 def test_xdist_selection_comes_from_the_workers(two_files, fake_fermut, monkeypatch):
     # Under -n the controller collects nothing; the ids come from the workers.
@@ -282,23 +314,12 @@ def test_xdist_selection_comes_from_the_workers(two_files, fake_fermut, monkeypa
     ]
 
 
-# --- skipping fermut's redundant baseline run ---
+# --- fermut's baseline run ---
 
 
-def test_whole_suite_session_skips_the_baseline(green_suite, fake_fermut, run_pytest):
+def test_whole_suite_session_keeps_the_baseline(green_suite, fake_fermut, run_pytest):
+    # A green session outside fermut's mirror doesn't prove it green inside.
     run_pytest(green_suite, "--fermut", "--fermut-no-coverage")
-    assert "--no-verify-baseline" in fake_fermut.run_call()["argv"]
-
-
-def test_narrowed_session_keeps_the_baseline(two_files, fake_fermut, run_pytest):
-    run_pytest(two_files, "--fermut", "--fermut-no-coverage", "-k", "one")
-    assert "--no-verify-baseline" not in fake_fermut.run_call()["argv"]
-
-
-def test_verify_baseline_flag_keeps_the_baseline(green_suite, fake_fermut, run_pytest):
-    run_pytest(
-        green_suite, "--fermut", "--fermut-no-coverage", "--fermut-verify-baseline"
-    )
     assert "--no-verify-baseline" not in fake_fermut.run_call()["argv"]
 
 
@@ -313,40 +334,46 @@ def test_no_verify_baseline_is_not_passed_twice(green_suite, fake_fermut, run_py
     assert fake_fermut.run_call()["argv"].count("--no-verify-baseline") == 1
 
 
-# --- the session's duration stands in for the skipped baseline ---
+# --- the session's duration stands in for a skipped baseline ---
 
 
 def _baseline_secs(fake_fermut):
-    argv = fake_fermut.run_call()["argv"]
-    found = [a for a in argv if a.startswith("--baseline-secs=")]
-    return float(found[0].split("=", 1)[1]) if found else None
+    secs = fake_fermut.run_call()["baseline_secs"]
+    return None if secs is None else float(secs)
 
 
 def test_whole_suite_session_passes_its_duration(pytester, fake_fermut, run_pytest):
     pytester.makepyfile(
         test_slow="import time\n\ndef test_slow():\n    time.sleep(0.3)\n"
     )
-    run_pytest(pytester, "--fermut", "--fermut-no-coverage")
+    run_pytest(
+        pytester,
+        "--fermut",
+        "--fermut-no-coverage",
+        "--fermut-arg=--no-verify-baseline",
+    )
     secs = _baseline_secs(fake_fermut)
     assert secs is not None and 0.3 <= secs < 30, secs
-    assert "--no-verify-baseline" in fake_fermut.run_call()["argv"]
+
+
+def test_duration_passed_without_the_flag(green_suite, fake_fermut, run_pytest):
+    # `verify_baseline = false` may sit in fermut's config, out of the
+    # plugin's sight; fermut ignores the value when its baseline runs.
+    run_pytest(green_suite, "--fermut", "--fermut-no-coverage")
+    assert _baseline_secs(fake_fermut) is not None
 
 
 def test_narrowed_session_passes_no_duration(two_files, fake_fermut, run_pytest):
     # fermut runs its own baseline then and measures that.
-    run_pytest(two_files, "--fermut", "--fermut-no-coverage", "-k", "one")
-    assert _baseline_secs(fake_fermut) is None
-
-
-def test_explicit_baseline_secs_wins(green_suite, fake_fermut, run_pytest):
     run_pytest(
-        green_suite,
+        two_files,
         "--fermut",
         "--fermut-no-coverage",
-        "--fermut-arg=--baseline-secs=9",
+        "--fermut-arg=--no-verify-baseline",
+        "-k",
+        "one",
     )
-    argv = fake_fermut.run_call()["argv"]
-    assert [a for a in argv if a.startswith("--baseline-secs")] == ["--baseline-secs=9"]
+    assert _baseline_secs(fake_fermut) is None
 
 
 @pytest.mark.skipif(not HAS_XDIST, reason="needs pytest-xdist")
@@ -371,6 +398,7 @@ def test_xdist_duration_is_the_serial_test_time(pytester, fake_fermut, monkeypat
         "4",
         "--fermut",
         "--fermut-no-coverage",
+        "--fermut-arg=--no-verify-baseline",
     )
     assert result.ret == 0, result.stdout.str()
     assert _baseline_secs(fake_fermut) >= 1.6

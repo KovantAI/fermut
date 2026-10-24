@@ -12,10 +12,6 @@
 //! - [`patterns::AstPatterns`] — pure-Rust pattern rules over the mutant's
 //!   operator + adjacent tokens. Catches `x +/- 0` and `x */÷ 1` identities.
 //!
-//! - [`probe::HypothesisProbe`] — differential property test driven by
-//!   `hypothesis.given(from_type(...))`. Pass-on-N gives a 0.80 confidence
-//!   signal that must stack with another layer to clear the pipeline
-//!   threshold. Opt-in; not in [`EquivPipeline::default_pipeline`].
 //! - [`llm::LlmJudge`] — model-judged equivalence with a strict JSON
 //!   contract and a calibrated confidence clamp. Also opt-in; runs last
 //!   because it's the most expensive and the least precise.
@@ -26,10 +22,6 @@ pub mod bytecode;
 #[allow(dead_code)]
 pub mod llm;
 pub mod patterns;
-// TODO: not yet wired into the pipeline (no CLI flag constructs it); kept
-// pending a wire-up-or-delete decision. Remove the allow once reachable.
-#[allow(dead_code)]
-pub mod probe;
 
 use crate::mutator::Mutant;
 
@@ -101,15 +93,6 @@ impl EquivPipeline {
     #[allow(dead_code)] // unwired probe/LLM surface, see module TODO
     pub fn with_threshold(mut self, t: f32) -> Self {
         self.threshold = t;
-        self
-    }
-
-    #[allow(dead_code)] // unwired probe/LLM surface, see module TODO
-    /// Append the hypothesis probe (Layer 3). Off by default; the probe
-    /// spawns a Python subprocess and depends on `hypothesis` being
-    /// installed, so callers opt in explicitly.
-    pub fn with_probe(mut self, probe: probe::HypothesisProbe) -> Self {
-        self.detectors.push(Box::new(probe));
         self
     }
 

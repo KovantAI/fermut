@@ -621,4 +621,112 @@ mod tests {
         let k_slash = key("v", "h", &m);
         assert_ne!(k_minus, k_slash);
     }
+
+    /// A fake `ty`: `--version` prints `ty 9.9`, `check` reports one
+    /// `major` diagnostic per line of the checked file containing `BAD`.
+    #[cfg(unix)]
+    fn fake_ty(dir: &Path) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("ty");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'ty 9.9'; exit 0; }\n\
+             printf '['; grep BAD \"$4\" | sed 's/.*/{\"severity\":\"major\"}/' | paste -sd, -; \
+             printf ']'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin.to_string_lossy().into_owned()
+    }
+
+    #[cfg(unix)]
+    fn subprocess_filter(bin: &str, cache_path: PathBuf) -> TyFilter {
+        let bin_version = probe_version(bin);
+        TyFilter {
+            bin: Some(bin.to_string()),
+            cache: Mutex::new(load_cache(&cache_path).invalidate_on_mismatch(&bin_version)),
+            bin_version,
+            baseline: Mutex::new(HashMap::new()),
+            ast_hashes: Mutex::new(HashMap::new()),
+            cache_path: Some(cache_path),
+            embedded: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subprocess_path_rejects_new_errors_and_caches_verdicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = fake_ty(dir.path());
+        assert_eq!(probe_version(&bin), "ty 9.9");
+        let src = dir.path().join("m.py");
+        std::fs::write(&src, "x = 1\ny = 2\n").unwrap();
+        let cache_path = dir.path().join(".fermut").join(TY_CACHE_FILENAME);
+        let mut ok = dummy_mutant(&src);
+        ok.range = TextRange::new(TextSize::from(4), TextSize::from(5));
+        ok.replacement = "3".into();
+        let mut bad = ok.clone();
+        bad.replacement = "BAD".into();
+
+        let f = subprocess_filter(&bin, cache_path.clone());
+        assert_eq!(f.name(), "ty");
+        assert!(f.admits(&ok).unwrap());
+        assert!(!f.admits(&bad).unwrap());
+        assert_eq!(lock_recover(&f.baseline).get(&src), Some(&0));
+        drop(f); // persists the cache
+
+        // A fresh filter answers from the persisted cache: a `ty` that now
+        // fails every check is never consulted.
+        let saved = load_cache(&cache_path);
+        assert_eq!(saved.entries.len(), 2);
+        assert_eq!(saved.ty_version, "ty 9.9");
+        let f = subprocess_filter(&bin, cache_path);
+        std::fs::write(dir.path().join("ty"), "#!/bin/sh\necho 'ty 9.9'\n").unwrap();
+        assert!(f.admits(&ok).unwrap());
+        assert!(!f.admits(&bad).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unparseable_ty_output_bypasses_the_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        // A silent `ty`: no output is not JSON, so the count is unknown.
+        // (Not `true`: GNU coreutils' `true --version` prints a banner.)
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.path().join("ty");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let f = subprocess_filter(bin.to_str().unwrap(), dir.path().join("c.json"));
+        let src = dir.path().join("m.py");
+        std::fs::write(&src, "x = 1\n").unwrap();
+        assert_eq!(f.error_count(src.to_str().unwrap()).unwrap(), None);
+        assert_eq!(f.bin_version, "");
+    }
+
+    #[test]
+    fn error_count_without_a_binary_is_an_error() {
+        let err = subprocess_filter_no_bin()
+            .error_count("x.py")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ty binary not on PATH"), "{err}");
+    }
+
+    fn subprocess_filter_no_bin() -> TyFilter {
+        TyFilter {
+            bin: None,
+            bin_version: String::new(),
+            baseline: Mutex::new(HashMap::new()),
+            ast_hashes: Mutex::new(HashMap::new()),
+            cache: Mutex::new(TyCache::default()),
+            cache_path: None,
+            embedded: None,
+        }
+    }
+
+    #[test]
+    fn unhashable_file_skips_the_cache() {
+        let f = subprocess_filter_no_bin();
+        assert!(f.ast_hash_for(Path::new("/nonexistent/m.py")).is_none());
+    }
 }

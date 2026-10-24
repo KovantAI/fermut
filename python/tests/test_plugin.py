@@ -332,3 +332,73 @@ def test_no_verify_baseline_is_not_passed_twice(green_suite, fake_fermut, run_py
         "--fermut-arg=--no-verify-baseline",
     )
     assert fake_fermut.run_call()["argv"].count("--no-verify-baseline") == 1
+
+
+# --- the session's duration stands in for a skipped baseline ---
+
+
+def _baseline_secs(fake_fermut):
+    secs = fake_fermut.run_call()["baseline_secs"]
+    return None if secs is None else float(secs)
+
+
+def test_whole_suite_session_passes_its_duration(pytester, fake_fermut, run_pytest):
+    pytester.makepyfile(
+        test_slow="import time\n\ndef test_slow():\n    time.sleep(0.3)\n"
+    )
+    run_pytest(
+        pytester,
+        "--fermut",
+        "--fermut-no-coverage",
+        "--fermut-arg=--no-verify-baseline",
+    )
+    secs = _baseline_secs(fake_fermut)
+    assert secs is not None and 0.3 <= secs < 30, secs
+
+
+def test_duration_passed_without_the_flag(green_suite, fake_fermut, run_pytest):
+    # `verify_baseline = false` may sit in fermut's config, out of the
+    # plugin's sight; fermut ignores the value when its baseline runs.
+    run_pytest(green_suite, "--fermut", "--fermut-no-coverage")
+    assert _baseline_secs(fake_fermut) is not None
+
+
+def test_narrowed_session_passes_no_duration(two_files, fake_fermut, run_pytest):
+    # fermut runs its own baseline then and measures that.
+    run_pytest(
+        two_files,
+        "--fermut",
+        "--fermut-no-coverage",
+        "--fermut-arg=--no-verify-baseline",
+        "-k",
+        "one",
+    )
+    assert _baseline_secs(fake_fermut) is None
+
+
+@pytest.mark.skipif(not HAS_XDIST, reason="needs pytest-xdist")
+def test_xdist_duration_is_the_serial_test_time(pytester, fake_fermut, monkeypatch):
+    # 4 × 0.4 s over 4 workers is ~0.4 s of wall time, but a mutant run is
+    # serial: the budget must cover the summed 1.6 s.
+    pytester.makepyfile(
+        test_slow="import time, pytest\n\n"
+        "@pytest.mark.parametrize('i', range(4))\n"
+        "def test_slow(i):\n    time.sleep(0.4)\n"
+    )
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    monkeypatch.setenv(
+        "PYTHONPATH", here + os.pathsep + os.environ.get("PYTHONPATH", "")
+    )
+    result = pytester.runpytest_subprocess(
+        "-p",
+        "pytest_fermut.plugin",
+        "-p",
+        "no:cacheprovider",
+        "-n",
+        "4",
+        "--fermut",
+        "--fermut-no-coverage",
+        "--fermut-arg=--no-verify-baseline",
+    )
+    assert result.ret == 0, result.stdout.str()
+    assert _baseline_secs(fake_fermut) >= 1.6

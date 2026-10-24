@@ -123,6 +123,10 @@ impl UnittestRunner {
 }
 
 impl Runner for UnittestRunner {
+    fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
     fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
         run_patched(&self.tests, self.isolation, mutant, |mirror| {
             let mut cmd = self.discover_command(mirror)?;
@@ -417,7 +421,7 @@ mod tests {
                     "expected zero-collection error, got: {output}"
                 );
             }
-            BaselineStatus::Passed => panic!("zero-collection must not pass vacuously"),
+            BaselineStatus::Passed { .. } => panic!("zero-collection must not pass vacuously"),
         }
     }
 
@@ -442,7 +446,7 @@ mod tests {
                     "got: {output}"
                 );
             }
-            BaselineStatus::Passed => panic!("zero-collection must not pass vacuously"),
+            BaselineStatus::Passed { .. } => panic!("zero-collection must not pass vacuously"),
         }
     }
 
@@ -522,7 +526,7 @@ mod tests {
         project_with_test(tmp.path(), "widget_test.py");
         let r = runner(tmp.path().join("tests"), py, Some("*_test.py".to_string()));
         assert!(
-            matches!(r.baseline().unwrap(), BaselineStatus::Passed),
+            matches!(r.baseline().unwrap(), BaselineStatus::Passed { .. }),
             "a matching pattern with a passing test must pass the baseline"
         );
     }
@@ -534,7 +538,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         project_with_test(tmp.path(), "test_widget.py");
         let r = runner(tmp.path().join("tests"), py, None);
-        assert!(matches!(r.baseline().unwrap(), BaselineStatus::Passed));
+        assert!(matches!(
+            r.baseline().unwrap(),
+            BaselineStatus::Passed { .. }
+        ));
     }
 
     #[test]
@@ -556,7 +563,10 @@ mod tests {
         let Some(py) = python_or_skip() else { return };
         let (dir, _calc) = project();
         let r = runner_timeout(dir.path().join("tests"), py, Duration::from_secs(30));
-        assert!(matches!(r.baseline().unwrap(), BaselineStatus::Passed));
+        assert!(matches!(
+            r.baseline().unwrap(),
+            BaselineStatus::Passed { .. }
+        ));
     }
 
     #[test]
@@ -585,6 +595,22 @@ mod tests {
             r.run(&Arc::new(m)).unwrap(),
             MutantOutcome::Survived { .. }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_timeout_shortens_the_per_mutant_cap() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, calc) = project();
+        // Stands in for `python -m unittest`: outlives the new cap only.
+        let py = dir.path().join("python");
+        fs::write(&py, "#!/bin/sh\nsleep 3\nexit 1\n").unwrap();
+        fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = runner_timeout(dir.path().join("tests"), py, Duration::from_secs(30));
+        r.set_timeout(Duration::from_millis(300));
+        let m = mutant(calc, "return 1", "return 2");
+        let o = r.run(&Arc::new(m)).unwrap();
+        assert!(matches!(o, MutantOutcome::TimedOut { .. }), "{o:?}");
     }
 
     #[test]

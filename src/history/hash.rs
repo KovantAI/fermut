@@ -64,6 +64,12 @@ fn hash_with_shard(cfg: &Config, shard: Option<(u32, u32)>) -> String {
     }
     h.update(b"|timeout=");
     h.update(cfg.timeout_secs.to_le_bytes());
+    // Scores under a budgeted timeout aren't comparable with flat-timeout
+    // ones. Fed only when set, so existing hashes are unchanged.
+    if let Some(f) = cfg.timeout_factor {
+        h.update(b"|timeout_factor=");
+        h.update(f.to_le_bytes());
+    }
     h.update(b"|hseed=");
     if let Some(s) = cfg.hypothesis_seed {
         h.update(s.to_le_bytes());
@@ -278,6 +284,8 @@ mod tests {
             verify_baseline: false,
             baseline_timeout_secs: 300,
             max_time_secs: None,
+            timeout_factor: None,
+            baseline_secs: None,
             record_kill_sets: None,
         }
     }
@@ -377,6 +385,11 @@ mod tests {
             ..cfg()
         });
         assert_ne!(base, inferred, "an inferred-kill run must differ");
+        let budgeted = config_hash(&Config {
+            timeout_factor: Some(3.0),
+            ..cfg()
+        });
+        assert_ne!(base, budgeted, "a budgeted-timeout run must differ");
 
         // Sharding partitions the mutant set; index and total both matter.
         let sh1 = config_hash(&Config {

@@ -175,9 +175,8 @@ bytecode is identical to the original's. The worked example above
 (`amount + 0` → `amount - 0`) compiles to different bytecode, so it
 stays `SURVIVED` and needs the inline marker.
 
-`src/equiv/` also contains a Hypothesis probe and an LLM judge
-(`probe.rs`, `llm.rs`). Neither is wired into the pipeline yet, and
-no flag enables them.
+`src/equiv/` also contains an LLM judge (`llm.rs`). It isn't wired
+into the pipeline yet, and no flag enables it.
 
 Disable the whole pass with `--no-equiv-detect` or
 `equiv_detect = false`. Useful when you want to see the raw,

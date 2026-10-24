@@ -45,6 +45,10 @@ pub trait Runner: Send + Sync {
     /// mutation and aborts on [`BaselineStatus::Failed`].
     fn baseline(&self) -> Result<BaselineStatus>;
 
+    /// Replace the per-mutant timeout, for the `--timeout-factor` budget sized
+    /// after the baseline. Default no-op, for test doubles that never time out.
+    fn set_timeout(&mut self, _timeout: Duration) {}
+
     /// Drain the kills learned this run (which test killed which
     /// `(file, operator)`), for the engine to fold into the smart-ordering
     /// sidecar. Default empty — only the pytest runner learns them, and only
@@ -76,8 +80,9 @@ pub trait Runner: Send + Sync {
 /// Result of the pre-flight baseline run (the unmutated suite).
 #[derive(Debug)]
 pub enum BaselineStatus {
-    /// The suite exited 0 — safe to proceed with mutation.
-    Passed,
+    /// The suite exited 0 — safe to proceed with mutation. `wall` is how long
+    /// the test process ran (mirror setup excluded); it sizes `--timeout-factor`.
+    Passed { wall: Duration },
     /// The suite failed/errored. `output` is the tail of pytest's combined
     /// stdout/stderr, for surfacing in the abort message.
     Failed { output: String },
@@ -86,7 +91,7 @@ pub enum BaselineStatus {
 impl std::fmt::Display for BaselineStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            BaselineStatus::Passed => "passed",
+            BaselineStatus::Passed { .. } => "passed",
             BaselineStatus::Failed { .. } => "failed",
         })
     }
@@ -266,7 +271,9 @@ pub(crate) fn run_baseline_with_timeout(
         .wait_timeout(timeout)
         .context("waiting on baseline run")?
     {
-        Some(status) if status.success() => Ok(BaselineStatus::Passed),
+        Some(status) if status.success() => Ok(BaselineStatus::Passed {
+            wall: started.elapsed(),
+        }),
         Some(_) => Ok(BaselineStatus::Failed {
             output: read_tail(),
         }),
@@ -828,6 +835,59 @@ mod tests {
     }
 
     #[test]
+    fn baseline_status_displays_its_verdict() {
+        use super::BaselineStatus;
+        let wall = std::time::Duration::ZERO;
+        assert_eq!(BaselineStatus::Passed { wall }.to_string(), "passed");
+        let output = String::new();
+        assert_eq!(BaselineStatus::Failed { output }.to_string(), "failed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn baseline_run_reports_pass_fail_timeout_and_missing_runner() {
+        use super::BaselineStatus;
+        use super::{process_group::with_new_process_group, run_baseline_with_timeout};
+        use std::time::Duration;
+        let sh = |script: &str| {
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", script]);
+            with_new_process_group(&mut c);
+            c
+        };
+        let secs = Duration::from_secs;
+
+        let ok = run_baseline_with_timeout(sh("exit 0"), secs(30)).unwrap();
+        assert!(matches!(ok, BaselineStatus::Passed { .. }), "{ok:?}");
+
+        let red = run_baseline_with_timeout(sh("echo out; echo err >&2; exit 1"), secs(30));
+        match red.unwrap() {
+            BaselineStatus::Failed { output } => assert_eq!(output, "out\nerr"),
+            other => panic!("{other:?}"),
+        }
+
+        let hung = run_baseline_with_timeout(sh("echo started; sleep 30"), secs(1));
+        match hung.unwrap() {
+            BaselineStatus::Failed { output } => {
+                assert!(
+                    output.contains("exceeded --baseline-timeout (1s)"),
+                    "{output}"
+                );
+                assert!(output.ends_with("started"), "{output}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let missing = std::process::Command::new("fermut-no-such-runner");
+        let err = run_baseline_with_timeout(missing, secs(30)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("`fermut-no-such-runner` was not found"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn tail_lines_keeps_all_when_under_limit() {
         let s = "a\nb\nc";
         assert_eq!(tail_lines(s, 40), "a\nb\nc");
@@ -1141,6 +1201,7 @@ mod tests {
         assert_eq!(py_unicode_escape(r"C:\proj"), r"C:\\proj");
         assert_eq!(py_unicode_escape("/Users/José"), r"/Users/Jos\xe9");
         assert_eq!(py_unicode_escape("a\tΩ😀"), r"a\t\u03a9\U0001f600");
+        assert_eq!(py_unicode_escape("a\r\nb"), r"a\r\nb");
         assert_eq!(py_unicode_escape("/repo/x y'\""), "/repo/x y'\"");
         // Width switches at U+0100 and U+10000.
         assert_eq!(

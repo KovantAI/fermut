@@ -9,6 +9,15 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Added
+- `--timeout-factor F` (config `timeout_factor`): size each mutant's timeout
+  from the baseline run, `min(--timeout, F × baseline wall + 5 s)`, so hung
+  mutants stop in seconds instead of at the flat 30 s. Off by default. With
+  `F = 3`: more-itertools 314 s → 162 s, pyjwt 79 s → 59 s, jinja2
+  272 s → 236 s. Verdicts unchanged except that a mutant which only makes
+  the suite many times slower counts as timed out (2 of ~3,800 mutants on
+  more-itertools). `--baseline-secs` supplies the suite time when fermut's
+  baseline is skipped; a whole-suite `pytest --fermut` session passes its
+  time.
 - `pytest --fermut` narrows to the session's selection: with a path, node
   id, `-k`, `-m`, `--deselect` and similar, only the selected tests run
   against the mutants, and mutants none of them cover are skipped as
@@ -22,7 +31,6 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   fails only under fermut, merge conflicts between shards of one config,
   coverage paths all outside the project root) and any panic now point to
   the GitHub issue tracker.
-- `pytest --fermut-verify-baseline`.
 
 ### Changed
 - **`minimal` is the default operator profile.** Ordering compares and
@@ -31,13 +39,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   (`>`, `>=`, `and` ↔ `or`). Expect scores to drop where a suite never tries
   one kind of input; mutant counts rise 0.3–6%. The switch shows in
   `fermut trend` as a config change, not a regression. The subsumption gate
-  found 0 violations on 245 fully checked sites across 11 repos. Set
+  found 0 violations on 366 fully checked sites across 13 repos, 23 of
+  them comparing numpy or pandas values. Set
   `operators = "classic"` (or `--operators classic`) to keep the old
   operators.
-- `pytest --fermut` skips fermut's baseline run after a green session that
-  ran the whole suite (it already proved the suite green). On pyjwt with a
-  warm cache this halves the run (10.5 s → 5.6 s). `--fermut-verify-baseline`
-  restores it.
 
 ### Deprecated
 - Operator profile name `default`: it now means `classic` and warns. It will

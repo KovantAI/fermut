@@ -1673,6 +1673,29 @@ mod tests {
         );
     }
 
+    /// `set_timeout` (the `--timeout-factor` budget) replaces the per-mutant
+    /// cap the runner was built with.
+    #[cfg(unix)]
+    #[test]
+    fn set_timeout_shortens_the_per_mutant_cap() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(proj.join("tests")).unwrap();
+        std::fs::write(proj.join("pyproject.toml"), "").unwrap();
+        // Outlives the new cap but not the built-in 30s one.
+        let py = tmp.path().join("python");
+        std::fs::write(&py, "#!/bin/sh\nsleep 3\nexit 1\n").unwrap();
+        std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = runner(false, breadth_ctx(&proj));
+        r.tests = proj.join("tests");
+        r.python = Some(py);
+        r.set_timeout(Duration::from_millis(300));
+        let m = Arc::new(mutant_in(&proj));
+        let o = r.audit(&m, "tests/t.py::k").unwrap().unwrap();
+        assert!(matches!(o, MutantOutcome::TimedOut { .. }), "{o:?}");
+    }
+
     /// A lone selected id with no output capture names the killer; several
     /// ids don't. Ids carrying the project path are passed in mirror form.
     #[test]

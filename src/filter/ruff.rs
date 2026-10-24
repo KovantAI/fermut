@@ -103,15 +103,87 @@ impl Filter for RuffFilter {
 }
 
 fn looks_like_diagnostic(line: &str) -> bool {
-    // path:line:col: CODE message  — count colons at start.
-    let mut colons = 0;
-    for c in line.chars().take(40) {
-        if c == ':' {
-            colons += 1;
-            if colons >= 3 {
-                return true;
-            }
+    // `path:line:col: CODE message` — find a `:<digits>:<digits>:` run after
+    // the path. Scanning for it (rather than counting leading colons) holds for
+    // any path length and for Windows drive letters (`C:\\…`).
+    let is_num = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let parts: Vec<&str> = line.split(':').skip(1).collect();
+    parts.windows(3).any(|w| is_num(w[0]) && is_num(w[1]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mutator::Operator;
+    use ruff_text_size::{TextRange, TextSize};
+
+    #[test]
+    fn diagnostic_lines_match_any_path_length() {
+        let long = format!("/{}/x.py:3:1: F401 unused", "d".repeat(60));
+        assert!(looks_like_diagnostic(&long));
+        assert!(looks_like_diagnostic(
+            "C:\\p\\x.py:3:12: E1 msg: with colon"
+        ));
+        assert!(!looks_like_diagnostic("Found 3 errors."));
+        assert!(!looks_like_diagnostic("x.py:3: no column"));
+        assert!(!looks_like_diagnostic("x.py:a:1: bad line"));
+        assert!(!looks_like_diagnostic(""));
+    }
+
+    /// A fake `ruff` reporting one diagnostic per line containing `BAD`, with
+    /// the (long, absolute) path ruff was given.
+    #[cfg(unix)]
+    fn fake_ruff(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("ruff");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nawk -v f=\"$5\" '/BAD/{print f \":1:1: F821 undefined\"}' \"$5\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    fn mutant(file: &Path, replacement: &str) -> Mutant {
+        Mutant {
+            id: "t".into(),
+            file: file.to_path_buf(),
+            operator: Operator::NumberShift,
+            range: TextRange::new(TextSize::from(4), TextSize::from(5)),
+            original: "1".into(),
+            replacement: replacement.into(),
+            line: 1,
+            stmt_line: 1,
+            site: None,
         }
     }
-    false
+
+    #[cfg(unix)]
+    #[test]
+    fn admits_only_mutants_that_add_no_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a_rather_long_module_name_for_paths.py");
+        std::fs::write(&src, "x = 1\ny = BAD\n").unwrap();
+        let f = RuffFilter {
+            bin: fake_ruff(dir.path()),
+            baseline: Mutex::new(HashMap::new()),
+        };
+        assert_eq!(f.name(), "ruff");
+        assert!(f.admits(&mutant(&src, "2")).unwrap());
+        assert_eq!(lock_recover(&f.baseline).get(&src), Some(&1));
+        assert!(!f.admits(&mutant(&src, "BAD")).unwrap());
+    }
+
+    #[test]
+    fn missing_source_is_an_error() {
+        let f = RuffFilter {
+            bin: PathBuf::from("true"),
+            baseline: Mutex::new(HashMap::new()),
+        };
+        // `true` prints nothing: baseline 0, then reading the source fails.
+        assert!(f
+            .admits(&mutant(Path::new("/nonexistent/x.py"), "2"))
+            .is_err());
+    }
 }

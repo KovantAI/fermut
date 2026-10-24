@@ -604,6 +604,22 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn set_timeout_shortens_the_per_mutant_cap() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, calc) = project();
+        // Stands in for `python -m unittest`: outlives the new cap only.
+        let py = dir.path().join("python");
+        fs::write(&py, "#!/bin/sh\nsleep 3\nexit 1\n").unwrap();
+        fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = runner_timeout(dir.path().join("tests"), py, Duration::from_secs(30));
+        r.set_timeout(Duration::from_millis(300));
+        let m = mutant(calc, "return 1", "return 2");
+        let o = r.run(&Arc::new(m)).unwrap();
+        assert!(matches!(o, MutantOutcome::TimedOut { .. }), "{o:?}");
+    }
+
     #[test]
     #[ignore = "requires python on PATH"]
     fn hanging_mutant_times_out_and_is_reaped() {

@@ -1297,3 +1297,263 @@ fn coverage_refresh_rebuilds_import_time_lines_of_changed_source() {
         "shifted source must not keep its pre-change import-time lines"
     );
 }
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn kill_sets_feed_subsume_only_dominators_and_hom() {
+    // The dominator pipeline end to end: record kill-sets, derive the
+    // dominator store, then a `--only-dominators` run must infer some kills
+    // and every audited inferred kill must reproduce (exit 0, or the run fails).
+    // `hom` reads the
+    // same kill-sets.
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    let coverage = sample.join(".coverage");
+    let kill_sets = sample.join("kill-sets.jsonl");
+    let fermut = || {
+        let mut c = Command::cargo_bin("fermut").unwrap();
+        c.current_dir(&sample);
+        c
+    };
+    let run = |extra: &[&str]| {
+        let mut c = fermut();
+        c.arg("run")
+            .arg(sample.join("src"))
+            .arg("--tests")
+            .arg(sample.join("tests"))
+            .arg("--coverage")
+            .arg(&coverage)
+            .args(["--no-ty-filter", "--no-cache", "--no-history"])
+            .args(["--fail-under", "0"])
+            .args(extra);
+        c
+    };
+
+    fermut().arg("coverage").arg(&sample).assert().success();
+    run(&["--record-kill-sets", kill_sets.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(kill_sets.exists(), "kill-sets JSONL written");
+
+    fermut()
+        .arg("subsume")
+        .arg(&kill_sets)
+        .args(["--format", "json"])
+        .assert()
+        .success()
+        .stdout(contains("\"records\""));
+    assert!(sample.join(".fermut").join("dominators.json").exists());
+
+    let report = sample.join("report.json");
+    run(&[
+        "--only-dominators",
+        "--audit-inferred",
+        "1.0",
+        "--json",
+        report.to_str().unwrap(),
+    ])
+    .assert()
+    .success();
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    let inferred = json["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|o| o["status"] == "killed" && !o["inferred_from"].is_null())
+        .count();
+    assert!(inferred > 0, "some kills must be inferred: {json:#}");
+
+    let hom_out = sample.join("hom.jsonl");
+    fermut()
+        .arg("hom")
+        .arg(sample.join("src"))
+        .arg("--tests")
+        .arg(sample.join("tests"))
+        .arg("--coverage")
+        .arg(&coverage)
+        .arg("--kill-sets")
+        .arg(&kill_sets)
+        .arg("--out")
+        .arg(&hom_out)
+        .args(["--max-pairs", "5"])
+        .assert()
+        .success();
+    assert!(hom_out.exists(), "hom results written");
+}
+
+/// Write an executable fake `gh` into `dir` that logs its argv + stdin to
+/// `dir/gh.log` and answers the comment lookup with `lookup_reply`.
+#[cfg(unix)]
+fn fake_gh(dir: &std::path::Path, lookup_reply: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let log = dir.join("gh.log");
+    let script = format!(
+        "#!/bin/sh\necho \"ARGS $*\" >> '{log}'\n\
+         case \"$*\" in\n  *--paginate*) printf '{lookup_reply}' ;;\n  \
+         *-*input*|*--body-file*) cat >> '{log}' ;;\nesac\nexit 0\n",
+        log = log.display()
+    );
+    let gh = dir.join("gh");
+    std::fs::write(&gh, script).unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn pr_comment_updates_existing_or_creates_new() {
+    let tmp = tempfile::tempdir().unwrap();
+    let md = tmp.path().join("report.md");
+    std::fs::write(&md, "# report \"quoted\"\n").unwrap();
+    let path = format!(
+        "{}:{}",
+        tmp.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let pr_comment = || {
+        let mut c = Command::cargo_bin("fermut").unwrap();
+        c.env("PATH", &path)
+            .arg("pr-comment")
+            .arg("--markdown")
+            .arg(&md)
+            .args(["--repo", "o/r", "--marker", "<!-- m -->"]);
+        c
+    };
+    let log = tmp.path().join("gh.log");
+
+    // An existing marker comment is PATCHed in place, payload on stdin.
+    fake_gh(tmp.path(), "\\n77\\n");
+    pr_comment()
+        .args(["--pr", "5"])
+        .assert()
+        .success()
+        .stdout(contains("updated comment 77 on o/r#5"));
+    let got = std::fs::read_to_string(&log).unwrap();
+    assert!(got.contains("repos/o/r/issues/5/comments"), "{got}");
+    assert!(got.contains("PATCH repos/o/r/issues/comments/77"), "{got}");
+    assert!(
+        got.contains(r#"{"body":"<!-- m -->\n# report \"quoted\"\n"}"#),
+        "{got}"
+    );
+
+    // No match: a fresh comment, PR number inferred from $GITHUB_REF.
+    std::fs::remove_file(&log).unwrap();
+    fake_gh(tmp.path(), "");
+    pr_comment()
+        .env_remove("PR_NUMBER")
+        .env("GITHUB_REF", "refs/pull/9/merge")
+        .assert()
+        .success()
+        .stdout(contains("created new comment on o/r#9"));
+    let got = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        got.contains("pr comment 9 --repo o/r --body-file -"),
+        "{got}"
+    );
+    assert!(got.contains("<!-- m -->\n# report"), "{got}");
+
+    // Dry run touches nothing.
+    std::fs::remove_file(&log).unwrap();
+    pr_comment()
+        .args(["--pr", "1", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(contains("marker : <!-- m -->"));
+    assert!(!log.exists());
+
+    // Unresolvable PR number is an error.
+    pr_comment()
+        .env_remove("PR_NUMBER")
+        .env_remove("GITHUB_REF")
+        .assert()
+        .failure()
+        .stderr(contains("--pr not given"));
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn autofix_reverts_a_test_that_does_not_kill_and_explain_llm_caches() {
+    // FERMUT_LLM_MOCK's canned test is `assert True`: it cannot kill the
+    // survivor, so autofix must report `still-survives` and revert the file.
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    let report = sample.join("report.json");
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .current_dir(&sample)
+        .arg("run")
+        .arg(sample.join("src"))
+        .arg("--tests")
+        .arg(sample.join("tests"))
+        .args(["--no-ty-filter", "--no-cache", "--no-history"])
+        .args(["--fail-under", "0", "--json"])
+        .arg(&report)
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    let survivor = json["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["status"] == "survived")
+        .expect("sample leaves a survivor")["mutant"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let test_file = sample.join("tests").join("test_calculator.py");
+    let before = std::fs::read_to_string(&test_file).unwrap();
+    let out = Command::cargo_bin("fermut")
+        .unwrap()
+        .current_dir(&sample)
+        .env("FERMUT_LLM_MOCK", "1")
+        .arg("autofix")
+        .arg(&report)
+        .arg(&survivor)
+        .arg("--path")
+        .arg(sample.join("src"))
+        .arg("--tests")
+        .arg(sample.join("tests"))
+        .arg("--out")
+        .arg(&test_file)
+        .args(["--no-cache", "--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let fix: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(fix["fixed"], 0, "{fix:#}");
+    assert_eq!(fix["entries"][0]["outcome"], "still-survives", "{fix:#}");
+    assert_eq!(fix["entries"][0]["kept"], false);
+    assert_eq!(std::fs::read_to_string(&test_file).unwrap(), before);
+
+    // `explain --llm`: the first call populates the cache, the second hits it.
+    let cache = sample.join("llm-cache.json");
+    let explain = || {
+        let mut c = Command::cargo_bin("fermut").unwrap();
+        c.current_dir(&sample)
+            .env("FERMUT_LLM_MOCK", "1")
+            .arg("explain")
+            .arg(&report)
+            .arg(&survivor)
+            .arg("--llm")
+            .arg("--cache-path")
+            .arg(&cache)
+            .args(["--format", "json"]);
+        c
+    };
+    explain()
+        .assert()
+        .success()
+        .stdout(contains("\"cached\": false"));
+    assert!(cache.exists(), "llm cache written");
+    explain()
+        .assert()
+        .success()
+        .stdout(contains("\"cached\": true"))
+        .stdout(contains("def test_mock_generated"));
+}

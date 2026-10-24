@@ -826,6 +826,59 @@ mod tests {
     }
 
     #[test]
+    fn baseline_status_displays_its_verdict() {
+        use super::BaselineStatus;
+        let wall = std::time::Duration::ZERO;
+        assert_eq!(BaselineStatus::Passed { wall }.to_string(), "passed");
+        let output = String::new();
+        assert_eq!(BaselineStatus::Failed { output }.to_string(), "failed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn baseline_run_reports_pass_fail_timeout_and_missing_runner() {
+        use super::BaselineStatus;
+        use super::{process_group::with_new_process_group, run_baseline_with_timeout};
+        use std::time::Duration;
+        let sh = |script: &str| {
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", script]);
+            with_new_process_group(&mut c);
+            c
+        };
+        let secs = Duration::from_secs;
+
+        let ok = run_baseline_with_timeout(sh("exit 0"), secs(30)).unwrap();
+        assert!(matches!(ok, BaselineStatus::Passed { .. }), "{ok:?}");
+
+        let red = run_baseline_with_timeout(sh("echo out; echo err >&2; exit 1"), secs(30));
+        match red.unwrap() {
+            BaselineStatus::Failed { output } => assert_eq!(output, "out\nerr"),
+            other => panic!("{other:?}"),
+        }
+
+        let hung = run_baseline_with_timeout(sh("echo started; sleep 30"), secs(1));
+        match hung.unwrap() {
+            BaselineStatus::Failed { output } => {
+                assert!(
+                    output.contains("exceeded --baseline-timeout (1s)"),
+                    "{output}"
+                );
+                assert!(output.ends_with("started"), "{output}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let missing = std::process::Command::new("fermut-no-such-runner");
+        let err = run_baseline_with_timeout(missing, secs(30)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("`fermut-no-such-runner` was not found"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn tail_lines_keeps_all_when_under_limit() {
         let s = "a\nb\nc";
         assert_eq!(tail_lines(s, 40), "a\nb\nc");

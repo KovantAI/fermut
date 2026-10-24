@@ -88,15 +88,6 @@ pub enum BaselineStatus {
     Failed { output: String },
 }
 
-impl std::fmt::Display for BaselineStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            BaselineStatus::Passed { .. } => "passed",
-            BaselineStatus::Failed { .. } => "failed",
-        })
-    }
-}
-
 /// Build a one-shot mirror for a baseline run. Unlike [`with_worker_mirror`],
 /// this isn't cached in a thread-local — the baseline runs once on the calling
 /// thread before the rayon pool spins up, so there is nothing to reuse.
@@ -1180,5 +1171,28 @@ mod tests {
         copy_dir_all(&src, &dst, IsolationMode::Copy).unwrap();
         assert!(dst.join("pkg/_ext.cpython-313-darwin.so").is_file());
         assert!(!dst.join("venv").exists());
+    }
+
+    #[test]
+    fn baseline_exit_status_decides_passed_or_failed() {
+        use super::{run_baseline_with_timeout, BaselineStatus};
+        let py = super::interpreter(None);
+        let run = |code: &str| {
+            let mut cmd = std::process::Command::new(&py);
+            cmd.args(["-c", code]);
+            run_baseline_with_timeout(cmd, std::time::Duration::from_secs(60)).unwrap()
+        };
+        if std::process::Command::new(&py)
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return; // no Python on this box
+        }
+        assert!(matches!(run("pass"), BaselineStatus::Passed { .. }));
+        match run("import sys; print('boom'); sys.exit(3)") {
+            BaselineStatus::Failed { output } => assert!(output.contains("boom"), "{output}"),
+            BaselineStatus::Passed { .. } => panic!("exit 3 must fail the baseline"),
+        }
     }
 }

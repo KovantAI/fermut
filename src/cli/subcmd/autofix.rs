@@ -197,7 +197,7 @@ pub fn autofix(opts: AutofixOpts) -> Result<()> {
 
     match opts.format {
         Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
-        Format::Human => render_human(&report),
+        Format::Human => print!("{}", render_human(&report)),
     }
     Ok(())
 }
@@ -555,11 +555,14 @@ impl Snapshot {
     }
 }
 
-fn render_human(report: &AutofixReport) {
+fn render_human(report: &AutofixReport) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
     for e in &report.entries {
         let m = &e.mutant;
         let mark = if e.kept { "kept" } else { "reverted" };
-        println!(
+        let _ = writeln!(
+            s,
             "[{}] {}:{} [{}] — {} ({mark})",
             e.outcome,
             m.file,
@@ -568,7 +571,8 @@ fn render_human(report: &AutofixReport) {
             e.detail.as_deref().unwrap_or("ok")
         );
     }
-    println!(
+    let _ = writeln!(
+        s,
         "\nautofix: {} fixed, {} failed, {} likely equivalent ({} total)",
         report.fixed,
         report.failed,
@@ -576,7 +580,8 @@ fn render_human(report: &AutofixReport) {
         report.entries.len()
     );
     if let Some(a) = &report.triage_audit {
-        println!(
+        let _ = writeln!(
+            s,
             "triage: {} judged equivalent, {} of them killed anyway{}",
             a.judged_equivalent,
             a.killed_anyway,
@@ -591,6 +596,7 @@ fn render_human(report: &AutofixReport) {
             }
         );
     }
+    s
 }
 
 #[cfg(test)]
@@ -759,6 +765,8 @@ mod tests {
             (report.fixed, report.failed, report.likely_equivalent),
             (0, 0, 1)
         );
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["likely_equivalent"], 1);
         assert_eq!(
             client.requests.lock().unwrap().len(),
             1,
@@ -783,6 +791,24 @@ mod tests {
                 killed_anyway: 1
             })
         );
+        assert_eq!(
+            (report.fixed, report.failed, report.likely_equivalent),
+            (1, 0, 0)
+        );
+        let human = render_human(&report);
+        assert!(human.contains("[fixed] "), "{human}");
+        assert!(
+            human.contains("autofix: 1 fixed, 0 failed, 0 likely equivalent (1 total)"),
+            "{human}"
+        );
+        assert!(
+            human.contains(
+                "1 judged equivalent, 1 of them killed anyway (judge precision at most 0%"
+            ),
+            "{human}"
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("likely_equivalent").is_none(), "zero is omitted");
         assert_eq!(
             client.requests.lock().unwrap().len(),
             2,
@@ -900,6 +926,30 @@ mod tests {
             !p.exists(),
             "revert must delete a file that didn't exist before"
         );
+    }
+
+    #[test]
+    fn autofix_surfaces_an_unreadable_report() {
+        let dir = TempDir::new().unwrap();
+        let err = autofix(AutofixOpts {
+            report: dir.path().join("missing.json"),
+            target: None,
+            all_survivors: true,
+            path: dir.path().into(),
+            tests: None,
+            python: None,
+            out: None,
+            model: None,
+            context_lines: 3,
+            sample_count: 1,
+            no_cache: true,
+            cache_path: None,
+            timeout: None,
+            keep_failed: false,
+            format: Format::Json,
+            triage: TriageMode::Off,
+        });
+        assert!(err.is_err());
     }
 
     #[test]

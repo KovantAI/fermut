@@ -252,7 +252,10 @@ pub fn suggest(opts: SuggestOpts) -> Result<()> {
                 .context("serializing suggest report")?;
             println!("{s}");
         }
-        Format::Human => render_human(&suggest_report, opts.apply, opts.out.as_deref()),
+        Format::Human => print!(
+            "{}",
+            render_human(&suggest_report, opts.apply || opts.out.is_some())
+        ),
     }
     Ok(())
 }
@@ -435,27 +438,22 @@ fn finalize_entry(r: GenResult, apply: bool, out: Option<&Path>, log: bool) -> S
     }
 }
 
-fn render_human(report: &SuggestReport, apply: bool, out: Option<&Path>) {
-    let written = apply || out.is_some();
+/// The stdout part of the human report; per-entry errors go to stderr as
+/// they're found. `written`: the tests went to a file, so don't echo them.
+fn render_human(report: &SuggestReport, written: bool) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
     for entry in &report.entries {
         let m = &entry.mutant;
-        let target =
-            entry
-                .applied_to
-                .as_deref()
-                .unwrap_or(if written { "(write failed)" } else { "" });
-        if let Some(code) = &entry.extracted_code {
-            if !written {
-                println!(
-                    "\n# fermut suggest: kills mutation `{}` → `{}` at {}:{}",
-                    m.original, m.replacement, m.file, m.line
-                );
-                print!("{code}");
-                if !code.ends_with('\n') {
-                    println!();
-                }
-            } else if !target.is_empty() && entry.applied_to.is_some() {
-                // Already logged during apply.
+        if let (Some(code), false) = (&entry.extracted_code, written) {
+            let _ = writeln!(
+                s,
+                "\n# fermut suggest: kills mutation `{}` → `{}` at {}:{}",
+                m.original, m.replacement, m.file, m.line
+            );
+            s.push_str(code);
+            if !code.ends_with('\n') {
+                s.push('\n');
             }
         }
         if let Some(err) = &entry.error {
@@ -463,7 +461,8 @@ fn render_human(report: &SuggestReport, apply: bool, out: Option<&Path>) {
         }
         if let Some(t) = &entry.triage {
             if t.verdict == "equivalent" && entry.extracted_code.is_none() {
-                println!(
+                let _ = writeln!(
+                    s,
                     "\n# fermut suggest: {}:{} [{}] judged equivalent, no test: {}\n#   if you agree: {}",
                     m.file,
                     m.line,
@@ -474,6 +473,7 @@ fn render_human(report: &SuggestReport, apply: bool, out: Option<&Path>) {
             }
         }
     }
+    s
 }
 
 // ---------------------------------------------------------------------------
@@ -921,7 +921,27 @@ mod tests {
         assert_eq!(judge.0.load(std::sync::atomic::Ordering::Relaxed), 1);
         let e = finalize_entry(r, false, None, false);
         assert!(e.error.is_none() && e.extracted_code.is_none());
-        assert_eq!(e.triage.unwrap().verdict, "equivalent");
+        assert_eq!(e.triage.as_ref().unwrap().verdict, "equivalent");
+        let mut report = SuggestReport {
+            model: DEFAULT_MODEL.into(),
+            entries: vec![e],
+        };
+        let human = render_human(&report, false);
+        assert!(
+            human.contains("judged equivalent, no test: same value"),
+            "{human}"
+        );
+        assert!(
+            human.contains("# fermut: ignore[boundary-shift]"),
+            "{human}"
+        );
+        // A different verdict asks for nothing to be ignored.
+        report.entries[0].triage.as_mut().unwrap().verdict = "different";
+        assert_eq!(render_human(&report, false), "");
+        // Generated code is echoed only when it wasn't written to a file.
+        report.entries[0].extracted_code = Some("def test_x():\n    pass".into());
+        assert!(render_human(&report, false).ends_with("def test_x():\n    pass\n"));
+        assert_eq!(render_human(&report, true), "");
     }
 
     #[test]

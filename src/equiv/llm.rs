@@ -453,6 +453,48 @@ mod tests {
         let f = enclosing_function(src, 5).unwrap();
         assert!(f.starts_with("    def m(self, x):"), "{f}");
         assert!(enclosing_function("x = 1\ny = 2\n", 2).is_none());
+        assert!(enclosing_function("x = 1\n", 2).is_none(), "past EOF");
+    }
+
+    #[test]
+    fn enclosing_function_length_cap_ignores_where_the_function_starts() {
+        let src = format!(
+            "{}def f(x):\n    return x\n",
+            "x = 1\n".repeat(MAX_FUNCTION_LINES)
+        );
+        let f = enclosing_function(&src, MAX_FUNCTION_LINES + 2).unwrap();
+        assert_eq!(f, "def f(x):\n    return x");
+    }
+
+    #[test]
+    fn unreadable_source_is_unknown_and_never_skips() {
+        let c = CannedClient::ok("{}");
+        let cell: ClientCell = std::sync::OnceLock::new();
+        let _ = cell.set(Ok(c.clone() as Arc<dyn LlmClient>));
+        let mut m = mutant(2);
+        m.file = PathBuf::from("/nonexistent/fermut/t.py");
+        let mut ctx = PromptContext::empty();
+        let (summary, skip) = before_generation(
+            TriageMode::Skip,
+            &m,
+            &mut ctx,
+            &opts(true),
+            &cell,
+            &Mutex::new(LlmCache::default()),
+        );
+        let summary = summary.unwrap();
+        assert_eq!(summary.verdict, "unknown");
+        assert!(summary.reason.starts_with("reading "), "{}", summary.reason);
+        assert!(!skip && ctx.hint.is_none());
+        assert!(c.last_user.lock().unwrap().is_none(), "no judge call");
+    }
+
+    #[test]
+    fn equivalent_at_exactly_the_confidence_floor_counts() {
+        let t = classify(
+            r#"{"equivalent": true, "confidence": 0.9, "reason": "r", "counterexample": null}"#,
+        );
+        assert!(matches!(t, Triage::Equivalent { .. }), "{t:?}");
     }
 
     #[test]

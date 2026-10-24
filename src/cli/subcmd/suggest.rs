@@ -460,7 +460,10 @@ fn render_human(report: &SuggestReport, written: bool) -> String {
             eprintln!("! {}:{} [{}] — {}", m.file, m.line, m.operator, err);
         }
         if let Some(t) = &entry.triage {
-            if t.verdict == "equivalent" && entry.extracted_code.is_none() {
+            // Only a `--triage skip` entry has neither a response nor an
+            // error; under `audit` a failed generation must not read as a skip.
+            let skipped = entry.response.is_none() && entry.error.is_none();
+            if t.verdict == "equivalent" && skipped {
                 let _ = writeln!(
                     s,
                     "\n# fermut suggest: {}:{} [{}] judged equivalent, no test: {}\n#   if you agree: {}",
@@ -935,6 +938,10 @@ mod tests {
             human.contains("# fermut: ignore[boundary-shift]"),
             "{human}"
         );
+        // `--triage audit`: generation ran and failed, so it wasn't skipped.
+        report.entries[0].error = Some("no code block".into());
+        assert!(!render_human(&report, false).contains("judged equivalent"));
+        report.entries[0].error = None;
         // A different verdict asks for nothing to be ignored.
         report.entries[0].triage.as_mut().unwrap().verdict = "different";
         assert_eq!(render_human(&report, false), "");

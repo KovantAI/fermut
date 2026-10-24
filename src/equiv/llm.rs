@@ -231,34 +231,23 @@ fn parse_verdict(text: &str) -> Option<ParsedVerdict> {
     })
 }
 
-/// The `def` (or `async def`) block enclosing 1-based `line`: the nearest
-/// less-indented `def` above it, through the last line indented deeper than
-/// that `def`. `None` at module or class scope, or when the function is
-/// longer than [`MAX_FUNCTION_LINES`].
+/// The innermost `def` (or `async def`) block enclosing 1-based `line`,
+/// decorators included, as whole source lines. Bounds come from the parsed
+/// AST, so multi-line signatures, column-0 comments and dedented string
+/// contents don't cut it short. `None` at module or class scope, on a parse
+/// failure, or when the function is longer than [`MAX_FUNCTION_LINES`].
 fn enclosing_function(source: &str, line: usize) -> Option<String> {
-    let lines: Vec<&str> = source.lines().collect();
-    let idx = line.checked_sub(1).filter(|&i| i < lines.len())?;
-    let indent = |l: &str| l.len() - l.trim_start().len();
-    let mut floor = indent(lines[idx]);
-    let def = (0..=idx).rev().find(|&i| {
-        let l = lines[i];
-        if l.trim().is_empty() || (i != idx && indent(l) >= floor) {
-            return false;
-        }
-        floor = floor.min(indent(l));
-        let t = l.trim_start();
-        t.starts_with("def ") || t.starts_with("async def ")
-    })?;
-    // Decorators above the def belong to it.
-    let mut start = def;
-    while start > 0 && lines[start - 1].trim_start().starts_with('@') {
-        start -= 1;
-    }
-    let def_indent = indent(lines[def]);
-    let end = (def + 1..lines.len())
-        .find(|&i| !lines[i].trim().is_empty() && indent(lines[i]) <= def_indent)
-        .unwrap_or(lines.len());
-    (end - start <= MAX_FUNCTION_LINES).then(|| lines[start..end].join("\n"))
+    let line_of = |offset: usize| source[..offset].matches('\n').count() + 1;
+    let (start, end) = crate::ast_hash::function_spans(source)
+        .into_iter()
+        .map(|r| (usize::from(r.start()), usize::from(r.end())))
+        .rev()
+        .find(|&(s, e)| (line_of(s)..=line_of(e)).contains(&line))?;
+    // Widen to whole lines so the def keeps its indentation.
+    let start = source[..start].rfind('\n').map_or(0, |i| i + 1);
+    let end = source[end..].find('\n').map_or(source.len(), |i| end + i);
+    let text = &source[start..end];
+    (text.lines().count() <= MAX_FUNCTION_LINES).then(|| text.to_string())
 }
 
 fn surround(source: &str, line: usize, span: usize) -> String {
@@ -464,6 +453,17 @@ mod tests {
         );
         let f = enclosing_function(&src, MAX_FUNCTION_LINES + 2).unwrap();
         assert_eq!(f, "def f(x):\n    return x");
+    }
+
+    #[test]
+    fn enclosing_function_survives_column_zero_lines_and_wrapped_signatures() {
+        let src =
+            "def f(x):\n    y = x + 1\n# note\n    s = \"\"\"\nSELECT 1\n\"\"\"\n    return y\n";
+        let f = enclosing_function(src, 2).unwrap();
+        assert!(f.ends_with("    return y"), "{f}");
+        let src = "def f(\n    a,\n) -> int:\n    return a + 1\n";
+        let f = enclosing_function(src, 4).unwrap();
+        assert_eq!(f, src.trim_end());
     }
 
     #[test]

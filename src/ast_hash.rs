@@ -363,6 +363,32 @@ fn body_fingerprint(body: &[Stmt]) -> String {
     hex::encode(h.finalize())
 }
 
+/// Byte ranges of every function definition in `source` (all nesting depths,
+/// source order, so an outer function precedes the ones nested in it), via a
+/// source-order walk. Empty on a parse failure.
+pub(crate) fn function_spans(source: &str) -> Vec<TextRange> {
+    use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
+    let Ok(parsed) = parse_module(source) else {
+        return Vec::new();
+    };
+    struct FnSpans {
+        spans: Vec<TextRange>,
+    }
+    impl<'a> SourceOrderVisitor<'a> for FnSpans {
+        fn visit_stmt(&mut self, stmt: &'a Stmt) {
+            if let Stmt::FunctionDef(f) = stmt {
+                self.spans.push(f.range());
+            }
+            walk_stmt(self, stmt);
+        }
+    }
+    let mut v = FnSpans { spans: Vec::new() };
+    for stmt in &parsed.syntax().body {
+        v.visit_stmt(stmt);
+    }
+    v.spans
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

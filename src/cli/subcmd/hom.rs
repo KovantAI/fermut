@@ -32,9 +32,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
-use ruff_python_ast::visitor::source_order::{walk_stmt, SourceOrderVisitor};
-use ruff_python_ast::Stmt;
-use ruff_python_parser::parse_module;
 use ruff_text_size::{Ranged, TextRange, TextSize};
 use serde::Deserialize;
 
@@ -347,32 +344,13 @@ fn classify(inter_kill: bool, outside_kill: bool) -> &'static str {
     }
 }
 
-/// Byte ranges of every function definition in `file` (all nesting depths),
-/// via a source-order walk. Empty on a parse failure or unreadable file — the
-/// same-function gate then treats those mutants as module-level (`None`).
+/// Byte ranges of every function definition in `file` (all nesting depths).
+/// Empty on an unreadable file — the same-function gate then treats those
+/// mutants as module-level (`None`).
 fn function_spans(file: &Path) -> Vec<TextRange> {
-    let Ok(source) = std::fs::read_to_string(file) else {
-        return Vec::new();
-    };
-    let Ok(parsed) = parse_module(&source) else {
-        return Vec::new();
-    };
-    struct FnSpans {
-        spans: Vec<TextRange>,
-    }
-    impl<'a> SourceOrderVisitor<'a> for FnSpans {
-        fn visit_stmt(&mut self, stmt: &'a Stmt) {
-            if let Stmt::FunctionDef(f) = stmt {
-                self.spans.push(f.range());
-            }
-            walk_stmt(self, stmt);
-        }
-    }
-    let mut v = FnSpans { spans: Vec::new() };
-    for stmt in &parsed.syntax().body {
-        v.visit_stmt(stmt);
-    }
-    v.spans
+    std::fs::read_to_string(file)
+        .map(|s| crate::ast_hash::function_spans(&s))
+        .unwrap_or_default()
 }
 
 /// The innermost function span containing `off`, keyed by its start offset;

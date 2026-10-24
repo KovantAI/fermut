@@ -560,7 +560,8 @@ const BUDGET_FLOOR_SECS: f64 = 5.0;
 
 /// Per-mutant timeout under `--timeout-factor`: `factor × baseline + floor`,
 /// rounded up to whole seconds and never above the configured `--timeout`.
-/// The baseline ran the whole suite; a mutant runs a subset of it.
+/// The baseline ran the whole suite alone; a mutant may rerun all of it beside
+/// other workers, hence the factor floor of 2 in `build_config`.
 fn budget_timeout_secs(timeout_secs: u64, factor: f64, baseline: Duration) -> u64 {
     let budget = (factor * baseline.as_secs_f64() + BUDGET_FLOOR_SECS).ceil() as u64;
     budget.min(timeout_secs)

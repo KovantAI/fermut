@@ -407,6 +407,13 @@ mod tests {
     }
 
     #[test]
+    fn set_timeout_replaces_the_per_mutant_timeout() {
+        let mut r = runner(PathBuf::from("tests"), PathBuf::from("python"), None);
+        r.set_timeout(Duration::from_secs(7));
+        assert_eq!(r.timeout, Duration::from_secs(7));
+    }
+
+    #[test]
     fn baseline_errors_on_zero_collection() {
         let Some(py) = python_or_skip() else { return };
         // Only a `*_test.py` file exists; the default `test*.py` pattern matches

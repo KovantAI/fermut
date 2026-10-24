@@ -27,10 +27,13 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 use super::explain::MutantSummary;
-use super::suggest::{append_to_test_file, generate_test_code, infer_apply_target, select_targets};
+use super::suggest::{
+    append_to_test_file, build_context, generate_test_code, infer_apply_target, select_targets,
+};
 use crate::cli::Format;
+use crate::equiv::llm::{before_generation, ignore_marker, TriageSummary};
 use crate::llm::cache::default_cache_path;
-use crate::llm::DEFAULT_MODEL;
+use crate::llm::{LlmCallOpts, LlmSession, TriageMode, DEFAULT_MODEL};
 use crate::mutator::Mutant;
 use crate::report::MutantOutcome;
 use crate::runner::{self, BaselineStatus, Runner};
@@ -53,6 +56,7 @@ pub struct AutofixOpts {
     /// the whole point is to land only proven tests.
     pub keep_failed: bool,
     pub format: Format,
+    pub triage: TriageMode,
 }
 
 impl From<AutofixArgs> for AutofixOpts {
@@ -73,6 +77,7 @@ impl From<AutofixArgs> for AutofixOpts {
             cache_path,
             keep_failed,
             format,
+            triage,
         } = a;
         AutofixOpts {
             report,
@@ -90,6 +95,7 @@ impl From<AutofixArgs> for AutofixOpts {
             cache_path,
             keep_failed,
             format,
+            triage,
         }
     }
 }
@@ -103,14 +109,35 @@ pub struct AutofixReport {
     pub model: String,
     pub fixed: usize,
     pub failed: usize,
+    /// Survivors the judge called equivalent under `--triage skip` (no test
+    /// generated; neither fixed nor failed).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub likely_equivalent: usize,
+    /// `--triage audit`: how often a survivor judged equivalent was killed
+    /// anyway, i.e. a proven false positive of the judge. Precision is at
+    /// most `(judged_equivalent - killed_anyway) / judged_equivalent`: autofix
+    /// failing to kill one doesn't prove it equivalent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triage_audit: Option<TriageAudit>,
     pub entries: Vec<AutofixEntry>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct TriageAudit {
+    pub judged_equivalent: usize,
+    pub killed_anyway: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Serialize)]
 pub struct AutofixEntry {
     pub mutant: MutantSummary,
     /// What happened, one of: `fixed`, `suite-red`, `still-survives`,
-    /// `generation-failed`, `error`.
+    /// `generation-failed`, `error`, or `likely-equivalent` (judged
+    /// equivalent under `--triage skip`; nothing generated).
     pub outcome: &'static str,
     /// Whether the generated test was left in the tree (true) or reverted.
     pub kept: bool,
@@ -118,8 +145,12 @@ pub struct AutofixEntry {
     pub applied_to: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// The equivalence judge's verdict (`--triage`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triage: Option<TriageSummary>,
 }
 
+const OUTCOME_LIKELY_EQUIVALENT: &str = "likely-equivalent";
 const OUTCOME_FIXED: &str = "fixed";
 const OUTCOME_SUITE_RED: &str = "suite-red";
 const OUTCOME_STILL_SURVIVES: &str = "still-survives";
@@ -150,9 +181,12 @@ pub fn autofix(opts: AutofixOpts) -> Result<()> {
         runner: runner.as_ref(),
         tests_dir: tests_dir.as_deref(),
         out: opts.out.as_deref(),
-        model: &model,
-        cache_path: &cache_path,
-        no_cache: opts.no_cache,
+        llm: LlmSession::new(LlmCallOpts {
+            model,
+            no_cache: opts.no_cache,
+            cache_path,
+        }),
+        triage: opts.triage,
         context_lines: opts.context_lines,
         sample_count: opts.sample_count,
         keep_failed: opts.keep_failed,
@@ -163,7 +197,7 @@ pub fn autofix(opts: AutofixOpts) -> Result<()> {
 
     match opts.format {
         Format::Json => println!("{}", serde_json::to_string_pretty(&report)?),
-        Format::Human => render_human(&report),
+        Format::Human => print!("{}", render_human(&report)),
     }
     Ok(())
 }
@@ -191,9 +225,8 @@ struct Core<'a> {
     runner: &'a dyn Runner,
     tests_dir: Option<&'a Path>,
     out: Option<&'a Path>,
-    model: &'a str,
-    cache_path: &'a Path,
-    no_cache: bool,
+    llm: LlmSession,
+    triage: TriageMode,
     context_lines: usize,
     sample_count: usize,
     keep_failed: bool,
@@ -205,15 +238,25 @@ fn run_autofix(core: &Core, mutants: &[Mutant]) -> AutofixReport {
     for m in mutants {
         entries.push(fix_one(core, m));
     }
-    let fixed = entries
-        .iter()
-        .filter(|e| e.outcome == OUTCOME_FIXED)
-        .count();
-    let failed = entries.len() - fixed;
+    let count = |outcome: &str| entries.iter().filter(|e| e.outcome == outcome).count();
+    let fixed = count(OUTCOME_FIXED);
+    let likely_equivalent = count(OUTCOME_LIKELY_EQUIVALENT);
+    let triage_audit = (core.triage == TriageMode::Audit).then(|| {
+        let judged: Vec<&AutofixEntry> = entries
+            .iter()
+            .filter(|e| e.triage.as_ref().is_some_and(|t| t.verdict == "equivalent"))
+            .collect();
+        TriageAudit {
+            judged_equivalent: judged.len(),
+            killed_anyway: judged.iter().filter(|e| e.outcome == OUTCOME_FIXED).count(),
+        }
+    });
     AutofixReport {
-        model: core.model.to_string(),
+        model: core.llm.opts.model.clone(),
         fixed,
-        failed,
+        failed: entries.len() - fixed - likely_equivalent,
+        likely_equivalent,
+        triage_audit,
         entries,
     }
 }
@@ -236,16 +279,50 @@ fn fix_one(core: &Core, m: &Mutant) -> AutofixEntry {
         );
     }
 
-    // 1. generate
-    let (code, ctx) = match generate_test_code(
+    // 0. triage (`--triage`): skip a survivor judged equivalent, or carry the
+    //    judge's explanation of the difference into generation.
+    let mut ctx = build_context(m, core.context_lines, core.tests_dir, core.sample_count);
+    let llm = &core.llm;
+    let (triage, skip) = before_generation(
+        core.triage,
         m,
-        core.tests_dir,
-        core.context_lines,
-        core.sample_count,
-        core.model,
-        core.cache_path,
-        core.no_cache,
-    ) {
+        &mut ctx,
+        &llm.opts,
+        &llm.client_cell,
+        &llm.cache,
+    );
+    let mut e = if skip {
+        let reason = triage.as_ref().map_or("", |t| t.reason.as_str());
+        if core.log {
+            eprintln!("  ~ judged equivalent; no test generated");
+        }
+        entry(
+            summary,
+            OUTCOME_LIKELY_EQUIVALENT,
+            false,
+            None,
+            Some(format!(
+                "{reason} If you agree, mark it: {}",
+                ignore_marker(m.file.display(), m.line, m.operator.name())
+            )),
+        )
+    } else {
+        generate_and_verify(core, m, summary, &ctx)
+    };
+    e.triage = triage;
+    e
+}
+
+/// Generate a test from `ctx`, append it, and keep it only if it verifies.
+fn generate_and_verify(
+    core: &Core,
+    m: &Mutant,
+    summary: MutantSummary,
+    ctx: &crate::llm::prompt::PromptContext,
+) -> AutofixEntry {
+    // 1. generate
+    let llm = &core.llm;
+    let code = match generate_test_code(m, ctx, &llm.opts, &llm.client_cell, &llm.cache) {
         Ok(v) => v,
         Err(e) => {
             return entry(
@@ -263,7 +340,7 @@ fn fix_one(core: &Core, m: &Mutant) -> AutofixEntry {
     let target_path = match core
         .out
         .map(|p| Ok(p.to_path_buf()))
-        .unwrap_or_else(|| infer_apply_target(m, &ctx))
+        .unwrap_or_else(|| infer_apply_target(m, ctx))
     {
         Ok(p) => p,
         Err(e) => return entry(summary, OUTCOME_ERROR, false, None, Some(e.to_string())),
@@ -404,6 +481,7 @@ fn entry(
         kept,
         applied_to,
         detail,
+        triage: None,
     }
 }
 
@@ -477,11 +555,14 @@ impl Snapshot {
     }
 }
 
-fn render_human(report: &AutofixReport) {
+fn render_human(report: &AutofixReport) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
     for e in &report.entries {
         let m = &e.mutant;
         let mark = if e.kept { "kept" } else { "reverted" };
-        println!(
+        let _ = writeln!(
+            s,
             "[{}] {}:{} [{}] — {} ({mark})",
             e.outcome,
             m.file,
@@ -490,12 +571,32 @@ fn render_human(report: &AutofixReport) {
             e.detail.as_deref().unwrap_or("ok")
         );
     }
-    println!(
-        "\nautofix: {} fixed, {} failed ({} total)",
+    let _ = writeln!(
+        s,
+        "\nautofix: {} fixed, {} failed, {} likely equivalent ({} total)",
         report.fixed,
         report.failed,
+        report.likely_equivalent,
         report.entries.len()
     );
+    if let Some(a) = &report.triage_audit {
+        let _ = writeln!(
+            s,
+            "triage: {} judged equivalent, {} of them killed anyway{}",
+            a.judged_equivalent,
+            a.killed_anyway,
+            if a.judged_equivalent > 0 {
+                format!(
+                    " (judge precision at most {:.0}%: a survivor autofix couldn't kill may still not be equivalent)",
+                    100.0 * (a.judged_equivalent - a.killed_anyway) as f64
+                        / a.judged_equivalent as f64
+                )
+            } else {
+                String::new()
+            }
+        );
+    }
+    s
 }
 
 #[cfg(test)]
@@ -592,14 +693,148 @@ mod tests {
             runner,
             tests_dir: Some(tests),
             out: None,
-            model: DEFAULT_MODEL,
-            cache_path: Path::new("/nonexistent/llm-cache.json"),
-            no_cache: true,
+            llm: LlmSession::new(LlmCallOpts {
+                model: DEFAULT_MODEL.into(),
+                no_cache: true,
+                cache_path: PathBuf::from("/nonexistent/llm-cache.json"),
+            }),
+            triage: TriageMode::Off,
             context_lines: 3,
             sample_count: 1,
             keep_failed,
             log: false,
         }
+    }
+
+    /// Answers the equivalence judge with `judge` and test generation with a
+    /// passing test; records every request so tests can count and inspect them.
+    struct RoutedClient {
+        judge: String,
+        requests: Mutex<Vec<crate::llm::client::LlmRequest>>,
+    }
+
+    impl crate::llm::LlmClient for RoutedClient {
+        fn complete(&self, req: &crate::llm::client::LlmRequest) -> Result<String> {
+            self.requests.lock().unwrap().push(req.clone());
+            Ok(if req.system.contains("BEHAVIORALLY EQUIVALENT") {
+                self.judge.clone()
+            } else {
+                "```python\ndef test_generated():\n    assert True\n```".into()
+            })
+        }
+    }
+
+    fn triaging<'a>(
+        runner: &'a dyn Runner,
+        tests: &'a Path,
+        mode: TriageMode,
+        judge: &str,
+    ) -> (Core<'a>, std::sync::Arc<RoutedClient>) {
+        let client = std::sync::Arc::new(RoutedClient {
+            judge: judge.into(),
+            requests: Mutex::new(Vec::new()),
+        });
+        let mut c = core(runner, tests, false);
+        c.triage = mode;
+        let _ = c.llm.client_cell.set(Ok(
+            client.clone() as std::sync::Arc<dyn crate::llm::LlmClient>
+        ));
+        (c, client)
+    }
+
+    const JUDGED_EQUIVALENT: &str = r#"{"equivalent": true, "confidence": 0.97, "reason": "both forms agree on every input.", "counterexample": null}"#;
+    const JUDGED_DIFFERENT: &str = r#"{"equivalent": false, "confidence": 0.9, "reason": "differs when x equals lo", "counterexample": "in_range(0, 0, 2)"}"#;
+
+    #[test]
+    fn triage_skip_reports_likely_equivalent_without_generating() {
+        let (dir, m, test_file) = fixture();
+        let before = std::fs::read_to_string(&test_file).unwrap();
+        let runner = mock(true, true);
+        let tests_dir = dir.path().join("tests");
+        let (c, client) = triaging(&runner, &tests_dir, TriageMode::Skip, JUDGED_EQUIVALENT);
+        let report = run_autofix(&c, std::slice::from_ref(&m));
+        let e = &report.entries[0];
+        assert_eq!(e.outcome, OUTCOME_LIKELY_EQUIVALENT);
+        assert_eq!(e.triage.as_ref().unwrap().verdict, "equivalent");
+        assert!(e
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("# fermut: ignore[boundary-shift]"));
+        assert_eq!(
+            (report.fixed, report.failed, report.likely_equivalent),
+            (0, 0, 1)
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["likely_equivalent"], 1);
+        assert_eq!(
+            client.requests.lock().unwrap().len(),
+            1,
+            "judge only, no generation"
+        );
+        assert_eq!(std::fs::read_to_string(&test_file).unwrap(), before);
+        assert!(report.triage_audit.is_none());
+    }
+
+    #[test]
+    fn triage_audit_still_fixes_and_counts_a_judge_false_positive() {
+        let (dir, m, _test_file) = fixture();
+        let runner = mock(true, true); // the generated test kills the mutant
+        let tests_dir = dir.path().join("tests");
+        let (c, client) = triaging(&runner, &tests_dir, TriageMode::Audit, JUDGED_EQUIVALENT);
+        let report = run_autofix(&c, std::slice::from_ref(&m));
+        assert_eq!(report.entries[0].outcome, OUTCOME_FIXED);
+        assert_eq!(
+            report.triage_audit,
+            Some(TriageAudit {
+                judged_equivalent: 1,
+                killed_anyway: 1
+            })
+        );
+        assert_eq!(
+            (report.fixed, report.failed, report.likely_equivalent),
+            (1, 0, 0)
+        );
+        let human = render_human(&report);
+        assert!(human.contains("[fixed] "), "{human}");
+        assert!(
+            human.contains("autofix: 1 fixed, 0 failed, 0 likely equivalent (1 total)"),
+            "{human}"
+        );
+        assert!(
+            human.contains(
+                "1 judged equivalent, 1 of them killed anyway (judge precision at most 0%"
+            ),
+            "{human}"
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("likely_equivalent").is_none(), "zero is omitted");
+        assert_eq!(
+            client.requests.lock().unwrap().len(),
+            2,
+            "judge, then generation"
+        );
+    }
+
+    #[test]
+    fn triage_different_steers_generation_with_the_judges_explanation() {
+        let (dir, m, _test_file) = fixture();
+        let runner = mock(true, true);
+        let tests_dir = dir.path().join("tests");
+        let (c, client) = triaging(&runner, &tests_dir, TriageMode::Skip, JUDGED_DIFFERENT);
+        let report = run_autofix(&c, std::slice::from_ref(&m));
+        assert_eq!(report.entries[0].outcome, OUTCOME_FIXED);
+        assert_eq!(
+            report.entries[0].triage.as_ref().unwrap().verdict,
+            "different"
+        );
+        let requests = client.requests.lock().unwrap();
+        let generation = &requests[1].user;
+        assert!(
+            generation.contains("differs when x equals lo"),
+            "{generation}"
+        );
+        assert!(generation.contains("in_range(0, 0, 2)"), "{generation}");
     }
 
     #[test]
@@ -694,6 +929,30 @@ mod tests {
     }
 
     #[test]
+    fn autofix_surfaces_an_unreadable_report() {
+        let dir = TempDir::new().unwrap();
+        let err = autofix(AutofixOpts {
+            report: dir.path().join("missing.json"),
+            target: None,
+            all_survivors: true,
+            path: dir.path().into(),
+            tests: None,
+            python: None,
+            out: None,
+            model: None,
+            context_lines: 3,
+            sample_count: 1,
+            no_cache: true,
+            cache_path: None,
+            timeout: None,
+            keep_failed: false,
+            format: Format::Json,
+            triage: TriageMode::Off,
+        });
+        assert!(err.is_err());
+    }
+
+    #[test]
     fn snapshot_existing_revert_restores_bytes() {
         let dir = TempDir::new().unwrap();
         let p = dir.path().join("t.py");
@@ -771,4 +1030,14 @@ pub(crate) struct AutofixArgs {
     /// `human` prints a per-mutant summary.
     #[arg(long, value_enum, default_value_t = crate::cli::Format::Json)]
     pub(crate) format: crate::cli::Format,
+
+    /// Ask an LLM equivalence judge about each survivor first (one extra,
+    /// cached call each). `skip`: report survivors judged equivalent as
+    /// `likely-equivalent` without generating, and steer the rest with the
+    /// judge's explanation of how the mutant behaves differently. `audit`:
+    /// judge, but still generate and verify every survivor, and count how
+    /// often a "likely equivalent" one was killed anyway (the judge's
+    /// measured false positives). The mutation score never changes.
+    #[arg(long, value_enum, default_value_t = TriageMode::Off)]
+    pub(crate) triage: TriageMode,
 }

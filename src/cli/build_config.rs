@@ -429,8 +429,10 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     let timeout_factor = cli_timeout_factor.or(file.timeout_factor);
     if let Some(f) = timeout_factor {
         anyhow::ensure!(
-            f.is_finite() && f >= 1.0,
-            "timeout factor must be at least 1 (got {f}): it scales the time the whole suite took"
+            f.is_finite() && f >= 2.0,
+            "timeout factor must be at least 2 (got {f}): a mutant can rerun the whole \
+             suite (unittest, or pytest without coverage) beside other workers, so a \
+             tighter budget times out real survivors and scores them detected"
         );
         if !verify_baseline && cli_baseline_secs.is_none() {
             warn!(
@@ -1254,17 +1256,17 @@ mod tests {
     }
 
     #[test]
-    fn timeout_factor_from_config_and_rejects_below_one() {
+    fn timeout_factor_from_config_and_rejects_below_two() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("fermut.toml"), "timeout_factor = 3.0\n").unwrap();
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
         assert_eq!(cfg.timeout_factor, Some(3.0));
         let mut args = run_args(empty_filter());
-        args.timeout_factor = Some(0.5);
+        args.timeout_factor = Some(1.5);
         let err = build_config(tmp.path().to_path_buf(), args)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("at least 1"), "{err}");
+        assert!(err.contains("at least 2"), "{err}");
 
         let mut args = run_args(empty_filter());
         args.baseline_secs = Some(1.5);

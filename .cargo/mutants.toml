@@ -36,4 +36,7 @@ exclude_globs = [
 # denominator everywhere, which is the point — a floor is only honest over
 # mutants a test could kill. Every entry needs a reason. "This PR would go green
 # faster" is not one; the `mutants-advisory` label is for that.
-exclude_re = []
+exclude_re = [
+    # `cached && log` only gates an unasserted "cache hit" line on stderr.
+    'src/cli/subcmd/suggest.rs:.*replace && with \|\| in generate_one',
+]

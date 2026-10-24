@@ -27,6 +27,7 @@ fermut suggest <report.json> [SELECTOR] [--all-survivors] [--format human|json] 
 | `--model M`             | Anthropic model id. Default `claude-sonnet-4-6` (applied by the handler when omitted on the CLI; clap itself has no default). |
 | `--no-cache`            | Disable the LLM response cache at `.fermut/llm-cache.json`.                                                            |
 | `--cache-path PATH`     | Override the LLM cache file location.                                                                                  |
+| `--triage off\|skip\|audit` | Ask an LLM equivalence judge about each survivor first (one extra, cached call). `skip`: no test for one judged equivalent; the judge's explanation of a difference steers the rest. `audit`: judge and report, but generate for all. Same modes as [`autofix --triage`](autofix.md#triage). Default `off`. |
 
 ## JSON shape
 
@@ -50,7 +51,10 @@ report, even under `--parallel N`. Optional fields are omitted, never
 `null`: `error` appears only when the entry failed. A failed call omits
 `response` and `extracted_code`; a response with no python code block keeps
 `response` but omits `extracted_code`. `applied_to` appears only when
-`--apply` or `--out` wrote the test to disk. The JSON shape is the contract for agent consumers — additions are
+`--apply` or `--out` wrote the test to disk. `triage` appears with
+`--triage` (`{verdict, reason, counterexample?, confidence?, cached}`); under
+`skip` an entry judged `equivalent` has no `response` and no `error`, since
+no test was generated. The JSON shape is the contract for agent consumers — additions are
 backwards-compatible; renames are not. See `VERSIONING.md`.
 
 ## Authentication

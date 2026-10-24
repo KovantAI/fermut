@@ -35,16 +35,15 @@ use serde::Serialize;
 
 use super::explain::{enclosing_symbol, render_source_snippet, EnclosingSymbol, MutantSummary};
 use crate::cli::Format;
+use crate::equiv::llm::{before_generation, ignore_marker, TriageSummary};
 use crate::llm::cache::{default_cache_path, LlmCache};
-use crate::llm::client::client_from_env;
 use crate::llm::prompt::{
     build_suggest_prompt, cache_key, extract_first_code_block, file_sha256, PromptContext,
     SampleTest,
 };
-use crate::llm::{LlmCallOpts, DEFAULT_MODEL};
+use crate::llm::{complete_cached, ClientCell, LlmCallOpts, TriageMode, DEFAULT_MODEL};
 use crate::mutator::Mutant;
 use crate::report::{MutantOutcome, Report};
-use crate::sync::lock_recover;
 use crate::util::search::{grep_symbol, DEFAULT_GREP_MATCH_LIMIT};
 
 pub struct SuggestOpts {
@@ -62,6 +61,7 @@ pub struct SuggestOpts {
     pub project_root: PathBuf,
     pub format: Format,
     pub parallel: usize,
+    pub triage: TriageMode,
 }
 
 /// Built with a caller-resolved `project_root` (via
@@ -83,6 +83,7 @@ impl From<(SuggestArgs, PathBuf)> for SuggestOpts {
             cache_path,
             format,
             parallel,
+            triage,
         } = a;
         SuggestOpts {
             report,
@@ -99,6 +100,7 @@ impl From<(SuggestArgs, PathBuf)> for SuggestOpts {
             project_root,
             format,
             parallel,
+            triage,
         }
     }
 }
@@ -125,6 +127,10 @@ pub struct SuggestEntry {
     pub applied_to: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The equivalence judge's verdict (`--triage`). With `skip`, an
+    /// `equivalent` verdict means no test was generated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triage: Option<TriageSummary>,
 }
 
 // ---------------------------------------------------------------------------
@@ -165,9 +171,7 @@ pub fn suggest(opts: SuggestOpts) -> Result<()> {
     // Defer client construction until a cache miss forces a network call.
     // Avoids failing with "ANTHROPIC_API_KEY is not set" when every target is
     // already cached. `OnceLock` ensures one construction across `--parallel`.
-    let client_cell: Arc<
-        OnceLock<std::result::Result<Arc<dyn crate::llm::client::LlmClient>, String>>,
-    > = Arc::new(OnceLock::new());
+    let client_cell: Arc<ClientCell> = Arc::new(OnceLock::new());
 
     let parallel = opts.parallel.max(1);
 
@@ -199,7 +203,17 @@ pub fn suggest(opts: SuggestOpts) -> Result<()> {
     let work = mutants.into_iter().zip(contexts).collect::<Vec<_>>();
     let raw_results: Vec<GenResult> = if parallel == 1 {
         work.into_iter()
-            .map(|(m, ctx)| generate_one(&m, &ctx, &llm_opts, &client_cell, &cache, log_progress))
+            .map(|(m, ctx)| {
+                generate_one(
+                    &m,
+                    ctx,
+                    &llm_opts,
+                    opts.triage,
+                    &client_cell,
+                    &cache,
+                    log_progress,
+                )
+            })
             .collect()
     } else {
         let pool = rayon::ThreadPoolBuilder::new()
@@ -210,7 +224,15 @@ pub fn suggest(opts: SuggestOpts) -> Result<()> {
             work.into_par_iter()
                 .with_max_len(1)
                 .map(|(m, ctx)| {
-                    generate_one(&m, &ctx, &llm_opts, &client_cell, &cache, log_progress)
+                    generate_one(
+                        &m,
+                        ctx,
+                        &llm_opts,
+                        opts.triage,
+                        &client_cell,
+                        &cache,
+                        log_progress,
+                    )
                 })
                 .collect()
         })
@@ -230,7 +252,10 @@ pub fn suggest(opts: SuggestOpts) -> Result<()> {
                 .context("serializing suggest report")?;
             println!("{s}");
         }
-        Format::Human => render_human(&suggest_report, opts.apply, opts.out.as_deref()),
+        Format::Human => print!(
+            "{}",
+            render_human(&suggest_report, opts.apply || opts.out.is_some())
+        ),
     }
     Ok(())
 }
@@ -244,16 +269,39 @@ struct GenResult {
     ctx: PromptContext,
     cached: bool,
     response: Result<String>,
+    triage: Option<TriageSummary>,
+    /// Judged equivalent under `--triage skip`: no generation call made.
+    skipped: bool,
 }
 
 fn generate_one(
     m: &Mutant,
-    ctx: &PromptContext,
+    mut ctx: PromptContext,
     opts: &LlmCallOpts,
-    client_cell: &OnceLock<std::result::Result<Arc<dyn crate::llm::client::LlmClient>, String>>,
-    cache: &Arc<Mutex<LlmCache>>,
+    triage_mode: TriageMode,
+    client_cell: &ClientCell,
+    cache: &Mutex<LlmCache>,
     log: bool,
 ) -> GenResult {
+    let (triage, skipped) = before_generation(triage_mode, m, &mut ctx, opts, client_cell, cache);
+    if skipped {
+        if log {
+            eprintln!(
+                "~ {}:{} [{}] judged equivalent; no test generated",
+                m.file.display(),
+                m.line,
+                m.operator.name()
+            );
+        }
+        return GenResult {
+            mutant: m.clone(),
+            ctx,
+            cached: false,
+            response: Err(anyhow!("judged equivalent")),
+            triage,
+            skipped,
+        };
+    }
     if log {
         eprintln!(
             "→ generating test for {}:{} [{}]",
@@ -263,61 +311,20 @@ fn generate_one(
         );
     }
 
-    let req = build_suggest_prompt(m, ctx, &opts.model);
+    let req = build_suggest_prompt(m, &ctx, &opts.model);
     let sha = file_sha256(&m.file).unwrap_or_default();
     let key = cache_key(&m.id, &sha, &req.user);
-
-    let cached_hit = if opts.no_cache {
-        None
-    } else {
-        lock_recover(cache).lookup(&key).map(str::to_string)
-    };
-
-    let (response, cached) = match cached_hit {
-        Some(hit) => {
-            if log {
-                eprintln!("  cache hit");
-            }
-            (Ok(hit), true)
-        }
-        None => {
-            let client_result = client_cell.get_or_init(|| {
-                client_from_env()
-                    .map(|c| {
-                        let c: Arc<dyn crate::llm::client::LlmClient> = Arc::from(c);
-                        c
-                    })
-                    .map_err(|e| e.to_string())
-            });
-            match client_result {
-                Err(e) => (Err(anyhow!(e.clone())), false),
-                Ok(client) => match client.complete(&req) {
-                    Ok(text) => {
-                        if !opts.no_cache {
-                            // Hold the lock across save so concurrent rayon
-                            // workers serialize disk writes and never race on
-                            // the shared tmp-sibling path.
-                            let mut guard = lock_recover(cache);
-                            guard.insert(key, text.clone());
-                            if let Err(e) = guard.save(&opts.cache_path) {
-                                eprintln!(
-                                    "  warning: persisting llm cache to {} failed: {e}",
-                                    opts.cache_path.display()
-                                );
-                            }
-                        }
-                        (Ok(text), false)
-                    }
-                    Err(e) => (Err(e), false),
-                },
-            }
-        }
-    };
+    let (response, cached) = complete_cached(&req, key, opts, client_cell, cache);
+    if cached && log {
+        eprintln!("  cache hit");
+    }
     GenResult {
         mutant: m.clone(),
-        ctx: ctx.clone(),
+        ctx,
         cached,
         response,
+        triage,
+        skipped,
     }
 }
 
@@ -331,6 +338,18 @@ fn finalize_entry(r: GenResult, apply: bool, out: Option<&Path>, log: bool) -> S
         original: m.original.clone(),
         replacement: m.replacement.clone(),
     };
+    let triage = r.triage;
+    if r.skipped {
+        return SuggestEntry {
+            mutant: summary,
+            cached: false,
+            response: None,
+            extracted_code: None,
+            applied_to: None,
+            error: None,
+            triage,
+        };
+    }
 
     let response = match r.response {
         Ok(text) => text,
@@ -342,6 +361,7 @@ fn finalize_entry(r: GenResult, apply: bool, out: Option<&Path>, log: bool) -> S
                 extracted_code: None,
                 applied_to: None,
                 error: Some(e.to_string()),
+                triage,
             };
         }
     };
@@ -355,6 +375,7 @@ fn finalize_entry(r: GenResult, apply: bool, out: Option<&Path>, log: bool) -> S
             extracted_code: None,
             applied_to: None,
             error: Some("model response did not contain a python code block".into()),
+            triage,
         };
     }
     let code = extracted.unwrap();
@@ -413,79 +434,86 @@ fn finalize_entry(r: GenResult, apply: bool, out: Option<&Path>, log: bool) -> S
         extracted_code: Some(code),
         applied_to,
         error,
+        triage,
     }
 }
 
-fn render_human(report: &SuggestReport, apply: bool, out: Option<&Path>) {
-    let written = apply || out.is_some();
+/// The stdout part of the human report; per-entry errors go to stderr as
+/// they're found. `written`: the tests went to a file, so don't echo them.
+fn render_human(report: &SuggestReport, written: bool) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
     for entry in &report.entries {
         let m = &entry.mutant;
-        let target =
-            entry
-                .applied_to
-                .as_deref()
-                .unwrap_or(if written { "(write failed)" } else { "" });
-        if let Some(code) = &entry.extracted_code {
-            if !written {
-                println!(
-                    "\n# fermut suggest: kills mutation `{}` → `{}` at {}:{}",
-                    m.original, m.replacement, m.file, m.line
-                );
-                print!("{code}");
-                if !code.ends_with('\n') {
-                    println!();
-                }
-            } else if !target.is_empty() && entry.applied_to.is_some() {
-                // Already logged during apply.
+        if let (Some(code), false) = (&entry.extracted_code, written) {
+            let _ = writeln!(
+                s,
+                "\n# fermut suggest: kills mutation `{}` → `{}` at {}:{}",
+                m.original, m.replacement, m.file, m.line
+            );
+            s.push_str(code);
+            if !code.ends_with('\n') {
+                s.push('\n');
             }
         }
         if let Some(err) = &entry.error {
             eprintln!("! {}:{} [{}] — {}", m.file, m.line, m.operator, err);
         }
+        if let Some(t) = &entry.triage {
+            // Only a `--triage skip` entry has neither a response nor an
+            // error; under `audit` a failed generation must not read as a skip.
+            let skipped = entry.response.is_none() && entry.error.is_none();
+            if t.verdict == "equivalent" && skipped {
+                let _ = writeln!(
+                    s,
+                    "\n# fermut suggest: {}:{} [{}] judged equivalent, no test: {}\n#   if you agree: {}",
+                    m.file,
+                    m.line,
+                    m.operator,
+                    t.reason,
+                    ignore_marker(&m.file, m.line, &m.operator)
+                );
+            } else {
+                // A test was attempted: still show what the judge said, or
+                // `--triage audit` pays for verdicts nobody sees.
+                let _ = writeln!(
+                    s,
+                    "# fermut suggest: {}:{} [{}] judge: {}: {}",
+                    m.file, m.line, m.operator, t.verdict, t.reason
+                );
+            }
+        }
     }
+    s
 }
 
 // ---------------------------------------------------------------------------
 // Selection + context plumbing
 // ---------------------------------------------------------------------------
 
-/// One-shot generation for a single mutant: build prompt context, call the
-/// model (or hit the cache), and return the extracted python test code plus
-/// the context (the apply-target inference needs it). Used by `fermut
-/// autofix`. Errors when the model fails or returns no code block.
+/// One-shot generation for a single mutant from a prepared `ctx` (see
+/// [`build_context`]): call the model (or hit the cache) and return the
+/// extracted python test code. Used by `fermut autofix`, which triages first.
+/// Errors when the model fails or returns no code block.
 pub(crate) fn generate_test_code(
     m: &Mutant,
-    tests_dir: Option<&Path>,
-    context_lines: usize,
-    sample_count: usize,
-    model: &str,
-    cache_path: &Path,
-    no_cache: bool,
-) -> Result<(String, PromptContext)> {
-    let ctx = build_context(m, context_lines, tests_dir, sample_count);
-    let cache = Arc::new(Mutex::new(if no_cache {
-        LlmCache::default()
-    } else {
-        LlmCache::load(cache_path)
-    }));
-    let client_cell: OnceLock<std::result::Result<Arc<dyn crate::llm::client::LlmClient>, String>> =
-        OnceLock::new();
+    ctx: &PromptContext,
+    opts: &LlmCallOpts,
+    client_cell: &ClientCell,
+    cache: &Mutex<LlmCache>,
+) -> Result<String> {
     let r = generate_one(
         m,
-        &ctx,
-        &LlmCallOpts {
-            model: model.to_string(),
-            no_cache,
-            cache_path: cache_path.to_path_buf(),
-        },
-        &client_cell,
-        &cache,
+        ctx.clone(),
+        opts,
+        TriageMode::Off,
+        client_cell,
+        cache,
         false,
     );
     let text = r.response?;
-    let code = extract_first_code_block(&text)
-        .ok_or_else(|| anyhow!("model response did not contain a python code block"))?;
-    Ok((code, ctx))
+    extract_first_code_block(&text)
+        .ok_or_else(|| anyhow!("model response did not contain a python code block"))
 }
 
 pub(crate) fn select_targets<'a>(
@@ -527,7 +555,7 @@ pub(crate) fn select_targets<'a>(
     }
 }
 
-fn build_context(
+pub(crate) fn build_context(
     m: &Mutant,
     context_lines: usize,
     tests_dir: Option<&Path>,
@@ -543,6 +571,7 @@ fn build_context(
         source_snippet,
         enclosing_symbol: enclosing,
         sample_tests,
+        hint: None,
     }
 }
 
@@ -794,6 +823,7 @@ mod tests {
             project_root,
             format,
             parallel,
+            triage: TriageMode::Off,
         };
         suggest(opts)
     }
@@ -870,6 +900,69 @@ mod tests {
     }
 
     #[test]
+    fn triage_skip_makes_no_generation_call_and_reports_the_verdict() {
+        struct Judge(std::sync::atomic::AtomicUsize);
+        impl crate::llm::LlmClient for Judge {
+            fn complete(&self, _: &crate::llm::client::LlmRequest) -> Result<String> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(r#"{"equivalent": true, "confidence": 0.95, "reason": "same value", "counterexample": null}"#.into())
+            }
+        }
+        let dir = TempDir::new().unwrap();
+        let src_path = dir.path().join("calc.py");
+        std::fs::write(&src_path, "def f(x):\n    return x + 0\n").unwrap();
+        let mutant = make_mutant("calc:2:arith:0", src_path, 2);
+        let judge = Arc::new(Judge(Default::default()));
+        let cell: ClientCell = OnceLock::new();
+        let _ = cell.set(Ok(judge.clone() as Arc<dyn crate::llm::LlmClient>));
+        let r = generate_one(
+            &mutant,
+            PromptContext::empty(),
+            &LlmCallOpts {
+                model: DEFAULT_MODEL.into(),
+                no_cache: true,
+                cache_path: dir.path().join("c.json"),
+            },
+            TriageMode::Skip,
+            &cell,
+            &Mutex::new(LlmCache::default()),
+            false,
+        );
+        assert!(r.skipped);
+        assert_eq!(judge.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let e = finalize_entry(r, false, None, false);
+        assert!(e.error.is_none() && e.extracted_code.is_none());
+        assert_eq!(e.triage.as_ref().unwrap().verdict, "equivalent");
+        let mut report = SuggestReport {
+            model: DEFAULT_MODEL.into(),
+            entries: vec![e],
+        };
+        let human = render_human(&report, false);
+        assert!(
+            human.contains("judged equivalent, no test: same value"),
+            "{human}"
+        );
+        assert!(
+            human.contains("# fermut: ignore[boundary-shift]"),
+            "{human}"
+        );
+        // `--triage audit`: generation ran and failed, so it wasn't skipped.
+        report.entries[0].error = Some("no code block".into());
+        assert!(!render_human(&report, false).contains("judged equivalent"));
+        report.entries[0].error = None;
+        // A different verdict asks for nothing to be ignored, but is shown.
+        report.entries[0].triage.as_mut().unwrap().verdict = "different";
+        let human = render_human(&report, false);
+        assert!(!human.contains("ignore["), "{human}");
+        assert!(human.contains("judge: different: same value"), "{human}");
+        // Generated code is echoed only when it wasn't written to a file.
+        report.entries[0].triage = None;
+        report.entries[0].extracted_code = Some("def test_x():\n    pass".into());
+        assert!(render_human(&report, false).ends_with("def test_x():\n    pass\n"));
+        assert_eq!(render_human(&report, true), "");
+    }
+
+    #[test]
     fn generate_one_persists_cache_per_response() {
         // Regression: prior to this test the on-disk cache was only written
         // after the entire generation loop finished, so an interrupt mid-loop
@@ -887,6 +980,7 @@ mod tests {
             source_snippet: String::new(),
             enclosing_symbol: None,
             sample_tests: Vec::new(),
+            hint: None,
         };
         let cache_path = dir.path().join("llm-cache.json");
         let cache = Arc::new(Mutex::new(LlmCache::default()));
@@ -896,12 +990,13 @@ mod tests {
 
         let result = generate_one(
             &mutant,
-            &ctx,
+            ctx,
             &LlmCallOpts {
                 model: DEFAULT_MODEL.to_string(),
                 no_cache: false,
                 cache_path: cache_path.clone(),
             },
+            TriageMode::Off,
             &client_cell,
             &cache,
             false,
@@ -994,4 +1089,12 @@ pub(crate) struct SuggestArgs {
     /// your tenant's rate limit. File writes stay serial.
     #[arg(long, default_value_t = 1)]
     pub(crate) parallel: usize,
+
+    /// Ask an LLM equivalence judge about each survivor first (one extra,
+    /// cached call each). `skip`: don't generate a test for one judged
+    /// equivalent, and steer the others with the judge's explanation of how
+    /// the mutant behaves differently. `audit`: judge and report, but
+    /// generate for every survivor. The mutation score never changes.
+    #[arg(long, value_enum, default_value_t = TriageMode::Off)]
+    pub(crate) triage: TriageMode,
 }

@@ -1431,6 +1431,13 @@ mod tests {
     }
 
     #[test]
+    fn set_timeout_replaces_the_per_mutant_timeout() {
+        let mut r = runner(false, Arc::new(CoverageContexts::default()));
+        r.set_timeout(Duration::from_secs(7));
+        assert_eq!(r.timeout, Duration::from_secs(7));
+    }
+
+    #[test]
     fn rstest_launches_binary_not_python_module() {
         let tmp = tempfile::tempdir().unwrap();
         let py = tmp.path().join("python");

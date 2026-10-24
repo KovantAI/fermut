@@ -371,8 +371,12 @@ def pytest_sessionfinish(session, exitstatus):
     # skipped (by flag or by config) in sizing `--timeout-factor` timeouts;
     # fermut ignores it otherwise. An env var, not a flag, so a fermut too old
     # to know it still runs. Taken before the coverage refresh.
+    # A narrowed session drops any inherited value: a stale export would size
+    # every mutant's timeout from some other run.
     if state.selected is None:
         env[BASELINE_SECS_ENV] = f"{state.suite_secs():.3f}"
+    else:
+        env.pop(BASELINE_SECS_ENV, None)
     root = _rootdir(config)
     capman = config.pluginmanager.getplugin("capturemanager")
     uncaptured = (

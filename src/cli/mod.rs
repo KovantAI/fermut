@@ -342,7 +342,7 @@ pub(crate) struct RunConfigArgs {
     /// flat `--timeout`: `min(--timeout, FACTOR × baseline wall + 5 s)`. Hung
     /// mutants then stop in seconds. Needs the baseline, or `--baseline-secs`
     /// with `--no-verify-baseline`. A mutant that only slows the suite down past
-    /// the budget counts as timed out (detected). Try 3.
+    /// the budget counts as timed out (detected). At least 2; try 3.
     #[arg(long, value_name = "FACTOR")]
     pub timeout_factor: Option<f64>,
 

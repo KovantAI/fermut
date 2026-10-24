@@ -392,6 +392,7 @@ fn call_llm(
         source_snippet: render_source_snippet(m, context_lines),
         enclosing_symbol: enclosing.map(|s| s.name.clone()),
         sample_tests: sample_tests_for_symbol(tests_dir, enclosing.map(|s| s.name.as_str())),
+        hint: None,
     };
     let req = build_explain_prompt(m, &ctx, &opts.model);
 

@@ -27,6 +27,15 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   history. Its baseline check runs only the selected tests, so a broken
   test outside the selection doesn't abort the run. A selection that covers
   none of the code under mutation is an error, not a vacuous N/A pass.
+- `fermut autofix --triage skip|audit` and `fermut suggest --triage …`: an
+  LLM equivalence judge triages each survivor before a test is generated
+  (one extra, cached call). With `skip`, a survivor judged equivalent gets
+  no test (autofix outcome `likely-equivalent`) and a suggested
+  `# fermut: ignore[...]` marker; for the others, the judge's explanation of
+  the behavioural difference goes into the generation prompt. `audit`
+  still generates for every survivor and reports how many judged-equivalent
+  ones were killed anyway. Off by default; the mutation score never
+  changes.
 - Errors that can mean fermut guessed wrong about a project (a baseline that
   fails only under fermut, merge conflicts between shards of one config,
   coverage paths all outside the project root) and any panic now point to

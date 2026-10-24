@@ -10,6 +10,23 @@ use serde::Deserialize;
 
 use super::{CacheScope, IsolationMode, RunnerKind};
 
+/// `operators = "..."`, accepting the pre-0.7 name `"default"` as `classic`
+/// with a warning (serde's `alias` would accept it silently).
+fn operators_with_deprecated_default<'de, D>(
+    d: D,
+) -> Result<Option<crate::config::OperatorProfile>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::IntoDeserializer;
+    let name = String::deserialize(d)?;
+    if name == "default" {
+        tracing::warn!("{}", super::DEPRECATED_DEFAULT_PROFILE);
+        return Ok(Some(crate::config::OperatorProfile::Classic));
+    }
+    crate::config::OperatorProfile::deserialize(name.into_deserializer()).map(Some)
+}
+
 /// Mirror of the TOML schema. Every field optional so partial files work.
 #[derive(Debug, Default, Deserialize, Clone)]
 #[serde(default, deny_unknown_fields)]
@@ -25,6 +42,7 @@ pub struct FileConfig {
     pub tce: Option<bool>,
     pub experimental: Option<bool>,
     pub parity: Option<bool>,
+    #[serde(deserialize_with = "operators_with_deprecated_default")]
     pub operators: Option<crate::config::OperatorProfile>,
     pub ops: Option<Vec<String>>,
     pub skip_ops: Option<Vec<String>>,
@@ -129,6 +147,17 @@ mod tests {
         );
         assert_eq!(cfg.diff_only.as_deref(), Some("origin/main"));
         assert_eq!(cfg.isolation, Some(IsolationMode::Hardlink));
+    }
+
+    /// `name()` is what `trend` and the config hash show, so it must be the
+    /// spelling the config file accepts.
+    #[test]
+    fn operator_profile_names_parse_back() {
+        use crate::config::OperatorProfile as P;
+        for p in [P::Classic, P::Minimal, P::Full, P::RorAll] {
+            let cfg: FileConfig = toml::from_str(&format!("operators = \"{}\"", p.name())).unwrap();
+            assert_eq!(cfg.operators, Some(p));
+        }
     }
 
     #[test]

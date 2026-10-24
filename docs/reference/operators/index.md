@@ -14,9 +14,9 @@ or `parity = true`, for cross-tool comparison only).
 - **[Parity operators](parity.md)** — 3 opt-in operators that broaden
   overlap with other tools (mutmut) for comparison only. Very noisy;
   never counted in normal scoring.
-- **[Operator profiles](profiles.md)** — `--operators minimal` swaps
-  the easily killed compare and `and`/`or` mutants for the ones no other
-  mutant subsumes. It has 5 profile-gated operators: 4 are emitted under
+- **[Operator profiles](profiles.md)** — the default `minimal` profile
+  replaces the easily killed compare and `and`/`or` mutants with the ones no
+  other mutant subsumes; `--operators classic` restores the old swaps. It has 5 profile-gated operators: 4 are emitted under
   `minimal` and `full`, and `region-rest` only under the internal
   `ror-all` profile used by the subsumption gate.
 - **[Selecting operators](selecting.md)** — `--ops` allowlist,

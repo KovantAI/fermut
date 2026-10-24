@@ -170,21 +170,28 @@ pub struct Config {
 pub const DEFAULT_CACHE_AUDIT_RATE: f64 = 0.05;
 
 /// Cache-key granularity for source-file identity. See `Config::cache_scope`.
+/// Warning for the pre-0.7 profile name `default`, which now means `classic`.
+pub const DEPRECATED_DEFAULT_PROFILE: &str = "operator profile `default` is deprecated: it is now \
+     called `classic` (the operators fermut used before 0.7). `minimal` is the default now; \
+     use `classic` to keep the old operators or drop the setting to use `minimal`";
+
 /// Which ROR / logical operator set to test (see `mutator::region`). Set via
 /// `--operators` / `operators = "..."`.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum OperatorProfile {
-    /// The historical catalogue: `and`↔`or` and the 3 compare swaps per
-    /// ordering op, no region-model operators.
+    /// The historical catalogue (the default before 0.7): `and`↔`or` and the
+    /// 3 compare swaps per ordering op, no region-model operators. The config
+    /// value `"default"` still parses to this, with a deprecation warning (see
+    /// `config::file`).
+    Classic,
+    /// The default. The region-model minimal set: per ordering compare and
+    /// 2-operand truth-position `and`/`or`, only the 3 dominator mutants.
+    /// About the same count as `classic`, but none is trivially killed.
     #[default]
-    Default,
-    /// The region-model minimal set: per ordering compare and 2-operand
-    /// truth-position `and`/`or`, only the 3 dominator mutants. About the same
-    /// count as `default`, but none is trivially killed.
     Minimal,
-    /// `default` plus the minimal-set operators. For experiments.
+    /// `classic` plus the minimal-set operators. For experiments.
     Full,
     /// `full` plus every remaining region-model form (all 7 per ordering
     /// compare). Only for the subsumption gate; not documented as a profile.
@@ -194,7 +201,7 @@ pub enum OperatorProfile {
 impl OperatorProfile {
     pub fn name(self) -> &'static str {
         match self {
-            Self::Default => "default",
+            Self::Classic => "classic",
             Self::Minimal => "minimal",
             Self::Full => "full",
             Self::RorAll => "ror-all",

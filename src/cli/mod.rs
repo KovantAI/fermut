@@ -135,10 +135,11 @@ pub(crate) struct FilterArgs {
     #[arg(long)]
     pub parity: bool,
 
-    /// ROR / logical operator set. `default`: today's swaps. `minimal`: per
-    /// ordering compare and truth-position `and`/`or`, only the 3 mutants no
-    /// other mutant subsumes (e.g. `<` → `<=`, `!=`, `False`). Same count,
-    /// stronger tests. `full`: both. See the operator-profiles reference.
+    /// ROR / logical operator set. `minimal` (default): per ordering compare
+    /// and truth-position `and`/`or`, only the 3 mutants no other mutant
+    /// subsumes (e.g. `<` → `<=`, `!=`, `False`). `classic`: the swaps fermut
+    /// used before 0.7 (`<` → `<=`, `>`, `>=`; `and` ↔ `or`). `full`: both.
+    /// See the operator-profiles reference.
     #[arg(long, value_enum, value_name = "PROFILE")]
     pub operators: Option<OperatorProfileCli>,
 
@@ -627,8 +628,11 @@ cli_enum! {
 
 cli_enum! {
     pub(crate) enum OperatorProfileCli => crate::config::OperatorProfile {
-        Default => Default,
+        Classic => Classic,
         Minimal => Minimal,
+        /// Deprecated name of `classic`; `build_config` warns.
+        #[value(hide = true)]
+        Default => Classic,
         Full => Full,
         #[value(hide = true)]
         RorAll => RorAll,

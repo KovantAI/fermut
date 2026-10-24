@@ -64,6 +64,9 @@ def gen_fermut(repo: str) -> pathlib.Path | None:
         "--coverage",
         str(cov.resolve()),
         "--no-verify-baseline",
+        # Parity compares mutmut's catalogue with fermut's classic operators.
+        "--operators",
+        "classic",
         "--no-history",
         "--no-cache",
         "--json",

@@ -1721,7 +1721,7 @@ mod tests {
             pytest_plugin: false,
             kill_order_path: PathBuf::from(".fermut/kill-order.json"),
             dominators_path: PathBuf::from(".fermut/dominators.json"),
-            operator_profile: crate::config::OperatorProfile::Default,
+            operator_profile: crate::config::OperatorProfile::Classic,
             only_dominators: false,
             inferred_audit_rate: 0.0,
             history: false,

@@ -22,8 +22,39 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   fails only under fermut, merge conflicts between shards of one config,
   coverage paths all outside the project root) and any panic now point to
   the GitHub issue tracker.
+- `pytest --fermut-verify-baseline`.
+
+### Changed
+- **`minimal` is the default operator profile.** Ordering compares and
+  `and`/`or` used as a condition now get the mutants no other mutant
+  subsumes (`a < b` → `<=`, `!=`, `False`) instead of the easily killed swaps
+  (`>`, `>=`, `and` ↔ `or`). Expect scores to drop where a suite never tries
+  one kind of input; mutant counts rise 0.3–6%. The switch shows in
+  `fermut trend` as a config change, not a regression. The subsumption gate
+  found 0 violations on 245 fully checked sites across 11 repos. Set
+  `operators = "classic"` (or `--operators classic`) to keep the old
+  operators.
+- `pytest --fermut` skips fermut's baseline run after a green session that
+  ran the whole suite (it already proved the suite green). On pyjwt with a
+  warm cache this halves the run (10.5 s → 5.6 s). `--fermut-verify-baseline`
+  restores it.
+
+### Deprecated
+- Operator profile name `default`: it now means `classic` and warns. It will
+  be removed in a later release.
 
 ### Fixed
+- Mutants whose selected tests are parametrized with an absolute path
+  (e.g. werkzeug's `test_from_directory[/repo/tests/res/test.txt]`) were
+  scored `error` (pytest exit 4): fermut runs in a copy of the project, where
+  pytest names those tests with the copy's path. Node ids are now rewritten
+  into the copy and mapped back in results. On werkzeug 124 errored mutants
+  now get verdicts.
+- False kills from parallel pytest runs sharing one temp root
+  (`$TMPDIR/pytest-of-$USER`): their cleanup races, and under
+  `filterwarnings = error` the resulting warning fails the run. Each worker
+  now has its own root (`PYTEST_DEBUG_TEMPROOT`). A `tmp_path`-heavy project
+  saw 13–21 false kills per run (2–3% of mutants), varying run to run.
 - Uneven worker load: mutants were split into fixed contiguous ranges per
   worker, so a range of slow mutants could leave one pytest running alone
   for most of the run. Each mutant is now scheduled on its own. A full

@@ -109,9 +109,9 @@ specific fermut binary.
   `--fermut-arg=--no-verify-baseline` skips it, at that risk.
 - **Timeout budgets.** With `timeout_factor` in your fermut config (or
   `--fermut-arg=--timeout-factor=3`), fermut sizes each mutant's timeout
-  from its baseline run. If you skip that run with
-  `--fermut-arg=--no-verify-baseline`, a whole-suite session's duration
-  stands in (`--baseline-secs`). See
+  from its baseline run. If you skip that run (with
+  `--fermut-arg=--no-verify-baseline` or `verify_baseline = false`), a
+  whole-suite session's duration stands in (`FERMUT_BASELINE_SECS`). See
   [Timeout budgets](../reference/cli/run.md#timeout-budgets).
 - **pytest-xdist.** Only the controller runs fermut, once. fermut parallelizes
   mutants itself. Narrowing works under `-n` too.

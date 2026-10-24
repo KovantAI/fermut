@@ -16,7 +16,8 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   272 s → 236 s. Verdicts unchanged except that a mutant which only makes
   the suite many times slower counts as timed out (2 of ~3,800 mutants on
   more-itertools). `--baseline-secs` supplies the suite time when fermut's
-  baseline is skipped; `pytest --fermut` passes its session time then.
+  baseline is skipped; a whole-suite `pytest --fermut` session passes its
+  time.
 - `pytest --fermut` narrows to the session's selection: with a path, node
   id, `-k`, `-m`, `--deselect` and similar, only the selected tests run
   against the mutants, and mutants none of them cover are skipped as

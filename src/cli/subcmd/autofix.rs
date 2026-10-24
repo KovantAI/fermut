@@ -422,7 +422,7 @@ fn verify(runner: &dyn Runner, m: &Mutant) -> Result<Verdict> {
     // reflects the just-appended test on whatever thread we call it.
     match runner.baseline()? {
         BaselineStatus::Failed { output } => return Ok(Verdict::SuiteRed(output)),
-        BaselineStatus::Passed => {}
+        BaselineStatus::Passed { .. } => {}
     }
     // Mutant-kill check on a fresh thread → fresh thread-local mirror that
     // snapshots the updated tests dir.
@@ -525,7 +525,9 @@ mod tests {
         fn baseline(&self) -> Result<BaselineStatus> {
             let mut q = self.baseline.lock().unwrap();
             Ok(if q.is_empty() {
-                BaselineStatus::Passed
+                BaselineStatus::Passed {
+                    wall: std::time::Duration::ZERO,
+                }
             } else {
                 q.remove(0)
             })
@@ -534,7 +536,9 @@ mod tests {
 
     fn mock(baseline_passed: bool, run_kills: bool) -> MockRunner {
         let baseline = if baseline_passed {
-            vec![BaselineStatus::Passed]
+            vec![BaselineStatus::Passed {
+                wall: std::time::Duration::ZERO,
+            }]
         } else {
             vec![BaselineStatus::Failed {
                 output: "1 failed".into(),

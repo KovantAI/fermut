@@ -36,6 +36,7 @@ import pytest
 
 CHILD_ENV = "FERMUT_CHILD"
 BIN_ENV = "FERMUT_BIN"
+BASELINE_SECS_ENV = "FERMUT_BASELINE_SECS"
 
 _STATE = pytest.StashKey["_FermutState"]()
 
@@ -272,27 +273,17 @@ def _refresh_coverage(state, config, root):
             state.lines.extend(({}, "  " + line) for line in tail)
 
 
-def _run_command(state, config, report_path, selection_path=None, suite_secs=None):
+def _run_command(state, config, report_path, selection_path=None):
     cmd = [state.binary, "run", "--python", sys.executable, "--json", report_path]
     if selection_path is not None:
         cmd += ["--select-tests", selection_path]
-    extra = config.getoption("fermut_arg")
-    # With fermut's baseline skipped, a whole-suite session stands in for it
-    # when fermut sizes `--timeout-factor` timeouts (ignored without one).
-    if (
-        "--no-verify-baseline" in extra
-        and selection_path is None
-        and suite_secs is not None
-        and not any(a.startswith("--baseline-secs") for a in extra)
-    ):
-        cmd.append(f"--baseline-secs={suite_secs:.3f}")
     since = config.getoption("fermut_since")
     if since:
         cmd += ["--since", since]
     min_score = config.getoption("fermut_min_score")
     if min_score is not None:
         cmd += ["--fail-under", repr(min_score)]
-    cmd += extra
+    cmd += config.getoption("fermut_arg")
     return cmd
 
 
@@ -375,8 +366,13 @@ def pytest_sessionfinish(session, exitstatus):
     if exitstatus != 0:
         state.lines.append(({"yellow": True}, "skipped: the test suite did not pass"))
         return
-    # Before the coverage refresh, which would count toward it.
-    suite_secs = state.suite_secs()
+    env = _child_env(config)
+    # A whole-suite session stands in for fermut's baseline when that is
+    # skipped (by flag or by config) in sizing `--timeout-factor` timeouts;
+    # fermut ignores it otherwise. An env var, not a flag, so a fermut too old
+    # to know it still runs. Taken before the coverage refresh.
+    if state.selected is None:
+        env[BASELINE_SECS_ENV] = f"{state.suite_secs():.3f}"
     root = _rootdir(config)
     capman = config.pluginmanager.getplugin("capturemanager")
     uncaptured = (
@@ -397,9 +393,9 @@ def pytest_sessionfinish(session, exitstatus):
             # stdout carries fermut's human report, rebuilt below from the
             # JSON; stderr (progress, warnings, errors) streams through.
             rc = subprocess.call(
-                _run_command(state, config, report_path, selection_path, suite_secs),
+                _run_command(state, config, report_path, selection_path),
                 cwd=root,
-                env=_child_env(config),
+                env=env,
                 stdout=subprocess.DEVNULL,
             )
         report = _load_report(report_path)

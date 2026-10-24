@@ -338,9 +338,8 @@ def test_no_verify_baseline_is_not_passed_twice(green_suite, fake_fermut, run_py
 
 
 def _baseline_secs(fake_fermut):
-    argv = fake_fermut.run_call()["argv"]
-    found = [a for a in argv if a.startswith("--baseline-secs=")]
-    return float(found[0].split("=", 1)[1]) if found else None
+    secs = fake_fermut.run_call()["baseline_secs"]
+    return None if secs is None else float(secs)
 
 
 def test_whole_suite_session_passes_its_duration(pytester, fake_fermut, run_pytest):
@@ -357,10 +356,11 @@ def test_whole_suite_session_passes_its_duration(pytester, fake_fermut, run_pyte
     assert secs is not None and 0.3 <= secs < 30, secs
 
 
-def test_verified_baseline_passes_no_duration(green_suite, fake_fermut, run_pytest):
-    # fermut runs its own baseline and measures that.
+def test_duration_passed_without_the_flag(green_suite, fake_fermut, run_pytest):
+    # `verify_baseline = false` may sit in fermut's config, out of the
+    # plugin's sight; fermut ignores the value when its baseline runs.
     run_pytest(green_suite, "--fermut", "--fermut-no-coverage")
-    assert _baseline_secs(fake_fermut) is None
+    assert _baseline_secs(fake_fermut) is not None
 
 
 def test_narrowed_session_passes_no_duration(two_files, fake_fermut, run_pytest):
@@ -374,17 +374,6 @@ def test_narrowed_session_passes_no_duration(two_files, fake_fermut, run_pytest)
         "one",
     )
     assert _baseline_secs(fake_fermut) is None
-
-
-def test_explicit_baseline_secs_wins(green_suite, fake_fermut, run_pytest):
-    run_pytest(
-        green_suite,
-        "--fermut",
-        "--fermut-no-coverage",
-        "--fermut-arg=--baseline-secs=9",
-    )
-    argv = fake_fermut.run_call()["argv"]
-    assert [a for a in argv if a.startswith("--baseline-secs")] == ["--baseline-secs=9"]
 
 
 @pytest.mark.skipif(not HAS_XDIST, reason="needs pytest-xdist")

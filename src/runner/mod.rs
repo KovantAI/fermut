@@ -45,6 +45,10 @@ pub trait Runner: Send + Sync {
     /// mutation and aborts on [`BaselineStatus::Failed`].
     fn baseline(&self) -> Result<BaselineStatus>;
 
+    /// Replace the per-mutant timeout, for the `--timeout-factor` budget sized
+    /// after the baseline. Default no-op, for test doubles that never time out.
+    fn set_timeout(&mut self, _timeout: Duration) {}
+
     /// Drain the kills learned this run (which test killed which
     /// `(file, operator)`), for the engine to fold into the smart-ordering
     /// sidecar. Default empty — only the pytest runner learns them, and only
@@ -76,8 +80,9 @@ pub trait Runner: Send + Sync {
 /// Result of the pre-flight baseline run (the unmutated suite).
 #[derive(Debug)]
 pub enum BaselineStatus {
-    /// The suite exited 0 — safe to proceed with mutation.
-    Passed,
+    /// The suite exited 0 — safe to proceed with mutation. `wall` is how long
+    /// the test process ran (mirror setup excluded); it sizes `--timeout-factor`.
+    Passed { wall: Duration },
     /// The suite failed/errored. `output` is the tail of pytest's combined
     /// stdout/stderr, for surfacing in the abort message.
     Failed { output: String },
@@ -86,7 +91,7 @@ pub enum BaselineStatus {
 impl std::fmt::Display for BaselineStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            BaselineStatus::Passed => "passed",
+            BaselineStatus::Passed { .. } => "passed",
             BaselineStatus::Failed { .. } => "failed",
         })
     }
@@ -266,7 +271,9 @@ pub(crate) fn run_baseline_with_timeout(
         .wait_timeout(timeout)
         .context("waiting on baseline run")?
     {
-        Some(status) if status.success() => Ok(BaselineStatus::Passed),
+        Some(status) if status.success() => Ok(BaselineStatus::Passed {
+            wall: started.elapsed(),
+        }),
         Some(_) => Ok(BaselineStatus::Failed {
             output: read_tail(),
         }),

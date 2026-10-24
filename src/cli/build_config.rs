@@ -435,8 +435,8 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         if !verify_baseline && cli_baseline_secs.is_none() {
             warn!(
                 "--timeout-factor needs the baseline run to size timeouts; with \
-                 --no-verify-baseline (and no --baseline-secs) every mutant uses \
-                 the flat --timeout"
+                 --no-verify-baseline (and no --baseline-secs or \
+                 FERMUT_BASELINE_SECS) every mutant uses the flat --timeout"
             );
         }
     }

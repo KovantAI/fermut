@@ -784,6 +784,10 @@ fn wait_draining_stdout_with_grace(
 }
 
 impl Runner for PytestRunner {
+    fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
     fn take_kill_records(&self) -> Vec<crate::kill_order::KillRecord> {
         std::mem::take(&mut *lock_recover(&self.kill_sink))
     }

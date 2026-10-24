@@ -376,6 +376,15 @@ def test_narrowed_session_passes_no_duration(two_files, fake_fermut, run_pytest)
     assert _baseline_secs(fake_fermut) is None
 
 
+def test_narrowed_session_drops_an_inherited_duration(
+    two_files, fake_fermut, run_pytest, monkeypatch
+):
+    # A stale export from another run must not size this run's timeouts.
+    monkeypatch.setenv("FERMUT_BASELINE_SECS", "999")
+    run_pytest(two_files, "--fermut", "--fermut-no-coverage", "-k", "one")
+    assert _baseline_secs(fake_fermut) is None
+
+
 @pytest.mark.skipif(not HAS_XDIST, reason="needs pytest-xdist")
 def test_xdist_duration_is_the_serial_test_time(pytester, fake_fermut, monkeypatch):
     # 4 × 0.4 s over 4 workers is ~0.4 s of wall time, but a mutant run is

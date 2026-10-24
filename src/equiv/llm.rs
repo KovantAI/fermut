@@ -119,7 +119,7 @@ pub(crate) fn triage(
 ) -> (Triage, bool) {
     let context = enclosing_function(source, m.line as usize)
         .unwrap_or_else(|| surround(source, m.line as usize, FALLBACK_SURROUND_LINES));
-    let req = build_equivalence_prompt(m, &context, None, &opts.model);
+    let req = build_equivalence_prompt(m, &context, source, None, &opts.model);
     let sha = file_sha256(&m.file).unwrap_or_default();
     let key = cache_key(&m.id, &sha, &format!("{}\n{}", req.system, req.user));
     let (response, cached) = complete_cached(&req, key, opts, client_cell, cache);

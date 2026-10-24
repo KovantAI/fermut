@@ -473,6 +473,14 @@ fn render_human(report: &SuggestReport, written: bool) -> String {
                     t.reason,
                     ignore_marker(&m.file, m.line, &m.operator)
                 );
+            } else {
+                // A test was attempted: still show what the judge said, or
+                // `--triage audit` pays for verdicts nobody sees.
+                let _ = writeln!(
+                    s,
+                    "# fermut suggest: {}:{} [{}] judge: {}: {}",
+                    m.file, m.line, m.operator, t.verdict, t.reason
+                );
             }
         }
     }
@@ -942,10 +950,13 @@ mod tests {
         report.entries[0].error = Some("no code block".into());
         assert!(!render_human(&report, false).contains("judged equivalent"));
         report.entries[0].error = None;
-        // A different verdict asks for nothing to be ignored.
+        // A different verdict asks for nothing to be ignored, but is shown.
         report.entries[0].triage.as_mut().unwrap().verdict = "different";
-        assert_eq!(render_human(&report, false), "");
+        let human = render_human(&report, false);
+        assert!(!human.contains("ignore["), "{human}");
+        assert!(human.contains("judge: different: same value"), "{human}");
         // Generated code is echoed only when it wasn't written to a file.
+        report.entries[0].triage = None;
         report.entries[0].extracted_code = Some("def test_x():\n    pass".into());
         assert!(render_human(&report, false).ends_with("def test_x():\n    pass\n"));
         assert_eq!(render_human(&report, true), "");

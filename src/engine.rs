@@ -352,20 +352,11 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
 
     let baseline_wall = preflight_baseline(cfg, runner.as_ref(), mutants)?
         .or_else(|| cfg.baseline_secs.map(Duration::from_secs_f64));
-    if let (Some(factor), Some(wall)) = (cfg.timeout_factor, baseline_wall) {
-        let secs = budget_timeout_secs(cfg.timeout_secs, factor, wall);
-        info!(
-            baseline_secs = format!("{:.1}", wall.as_secs_f64()),
-            timeout_secs = secs,
-            "per-mutant timeout sized from the baseline (--timeout-factor)"
-        );
-        // Only the runner sees the budget. The cache scope and history hash
-        // keep the configured `timeout_secs` + factor: the budget moves a
-        // little every run and would otherwise miss the cache every time.
-        runner = runner::build(&Config {
-            timeout_secs: secs,
-            ..cfg.clone()
-        });
+    // Only the runner sees the budget. The cache scope and history hash keep
+    // the configured `timeout_secs` + factor: the budget moves a little every
+    // run and would otherwise miss the cache every time.
+    if let Some(budgeted) = budgeted_config(cfg, baseline_wall) {
+        runner = runner::build(&budgeted);
     }
 
     // One read + at most one parse per unique file, deriving the cache-key
@@ -573,6 +564,24 @@ const BUDGET_FLOOR_SECS: f64 = 5.0;
 fn budget_timeout_secs(timeout_secs: u64, factor: f64, baseline: Duration) -> u64 {
     let budget = (factor * baseline.as_secs_f64() + BUDGET_FLOOR_SECS).ceil() as u64;
     budget.min(timeout_secs)
+}
+
+/// `cfg` with `timeout_secs` cut to the `--timeout-factor` budget, for the
+/// runner. `None` without a factor or a baseline wall time to scale.
+fn budgeted_config(cfg: &Config, baseline_wall: Option<Duration>) -> Option<Config> {
+    let (Some(factor), Some(wall)) = (cfg.timeout_factor, baseline_wall) else {
+        return None;
+    };
+    let secs = budget_timeout_secs(cfg.timeout_secs, factor, wall);
+    info!(
+        baseline_secs = format!("{:.1}", wall.as_secs_f64()),
+        timeout_secs = secs,
+        "per-mutant timeout sized from the baseline (--timeout-factor)"
+    );
+    Some(Config {
+        timeout_secs: secs,
+        ..cfg.clone()
+    })
 }
 
 /// Testing-phase wall-clock ceiling from `--max-time`. `None` when unset.
@@ -1613,6 +1622,17 @@ mod tests {
     }
 
     #[test]
+    fn scope_prefix_tracks_the_timeout_factor() {
+        let mut cfg = base_test_config();
+        let unset = compute_scope_prefix(&cfg);
+        cfg.timeout_factor = Some(3.0);
+        let three = compute_scope_prefix(&cfg);
+        cfg.timeout_factor = Some(4.0);
+        assert_ne!(unset, three);
+        assert_ne!(three, compute_scope_prefix(&cfg));
+    }
+
+    #[test]
     fn mutant_scope_survives_edit_to_non_covering_test() {
         let fx = ScopeFixture::new();
         let cfg = fx.config(RunnerKind::Pytest, true);
@@ -2165,6 +2185,64 @@ mod tests {
             "capped at --timeout"
         );
         assert_eq!(budget_timeout_secs(60, 3.0, s(9.0)), 32);
+    }
+
+    #[test]
+    fn budgeted_config_cuts_only_the_timeout() {
+        let mut cfg = base_test_config();
+        cfg.timeout_secs = 60;
+        let wall = Some(Duration::from_secs(9));
+        assert!(budgeted_config(&cfg, wall).is_none(), "no factor");
+        cfg.timeout_factor = Some(3.0);
+        assert!(budgeted_config(&cfg, None).is_none(), "no baseline");
+        let b = budgeted_config(&cfg, wall).unwrap();
+        assert_eq!(b.timeout_secs, 32);
+        assert_eq!(b.timeout_factor, Some(3.0), "rest of cfg kept");
+    }
+
+    /// Runner whose baseline is green after 5 ms.
+    struct SlowGreenRunner;
+    impl Runner for SlowGreenRunner {
+        fn run(&self, _m: &Arc<Mutant>) -> Result<MutantOutcome> {
+            unreachable!()
+        }
+        fn baseline(&self) -> Result<runner::BaselineStatus> {
+            std::thread::sleep(Duration::from_millis(5));
+            Ok(runner::BaselineStatus::Passed)
+        }
+    }
+
+    /// Runner whose baseline is red.
+    struct RedBaselineRunner;
+    impl Runner for RedBaselineRunner {
+        fn run(&self, _m: &Arc<Mutant>) -> Result<MutantOutcome> {
+            unreachable!()
+        }
+        fn baseline(&self) -> Result<runner::BaselineStatus> {
+            Ok(runner::BaselineStatus::Failed {
+                output: "1 failed".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn preflight_baseline_times_a_green_suite_and_refuses_a_red_one() {
+        let mut cfg = base_test_config();
+        let ms = vec![Arc::new(arith_mutant("return x + 0", "+", "-"))];
+        cfg.verify_baseline = true;
+        let took = preflight_baseline(&cfg, &SlowGreenRunner, &ms).unwrap();
+        assert!(took >= Some(Duration::from_millis(5)), "{took:?}");
+        let err = preflight_baseline(&cfg, &RedBaselineRunner, &ms).unwrap_err();
+        assert!(err.to_string().contains("1 failed"), "{err}");
+        assert_eq!(
+            preflight_baseline(&cfg, &RedBaselineRunner, &[]).unwrap(),
+            None
+        );
+        cfg.verify_baseline = false;
+        assert_eq!(
+            preflight_baseline(&cfg, &RedBaselineRunner, &ms).unwrap(),
+            None
+        );
     }
 
     #[test]

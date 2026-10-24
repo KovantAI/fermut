@@ -1141,6 +1141,7 @@ mod tests {
         assert_eq!(py_unicode_escape(r"C:\proj"), r"C:\\proj");
         assert_eq!(py_unicode_escape("/Users/José"), r"/Users/Jos\xe9");
         assert_eq!(py_unicode_escape("a\tΩ😀"), r"a\t\u03a9\U0001f600");
+        assert_eq!(py_unicode_escape("a\r\nb"), r"a\r\nb");
         assert_eq!(py_unicode_escape("/repo/x y'\""), "/repo/x y'\"");
         // Width switches at U+0100 and U+10000.
         assert_eq!(

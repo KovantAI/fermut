@@ -1275,6 +1275,48 @@ mod tests {
         assert!(build_config(tmp.path().to_path_buf(), args).is_err());
     }
 
+    /// What `f` logged on this thread.
+    fn logged(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let w = buf.clone();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(move || w.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(sub, f);
+        let bytes = buf.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn timeout_factor_warns_only_when_no_baseline_can_size_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let warns = |no_verify: bool, baseline_secs: Option<f64>| {
+            let mut args = run_args(empty_filter());
+            args.timeout_factor = Some(3.0);
+            args.no_verify_baseline = no_verify;
+            args.baseline_secs = baseline_secs;
+            logged(|| {
+                build_config(tmp.path().to_path_buf(), args).unwrap();
+            })
+            .contains("--timeout-factor needs the baseline run")
+        };
+        assert!(warns(true, None));
+        assert!(!warns(false, None), "baseline run sizes it");
+        assert!(!warns(true, Some(2.0)), "--baseline-secs sizes it");
+    }
+
     #[test]
     fn smart_order_config_false_disables() {
         let tmp = tempfile::tempdir().unwrap();

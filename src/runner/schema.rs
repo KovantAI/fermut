@@ -686,4 +686,183 @@ mod tests {
         assert_eq!(tail("a\nb\nc", 2), "b\nc");
         assert_eq!(tail("a", 5), "a");
     }
+
+    /// A schema whose "template" is `sh -c script`, so the protocol and its
+    /// failure handling run without pytest. Each schema gets its own
+    /// generation, so a test never inherits a template from another.
+    fn fake_schema(dir: &std::path::Path, script: &str) -> Schema {
+        static NEXT: AtomicU64 = AtomicU64::new(1 << 62);
+        let dir = dir.canonicalize().unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "").unwrap();
+        let mirror =
+            super::super::build_mirror(&dir.join("tests"), crate::config::IsolationMode::Copy)
+                .unwrap();
+        Schema {
+            generation: NEXT.fetch_add(1, Ordering::Relaxed),
+            mirror,
+            index: HashMap::new(),
+            serve_args: vec!["-c".into(), script.into()],
+            python: "/bin/sh".into(),
+            ready_timeout: Duration::from_secs(10),
+            verified: OnceLock::new(),
+        }
+    }
+
+    /// A template that answers every request with pid 0 (never a real group,
+    /// so a timeout's kill is a no-op) and then `done`, after `delay`.
+    fn answering(done: &str, delay: &str) -> String {
+        format!(
+            "echo '{{\"ready\":true,\"unsafe\":[[2,4]]}}'; \
+             while read req; do echo '{{\"pid\":0}}'; sleep {delay}; echo '{done}'; done"
+        )
+    }
+
+    #[test]
+    fn template_reports_ready_and_unsafe_ranges_then_serves_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schema = fake_schema(
+            tmp.path(),
+            &answering(
+                r#"{"status":256,"failed":["t.py::a"],"test_secs":0.5}"#,
+                "0",
+            ),
+        );
+        let mut t = Template::start(&schema).unwrap();
+        assert!(t.is_unsafe(3) && !t.is_unsafe(5));
+        let s = t.request(5, None, false, Duration::from_secs(10)).unwrap();
+        assert_eq!(s.status.and_then(|st| st.code()), Some(1));
+        assert_eq!(s.result.failures, ["t.py::a"]);
+        assert!((s.result.test_secs - 0.5).abs() < f64::EPSILON);
+        assert!(s.error.is_none());
+    }
+
+    #[test]
+    fn template_that_refuses_or_dies_before_ready_does_not_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let refused = fake_schema(tmp.path(), r#"echo '{"ready":false,"error":"no fork"}'"#);
+        let e = format!("{:#}", Template::start(&refused).err().unwrap());
+        assert!(e.contains("template refused: no fork"), "{e}");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let died = fake_schema(tmp.path(), "echo 'ImportError: boom' >&2; exit 1");
+        let e = format!("{:#}", Template::start(&died).err().unwrap());
+        assert!(e.contains("never became ready"), "{e}");
+        assert!(e.contains("ImportError: boom"), "stderr tail is shown: {e}");
+        assert!(e.contains("the template exited"), "{e}");
+    }
+
+    #[test]
+    fn a_run_past_its_timeout_has_no_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schema = fake_schema(tmp.path(), &answering(r#"{"status":9}"#, "1"));
+        let mut t = Template::start(&schema).unwrap();
+        let s = t
+            .request(1, None, false, Duration::from_millis(100))
+            .unwrap();
+        assert!(s.status.is_none(), "timed out");
+    }
+
+    #[test]
+    fn a_template_that_exits_mid_request_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schema = fake_schema(
+            tmp.path(),
+            r#"echo '{"ready":true}'; read req; echo '{"pid":0}'; exit 0"#,
+        );
+        let mut t = Template::start(&schema).unwrap();
+        assert!(t.request(1, None, false, Duration::from_secs(10)).is_err());
+    }
+
+    #[test]
+    fn verify_passes_only_a_clean_run_with_no_mutant_active() {
+        let check = |done: &str, delay: &str, timeout: Duration| {
+            let tmp = tempfile::tempdir().unwrap();
+            let schema = fake_schema(tmp.path(), &answering(done, delay));
+            verify(&mut Template::start(&schema).unwrap(), timeout)
+        };
+        let secs = Duration::from_secs(10);
+        assert!(check(r#"{"status":0}"#, "0", secs));
+        assert!(!check(r#"{"status":256,"failed":["t.py::a"]}"#, "0", secs));
+        assert!(!check(r#"{"status":768,"error":"Traceback"}"#, "0", secs));
+        assert!(!check(r#"{"status":0}"#, "1", Duration::from_millis(100)));
+        assert!(!check("not json", "0", secs));
+    }
+
+    #[test]
+    fn a_template_that_fails_to_start_is_not_retried() {
+        let tmp = tempfile::tempdir().unwrap();
+        let starts = tmp.path().canonicalize().unwrap().join("starts");
+        let schema = fake_schema(
+            tmp.path(),
+            &format!("echo x >> '{}'; exit 1", starts.display()),
+        );
+        for _ in 0..2 {
+            assert_eq!(with_template(&schema, |_| Ok(Some(1))), None);
+        }
+        assert_eq!(std::fs::read_to_string(&starts).unwrap(), "x\n");
+    }
+
+    #[test]
+    fn a_template_whose_request_fails_is_dropped_for_the_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schema = fake_schema(tmp.path(), &answering(r#"{"status":0}"#, "0"));
+        assert_eq!(with_template(&schema, |_| Ok(Some(1))), Some(1));
+        assert_eq!(
+            with_template(&schema, |_| -> Result<Option<i32>> { bail!("wedged") }),
+            None
+        );
+        let mut called = false;
+        let out = with_template(&schema, |_| {
+            called = true;
+            Ok(Some(1))
+        });
+        assert_eq!(out, None);
+        assert!(!called, "a dead template is not asked again");
+    }
+
+    #[test]
+    fn a_schema_that_fails_to_build_leaves_every_mutant_to_the_spawn_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "").unwrap();
+        let runner = SchemaRunner::new(PytestRunner::new(super::super::pytest::PytestConfig {
+            tests: dir.join("tests"),
+            timeout: Duration::from_secs(30),
+            baseline_timeout: Duration::from_secs(30),
+            hypothesis_seed: None,
+            extra_args: Vec::new(),
+            isolation: crate::config::IsolationMode::Copy,
+            coverage: None,
+            python: Some("/bin/false".into()),
+            exe: "pytest",
+            smart_order: false,
+            kill_order: Arc::new(crate::kill_order::KillOrder::default()),
+            kill_sink: Arc::new(Mutex::new(Vec::new())),
+            record_kill_sets: false,
+            kill_set_sink: Arc::new(Mutex::new(Vec::new())),
+            learn_killer: false,
+            key_base: dir.clone(),
+            plugin: false,
+            baseline_ids: None,
+        }));
+        runner.prepare(&[]).unwrap();
+        assert!(runner.schema().is_none());
+    }
+
+    #[test]
+    fn helper_failure_carries_its_exit_status_and_stderr() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "cat >/dev/null; echo 'bad input' >&2; exit 3"]);
+        let e = format!("{:#}", run_with_stdin(cmd, b"[]").err().unwrap());
+        assert!(
+            e.contains("exit status: 3") && e.contains("bad input"),
+            "{e}"
+        );
+
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "cat"]);
+        assert_eq!(run_with_stdin(cmd, b"echo").unwrap(), b"echo");
+    }
 }

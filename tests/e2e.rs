@@ -418,6 +418,12 @@ fn schemata_gives_the_same_verdicts_as_a_normal_run() {
          def test_countdown():\n    assert countdown(3) == 0\n\n\n\
          def test_save(tmp_path):\n    assert save(tmp_path / \"f\", \"hi\") == \"HI\"\n",
     );
+    // A second file covering `add`, edited below to change its mutants' scope
+    // while their killer in test_m.py stays put.
+    write(
+        "tests/test_more.py",
+        "from pkg.m import add\n\n\ndef test_add_zero():\n    assert add(0, 0) == 0\n",
+    );
     Command::cargo_bin("fermut")
         .unwrap()
         .arg("coverage")
@@ -473,6 +479,82 @@ fn schemata_gives_the_same_verdicts_as_a_normal_run() {
         .and_then(|n| n.parse().ok())
         .unwrap_or_else(|| panic!("no schemata summary in:\n{stderr}"));
     assert!(served > 0, "no mutant was run from the schema:\n{stderr}");
+
+    // Kill-sets recorded from the schema (every covering test runs, no `-x`)
+    // match the spawn path's, mutant for mutant.
+    let kill_sets = |extra: &[&str]| -> std::collections::BTreeMap<String, serde_json::Value> {
+        let path = proj.join("kill-sets.jsonl");
+        let _ = std::fs::remove_file(&path);
+        run_outcomes(
+            proj,
+            &[
+                &["--timeout", "5", "--record-kill-sets"],
+                &[path.to_str().unwrap()][..],
+                extra,
+            ]
+            .concat(),
+        );
+        std::fs::read_to_string(&path)
+            .expect("kill-sets written")
+            .lines()
+            .map(|l| {
+                let r: serde_json::Value = serde_json::from_str(l).unwrap();
+                (
+                    r["mutant_id"].as_str().unwrap().to_string(),
+                    serde_json::json!([r["status"], r["kill_set"]]),
+                )
+            })
+            .collect()
+    };
+    let normal_sets = kill_sets(&[]);
+    assert!(!normal_sets.is_empty());
+    assert_eq!(kill_sets(&["--schemata"]), normal_sets);
+
+    // After a test edit the warm cache trusts each mutant's recorded killer;
+    // its audit re-runs that killer through the schema too, under a
+    // `--timeout-factor` budget, and confirms every kill.
+    let cached = |extra: &[&str]| {
+        let report = proj.join("cached.json");
+        let out = Command::cargo_bin("fermut")
+            .unwrap()
+            .args(["run", "--no-ty-filter", "--no-history", "--fail-under", "0"])
+            .args(["--schemata", "--timeout-factor", "3", "--json"])
+            .arg(&report)
+            .arg(proj.join("src"))
+            .arg("--tests")
+            .arg(proj.join("tests"))
+            .arg("--coverage")
+            .arg(proj.join(".coverage"))
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+        let killed = json["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["status"] == "killed")
+            .map(|o| o["mutant"]["id"].as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        (killed, String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let (killed, _) = cached(&[]);
+    let more = proj.join("tests/test_more.py");
+    let edited = std::fs::read_to_string(&more).unwrap() + "\n\ndef test_noop():\n    pass\n";
+    std::fs::write(&more, edited).unwrap();
+    let (audited, stderr) = cached(&["--cache-audit-rate", "1"]);
+    assert_eq!(audited, killed);
+    // "cache: <f> full hits, <k> killer hits, <a> audited (<d> dropped), ..."
+    let summary = stderr
+        .lines()
+        .find(|l| l.contains("killer hits,"))
+        .unwrap_or_else(|| panic!("no cache summary in:\n{stderr}"));
+    assert!(
+        !summary.contains(" 0 audited") && summary.contains("(0 dropped)"),
+        "every audited kill must reproduce through the schema: {summary}"
+    );
 }
 
 #[test]

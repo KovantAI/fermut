@@ -392,6 +392,7 @@ fn call_llm(
         source_snippet: render_source_snippet(m, context_lines),
         enclosing_symbol: enclosing.map(|s| s.name.clone()),
         sample_tests: sample_tests_for_symbol(tests_dir, enclosing.map(|s| s.name.as_str())),
+        hint: None,
     };
     let req = build_explain_prompt(m, &ctx, &opts.model);
 
@@ -1228,39 +1229,62 @@ mod tests {
 
     #[test]
     fn operator_hint_covers_every_variant() {
-        for op in [
-            Operator::ArithOpSwap,
-            Operator::CompareOpSwap,
-            Operator::BoolOpSwap,
-            Operator::ConstantReplace,
-            Operator::BoundaryShift,
-            Operator::AugAssignSwap,
-            Operator::UnaryOpSwap,
-            Operator::NumberShift,
-            Operator::ReturnValueToNone,
-            Operator::BreakContinueSwap,
-            Operator::NotInsertion,
-            Operator::RemoveDecorator,
-            Operator::DefaultArgToNone,
-            Operator::LambdaBodyToNone,
-            Operator::SliceBoundDrop,
-            Operator::SliceStepMutate,
-            Operator::AssignValueToNone,
-            Operator::NumberToZero,
-            Operator::NumberToNeg,
-            Operator::StringToEmpty,
-            Operator::StringSentinel,
-            Operator::BytesSentinel,
-            Operator::KeywordArgDrop,
-            Operator::DictItemDrop,
-            Operator::ExceptionClassSwap,
-            Operator::BareExcept,
-            Operator::ZeroIterationForLoop,
-            Operator::OneIterationForLoop,
-        ] {
+        for &op in Operator::all() {
             assert!(!operator_hint(op).is_empty(), "missing hint for {op:?}");
             assert!(!operator_slug(op).is_empty(), "missing slug for {op:?}");
         }
+    }
+
+    #[test]
+    fn source_snippet_marks_the_line_and_tolerates_bad_input() {
+        let path = write_tmp("snippet.py", "a\nb\nc\n");
+        let snip = render_source_snippet(&make_mutant(path.clone(), 2), 0);
+        assert_eq!(snip, "► b\n");
+        let snip = render_source_snippet(&make_mutant(path.clone(), 1), 5);
+        assert_eq!(snip, "► a\n  b\n  c\n");
+        assert_eq!(render_source_snippet(&make_mutant(path, 4), 1), "");
+        let missing = PathBuf::from("/nonexistent/snippet.py");
+        assert_eq!(render_source_snippet(&make_mutant(missing, 1), 1), "");
+    }
+
+    #[test]
+    fn sample_tests_dedupe_cap_and_truncate() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = format!(
+            "def test_a():\n    in_range()\n    in_range()\n{}",
+            "é".repeat(3_000)
+        );
+        std::fs::write(dir.path().join("test_a.py"), &big).unwrap();
+        std::fs::write(dir.path().join("test_b.py"), "in_range()\n").unwrap();
+        let got = sample_tests_for_symbol(Some(dir.path()), Some("in_range"));
+        assert_eq!(got.len(), 2, "one entry per file: {got:?}");
+        let a = got.iter().find(|t| t.path.ends_with("test_a.py")).unwrap();
+        assert!(a.body.ends_with("\n# ... (truncated)"));
+        assert!(a.body.len() < big.len());
+
+        std::fs::write(dir.path().join("test_c.py"), "in_range()\n").unwrap();
+        let got = sample_tests_for_symbol(Some(dir.path()), Some("in_range"));
+        assert_eq!(got.len(), 2, "capped at two files");
+        assert!(sample_tests_for_symbol(None, Some("in_range")).is_empty());
+        assert!(sample_tests_for_symbol(Some(dir.path()), None).is_empty());
+    }
+
+    #[test]
+    fn safe_boundary_backs_off_to_a_char_boundary() {
+        assert_eq!(safe_boundary("aé", 2), 1);
+        assert_eq!(safe_boundary("aé", 3), 3);
+        assert_eq!(safe_boundary("", 0), 0);
+    }
+
+    #[test]
+    fn test_matches_report_file_and_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("test_x.py"), "x\nin_range(1)\n").unwrap();
+        let sig = build_test_matches(dir.path(), "in_range").unwrap();
+        assert_eq!(sig.symbol, "in_range");
+        assert_eq!(sig.matches.len(), 1);
+        assert_eq!(sig.matches[0].line, 2);
+        assert!(sig.matches[0].file.ends_with("test_x.py"));
     }
 
     #[test]

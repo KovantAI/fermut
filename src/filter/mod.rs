@@ -353,7 +353,7 @@ mod chain_order_tests {
             schemata: false,
             kill_order_path: PathBuf::from(".fermut/kill-order.json"),
             dominators_path: PathBuf::from(".fermut/dominators.json"),
-            operator_profile: crate::config::OperatorProfile::Default,
+            operator_profile: crate::config::OperatorProfile::Classic,
             only_dominators: false,
             inferred_audit_rate: 0.0,
             history: false,
@@ -372,6 +372,8 @@ mod chain_order_tests {
             verify_baseline: false,
             baseline_timeout_secs: 300,
             max_time_secs: None,
+            timeout_factor: None,
+            baseline_secs: None,
             record_kill_sets: None,
         }
     }

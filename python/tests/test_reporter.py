@@ -45,6 +45,9 @@ def test_passing_run_records_session_and_durations(pytester, report):
     assert ret == 0
     assert events[0]["ev"] == "start" and events[0]["v"] == 1
     assert kinds(events) == ["start", "begin", "dur", "finish"]
+    assert events[0]["pytest"] == pytest.__version__
+    assert events[1]["nodeid"] == events[2]["nodeid"] == "test_a.py::test_ok"
+    assert isinstance(events[2]["dur"], float)
     assert events[-1]["exit"] == 0
     assert all("pid" in e for e in events)
 
@@ -72,6 +75,7 @@ def test_setup_error(broken):
         ("test_a.py::test_fails", "call"),
         ("test_a.py::test_setup_error", "setup"),
     ]
+    assert all(isinstance(e["dur"], float) for e in events if e["ev"] == "test")
 
 
 def test_import_error_under_node_ids_is_a_collect_event(pytester, report):
@@ -131,3 +135,26 @@ def test_inert_without_result_env(pytester, monkeypatch, tmp_path):
     )
     assert res.ret == 0
     assert list(pytester.path.glob("*.jsonl")) == []
+
+
+def test_collect_context_attributes_import_time_lines_then_restores(
+    pytester, report, monkeypatch
+):
+    pytest.importorskip("pytest_cov")
+    coverage = pytest.importorskip("coverage")
+    monkeypatch.setenv("FERMUT_COLLECT_CONTEXT", "1")
+    pytester.makepyfile(proj="X = 1\n\n\ndef f():\n    return 2\n")
+    # Runs after collection, before any test: back in the "" context.
+    pytester.makeconftest(
+        "def pytest_collection_finish(session):\n    import proj\n    proj.f()\n"
+    )
+    pytester.makepyfile(
+        test_a="import proj\n\n\ndef test_x():\n    assert proj.X == 1\n"
+    )
+    ret, _ = report("--cov=.", "--cov-context=test", "--cov-report=")
+    assert ret == 0
+    data = coverage.CoverageData(str(pytester.path / ".coverage"))
+    data.read()
+    by_line = data.contexts_by_lineno(str(pytester.path / "proj.py"))
+    assert by_line[1] == ["test_a.py|collect"]
+    assert by_line[5] == [""]

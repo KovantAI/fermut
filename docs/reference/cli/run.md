@@ -39,7 +39,7 @@ fermut run [PATH] [flags...]
 | `--trend`                   | off                              | Include a compact trend block at the top of the Markdown report.      |
 | `--experimental`            | off                              | Include experimental operators.                                       |
 | `--parity`                  | off                              | Include parity operators (cross-tool comparison only — very noisy, never for normal scoring). See [Parity operators](../operators/parity.md). |
-| `--operators <profile>`     | `default`                        | Compare / `and`-`or` operator set: `default`, `minimal`, `full`. See [Operator profiles](../operators/profiles.md). |
+| `--operators <profile>`     | `minimal`                        | Compare / `and`-`or` operator set: `minimal`, `classic`, `full`. See [Operator profiles](../operators/profiles.md). |
 | `--ops <list>`              | all                              | Allowlist operators.                                                  |
 | `--skip-ops <list>`         | none                             | Denylist operators (wins over `--ops`).                                |
 | `--diff-only [base]`        | off                              | Restrict to lines changed vs base ref (default `main`).               |
@@ -59,6 +59,8 @@ fermut run [PATH] [flags...]
 | `--no-pytest-plugin`        | on                               | Don't load fermut's reporter plugin into per-mutant pytest/rstest runs; infer outcomes from exit codes and output instead. See [Result reporter plugin](#result-reporter-plugin). |
 | `--schemata`                | off                              | [experimental] Run function-body mutants by forking a pytest process that has already imported and collected the suite, instead of starting pytest per mutant. Same verdicts; pytest runner on Unix only. See [Schemata](#schemata). |
 | `--max-time <SECS>`         | off (whole catalogue)            | Wall-clock ceiling on the testing phase. Evaluates highest-value mutants first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` (excluded from the score) instead of run — in-flight mutants finish. A predictable time ceiling for PR gates. See [Time-boxed runs](#time-boxed-runs-max-time). |
+| `--timeout-factor <F>`      | off (flat `--timeout`)           | Size each mutant's timeout from the baseline run: `min(--timeout, F × baseline wall + 5 s)`, so hung mutants stop in seconds. Needs the baseline. See [Timeout budgets](#timeout-budgets). |
+| `--baseline-secs <SECS>`    | none                             | Wall time of a green whole-suite run you already did. When fermut's baseline is skipped it sizes `--timeout-factor` timeouts in its place (fermut's own baseline wins when it runs). Ignored without `--timeout-factor`. A whole-suite `pytest --fermut` session passes its session time in `FERMUT_BASELINE_SECS`. |
 | `--record-kill-sets <PATH>` | off                              | [experimental] Write each mutant's full kill-set (every covering test that fails) to `PATH` as JSONL, the input to [`subsume`](subsume.md) and [`hom`](hom.md). Drops pytest's `-x`, so it is much slower. Pytest/rstest only. Pair with `--no-cache`: a cache hit runs nothing and records nothing. |
 | `--only-dominators`         | off                              | [experimental] Run dominator mutants from `.fermut/dominators.json` and infer the kills they imply; for nightly sweeps, refused with `--diff-only`/`--since`/`--record-kill-sets`. See [`fermut subsume`](subsume.md#fermut-run-only-dominators-experimental). |
 | `--audit-inferred <RATE>`   | `0.05`                           | Requires `--only-dominators` (the parser rejects it otherwise). Under `--only-dominators`: fraction of inferred kills re-run against their killing test; any that survives fails the run. |
@@ -165,6 +167,42 @@ The exit code still decides every other verdict. If the plugin produces no
 result, for example because it couldn't load, fermut warns once and falls
 back to exit codes, a `--collect-only` re-run for exit 4, and output parsing.
 `--no-pytest-plugin` (or `pytest_plugin = false`) forces that fallback.
+
+## Timeout budgets (`--timeout-factor`) { #timeout-budgets }
+
+A mutant that sends the code into an infinite loop runs until `--timeout`
+(30 s by default). On a suite that takes a second or two, that wait is most
+of the run: on more-itertools 85 hung mutants took 63% of all worker time.
+
+`--timeout-factor F` sizes the timeout from the baseline run instead. The
+baseline runs the whole suite once, and each mutant runs a subset of it, so
+an honest run fits in `F × baseline wall + 5 s` (5 s covers interpreter
+start-up and running beside the other workers). `--timeout` stays the upper
+limit. With a 1.4 s suite and `F = 3`, mutants get 10 s instead of 30 s.
+
+- **Verdicts.** A mutant that doesn't hang but makes the suite many times
+  slower now counts as timed out (detected) instead of survived. PIT and
+  Stryker treat it the same way. On more-itertools 2 of ~3,800 mutants
+  changed this way; that is why the flag is off by default.
+- **Needs a baseline.** With `--no-verify-baseline` there is nothing to
+  scale from, so every mutant uses the flat `--timeout` (fermut warns),
+  unless `--baseline-secs SECS` gives the wall time of a green whole-suite run
+  you already did. [`pytest --fermut`](../../guides/pytest-plugin.md) does
+  this on a whole-suite session: it passes its own session time (the summed
+  test time under pytest-xdist, since a mutant runs serially) in
+  `FERMUT_BASELINE_SECS`.
+- **Busy machines.** The baseline runs alone; mutants run beside
+  `--jobs` other workers. On an oversubscribed runner a mutant that runs
+  most of the suite can take several times the baseline and count as timed
+  out. If timeouts climb under load, raise `F` or lower `--jobs`.
+- **`fermut run` only.** `autofix` and `hom` re-run mutants with the flat
+  `--timeout`.
+- **History and cache.** The factor is part of the run's configuration, so
+  `fermut trend` shows turning it on as a config change. The computed budget
+  is not: it moves a little with each baseline and would otherwise invalidate
+  the cache on every run.
+
+Set it in config as `timeout_factor` under `[tool.fermut]`.
 
 ## Schemata (`--schemata`, experimental) { #schemata }
 

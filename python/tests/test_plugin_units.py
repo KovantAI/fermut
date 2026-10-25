@@ -408,3 +408,33 @@ def test_run_uses_rootdir_and_a_fermut_temp_report(
     result.stdout.fnmatch_lines(["  src*m.py:1 [[]arith-op-swap[]] `+` -> `-`"])
     out, _ = capfd.readouterr()
     assert "fake-stdout" not in out + result.stdout.str()
+
+
+def test_find_fermut_prefers_env_then_scripts_dir_then_path(tmp_path, monkeypatch):
+    name = "fermut.exe" if os.name == "nt" else "fermut"
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    on_path = tmp_path / "bin"
+    on_path.mkdir()
+    exe = on_path / name
+    exe.write_text("")
+    exe.chmod(0o755)
+    monkeypatch.setattr(
+        plugin.sysconfig,
+        "get_path",
+        lambda kind: str(scripts) if kind == "scripts" else None,
+    )
+    monkeypatch.setenv("PATH", str(on_path))
+    monkeypatch.delenv(plugin.BIN_ENV, raising=False)
+    assert plugin.find_fermut() == str(exe)
+    (scripts / name).write_text("")
+    assert plugin.find_fermut() == str(scripts / name)
+    monkeypatch.setenv(plugin.BIN_ENV, "/explicit/fermut")
+    assert plugin.find_fermut() == "/explicit/fermut"
+
+
+def test_find_fermut_none_when_nowhere(tmp_path, monkeypatch):
+    monkeypatch.setattr(plugin.sysconfig, "get_path", lambda kind: str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.delenv(plugin.BIN_ENV, raising=False)
+    assert plugin.find_fermut() is None

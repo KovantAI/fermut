@@ -135,10 +135,11 @@ pub(crate) struct FilterArgs {
     #[arg(long)]
     pub parity: bool,
 
-    /// ROR / logical operator set. `default`: today's swaps. `minimal`: per
-    /// ordering compare and truth-position `and`/`or`, only the 3 mutants no
-    /// other mutant subsumes (e.g. `<` → `<=`, `!=`, `False`). Same count,
-    /// stronger tests. `full`: both. See the operator-profiles reference.
+    /// ROR / logical operator set. `minimal` (default): per ordering compare
+    /// and truth-position `and`/`or`, only the 3 mutants no other mutant
+    /// subsumes (e.g. `<` → `<=`, `!=`, `False`). `classic`: the swaps fermut
+    /// used before 0.7 (`<` → `<=`, `>`, `>=`; `and` ↔ `or`). `full`: both.
+    /// See the operator-profiles reference.
     #[arg(long, value_enum, value_name = "PROFILE")]
     pub operators: Option<OperatorProfileCli>,
 
@@ -346,6 +347,21 @@ pub(crate) struct RunConfigArgs {
     /// and the ty pre-filter are separate fixed costs it does not cover.
     #[arg(long, value_name = "SECS")]
     pub max_time: Option<u64>,
+
+    /// Size each mutant's timeout from the baseline run instead of using the
+    /// flat `--timeout`: `min(--timeout, FACTOR × baseline wall + 5 s)`. Hung
+    /// mutants then stop in seconds. Needs the baseline, or `--baseline-secs`
+    /// with `--no-verify-baseline`. A mutant that only slows the suite down past
+    /// the budget counts as timed out (detected). At least 2; try 3.
+    #[arg(long, value_name = "FACTOR")]
+    pub timeout_factor: Option<f64>,
+
+    /// Wall time of a green whole-suite run you already did (seconds). When
+    /// fermut's baseline is skipped it stands in for it when sizing
+    /// `--timeout-factor` timeouts; ignored without `--timeout-factor`.
+    /// `pytest --fermut` passes its session time through the env var.
+    #[arg(long, value_name = "SECS", env = "FERMUT_BASELINE_SECS")]
+    pub baseline_secs: Option<f64>,
 
     /// [experimental] Record each mutant's full kill-set (the covering tests that
     /// fail) to <PATH> as JSONL. Drops pytest's `-x`, so a killed mutant runs
@@ -637,8 +653,11 @@ cli_enum! {
 
 cli_enum! {
     pub(crate) enum OperatorProfileCli => crate::config::OperatorProfile {
-        Default => Default,
+        Classic => Classic,
         Minimal => Minimal,
+        /// Deprecated name of `classic`; `build_config` warns.
+        #[value(hide = true)]
+        Default => Classic,
         Full => Full,
         #[value(hide = true)]
         RorAll => RorAll,

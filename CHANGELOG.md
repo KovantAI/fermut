@@ -15,6 +15,15 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   starting pytest per mutant. Verdicts match a normal run. Mutants it can't
   serve safely, such as module-level code or functions that ran during
   import, run the normal way. Also `schemata = true` in config.
+- `--timeout-factor F` (config `timeout_factor`): size each mutant's timeout
+  from the baseline run, `min(--timeout, F × baseline wall + 5 s)`, so hung
+  mutants stop in seconds instead of at the flat 30 s. Off by default. With
+  `F = 3`: more-itertools 314 s → 162 s, pyjwt 79 s → 59 s, jinja2
+  272 s → 236 s. Verdicts unchanged except that a mutant which only makes
+  the suite many times slower counts as timed out (2 of ~3,800 mutants on
+  more-itertools). `--baseline-secs` supplies the suite time when fermut's
+  baseline is skipped; a whole-suite `pytest --fermut` session passes its
+  time.
 - `pytest --fermut` narrows to the session's selection: with a path, node
   id, `-k`, `-m`, `--deselect` and similar, only the selected tests run
   against the mutants, and mutants none of them cover are skipped as
@@ -24,12 +33,48 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   history. Its baseline check runs only the selected tests, so a broken
   test outside the selection doesn't abort the run. A selection that covers
   none of the code under mutation is an error, not a vacuous N/A pass.
+- `fermut autofix --triage skip|audit` and `fermut suggest --triage …`: an
+  LLM equivalence judge triages each survivor before a test is generated
+  (one extra, cached call). With `skip`, a survivor judged equivalent gets
+  no test (autofix outcome `likely-equivalent`) and a suggested
+  `# fermut: ignore[...]` marker; for the others, the judge's explanation of
+  the behavioural difference goes into the generation prompt. `audit`
+  still generates for every survivor and reports how many judged-equivalent
+  ones were killed anyway. Off by default; the mutation score never
+  changes.
 - Errors that can mean fermut guessed wrong about a project (a baseline that
   fails only under fermut, merge conflicts between shards of one config,
   coverage paths all outside the project root) and any panic now point to
   the GitHub issue tracker.
 
+### Changed
+- **`minimal` is the default operator profile.** Ordering compares and
+  `and`/`or` used as a condition now get the mutants no other mutant
+  subsumes (`a < b` → `<=`, `!=`, `False`) instead of the easily killed swaps
+  (`>`, `>=`, `and` ↔ `or`). Expect scores to drop where a suite never tries
+  one kind of input; mutant counts rise 0.3–6%. The switch shows in
+  `fermut trend` as a config change, not a regression. The subsumption gate
+  found 0 violations on 366 fully checked sites across 13 repos, 23 of
+  them comparing numpy or pandas values. Set
+  `operators = "classic"` (or `--operators classic`) to keep the old
+  operators.
+
+### Deprecated
+- Operator profile name `default`: it now means `classic` and warns. It will
+  be removed in a later release.
+
 ### Fixed
+- Mutants whose selected tests are parametrized with an absolute path
+  (e.g. werkzeug's `test_from_directory[/repo/tests/res/test.txt]`) were
+  scored `error` (pytest exit 4): fermut runs in a copy of the project, where
+  pytest names those tests with the copy's path. Node ids are now rewritten
+  into the copy and mapped back in results. On werkzeug 124 errored mutants
+  now get verdicts.
+- False kills from parallel pytest runs sharing one temp root
+  (`$TMPDIR/pytest-of-$USER`): their cleanup races, and under
+  `filterwarnings = error` the resulting warning fails the run. Each worker
+  now has its own root (`PYTEST_DEBUG_TEMPROOT`). A `tmp_path`-heavy project
+  saw 13–21 false kills per run (2–3% of mutants), varying run to run.
 - Uneven worker load: mutants were split into fixed contiguous ranges per
   worker, so a range of slow mutants could leave one pytest running alone
   for most of the run. Each mutant is now scheduled on its own. A full

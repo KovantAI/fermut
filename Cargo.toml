@@ -34,7 +34,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 fs2 = "0.4"
 globset = "0.4"

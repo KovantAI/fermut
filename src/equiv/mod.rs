@@ -12,24 +12,13 @@
 //! - [`patterns::AstPatterns`] — pure-Rust pattern rules over the mutant's
 //!   operator + adjacent tokens. Catches `x +/- 0` and `x */÷ 1` identities.
 //!
-//! - [`probe::HypothesisProbe`] — differential property test driven by
-//!   `hypothesis.given(from_type(...))`. Pass-on-N gives a 0.80 confidence
-//!   signal that must stack with another layer to clear the pipeline
-//!   threshold. Opt-in; not in [`EquivPipeline::default_pipeline`].
-//! - [`llm::LlmJudge`] — model-judged equivalence with a strict JSON
-//!   contract and a calibrated confidence clamp. Also opt-in; runs last
-//!   because it's the most expensive and the least precise.
+//! Not a pipeline layer: [`llm`], the LLM equivalence judge. A model's
+//! opinion can't prove equivalence, so it never touches the score; `autofix`
+//! and `suggest` use it to triage survivors (`--triage`).
 
 pub mod bytecode;
-// TODO: not yet wired into the pipeline (no CLI flag constructs it); kept
-// pending a wire-up-or-delete decision. Remove the allow once reachable.
-#[allow(dead_code)]
 pub mod llm;
 pub mod patterns;
-// TODO: not yet wired into the pipeline (no CLI flag constructs it); kept
-// pending a wire-up-or-delete decision. Remove the allow once reachable.
-#[allow(dead_code)]
-pub mod probe;
 
 use crate::mutator::Mutant;
 
@@ -52,20 +41,7 @@ pub enum EquivVerdict {
     },
 }
 
-impl EquivVerdict {
-    // TODO: extension surface for the unwired probe/LLM detectors; drop the
-    // allow with them (see the module TODO above).
-    #[allow(dead_code)]
-    pub fn is_equivalent_signal(&self) -> bool {
-        !matches!(self, EquivVerdict::NotEquivalent)
-    }
-}
-
 pub trait EquivDetector: Send + Sync {
-    // TODO: extension surface for the unwired probe/LLM detectors; drop the
-    // allow with them (see the module TODO above).
-    #[allow(dead_code)]
-    fn name(&self) -> &'static str;
     /// Inspect a mutant given the original (un-patched) source of the file
     /// it lives in. Detectors must be pure with respect to their inputs.
     fn detect(&self, mutant: &Mutant, source: &str) -> EquivVerdict;
@@ -96,29 +72,6 @@ impl EquivPipeline {
             Box::new(patterns::AstPatterns::new()),
             Box::new(bytecode::BytecodeIdentity::new()),
         ])
-    }
-
-    #[allow(dead_code)] // unwired probe/LLM surface, see module TODO
-    pub fn with_threshold(mut self, t: f32) -> Self {
-        self.threshold = t;
-        self
-    }
-
-    #[allow(dead_code)] // unwired probe/LLM surface, see module TODO
-    /// Append the hypothesis probe (Layer 3). Off by default; the probe
-    /// spawns a Python subprocess and depends on `hypothesis` being
-    /// installed, so callers opt in explicitly.
-    pub fn with_probe(mut self, probe: probe::HypothesisProbe) -> Self {
-        self.detectors.push(Box::new(probe));
-        self
-    }
-
-    #[allow(dead_code)] // unwired probe/LLM surface, see module TODO
-    /// Append the LLM judge (Layer 4). Off by default; runs last by
-    /// construction so cheaper layers short-circuit it for free.
-    pub fn with_llm(mut self, judge: llm::LlmJudge) -> Self {
-        self.detectors.push(Box::new(judge));
-        self
     }
 
     pub fn classify(&self, mutant: &Mutant, source: &str) -> EquivVerdict {
@@ -158,9 +111,6 @@ mod tests {
 
     struct AlwaysProvable;
     impl EquivDetector for AlwaysProvable {
-        fn name(&self) -> &'static str {
-            "always-provable"
-        }
         fn detect(&self, _m: &Mutant, _s: &str) -> EquivVerdict {
             EquivVerdict::ProvablyEquivalent {
                 reason: "test".into(),
@@ -171,9 +121,6 @@ mod tests {
 
     struct AlwaysLikely(f32);
     impl EquivDetector for AlwaysLikely {
-        fn name(&self) -> &'static str {
-            "always-likely"
-        }
         fn detect(&self, _m: &Mutant, _s: &str) -> EquivVerdict {
             EquivVerdict::LikelyEquivalent {
                 confidence: self.0,
@@ -185,9 +132,6 @@ mod tests {
 
     struct Silent;
     impl EquivDetector for Silent {
-        fn name(&self) -> &'static str {
-            "silent"
-        }
         fn detect(&self, _m: &Mutant, _s: &str) -> EquivVerdict {
             EquivVerdict::NotEquivalent
         }

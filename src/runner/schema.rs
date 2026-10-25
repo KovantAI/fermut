@@ -318,6 +318,10 @@ impl Runner for SchemaRunner {
         Ok(())
     }
 
+    fn set_timeout(&mut self, timeout: Duration) {
+        self.inner.set_timeout(timeout);
+    }
+
     fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
         let all = self.inner.record_kill_sets;
         match self.serve(mutant, None, all) {

@@ -24,8 +24,6 @@
 //! falls back to the exit-code path, so a plugin that failed to load can never
 //! change a verdict.
 
-use std::path::Path;
-
 use serde::Deserialize;
 
 /// Module name passed to `pytest -p`. Deliberately not `fermut`, so it never
@@ -79,12 +77,6 @@ struct Event {
 }
 
 impl RunResult {
-    /// Read and parse a result file. `None` when it is missing or unusable.
-    pub(crate) fn read(path: &Path) -> Option<Self> {
-        let bytes = std::fs::read(path).ok()?;
-        Self::parse(&String::from_utf8_lossy(&bytes))
-    }
-
     /// Parse JSON-lines events. Lines that don't parse are skipped (a run
     /// killed mid-write leaves a truncated last line). Returns `None` when no
     /// session started and configuration didn't fail — the plugin never ran —
@@ -321,11 +313,5 @@ mod tests {
             RunResult::parse("{\"v\":2,\"ev\":\"start\",\"pid\":1}\n"),
             None
         );
-    }
-
-    #[test]
-    fn missing_file_falls_back() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(RunResult::read(&tmp.path().join("absent.jsonl")), None);
     }
 }

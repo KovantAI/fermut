@@ -83,6 +83,8 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         no_pytest_plugin: cli_no_pytest_plugin,
         schemata: cli_schemata,
         max_time: cli_max_time,
+        timeout_factor: cli_timeout_factor,
+        baseline_secs: cli_baseline_secs,
         record_kill_sets: cli_record_kill_sets,
         only_dominators,
         audit_inferred,
@@ -146,6 +148,9 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     let tce = cli_tce || file.tce.unwrap_or(false);
     let experimental = f.experimental || file.experimental.unwrap_or(false);
     let parity = f.parity || file.parity.unwrap_or(false);
+    if matches!(f.operators, Some(crate::cli::OperatorProfileCli::Default)) {
+        warn!("{}", crate::config::DEPRECATED_DEFAULT_PROFILE);
+    }
     let operator_profile = f
         .operators
         .map(Into::into)
@@ -421,6 +426,28 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         .or(file.baseline_timeout)
         .unwrap_or(DEFAULT_BASELINE_TIMEOUT_SECS);
     let max_time_secs = cli_max_time.or(file.max_time);
+    if let Some(s) = cli_baseline_secs {
+        anyhow::ensure!(
+            s.is_finite() && s >= 0.0,
+            "--baseline-secs must be a non-negative number of seconds (got {s})"
+        );
+    }
+    let timeout_factor = cli_timeout_factor.or(file.timeout_factor);
+    if let Some(f) = timeout_factor {
+        anyhow::ensure!(
+            f.is_finite() && f >= 2.0,
+            "timeout factor must be at least 2 (got {f}): a mutant can rerun the whole \
+             suite (unittest, or pytest without coverage) beside other workers, so a \
+             tighter budget times out real survivors and scores them detected"
+        );
+        if !verify_baseline && cli_baseline_secs.is_none() {
+            warn!(
+                "--timeout-factor needs the baseline run to size timeouts; with \
+                 --no-verify-baseline (and no --baseline-secs or \
+                 FERMUT_BASELINE_SECS) every mutant uses the flat --timeout"
+            );
+        }
+    }
 
     Ok(Config {
         source_root,
@@ -466,6 +493,8 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         verify_baseline,
         baseline_timeout_secs,
         max_time_secs,
+        timeout_factor,
+        baseline_secs: cli_baseline_secs,
         record_kill_sets: cli_record_kill_sets.map(absolutize),
         only_dominators,
         inferred_audit_rate: audit_inferred.unwrap_or(crate::config::DEFAULT_CACHE_AUDIT_RATE),
@@ -860,6 +889,8 @@ mod tests {
             no_pytest_plugin: false,
             schemata: false,
             max_time: None,
+            timeout_factor: None,
+            baseline_secs: None,
             record_kill_sets: None,
             only_dominators: false,
             audit_inferred: None,
@@ -1210,11 +1241,15 @@ mod tests {
         use crate::config::OperatorProfile;
         let tmp = tempfile::tempdir().unwrap();
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
-        assert_eq!(cfg.operator_profile, OperatorProfile::Default);
+        assert_eq!(
+            cfg.operator_profile,
+            OperatorProfile::Minimal,
+            "minimal is the default"
+        );
 
-        std::fs::write(tmp.path().join("fermut.toml"), "operators = \"minimal\"\n").unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "operators = \"classic\"\n").unwrap();
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
-        assert_eq!(cfg.operator_profile, OperatorProfile::Minimal);
+        assert_eq!(cfg.operator_profile, OperatorProfile::Classic);
 
         let f = FilterArgs {
             operators: Some(crate::cli::OperatorProfileCli::Full),
@@ -1222,6 +1257,93 @@ mod tests {
         };
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
         assert_eq!(cfg.operator_profile, OperatorProfile::Full, "CLI wins");
+    }
+
+    #[test]
+    fn deprecated_default_profile_name_means_classic() {
+        use crate::config::OperatorProfile;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "operators = \"default\"\n").unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert_eq!(
+            cfg.operator_profile,
+            OperatorProfile::Classic,
+            "config file"
+        );
+
+        let f = FilterArgs {
+            operators: Some(crate::cli::OperatorProfileCli::Default),
+            ..empty_filter()
+        };
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
+        assert_eq!(cfg.operator_profile, OperatorProfile::Classic, "CLI");
+
+        std::fs::write(tmp.path().join("fermut.toml"), "operators = \"bogus\"\n").unwrap();
+        assert!(call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).is_err());
+    }
+
+    #[test]
+    fn timeout_factor_from_config_and_rejects_below_two() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "timeout_factor = 3.0\n").unwrap();
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert_eq!(cfg.timeout_factor, Some(3.0));
+        let mut args = run_args(empty_filter());
+        args.timeout_factor = Some(1.5);
+        let err = build_config(tmp.path().to_path_buf(), args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("at least 2"), "{err}");
+
+        let mut args = run_args(empty_filter());
+        args.baseline_secs = Some(1.5);
+        let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
+        assert_eq!(cfg.baseline_secs, Some(1.5));
+        let mut args = run_args(empty_filter());
+        args.baseline_secs = Some(-1.0);
+        assert!(build_config(tmp.path().to_path_buf(), args).is_err());
+    }
+
+    /// What `f` logged on this thread.
+    fn logged(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let w = buf.clone();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(move || w.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(sub, f);
+        let bytes = buf.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn timeout_factor_warns_only_when_no_baseline_can_size_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let warns = |no_verify: bool, baseline_secs: Option<f64>| {
+            let mut args = run_args(empty_filter());
+            args.timeout_factor = Some(3.0);
+            args.no_verify_baseline = no_verify;
+            args.baseline_secs = baseline_secs;
+            logged(|| {
+                build_config(tmp.path().to_path_buf(), args).unwrap();
+            })
+            .contains("--timeout-factor needs the baseline run")
+        };
+        assert!(warns(true, None));
+        assert!(!warns(false, None), "baseline run sizes it");
+        assert!(!warns(true, Some(2.0)), "--baseline-secs sizes it");
     }
 
     #[test]

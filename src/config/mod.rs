@@ -155,6 +155,19 @@ pub struct Config {
     /// are separate fixed costs the budget does not cover. `None` = run the
     /// whole catalogue. Set via `--max-time`.
     pub max_time_secs: Option<u64>,
+    /// Per-mutant timeout budget: when `Some(f)` and the baseline ran, each
+    /// mutant gets `min(timeout_secs, f × baseline wall + floor)` instead of
+    /// the flat `timeout_secs`. A mutant only runs a subset of the suite, so
+    /// the whole-suite baseline bounds an honest run; hung mutants then die in
+    /// seconds rather than at `timeout_secs`. Off (`None`) by default: a mutant
+    /// that only makes the suite many times slower becomes `timed_out`
+    /// (detected) instead of `survived`. Set via `--timeout-factor`.
+    pub timeout_factor: Option<f64>,
+    /// Wall time (seconds) of a green whole-suite run the caller already did,
+    /// e.g. the `pytest --fermut` session. Sizes the `timeout_factor` budget
+    /// when fermut skips its own baseline (`--no-verify-baseline`); a baseline
+    /// fermut runs itself wins. Set via `--baseline-secs`.
+    pub baseline_secs: Option<f64>,
     /// Experiment hook: when `Some(path)`, the pytest runner drops `-x` and
     /// records, per mutant, the FULL set of covering tests that fail (the
     /// mutant's kill-set `K(m)`), writing one JSON object per mutant to `path`
@@ -177,21 +190,28 @@ pub struct Config {
 pub const DEFAULT_CACHE_AUDIT_RATE: f64 = 0.05;
 
 /// Cache-key granularity for source-file identity. See `Config::cache_scope`.
+/// Warning for the pre-0.7 profile name `default`, which now means `classic`.
+pub const DEPRECATED_DEFAULT_PROFILE: &str = "operator profile `default` is deprecated: it is now \
+     called `classic` (the operators fermut used before 0.7). `minimal` is the default now; \
+     use `classic` to keep the old operators or drop the setting to use `minimal`";
+
 /// Which ROR / logical operator set to test (see `mutator::region`). Set via
 /// `--operators` / `operators = "..."`.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum OperatorProfile {
-    /// The historical catalogue: `and`↔`or` and the 3 compare swaps per
-    /// ordering op, no region-model operators.
+    /// The historical catalogue (the default before 0.7): `and`↔`or` and the
+    /// 3 compare swaps per ordering op, no region-model operators. The config
+    /// value `"default"` still parses to this, with a deprecation warning (see
+    /// `config::file`).
+    Classic,
+    /// The default. The region-model minimal set: per ordering compare and
+    /// 2-operand truth-position `and`/`or`, only the 3 dominator mutants.
+    /// About the same count as `classic`, but none is trivially killed.
     #[default]
-    Default,
-    /// The region-model minimal set: per ordering compare and 2-operand
-    /// truth-position `and`/`or`, only the 3 dominator mutants. About the same
-    /// count as `default`, but none is trivially killed.
     Minimal,
-    /// `default` plus the minimal-set operators. For experiments.
+    /// `classic` plus the minimal-set operators. For experiments.
     Full,
     /// `full` plus every remaining region-model form (all 7 per ordering
     /// compare). Only for the subsumption gate; not documented as a profile.
@@ -201,7 +221,7 @@ pub enum OperatorProfile {
 impl OperatorProfile {
     pub fn name(self) -> &'static str {
         match self {
-            Self::Default => "default",
+            Self::Classic => "classic",
             Self::Minimal => "minimal",
             Self::Full => "full",
             Self::RorAll => "ror-all",

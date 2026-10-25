@@ -30,11 +30,13 @@ import subprocess
 import sys
 import sysconfig
 import tempfile
+import time
 
 import pytest
 
 CHILD_ENV = "FERMUT_CHILD"
 BIN_ENV = "FERMUT_BIN"
+BASELINE_SECS_ENV = "FERMUT_BASELINE_SECS"
 
 _STATE = pytest.StashKey["_FermutState"]()
 
@@ -93,6 +95,14 @@ class _FermutState:
         # Absolute node ids ("<abs test file>::<name>") the session selected,
         # or None when the session ran the whole suite.
         self.selected = None
+        # For fermut's timeout budget when its own baseline is skipped: when
+        # the session started (collection included) and the summed duration
+        # of every test phase (under xdist the wall time is only a share).
+        self.started = time.monotonic()
+        self.test_secs = 0.0
+
+    def suite_secs(self):
+        return max(time.monotonic() - self.started, self.test_secs)
 
 
 def _active(config):
@@ -128,6 +138,7 @@ def pytest_configure(config):
             "environment (e.g. `uv add --dev fermut`) or set FERMUT_BIN."
         )
     config.stash[_STATE] = _FermutState(binary)
+    config.pluginmanager.register(_TestTime(config.stash[_STATE]))
 
 
 # Options that select a subset of the collected tests. Any of them set means
@@ -172,6 +183,18 @@ def _absolute_id(root, nodeid):
     fermut re-roots it onto its own project root, which can differ from
     pytest's rootdir."""
     return os.path.join(root, nodeid)
+
+
+class _TestTime:
+    """Sums every test phase's duration into the session state. Registered
+    only for an active session; on the xdist controller it sees every
+    worker's reports."""
+
+    def __init__(self, state):
+        self.state = state
+
+    def pytest_runtest_logreport(self, report):
+        self.state.test_secs += report.duration
 
 
 def pytest_collection_finish(session):
@@ -343,6 +366,17 @@ def pytest_sessionfinish(session, exitstatus):
     if exitstatus != 0:
         state.lines.append(({"yellow": True}, "skipped: the test suite did not pass"))
         return
+    env = _child_env(config)
+    # A whole-suite session stands in for fermut's baseline when that is
+    # skipped (by flag or by config) in sizing `--timeout-factor` timeouts;
+    # fermut ignores it otherwise. An env var, not a flag, so a fermut too old
+    # to know it still runs. Taken before the coverage refresh.
+    # A narrowed session drops any inherited value: a stale export would size
+    # every mutant's timeout from some other run.
+    if state.selected is None:
+        env[BASELINE_SECS_ENV] = f"{state.suite_secs():.3f}"
+    else:
+        env.pop(BASELINE_SECS_ENV, None)
     root = _rootdir(config)
     capman = config.pluginmanager.getplugin("capturemanager")
     uncaptured = (
@@ -365,7 +399,7 @@ def pytest_sessionfinish(session, exitstatus):
             rc = subprocess.call(
                 _run_command(state, config, report_path, selection_path),
                 cwd=root,
-                env=_child_env(config),
+                env=env,
                 stdout=subprocess.DEVNULL,
             )
         report = _load_report(report_path)

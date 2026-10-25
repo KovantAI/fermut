@@ -4,14 +4,21 @@
 mutants fermut makes for ordering comparisons (`<`, `<=`, `>`, `>=`) and for
 `and` / `or` used as a condition.
 
-| Profile   | What you get                                                        |
-|-----------|---------------------------------------------------------------------|
-| `default` | The usual swaps: 3 per ordering compare, `and` ↔ `or`. Unchanged.   |
-| `minimal` | Only the mutants no other mutant subsumes (3 per site). Opt-in.      |
-| `full`    | Both sets. For experiments.                                          |
+| Profile   | What you get                                                          |
+|-----------|-----------------------------------------------------------------------|
+| `minimal` | **Default.** Only the mutants no other mutant subsumes (3 per site).   |
+| `classic` | The swaps fermut used before 0.7: 3 per ordering compare, `and` ↔ `or`. |
+| `full`    | Both sets. For experiments.                                            |
 
-On the parity corpus (click, pyjwt, starlette, typer, markupsafe), `minimal`
-makes 1–3% more mutants than `default`.
+`minimal` makes 0.3–6% more mutants than `classic` (11 repos, see
+[Evidence](#evidence)).
+
+!!! note "Upgrading from 0.6"
+    `minimal` became the default in 0.7. Scores drop where a suite skips a
+    kind of input (see below); the drop is real. `fermut trend` shows the
+    switch as a config change, not a regression. To keep the old operators,
+    set `operators = "classic"`. The old name `default` still works and means
+    `classic`, with a deprecation warning.
 
 ## Why `minimal`
 
@@ -20,7 +27,7 @@ inputs where the change gives a different answer. There are three kinds of
 input: `a < b`, `a == b`, `a > b`. Each mutant differs from `<` on some of
 them:
 
-| mutant  | differs when       | in `default` | in `minimal` |
+| mutant  | differs when       | in `classic` | in `minimal` |
 |---------|--------------------|:------------:|:------------:|
 | `<=`    | `a == b`           | yes          | yes          |
 | `!=`    | `a > b`            |              | yes          |
@@ -29,7 +36,7 @@ them:
 | `>=`    | always             | yes          |              |
 
 A mutant that differs on more inputs is easier to kill. Any test that kills
-`!=` also kills `>`, and any test at all kills `>=`. So in `default`, two of
+`!=` also kills `>`, and any test at all kills `>=`. So in `classic`, two of
 the three mutants are killed by almost any test. A suite that never tries
 `a > b` still kills all three and scores 100%. `minimal` keeps one mutant per
 kind of input, so that gap shows up as a surviving `!=`.
@@ -70,7 +77,7 @@ Everything else is the same in all profiles.
 | `bool-operand-drop` | `if a and b:` → `if (a):` / `if (b):`                |
 | `bool-const`        | `if a and b:` → `if False:`; `if a or b:` → `if True:` |
 
-`minimal` also drops the default swaps it replaces (`<` → `>`, `>=`; `and` →
+`minimal` also drops the `classic` swaps it replaces (`<` → `>`, `>=`; `and` →
 `or` at a covered site). `--ops` / `--skip-ops` still apply on top.
 
 ## Caveats
@@ -84,10 +91,16 @@ used as a plain `True`/`False`. Python doesn't always do that:
 - numpy and pandas comparisons return arrays, so `False` changes the type and
   the mutant dies on a `TypeError`.
 
-`minimal` stays opt-in until `benchmarks/subsumption/gate.py` shows no
-unexplained violations on the parity corpus. The gate runs every form of each
-site and checks that whenever the `minimal` mutants all die, the others die
-too.
+## Evidence { #evidence }
+
+`benchmarks/subsumption/gate.py` runs every form of each site and checks that
+whenever the `minimal` mutants all die, the others die too. Across 13 repos
+(click, pyjwt, starlette, typer, markupsafe, more-itertools, jinja2, flask,
+werkzeug, uncertainties, pyquaternion, pvlib, pint): 1322 sites, 366 with
+every `minimal` mutant killed, **0 violations**. A runtime type probe shows
+23 of the checked sites compare numpy arrays, pandas objects or numpy scalars,
+and uncertainties adds float-heavy comparisons. Details in
+`benchmarks/subsumption/RESULTS.md`.
 
 ## Folded survivors
 
@@ -101,6 +114,7 @@ unchanged.
 
 ## Score history
 
-A non-default profile changes the run's `config_hash`, so `fermut trend`
-shows a config change rather than a regression. Default-profile hashes are
-unchanged.
+Any profile but `classic` feeds the run's `config_hash`, so `fermut trend`
+shows a profile change, including the 0.7 switch to `minimal`, as a config
+change rather than a regression. `classic` runs keep the hash they had as
+`default` before 0.7.

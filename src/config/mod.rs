@@ -76,6 +76,13 @@ pub struct Config {
     /// stdout parsing. Default on; disable with `--no-pytest-plugin` /
     /// `pytest_plugin = false`.
     pub pytest_plugin: bool,
+    /// [experimental] Schemata mode for the pytest runner: build every
+    /// function-body mutant into one schema up front, then run each by forking
+    /// a pytest process that has already imported and collected the suite,
+    /// instead of spawning pytest per mutant. Verdict-equivalent by design;
+    /// any mutant it can't serve safely runs the normal way. Pytest runner on
+    /// Unix only. `--schemata` / `schemata = true`.
+    pub schemata: bool,
     /// Fraction (0.0–1.0) of killer-keyed cache hits re-run each run against
     /// just the recorded killing test, to catch flaky or order-dependent kills
     /// (at least one hit is audited whenever any occur and the rate is > 0). A

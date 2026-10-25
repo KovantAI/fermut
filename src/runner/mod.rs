@@ -16,6 +16,8 @@ pub(crate) mod process_group;
 pub mod pytest;
 pub(crate) mod pytest_result;
 pub mod python;
+#[cfg(unix)]
+pub mod schema;
 pub mod unittest;
 
 pub use python::{interpreter, resolve_python, resolve_tool};
@@ -44,6 +46,12 @@ pub trait Runner: Send + Sync {
     /// toward 100% while proving nothing. The engine calls this before any
     /// mutation and aborts on [`BaselineStatus::Failed`].
     fn baseline(&self) -> Result<BaselineStatus>;
+
+    /// Called once with every collected mutant, before any `run`. Default
+    /// no-op; the schemata runner keeps them to build its schema from.
+    fn prepare(&self, _mutants: &[std::sync::Arc<Mutant>]) -> Result<()> {
+        Ok(())
+    }
 
     /// Drain the kills learned this run (which test killed which
     /// `(file, operator)`), for the engine to fold into the smart-ordering
@@ -314,30 +322,36 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
         });
     // `rstest` is a pytest-CLI-compatible drop-in, so it reuses the pytest
     // runner wholesale — only the framework executable name differs.
+    let pytest_config = |exe: &'static str| pytest::PytestConfig {
+        tests: tests.clone(),
+        timeout,
+        baseline_timeout,
+        hypothesis_seed: cfg.hypothesis_seed,
+        extra_args: cfg.pytest_args.clone(),
+        isolation,
+        coverage: cfg.coverage.clone(),
+        python: cfg.python.clone(),
+        exe,
+        smart_order: cfg.smart_order,
+        kill_order: kill_order.clone(),
+        kill_sink: kill_sink.clone(),
+        record_kill_sets,
+        kill_set_sink: kill_set_sink.clone(),
+        // Only coverage-selected runs can name a killer the cache can use.
+        learn_killer: cfg.cache && cfg.coverage.is_some(),
+        key_base: key_base.clone(),
+        plugin: cfg.pytest_plugin,
+        baseline_ids: baseline_ids.clone(),
+    };
     let pytest_compatible = |exe: &'static str| -> Box<dyn Runner> {
-        Box::new(pytest::PytestRunner::new(pytest::PytestConfig {
-            tests: tests.clone(),
-            timeout,
-            baseline_timeout,
-            hypothesis_seed: cfg.hypothesis_seed,
-            extra_args: cfg.pytest_args.clone(),
-            isolation,
-            coverage: cfg.coverage.clone(),
-            python: cfg.python.clone(),
-            exe,
-            smart_order: cfg.smart_order,
-            kill_order: kill_order.clone(),
-            kill_sink: kill_sink.clone(),
-            record_kill_sets,
-            kill_set_sink: kill_set_sink.clone(),
-            // Only coverage-selected runs can name a killer the cache can use.
-            learn_killer: cfg.cache && cfg.coverage.is_some(),
-            key_base: key_base.clone(),
-            plugin: cfg.pytest_plugin,
-            baseline_ids: baseline_ids.clone(),
-        }))
+        Box::new(pytest::PytestRunner::new(pytest_config(exe)))
     };
     match cfg.runner {
+        #[cfg(unix)]
+        RunnerKind::Pytest if cfg.schemata => {
+            let inner = pytest::PytestRunner::new(pytest_config("pytest"));
+            Box::new(schema::SchemaRunner::new(inner))
+        }
         RunnerKind::Pytest => pytest_compatible("pytest"),
         RunnerKind::Rstest => pytest_compatible("rstest"),
         RunnerKind::Unittest => Box::new(unittest::UnittestRunner::new(

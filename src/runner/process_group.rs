@@ -43,16 +43,7 @@ pub(crate) fn with_new_process_group(cmd: &mut Command) {
 /// race against the wall clock, all we can do is clean up.
 pub(crate) fn kill_group(child: &mut Child) {
     #[cfg(unix)]
-    {
-        // SAFETY: libc::kill takes a pid and signal; passing a negated pid
-        // signals the entire process group. No memory is shared with the
-        // child. `child.id()` is u32; we cast to i32 because killpg is i32.
-        let pid = child.id() as i32;
-        #[allow(unsafe_code)] // sole FFI site: signal the child's process group
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-    }
+    kill_pgid(child.id());
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Console::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
@@ -71,4 +62,22 @@ pub(crate) fn kill_group(child: &mut Child) {
         }
     }
     let _ = child.kill();
+}
+
+/// SIGKILL the process group led by `pid`. Also used directly for a process
+/// fermut has no `Child` for: a schemata child forked by the template.
+#[cfg(unix)]
+pub(crate) fn kill_pgid(pid: u32) {
+    // Refuse what isn't a real leader pid: kill(-0) would signal fermut's own
+    // group and an overflowing cast a different process.
+    let Ok(pid) = i32::try_from(pid) else { return };
+    if pid <= 0 {
+        return;
+    }
+    // SAFETY: libc::kill takes a pid and signal; passing a negated pid
+    // signals the entire process group. No memory is shared with the child.
+    #[allow(unsafe_code)] // sole FFI site: signal a process group
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
 }

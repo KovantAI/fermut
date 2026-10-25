@@ -256,6 +256,7 @@ mod tests {
             cache_path: PathBuf::from(".fermut/cache.json"),
             smart_order: false,
             pytest_plugin: false,
+            schemata: false,
             kill_order_path: PathBuf::from(".fermut/kill-order.json"),
             dominators_path: PathBuf::from(".fermut/dominators.json"),
             operator_profile: crate::config::OperatorProfile::Default,

@@ -9,6 +9,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Added
+- `fermut run --schemata` (experimental, pytest runner on Unix): build every
+  function-body mutant into one schema, then run each mutant by forking a
+  pytest process that already imported and collected the suite, instead of
+  starting pytest per mutant. Verdicts match a normal run. Mutants it can't
+  serve safely, such as module-level code or functions that ran during
+  import, run the normal way. Also `schemata = true` in config.
 - `pytest --fermut` narrows to the session's selection: with a path, node
   id, `-k`, `-m`, `--deselect` and similar, only the selected tests run
   against the mutants, and mutants none of them cover are skipped as

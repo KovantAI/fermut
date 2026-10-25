@@ -57,6 +57,7 @@ fermut run [PATH] [flags...]
 | `--no-smart-order`          | on                               | Disable smart test ordering. On by default, timeout or not — ordering only permutes the selected set, so the score and `--fail-on-regression` gate stay order-invariant. See [Smart test ordering](#smart-test-ordering). |
 | `--smart-order`             | off                              | Force smart test ordering on over `smart_order = false` in config. Conflicts with `--no-smart-order`. |
 | `--no-pytest-plugin`        | on                               | Don't load fermut's reporter plugin into per-mutant pytest/rstest runs; infer outcomes from exit codes and output instead. See [Result reporter plugin](#result-reporter-plugin). |
+| `--schemata`                | off                              | [experimental] Run function-body mutants by forking a pytest process that has already imported and collected the suite, instead of starting pytest per mutant. Same verdicts; pytest runner on Unix only. See [Schemata](#schemata). |
 | `--max-time <SECS>`         | off (whole catalogue)            | Wall-clock ceiling on the testing phase. Evaluates highest-value mutants first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` (excluded from the score) instead of run — in-flight mutants finish. A predictable time ceiling for PR gates. See [Time-boxed runs](#time-boxed-runs-max-time). |
 | `--record-kill-sets <PATH>` | off                              | [experimental] Write each mutant's full kill-set (every covering test that fails) to `PATH` as JSONL, the input to [`subsume`](subsume.md) and [`hom`](hom.md). Drops pytest's `-x`, so it is much slower. Pytest/rstest only. Pair with `--no-cache`: a cache hit runs nothing and records nothing. |
 | `--only-dominators`         | off                              | [experimental] Run dominator mutants from `.fermut/dominators.json` and infer the kills they imply; for nightly sweeps, refused with `--diff-only`/`--since`/`--record-kill-sets`. See [`fermut subsume`](subsume.md#fermut-run-only-dominators-experimental). |
@@ -164,6 +165,44 @@ The exit code still decides every other verdict. If the plugin produces no
 result, for example because it couldn't load, fermut warns once and falls
 back to exit codes, a `--collect-only` re-run for exit 4, and output parsing.
 `--no-pytest-plugin` (or `pytest_plugin = false`) forces that fallback.
+
+## Schemata (`--schemata`, experimental) { #schemata }
+
+By default every mutant gets a fresh `pytest` process: start Python, import
+pytest and your package, collect the selected tests, then run them. On a
+fast suite that startup is most of the time. `--schemata` pays it once per
+worker:
+
+1. Before the first mutant, fermut builds one *schema*: a copy of the project
+   in which every mutant inside a function body is compiled into its
+   function behind a switch on the active-mutant number.
+2. Each worker starts a *template*: a pytest session that imports and
+   collects the suite once.
+3. For each mutant, the template forks a child with that mutant switched on.
+   The child runs the same selected tests a spawned pytest would, in the same
+   order, with `-x`, its own `tmp_path` root and the same timeout.
+
+On the benchmark suite this ran each mutant roughly 6–12× cheaper, and whole
+runs got 1.2–5.7× faster with a 10 s timeout. Timeouts become the main cost,
+since forking can't make a hanging mutant finish sooner.
+
+Some mutants still run the normal way, and the verdicts are the same either
+way:
+
+- mutants outside function bodies (module level, class bodies, decorators,
+  default arguments): the template has already run that code;
+- mutants in a function that already ran while the template imported and
+  collected (a registry filled at import, a decorator factory): whatever it
+  built before the fork used the original code;
+- mutants whose source triggers a compile-time warning, which
+  `filterwarnings = error` would turn into an import error for the whole
+  file.
+
+The run logs how many mutants the schema served. Verdicts are cached
+separately from normal runs while the mode is experimental. The baseline
+check is always a normal pytest run. Use `--python` / `python` when pytest
+runs under an interpreter other than the one behind `pytest` on `PATH`; the
+project interpreter needs Python 3.10 or newer.
 
 ## Time-boxed runs (`--max-time`) { #time-boxed-runs-max-time }
 

@@ -51,8 +51,10 @@ pub(crate) fn run(args: SubsumeArgs) -> Result<()> {
     }
     if store.file_hashes.is_empty() && store.stats.records > 0 {
         tracing::warn!(
-            "none of the mutated files could be read, so `fermut run` will never treat \
-             this store as fresh (run `fermut subsume` on the machine that recorded it)"
+            "no mutated source files found from {}, so `fermut run` will never treat \
+             this store as fresh (run `fermut subsume` from the project root of a \
+             checkout of the recorded commit; in CI, add a checkout step)",
+            std::env::current_dir().unwrap_or_default().display()
         );
     }
     Ok(())

@@ -358,6 +358,7 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     if let Some(secs) = budgeted_timeout_secs(cfg, baseline_wall) {
         runner.set_timeout(Duration::from_secs(secs));
     }
+    runner.prepare(mutants)?;
 
     // One read + at most one parse per unique file, deriving the cache-key
     // hash (always), the scope map (only in `scope` cache mode), and the source
@@ -1036,7 +1037,7 @@ fn compute_scope_prefix(cfg: &Config) -> String {
     h.update(b"|cache_scope=");
     h.update(format!("{:?}", cfg.cache_scope).as_bytes());
     h.update(b"|runner=");
-    h.update(runner_cache_tag(cfg.runner).as_bytes());
+    h.update(runner_cache_tag(cfg.runner, cfg.schemata).as_bytes());
     h.update(b"|python=");
     match &cfg.python {
         Some(p) => h.update(p.as_os_str().as_encoded_bytes()),
@@ -1073,8 +1074,11 @@ fn compute_scope_prefix(cfg: &Config) -> String {
 
 /// Stable cache tag for `RunnerKind`. Hard-coded so renaming a variant
 /// is a deliberate cache-busting change, not a silent one.
-fn runner_cache_tag(kind: RunnerKind) -> &'static str {
+fn runner_cache_tag(kind: RunnerKind, schemata: bool) -> &'static str {
     match kind {
+        // Its own tag while experimental: a schemata bug must not leave
+        // verdicts a normal run would trust.
+        RunnerKind::Pytest if schemata => "pytest-schemata",
         RunnerKind::Pytest => "pytest",
         RunnerKind::Rstest => "rstest",
         RunnerKind::Unittest => "unittest",
@@ -1283,6 +1287,18 @@ fn build_pool(jobs: Option<usize>) -> Result<rayon::ThreadPool> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn schemata_has_its_own_cache_tag() {
+        // While experimental, a schemata verdict must never be served to a
+        // normal run from the cache (or the other way around).
+        assert_ne!(
+            runner_cache_tag(RunnerKind::Pytest, true),
+            runner_cache_tag(RunnerKind::Pytest, false)
+        );
+        assert_eq!(runner_cache_tag(RunnerKind::Pytest, false), "pytest");
+    }
+
     use super::*;
     use crate::mutator::Operator;
     use ruff_text_size::{TextRange, TextSize};
@@ -1780,6 +1796,7 @@ mod tests {
             cache_path: PathBuf::from(".fermut/cache.json"),
             smart_order: false,
             pytest_plugin: false,
+            schemata: false,
             kill_order_path: PathBuf::from(".fermut/kill-order.json"),
             dominators_path: PathBuf::from(".fermut/dominators.json"),
             operator_profile: crate::config::OperatorProfile::Classic,

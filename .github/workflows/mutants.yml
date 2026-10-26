@@ -20,7 +20,7 @@ jobs:
     # ~15 min for a cold ruff/ty build, then a rebuild per mutant.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # `--in-diff` needs the base commit, which a depth-1 checkout lacks.
           fetch-depth: 0
@@ -28,10 +28,10 @@ jobs:
       # Saves the dep clone, not the compile: mutants build in a scratch copy
       # of the tree, so the cold build above is paid every run. `copy_target`
       # would change that at the cost of copying target/ per mutant.
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: mutants
-      - uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           # Pinned: mutants.toml rejects unknown keys, so a renamed config key
           # in a new release would fail every PR.
@@ -151,7 +151,7 @@ jobs:
           echo "::error::${msg}"
           exit 1
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: mutants.out

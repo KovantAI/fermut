@@ -805,85 +805,97 @@ impl Runner for PytestRunner {
     }
 
     fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
-        run_patched(&self.tests, self.isolation, mutant, |mirror| {
-            let (key_file, key_op) = self.kill_key(mutant);
-            let MutantCommand {
-                mut cmd,
-                sole,
-                result,
-            } = self.build_mutant_command(mirror, mutant, &key_file, key_op, None)?;
-            let result = result.map(ResultFile);
-            let started = Instant::now();
-            let child = cmd.spawn().context("spawning test runner")?;
-            let (status, output) = wait_draining_stdout(child, self.timeout, kill_group)?;
-            let waited = (status, output.map(|o| mirror.text_from_mirror(&o)));
-            let wall = started.elapsed();
-            let reported = read_reported(mirror, result.as_ref(), waited.0.is_some());
-            // Exit 4 is ambiguous under node-id selection (see `exit.rs`). The
-            // reporter plugin saw whether test code failed to import; without
-            // its result (plugin off or failed to load) the mutant is still
-            // applied here, so re-collect once to tell a broken import (kill)
-            // from a stale node id (anomaly). Rare path: the common exits never
-            // pay for it.
-            let import_broke = matches!(&waited, (Some(s), _) if s.code() == Some(PYTEST_USAGE_ERROR))
-                && match &reported {
-                    Some(r) => r.import_broke(),
-                    None => self.probe_collection_failure(mirror, mutant, &key_file, key_op),
-                };
-            if self.record_kill_sets {
-                self.record_kill_set(
-                    mutant,
-                    &waited,
-                    reported.as_ref(),
-                    import_broke,
-                    &key_file,
-                    key_op,
-                );
-            }
-            Ok(self
-                .classify_run(
-                    mutant,
-                    waited,
-                    reported.as_ref(),
-                    import_broke,
+        run_patched(
+            &self.tests,
+            self.isolation,
+            self.python.as_deref(),
+            mutant,
+            |mirror| {
+                let (key_file, key_op) = self.kill_key(mutant);
+                let MutantCommand {
+                    mut cmd,
                     sole,
-                    &key_file,
-                    key_op,
-                )
-                .with_timing(run_timing(wall, reported.as_ref())))
-        })
+                    result,
+                } = self.build_mutant_command(mirror, mutant, &key_file, key_op, None)?;
+                let result = result.map(ResultFile);
+                let started = Instant::now();
+                let child = cmd.spawn().context("spawning test runner")?;
+                let (status, output) = wait_draining_stdout(child, self.timeout, kill_group)?;
+                let waited = (status, output.map(|o| mirror.text_from_mirror(&o)));
+                let wall = started.elapsed();
+                let reported = read_reported(mirror, result.as_ref(), waited.0.is_some());
+                // Exit 4 is ambiguous under node-id selection (see `exit.rs`). The
+                // reporter plugin saw whether test code failed to import; without
+                // its result (plugin off or failed to load) the mutant is still
+                // applied here, so re-collect once to tell a broken import (kill)
+                // from a stale node id (anomaly). Rare path: the common exits never
+                // pay for it.
+                let import_broke = matches!(&waited, (Some(s), _) if s.code() == Some(PYTEST_USAGE_ERROR))
+                    && match &reported {
+                        Some(r) => r.import_broke(),
+                        None => self.probe_collection_failure(mirror, mutant, &key_file, key_op),
+                    };
+                if self.record_kill_sets {
+                    self.record_kill_set(
+                        mutant,
+                        &waited,
+                        reported.as_ref(),
+                        import_broke,
+                        &key_file,
+                        key_op,
+                    );
+                }
+                Ok(self
+                    .classify_run(
+                        mutant,
+                        waited,
+                        reported.as_ref(),
+                        import_broke,
+                        sole,
+                        &key_file,
+                        key_op,
+                    )
+                    .with_timing(run_timing(wall, reported.as_ref())))
+            },
+        )
     }
 
     fn audit(&self, mutant: &Arc<Mutant>, killer: &str) -> Result<Option<MutantOutcome>> {
         // Same command as a real run, but selecting only the recorded killer.
         // No exit-4 probe: an audit that can't even resolve the node id is a
         // disagreement either way, and the engine then re-runs the mutant fully.
-        run_patched(&self.tests, self.isolation, mutant, |mirror| {
-            let (key_file, key_op) = self.kill_key(mutant);
-            let MutantCommand {
-                mut cmd,
-                sole,
-                result,
-            } = self.build_mutant_command(mirror, mutant, &key_file, key_op, Some(killer))?;
-            let result = result.map(ResultFile);
-            let started = Instant::now();
-            let child = cmd.spawn().context("spawning audit run")?;
-            let (status, output) = wait_draining_stdout(child, self.timeout, kill_group)?;
-            let waited = (status, output.map(|o| mirror.text_from_mirror(&o)));
-            let wall = started.elapsed();
-            let reported = read_reported(mirror, result.as_ref(), waited.0.is_some());
-            Ok(self
-                .classify_run(
-                    mutant,
-                    waited,
-                    reported.as_ref(),
-                    false,
+        run_patched(
+            &self.tests,
+            self.isolation,
+            self.python.as_deref(),
+            mutant,
+            |mirror| {
+                let (key_file, key_op) = self.kill_key(mutant);
+                let MutantCommand {
+                    mut cmd,
                     sole,
-                    &key_file,
-                    key_op,
-                )
-                .with_timing(run_timing(wall, reported.as_ref())))
-        })
+                    result,
+                } = self.build_mutant_command(mirror, mutant, &key_file, key_op, Some(killer))?;
+                let result = result.map(ResultFile);
+                let started = Instant::now();
+                let child = cmd.spawn().context("spawning audit run")?;
+                let (status, output) = wait_draining_stdout(child, self.timeout, kill_group)?;
+                let waited = (status, output.map(|o| mirror.text_from_mirror(&o)));
+                let wall = started.elapsed();
+                let reported = read_reported(mirror, result.as_ref(), waited.0.is_some());
+                Ok(self
+                    .classify_run(
+                        mutant,
+                        waited,
+                        reported.as_ref(),
+                        false,
+                        sole,
+                        &key_file,
+                        key_op,
+                    )
+                    .with_timing(run_timing(wall, reported.as_ref())))
+            },
+        )
         .map(Some)
     }
 

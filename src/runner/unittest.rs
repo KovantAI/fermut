@@ -128,47 +128,54 @@ impl Runner for UnittestRunner {
     }
 
     fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
-        run_patched(&self.tests, self.isolation, mutant, |mirror| {
-            let mut cmd = self.discover_command(mirror)?;
-            // Discard per-mutant output — only the exit status decides
-            // survived/killed. unittest writes its dots and tracebacks to
-            // stderr; left inherited, every killed mutant spews a traceback to
-            // the terminal. The baseline run still captures output for
-            // diagnosis.
-            cmd.stdout(Stdio::null()).stderr(Stdio::null());
-            let started = std::time::Instant::now();
-            let mut child = cmd.spawn().context("spawning python -m unittest")?;
+        run_patched(
+            &self.tests,
+            self.isolation,
+            Some(&self.python),
+            mutant,
+            |mirror| {
+                let mut cmd = self.discover_command(mirror)?;
+                // Discard per-mutant output — only the exit status decides
+                // survived/killed. unittest writes its dots and tracebacks to
+                // stderr; left inherited, every killed mutant spews a traceback to
+                // the terminal. The baseline run still captures output for
+                // diagnosis.
+                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                let started = std::time::Instant::now();
+                let mut child = cmd.spawn().context("spawning python -m unittest")?;
 
-            let outcome = match child
-                .wait_timeout(self.timeout)
-                .context("waiting on unittest")?
-            {
-                // Share the pytest runner's exit→verdict logic: a usage error
-                // (exit 2) or "no tests ran" (exit 5 on Python 3.12+) is an
-                // infrastructure fault, not a kill — scoring it as a kill would
-                // inflate the mutation score. Only a genuine failure/error
-                // (exit 1, including a mutant that broke import) counts.
-                Some(status) => match classify_exit(TestTool::Unittest, status.code()) {
-                    ExitVerdict::Survived => Ok(MutantOutcome::survived(mutant.clone())),
-                    ExitVerdict::Killed => Ok(MutantOutcome::killed(mutant.clone())),
-                    ExitVerdict::Anomaly(code) => Ok(MutantOutcome::error(
-                        mutant.clone(),
-                        anomaly_message(TestTool::Unittest, code),
-                    )),
-                },
-                None => {
-                    kill_group(&mut child);
-                    let _ = child.wait();
-                    Ok(MutantOutcome::timed_out(mutant.clone()))
-                }
-            };
-            outcome.map(|o| {
-                o.with_timing(Timing {
-                    duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    test_ms: None,
+                let outcome = match child
+                    .wait_timeout(self.timeout)
+                    .context("waiting on unittest")?
+                {
+                    // Share the pytest runner's exit→verdict logic: a usage error
+                    // (exit 2) or "no tests ran" (exit 5 on Python 3.12+) is an
+                    // infrastructure fault, not a kill — scoring it as a kill would
+                    // inflate the mutation score. Only a genuine failure/error
+                    // (exit 1, including a mutant that broke import) counts.
+                    Some(status) => match classify_exit(TestTool::Unittest, status.code()) {
+                        ExitVerdict::Survived => Ok(MutantOutcome::survived(mutant.clone())),
+                        ExitVerdict::Killed => Ok(MutantOutcome::killed(mutant.clone())),
+                        ExitVerdict::Anomaly(code) => Ok(MutantOutcome::error(
+                            mutant.clone(),
+                            anomaly_message(TestTool::Unittest, code),
+                        )),
+                    },
+                    None => {
+                        kill_group(&mut child);
+                        let _ = child.wait();
+                        Ok(MutantOutcome::timed_out(mutant.clone()))
+                    }
+                };
+                outcome.map(|o| {
+                    o.with_timing(Timing {
+                        duration_ms: u64::try_from(started.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                        test_ms: None,
+                    })
                 })
-            })
-        })
+            },
+        )
     }
 
     fn baseline(&self) -> Result<BaselineStatus> {

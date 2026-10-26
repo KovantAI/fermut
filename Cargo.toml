@@ -83,7 +83,7 @@ ruff_text_size     = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1"
 # fails (pre-release API surface).
 ruff_db            = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1", features = ["os"], optional = true }
 ruff_notebook      = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1", optional = true }
-ty_project         = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1", optional = true }
+ty_project         = { git = "https://github.com/astral-sh/ruff", tag = "0.17.2", optional = true }
 ty_python_semantic = { git = "https://github.com/astral-sh/ruff", tag = "0.17.1", optional = true }
 
 [features]

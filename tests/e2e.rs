@@ -372,6 +372,191 @@ fn run_outcomes(proj: &std::path::Path, extra: &[&str]) -> Vec<serde_json::Value
     json["outcomes"].as_array().expect("outcomes array").clone()
 }
 
+#[cfg(unix)]
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn schemata_gives_the_same_verdicts_as_a_normal_run() {
+    // `--schemata` forks a warm pytest per mutant instead of spawning one; every
+    // verdict must match the spawn path. The shapes are the ones that broke the
+    // spike: a decorator factory whose closure is built when the test module
+    // imports (the switch must sit in the closure, not the factory), a function
+    // that runs at import (must fall back to spawning: its result was stored
+    // before the fork), a mutant that hangs (timeout), and `tmp_path`.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n",
+    );
+    write("src/pkg/__init__.py", "");
+    write(
+        "src/pkg/m.py",
+        "import functools\n\n\
+         REGISTRY = {}\n\n\n\
+         def register(name):\n    REGISTRY[name] = len(name) * 2\n    return name\n\n\n\
+         def requires(role):\n    def deco(fn):\n        @functools.wraps(fn)\n        \
+         def wrapper(*a):\n            if role == \"admin\":\n                return fn(*a)\n            \
+         return None\n        return wrapper\n    return deco\n\n\n\
+         def add(a, b):\n    return a + b\n\n\n\
+         def countdown(n):\n    while n > 0:\n        n = n - 1\n    return n\n\n\n\
+         def save(path, text):\n    path.write_text(text.upper())\n    return path.read_text()\n\n\n\
+         register(\"alpha\")\n",
+    );
+    write(
+        "tests/test_m.py",
+        "from pkg.m import REGISTRY, add, countdown, requires, save\n\n\n\
+         @requires(\"admin\")\ndef secret():\n    return 42\n\n\n\
+         def test_add():\n    assert add(2, 3) == 5\n\n\n\
+         def test_secret():\n    assert secret() == 42\n\n\n\
+         def test_registry():\n    assert REGISTRY == {\"alpha\": 10}\n\n\n\
+         def test_countdown():\n    assert countdown(3) == 0\n\n\n\
+         def test_save(tmp_path):\n    assert save(tmp_path / \"f\", \"hi\") == \"HI\"\n",
+    );
+    // A second file covering `add`, edited below to change its mutants' scope
+    // while their killer in test_m.py stays put.
+    write(
+        "tests/test_more.py",
+        "from pkg.m import add\n\n\ndef test_add_zero():\n    assert add(0, 0) == 0\n",
+    );
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(proj)
+        .assert()
+        .success();
+
+    let verdicts = |extra: &[&str]| -> std::collections::BTreeMap<String, String> {
+        run_outcomes(proj, &[&["--timeout", "5"], extra].concat())
+            .iter()
+            .filter(|o| o["status"] != "skipped")
+            .map(|o| {
+                let id = o["mutant"]["id"].as_str().unwrap().to_string();
+                (id, o["status"].as_str().unwrap().to_string())
+            })
+            .collect()
+    };
+    let normal = verdicts(&[]);
+    let schemata = verdicts(&["--schemata"]);
+    assert!(
+        normal.values().any(|s| s == "timed_out"),
+        "the countdown mutant must hang: {normal:#?}"
+    );
+    assert_eq!(schemata, normal);
+
+    // Equal verdicts would also come from everything silently falling back to
+    // spawning; the summary line shows the schema actually served mutants.
+    let out = Command::cargo_bin("fermut")
+        .unwrap()
+        .args([
+            "run",
+            "--no-ty-filter",
+            "--no-cache",
+            "--no-history",
+            "--fail-under",
+            "0",
+        ])
+        .args(["--timeout", "5", "--schemata"])
+        .arg(proj.join("src"))
+        .arg("--tests")
+        .arg(proj.join("tests"))
+        .arg("--coverage")
+        .arg(proj.join(".coverage"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // "schemata: <n> mutants run from the schema, <m> run normally"
+    let served: u32 = stderr
+        .lines()
+        .find(|l| l.contains("mutants run from the schema"))
+        .and_then(|l| l.split("schemata: ").nth(1))
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no schemata summary in:\n{stderr}"));
+    assert!(served > 0, "no mutant was run from the schema:\n{stderr}");
+
+    // Kill-sets recorded from the schema (every covering test runs, no `-x`)
+    // match the spawn path's, mutant for mutant.
+    let kill_sets = |extra: &[&str]| -> std::collections::BTreeMap<String, serde_json::Value> {
+        let path = proj.join("kill-sets.jsonl");
+        let _ = std::fs::remove_file(&path);
+        run_outcomes(
+            proj,
+            &[
+                &["--timeout", "5", "--record-kill-sets"],
+                &[path.to_str().unwrap()][..],
+                extra,
+            ]
+            .concat(),
+        );
+        std::fs::read_to_string(&path)
+            .expect("kill-sets written")
+            .lines()
+            .map(|l| {
+                let r: serde_json::Value = serde_json::from_str(l).unwrap();
+                (
+                    r["mutant_id"].as_str().unwrap().to_string(),
+                    serde_json::json!([r["status"], r["kill_set"]]),
+                )
+            })
+            .collect()
+    };
+    let normal_sets = kill_sets(&[]);
+    assert!(!normal_sets.is_empty());
+    assert_eq!(kill_sets(&["--schemata"]), normal_sets);
+
+    // After a test edit the warm cache trusts each mutant's recorded killer;
+    // its audit re-runs that killer through the schema too, under a
+    // `--timeout-factor` budget, and confirms every kill.
+    let cached = |extra: &[&str]| {
+        let report = proj.join("cached.json");
+        let out = Command::cargo_bin("fermut")
+            .unwrap()
+            .args(["run", "--no-ty-filter", "--no-history", "--fail-under", "0"])
+            .args(["--schemata", "--timeout-factor", "3", "--json"])
+            .arg(&report)
+            .arg(proj.join("src"))
+            .arg("--tests")
+            .arg(proj.join("tests"))
+            .arg("--coverage")
+            .arg(proj.join(".coverage"))
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+        let killed = json["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["status"] == "killed")
+            .map(|o| o["mutant"]["id"].as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        (killed, String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let (killed, _) = cached(&[]);
+    let more = proj.join("tests/test_more.py");
+    let edited = std::fs::read_to_string(&more).unwrap() + "\n\ndef test_noop():\n    pass\n";
+    std::fs::write(&more, edited).unwrap();
+    let (audited, stderr) = cached(&["--cache-audit-rate", "1"]);
+    assert_eq!(audited, killed);
+    // "cache: <f> full hits, <k> killer hits, <a> audited (<d> dropped), ..."
+    let summary = stderr
+        .lines()
+        .find(|l| l.contains("killer hits,"))
+        .unwrap_or_else(|| panic!("no cache summary in:\n{stderr}"));
+    assert!(
+        !summary.contains(" 0 audited") && summary.contains("(0 dropped)"),
+        "every audited kill must reproduce through the schema: {summary}"
+    );
+}
+
 #[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn select_tests_skips_mutants_outside_the_selection() {

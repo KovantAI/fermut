@@ -36,31 +36,31 @@ use crate::report::{MutantOutcome, Timing};
 use crate::sync::lock_recover;
 
 pub struct PytestRunner {
-    tests: PathBuf,
-    timeout: Duration,
-    baseline_timeout: Duration,
-    hypothesis_seed: Option<u64>,
-    extra_args: Vec<String>,
-    isolation: IsolationMode,
+    pub(super) tests: PathBuf,
+    pub(super) timeout: Duration,
+    pub(super) baseline_timeout: Duration,
+    pub(super) hypothesis_seed: Option<u64>,
+    pub(super) extra_args: Vec<String>,
+    pub(super) isolation: IsolationMode,
     coverage: Option<Arc<CoverageContexts>>,
     /// Interpreter to run the framework with. `Some` → `<python> -m <exe>`
     /// (rstest: the binary beside it); `None` → bare `<exe>` from `PATH`.
-    python: Option<PathBuf>,
+    pub(super) python: Option<PathBuf>,
     /// Framework executable / module name: `pytest` or the `rstest` drop-in.
     exe: &'static str,
     /// Smart test ordering on. When set, coverage-selected ids are reordered —
     /// the cold-start breadth prior (fewest of the mutated file's lines) first,
     /// then any learned `(file, operator)` killer lifted ahead of that — and
     /// killers observed this run are learned into `kill_sink`.
-    smart_order: bool,
+    pub(super) smart_order: bool,
     /// Immutable kill-order history, read to order selected tests (no lock).
-    kill_order: Arc<crate::kill_order::KillOrder>,
+    pub(super) kill_order: Arc<crate::kill_order::KillOrder>,
     /// Kills learned this run, folded into the sidecar by the engine afterward.
     kill_sink: Arc<Mutex<Vec<crate::kill_order::KillRecord>>>,
     /// Kill-set recording on (the higher-order-mutant experiment). When set, the
     /// per-mutant command drops `-x` and always captures stdout, and every
     /// mutant's full kill-set is pushed to `kill_set_sink`.
-    record_kill_sets: bool,
+    pub(super) record_kill_sets: bool,
     /// Per-mutant kill-sets recorded this run, drained by the engine to JSONL.
     kill_set_sink: Arc<Mutex<Vec<super::kill_sets::KillSetRecord>>>,
     /// Name the killing test on each `Killed` outcome (for the killer-keyed
@@ -160,7 +160,7 @@ impl PytestRunner {
 
     /// `(source-root-relative file, operator name)` history key for a mutant.
     /// The file is stripped of `key_base` (the run's `source_root`).
-    fn kill_key(&self, mutant: &Mutant) -> (String, &'static str) {
+    pub(super) fn kill_key(&self, mutant: &Mutant) -> (String, &'static str) {
         let file = mutant
             .file
             .strip_prefix(&self.key_base)
@@ -193,6 +193,24 @@ impl PytestRunner {
             });
         }
         nodeid
+    }
+
+    /// The node ids to run `mutant` against, breadth-ordered under smart
+    /// ordering (the learned-killer lift comes after, in [`select_args`] or the
+    /// schemata runner): `only` when given (an audit), else the coverage
+    /// selection. `None` without coverage data — run the whole suite.
+    pub(super) fn coverage_ids(&self, mutant: &Mutant, only: Option<&str>) -> Option<Vec<String>> {
+        match only {
+            Some(t) => Some(vec![t.to_string()]),
+            None => self.coverage.as_ref().and_then(|ctx| {
+                ctx.tests_for_mutant(mutant).map(|ids| {
+                    self.ordered_ids(ctx, mutant, ids)
+                        .into_iter()
+                        .cloned()
+                        .collect()
+                })
+            }),
+        }
     }
 
     /// Cold-start breadth ordering of the coverage-selected node ids: with smart
@@ -271,17 +289,7 @@ impl PytestRunner {
         // mutated file's lines — first, then [`select_args`] lifts any learned
         // `(file, operator)` killer ahead of that. Breadth fills the no-history
         // gap; history dominates once a killer is known.
-        let ordered: Option<Vec<String>> = match only {
-            Some(t) => Some(vec![t.to_string()]),
-            None => self.coverage.as_ref().and_then(|ctx| {
-                ctx.tests_for_mutant(mutant).map(|ids| {
-                    self.ordered_ids(ctx, mutant, ids)
-                        .into_iter()
-                        .cloned()
-                        .collect()
-                })
-            }),
-        };
+        let ordered = self.coverage_ids(mutant, only);
         // With the plugin the killer comes from its result file, so stdout is
         // never captured for it.
         let capture_killer = (self.smart_order || self.learn_killer) && !self.plugin;
@@ -345,7 +353,7 @@ impl PytestRunner {
     /// stdout. The verdict
     /// is derived the same way [`classify_run`] derives it, so the recorded
     /// `status` matches the report; `kill_set` is populated only on a real kill.
-    fn record_kill_set(
+    pub(super) fn record_kill_set(
         &self,
         mutant: &Arc<Mutant>,
         waited: &(Option<ExitStatus>, Option<String>),
@@ -443,7 +451,7 @@ impl PytestRunner {
     /// usage error (node ids can't resolve) rather than exit 2, and that is a
     /// kill, not an anomaly.
     #[allow(clippy::too_many_arguments)]
-    fn classify_run(
+    pub(super) fn classify_run(
         &self,
         mutant: &Arc<Mutant>,
         waited: (Option<ExitStatus>, Option<String>),
@@ -492,7 +500,7 @@ impl PytestRunner {
 
 /// Timing for one run: `wall` from spawn to exit, plus the reporter plugin's
 /// test time when it loaded.
-fn run_timing(wall: Duration, reported: Option<&RunResult>) -> Timing {
+pub(super) fn run_timing(wall: Duration, reported: Option<&RunResult>) -> Timing {
     Timing {
         duration_ms: u64::try_from(wall.as_millis()).unwrap_or(u64::MAX),
         test_ms: reported.map(|r| (r.test_secs * 1000.0).round() as u64),

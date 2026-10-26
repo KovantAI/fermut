@@ -105,11 +105,26 @@ impl std::fmt::Display for BaselineStatus {
     }
 }
 
-/// Build a one-shot mirror for a baseline run. Unlike [`with_worker_mirror`],
-/// this isn't cached in a thread-local — the baseline runs once on the calling
-/// thread before the rayon pool spins up, so there is nothing to reuse.
+/// Build a one-shot, unprecompiled mirror (tests).
+#[cfg(test)]
 pub(crate) fn build_mirror(tests: &Path, mode: IsolationMode) -> Result<Mirror> {
     Mirror::build(tests, mode)
+}
+
+/// Build a one-shot mirror for a baseline run, precompiled like every worker
+/// mirror: the baseline must see the same tree as the mutant runs
+/// (`__pycache__` included), or a test that lists the package passes the
+/// baseline and fails every mutant. Unlike [`with_worker_mirror`], this isn't
+/// cached in a thread-local — the baseline runs once on the calling thread
+/// before the rayon pool spins up, so there is nothing to reuse.
+pub(crate) fn build_baseline_mirror(
+    tests: &Path,
+    mode: IsolationMode,
+    python: Option<&Path>,
+) -> Result<Mirror> {
+    let mirror = Mirror::build(tests, mode)?;
+    precompile(&mirror.root, &python::pytest_interpreter(python));
+    Ok(mirror)
 }
 
 /// PYTHONPATH that makes the mirror's (possibly mutated) package win over an
@@ -668,8 +683,7 @@ where
         let needs_build = !matches!(&*slot, Some((p, m, _)) if p == tests && *m == mode);
         if needs_build {
             *slot = None;
-            let mirror = Mirror::build(tests, mode)?;
-            precompile(&mirror.root, &python::pytest_interpreter(python));
+            let mirror = build_baseline_mirror(tests, mode, python)?;
             *slot = Some((tests.to_path_buf(), mode, mirror));
         }
         let mirror = &slot.as_ref().unwrap().2;
@@ -1312,6 +1326,24 @@ mod tests {
             BaselineStatus::Failed { output } => assert!(output.contains("boom"), "{output}"),
             BaselineStatus::Passed { .. } => panic!("exit 3 must fail the baseline"),
         }
+    }
+
+    /// A baseline that ran without the `__pycache__` the mutant mirrors get
+    /// would pass a package-listing test that every mutant run then fails.
+    #[test]
+    fn baseline_mirror_is_precompiled_like_worker_mirrors() {
+        let py = super::interpreter(None);
+        if std::process::Command::new(&py)
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return; // no Python on this box
+        }
+        let (_tmp, root, tests, _src) = fake_project();
+        fs::write(root.join("m.py"), "X = 1\n").unwrap();
+        let mirror = super::build_baseline_mirror(&tests, IsolationMode::Copy, Some(&py)).unwrap();
+        assert!(mirror.root.join("__pycache__").is_dir());
     }
 
     /// The stale-`.pyc` false survivor, against a precompiled mirror: a

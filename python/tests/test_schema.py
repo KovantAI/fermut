@@ -167,6 +167,9 @@ MUTANTS = [
     # `nonlocal` nested inside try/except in set_flag: hoisting must still find it.
     mutant("nested-nonlocal", 'return "set"', 'return "unset"'),
     # Fallbacks:
+    # Drops gen's only yield: spliced, gen is a plain function; switched, it
+    # would still be a generator.
+    mutant("unyield", "yield i * 3", "None"),
     mutant("docstring", '"""Plain doc."""', '"""XX"""'),
     mutant("warning", 'x == "a"', 'x is "a"'),
     mutant("default", "x=LIMIT", "x=LIMIT + 1"),
@@ -175,6 +178,7 @@ MUTANTS = [
     mutant("decorator", '@requires("admin")', '@requires("user")'),
 ]
 EXPECTED_FALLBACK = {
+    "unyield": "structure",
     "docstring": "docstring",
     "warning": "compile-warning",
     "default": "signature",
@@ -287,8 +291,22 @@ PROJECT = {
         register("alpha")
         """
     ),
+    "tests/conftest.py": textwrap.dedent(
+        """\
+        import pytest
+
+
+        @pytest.fixture(scope="session")
+        def marker():
+            yield
+            open("torn-down", "w").close()
+        """
+    ),
     "tests/test_core.py": textwrap.dedent(
         """\
+        import os
+        import time
+
         from pkg.core import REGISTRY, add, spin
 
 
@@ -307,6 +325,63 @@ PROJECT = {
         def test_tmp(tmp_path):
             (tmp_path / "f").write_text("x")
             assert (tmp_path / "f").read_text() == "x"
+
+
+        def test_add_with_marker(marker):
+            assert add(1, 1) == 2
+
+
+        def test_after_marker():
+            pass
+
+
+        def close_inherited_pipes():
+            import stat
+
+            for fd in range(3, 256):
+                try:
+                    if stat.S_ISFIFO(os.fstat(fd).st_mode):
+                        os.close(fd)  # the event pipe among them
+                except OSError:
+                    pass
+
+
+        def test_closes_inherited_pipes():
+            close_inherited_pipes()
+
+
+        def test_closes_inherited_pipes_then_hangs():
+            close_inherited_pipes()
+            assert spin(0) == 0  # hangs under the spin mutant
+
+
+        def test_add_in_a_clean_subprocess():
+            import subprocess
+            import sys
+
+            check = "from pkg.core import add; assert add(2, 3) == 5"
+            env = {"PATH": os.environ.get("PATH", "")}
+            subprocess.run([sys.executable, "-c", check], env=env, check=True)
+
+
+        def test_crashes_leaving_a_helper():
+            import builtins
+            import subprocess
+
+            if not getattr(builtins, "_fm_active", 0):
+                return  # only crashes with a mutant active
+
+            helper = subprocess.Popen(["sleep", "30"])
+            with open("helper.pid", "w") as f:
+                f.write(str(helper.pid))
+            os._exit(1)
+
+
+        def test_forks_a_helper():
+            if os.fork() == 0:  # inherits the child's event pipe
+                time.sleep(30)
+                os._exit(0)
+            assert add(2, 3) == 5
         """
     ),
 }
@@ -326,7 +401,15 @@ def project_mutant(id_, file, needle, replacement, root):
 
 class Server:
     def __init__(self, root, schema_path):
-        env = {**os.environ, "PYTHONPATH": str(root), "PYTHONDONTWRITEBYTECODE": "1"}
+        # As fermut runs it: pytest's temp root inside the mirror's workdir.
+        self.temproot = root / "pytest-temproot"
+        self.temproot.mkdir(exist_ok=True)
+        env = {
+            **os.environ,
+            "PYTHONPATH": str(root),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTEST_DEBUG_TEMPROOT": str(self.temproot),
+        }
         env.pop("FM_ACTIVE", None)
         self.proc = subprocess.Popen(
             [
@@ -354,12 +437,9 @@ class Server:
         self.proc.stdin.write(json.dumps(obj) + "\n")
         self.proc.stdin.flush()
 
-    def run(self, idx, ids, kill=False):
-        self.send({"idx": idx, "ids": ids, "all": False})
-        pid = self.recv()["pid"]
-        if kill:
-            time.sleep(0.5)  # let it get into the test
-            os.killpg(pid, 9)
+    def run(self, idx, ids, timeout=None):
+        self.send({"idx": idx, "ids": ids, "all": False, "timeout": timeout})
+        self.recv()  # pid
         result = self.recv()
         status = result.pop("status")
         result["exit"] = (
@@ -417,27 +497,123 @@ def test_serve_kills_survives_and_flags_pre_fork_functions(served):
     server.close()
 
 
-def test_serve_recovers_after_the_caller_kills_a_hung_child(served):
+def test_serve_kills_a_hung_child_at_its_timeout_and_recovers(served):
     server, idx = served
     assert server.recv()["ready"] is True
-    hung = server.run(idx["spin"], ["tests/test_core.py::test_spin"], kill=True)
+    hung = server.run(idx["spin"], ["tests/test_core.py::test_spin"], timeout=0.5)
+    assert hung["timed_out"] is True
     assert hung["exit"] is None and hung["signal"] == 9
     assert hung["unfinished"] == "tests/test_core.py::test_spin"
     assert server.run(0, ["tests/test_core.py::test_spin"])["exit"] == 0
     server.close()
 
 
+def test_early_stop_still_tears_down_session_fixtures(served, tmp_path):
+    server, idx = served
+    assert server.recv()["ready"] is True
+    ids = [
+        "tests/test_core.py::test_add_with_marker",
+        "tests/test_core.py::test_after_marker",
+    ]
+    killed = server.run(idx["add"], ids)
+    assert killed["exit"] == 1
+    assert (tmp_path / "torn-down").exists()
+    server.close()
+
+
+def test_a_helper_holding_the_event_pipe_does_not_stall_the_run(served):
+    server, idx = served
+    assert server.recv()["ready"] is True
+    started = time.monotonic()
+    killed = server.run(
+        idx["add"], ["tests/test_core.py::test_forks_a_helper"], timeout=20
+    )
+    assert killed["exit"] == 1 and killed["timed_out"] is False
+    assert time.monotonic() - started < 10
+    server.close()
+
+
+def test_a_child_that_loses_its_event_pipe_still_exits(served):
+    server, _ = served
+    assert server.recv()["ready"] is True
+    lost = server.run(0, ["tests/test_core.py::test_closes_inherited_pipes"])
+    assert lost["exit"] == 0
+    assert server.run(0, ["tests/test_core.py::test_add"])["exit"] == 0
+    server.close()
+
+
+def test_a_child_that_loses_its_event_pipe_still_times_out(served):
+    server, idx = served
+    assert server.recv()["ready"] is True
+    hung = server.run(
+        idx["spin"],
+        ["tests/test_core.py::test_closes_inherited_pipes_then_hangs"],
+        timeout=1,
+    )
+    assert hung["timed_out"] is True and hung["signal"] == 9
+    server.close()
+
+
+def test_a_subprocess_with_a_scrubbed_environment_sees_the_mutant(served):
+    server, idx = served
+    assert server.recv()["ready"] is True
+    ids = ["tests/test_core.py::test_add_in_a_clean_subprocess"]
+    assert server.run(0, ids)["exit"] == 0
+    assert server.run(idx["add"], ids)["exit"] == 1
+    server.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "waitid"), reason="no waitid: can't sweep safely")
+def test_a_crashed_childs_helpers_are_swept(served, tmp_path):
+    server, idx = served
+    assert server.recv()["ready"] is True
+    crashed = server.run(
+        idx["spin"], ["tests/test_core.py::test_crashes_leaving_a_helper"]
+    )
+    assert crashed["exit"] == 1
+    helper = int((tmp_path / "helper.pid").read_text())
+    for _ in range(100):  # reparented to init, which reaps it
+        try:
+            os.kill(helper, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("helper still running")
+    server.close()
+
+
+def test_startup_tracebacks_reach_stderr(tmp_path):
+    (tmp_path / "schema.json").write_text(json.dumps({"functions": {}}))
+    out = subprocess.run(
+        [
+            sys.executable,
+            str(HELPER),
+            "serve",
+            str(tmp_path / "missing"),
+            str(tmp_path / "schema.json"),
+        ],
+        check=False,
+        input="",
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert "FileNotFoundError" in out.stderr
+
+
 def test_children_get_private_tmp_roots_of_cold_length(served, tmp_path):
     server, _ = served
     assert server.recv()["ready"] is True
     assert server.run(0, ["tests/test_core.py::test_tmp"])["exit"] == 0
+    server.close()  # the template cleans up after answering
     leftovers = [
         d
-        for d in os.listdir(schema.tempfile.gettempdir())
+        for root in (server.temproot, schema.tempfile.gettempdir())
+        for d in os.listdir(root)
         if d.startswith("pytest-of-f")
     ]
     assert leftovers == []
-    server.close()
 
 
 def test_fake_user_matches_real_user_length():
@@ -445,8 +621,23 @@ def test_fake_user_matches_real_user_length():
     t.user = "drorasaf"
     assert len(t.fake_user(42)) == len("drorasaf")
     assert t.fake_user(42) != t.fake_user(43)
-    t.user = "bob"
-    assert len(t.fake_user(99999)) == 8
+    t.user = "runner"
+    assert len(t.fake_user(54321)) == len("runner")
+    assert t.fake_user(654321) == "f654321", "a longer pid still fits"
+
+
+def test_serve_refuses_with_threads_running(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_bg.py").write_text(
+        "import threading, time\n"
+        "threading.Thread(target=time.sleep, args=(30,), name='poller', daemon=True).start()\n"
+        "def test_ok():\n    pass\n"
+    )
+    (tmp_path / "schema.json").write_text(json.dumps({"functions": {}}))
+    server = Server(tmp_path, tmp_path / "schema.json")
+    msg = server.recv()
+    assert msg["ready"] is False and "poller" in msg["error"]
+    server.close()
 
 
 def test_serve_refuses_on_collection_errors(tmp_path):

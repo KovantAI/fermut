@@ -26,8 +26,8 @@ use super::exit::{
 use super::process_group::{kill_group, with_new_process_group};
 use super::pytest_result::{RunResult, REPORTER_MODULE, RESULT_ENV};
 use super::{
-    build_mirror, configure_mirror_cmd, mirror_pythonpath, run_baseline_with_timeout, run_patched,
-    BaselineStatus, Runner,
+    build_baseline_mirror, configure_mirror_cmd, mirror_pythonpath, run_baseline_with_timeout,
+    run_patched, BaselineStatus, Runner,
 };
 use crate::config::IsolationMode;
 use crate::filter::coverage::CoverageContexts;
@@ -906,7 +906,7 @@ impl Runner for PytestRunner {
         // wall-clock cap is `--baseline-timeout` (separate from the per-mutant
         // `--timeout`, which sizes a coverage-selected subset) so a hung suite
         // can't stall the whole run forever.
-        let mirror = build_mirror(&self.tests, self.isolation)?;
+        let mirror = build_baseline_mirror(&self.tests, self.isolation, self.python.as_deref())?;
         let mut cmd = self.framework_command();
         cmd.arg("--tb=line").arg("-q");
         if let Some(seed) = self.hypothesis_seed {

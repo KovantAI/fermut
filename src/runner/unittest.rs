@@ -37,8 +37,8 @@ use wait_timeout::ChildExt;
 use super::exit::{anomaly_message, classify_exit, ExitVerdict, TestTool};
 use super::process_group::kill_group;
 use super::{
-    build_mirror, configure_mirror_cmd, mirror_pythonpath, run_baseline_with_timeout, run_patched,
-    sanitize_python_env, BaselineStatus, Mirror, Runner,
+    build_baseline_mirror, configure_mirror_cmd, mirror_pythonpath, run_baseline_with_timeout,
+    run_patched, sanitize_python_env, BaselineStatus, Mirror, Runner,
 };
 use crate::config::IsolationMode;
 use crate::mutator::Mutant;
@@ -181,7 +181,7 @@ impl Runner for UnittestRunner {
     fn baseline(&self) -> Result<BaselineStatus> {
         // Run the unmutated suite once via `unittest discover`, capped at
         // `--baseline-timeout` so a hanging suite can't stall the run forever.
-        let mirror = build_mirror(&self.tests, self.isolation)?;
+        let mirror = build_baseline_mirror(&self.tests, self.isolation, Some(&self.python))?;
 
         // Zero-collection guard: `unittest discover` with no matching tests
         // exits 0, so the baseline would vacuously "pass" and then EVERY mutant
@@ -563,7 +563,8 @@ mod tests {
         let Some(py) = python_or_skip() else { return };
         let tmp = tempfile::tempdir().unwrap();
         project_with_test(tmp.path(), "widget_test.py");
-        let mirror = build_mirror(&tmp.path().join("tests"), IsolationMode::Auto).unwrap();
+        let mirror =
+            crate::runner::build_mirror(&tmp.path().join("tests"), IsolationMode::Auto).unwrap();
         // Default pattern misses `*_test.py` → 0; the convention pattern finds 1.
         let r_default = runner(tmp.path().join("tests"), py.clone(), None);
         assert_eq!(r_default.count_tests(&mirror), Some(0));

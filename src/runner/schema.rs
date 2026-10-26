@@ -14,14 +14,15 @@
 //! [`PytestRunner`] exactly as without `--schemata`: mutants outside function
 //! bodies, ones that would warn at compile time, functions that already ran
 //! inside the template (their results may have been stored before the fork),
-//! a template that failed to start or died, and a child that broke itself.
+//! a template that failed to start or died, a child that broke itself, and
+//! a run that timed out.
 //! The baseline is always the cold, spawn-path run.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::ExitStatusExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -35,7 +36,8 @@ use tracing::{info, warn};
 use super::pytest::{run_timing, PytestRunner};
 use super::pytest_result::RunResult;
 use super::python::pytest_interpreter;
-use super::{configure_mirror_cmd, BaselineStatus, Mirror, Runner};
+use super::{configure_mirror_cmd, precompile, BaselineStatus, Mirror, Runner};
+use crate::config::IsolationMode;
 use crate::mutator::Mutant;
 use crate::report::MutantOutcome;
 use crate::sync::lock_recover;
@@ -47,8 +49,9 @@ const SCRIPT_SOURCE: &str = include_str!("../../python/pytest_fermut/_fermut_sch
 /// missing this means the template is wedged.
 const FORK_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Waiting for the result after killing a timed-out child's group: the
-/// template only has to reap it.
+/// Waiting for the result past the run's timeout: the template enforces the
+/// timeout itself and only has to kill and reap the child. Missing this means
+/// the template is wedged.
 const REAP_GRACE: Duration = Duration::from_secs(5);
 
 pub struct SchemaRunner {
@@ -63,16 +66,29 @@ pub struct SchemaRunner {
     spawned: AtomicU64,
 }
 
-/// The built schema: one read-only mirror shared by every template.
+/// The built schema: rewritten files in a staging mirror, copied into each
+/// template's own mirror. Templates fork children that run tests at the same
+/// time, so they can't share a working tree (tests write files relative to the
+/// project); one mirror per template keeps the spawn path's one-pytest-per-
+/// mirror rule.
 struct Schema {
     /// Distinguishes this schema from one built by an earlier run in the same
     /// process (watch mode), so a worker never reuses a stale template.
     generation: u64,
-    mirror: Mirror,
+    staging: Mirror,
+    /// Rewritten files, relative to a mirror root.
+    files: Vec<PathBuf>,
     /// Mutant id → its index in the schema. Absent ids run on the spawn path.
     index: HashMap<String, u64>,
-    /// Template command line after the interpreter: script, `serve`, args.
+    /// Template command line after the interpreter, up to the mirror root:
+    /// script, `serve`.
     serve_args: Vec<std::ffi::OsString>,
+    /// `schema.json`, passed after the mirror root.
+    schema_json: PathBuf,
+    /// pytest arguments, before the mirror's tests path.
+    pytest_args: Vec<std::ffi::OsString>,
+    tests: PathBuf,
+    isolation: IsolationMode,
     python: PathBuf,
     /// How long a template may take to import and collect the suite; also
     /// bounds the verification run.
@@ -85,7 +101,8 @@ struct Schema {
 #[derive(Deserialize)]
 struct SchematizeOutput {
     mutants: HashMap<String, SchematizeEntry>,
-    functions: serde_json::Value,
+    /// Keyed by rewritten file, relative to the mirror root.
+    functions: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -177,29 +194,28 @@ impl SchemaRunner {
             }
         );
 
+        let files = parsed.functions.keys().map(PathBuf::from).collect();
         let schema_json = mirror.plugin_dir.join("schema.json");
         std::fs::write(
             &schema_json,
             serde_json::to_vec(&serde_json::json!({"functions": parsed.functions}))?,
         )
         .with_context(|| format!("writing {}", schema_json.display()))?;
-        let mut serve_args: Vec<std::ffi::OsString> = vec![
-            script.clone().into(),
-            "serve".into(),
-            mirror.root.clone().into(),
-            schema_json.clone().into(),
-        ];
-        serve_args.extend(["--tb=no".into(), "-q".into()]);
+        let mut pytest_args: Vec<std::ffi::OsString> = vec!["--tb=no".into(), "-q".into()];
         if let Some(seed) = self.inner.hypothesis_seed {
-            serve_args.push(format!("--hypothesis-seed={seed}").into());
+            pytest_args.push(format!("--hypothesis-seed={seed}").into());
         }
-        serve_args.extend(self.inner.extra_args.iter().map(Into::into));
-        serve_args.push(mirror.tests.clone().into());
+        pytest_args.extend(self.inner.extra_args.iter().map(Into::into));
         Ok(Schema {
             generation: GENERATION.fetch_add(1, Ordering::Relaxed),
-            mirror,
+            staging: mirror,
+            files,
             index,
-            serve_args,
+            serve_args: vec![script.into(), "serve".into()],
+            schema_json,
+            pytest_args,
+            tests: self.inner.tests.clone(),
+            isolation: self.inner.isolation,
             python,
             ready_timeout: self.inner.baseline_timeout,
             verified: OnceLock::new(),
@@ -299,9 +315,11 @@ fn verify(template: &mut Template, timeout: Duration) -> bool {
 }
 
 /// Whether a served run can stand as the mutant's verdict. The schema has no
-/// say over a child that broke itself (exit 3 with a traceback) or a selection
+/// say over a child that broke itself (exit 3 with a traceback), a selection
 /// the template didn't collect (exit 4: pytest would have been asked for ids
-/// outside the tests path); the spawn path answers those.
+/// outside the tests path), or a timeout (a forked child can deadlock on a
+/// lock some native thread held at fork, which a cold run never sees); the
+/// spawn path answers those.
 fn usable(served: &Served) -> bool {
     static WARNED: AtomicBool = AtomicBool::new(false);
     if let Some(tb) = &served.error {
@@ -310,7 +328,7 @@ fn usable(served: &Served) -> bool {
         }
         return false;
     }
-    served.status.and_then(|s| s.code()) != Some(4)
+    served.status.is_some_and(|s| s.code() != Some(4))
 }
 
 impl Runner for SchemaRunner {
@@ -406,13 +424,17 @@ struct Ready {
 }
 
 #[derive(Deserialize)]
+/// Read only to keep replies in step: the template does any killing.
 struct Pid {
-    pid: u32,
+    #[serde(rename = "pid")]
+    _pid: u32,
 }
 
 #[derive(Deserialize)]
 struct Done {
     status: i32,
+    #[serde(default)]
+    timed_out: bool,
     #[serde(default)]
     failed: Vec<String>,
     #[serde(default)]
@@ -432,16 +454,27 @@ struct Template {
     lines: Receiver<String>,
     /// Index ranges of functions that ran inside the template before forking.
     unsafe_ranges: Vec<(u64, u64)>,
+    /// This template's own mirror; node ids are mapped in and out of it.
+    mirror: Mirror,
 }
 
 impl Template {
     fn start(schema: &Schema) -> Result<Self> {
+        let mirror = Mirror::build(&schema.tests, schema.isolation)?;
+        for rel in &schema.files {
+            copy_replacing(&schema.staging.root.join(rel), &mirror.root.join(rel))?;
+        }
+        precompile(&mirror.root, &schema.python);
         let mut cmd = Command::new(&schema.python);
-        cmd.args(&schema.serve_args);
-        configure_mirror_cmd(&mut cmd, &schema.mirror)?;
+        cmd.args(&schema.serve_args)
+            .arg(&mirror.root)
+            .arg(&schema.schema_json)
+            .args(&schema.pytest_args)
+            .arg(&mirror.tests);
+        configure_mirror_cmd(&mut cmd, &mirror)?;
         cmd.env_remove("FM_ACTIVE");
-        let log = tempfile::NamedTempFile::new_in(&schema.mirror.plugin_dir)
-            .context("creating template log")?;
+        let log =
+            tempfile::NamedTempFile::new_in(&mirror.plugin_dir).context("creating template log")?;
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -464,6 +497,7 @@ impl Template {
             stdin,
             lines,
             unsafe_ranges: Vec::new(),
+            mirror,
         };
         let line = template.recv(schema.ready_timeout).with_context(|| {
             let stderr = std::fs::read_to_string(log.path()).unwrap_or_default();
@@ -500,27 +534,32 @@ impl Template {
         all: bool,
         timeout: Duration,
     ) -> Result<Served> {
-        let req = serde_json::json!({"idx": idx, "ids": ids, "all": all});
+        // Ids as pytest names them in this mirror (parametrize ids can embed
+        // the project path), and results mapped back, as on the spawn path.
+        let ids: Option<Vec<String>> = ids.map(|ids| {
+            ids.iter()
+                .map(|id| self.mirror.id_into_mirror(id))
+                .collect()
+        });
+        let req = serde_json::json!({
+            "idx": idx, "ids": ids, "all": all, "timeout": timeout.as_secs_f64(),
+        });
         writeln!(self.stdin, "{req}").context("sending a request")?;
         self.stdin.flush().context("sending a request")?;
-        let pid: Pid =
+        let _: Pid =
             serde_json::from_str(&self.recv(FORK_TIMEOUT)?).context("parsing the fork reply")?;
         let started = Instant::now();
-        let (line, timed_out) = match self.recv(timeout) {
-            Ok(line) => (line, false),
-            Err(_) if !matches!(self.child.try_wait(), Ok(Some(_))) => {
-                super::process_group::kill_pgid(pid.pid);
-                (self.recv(REAP_GRACE)?, true)
-            }
-            Err(e) => return Err(e),
-        };
+        // The template kills a child past `timeout` itself: it alone knows the
+        // child isn't reaped yet, so its group id can't have been recycled.
+        let line = self.recv(timeout + REAP_GRACE)?;
         let wall = started.elapsed();
         let done: Done = serde_json::from_str(&line).context("parsing the run result")?;
+        let from_mirror = |id: String| self.mirror.text_from_mirror(&id);
         Ok(Served {
-            status: (!timed_out).then(|| ExitStatus::from_raw(done.status)),
+            status: (!done.timed_out).then(|| ExitStatus::from_raw(done.status)),
             result: RunResult {
-                failures: done.failed,
-                unfinished: done.unfinished,
+                failures: done.failed.into_iter().map(from_mirror).collect(),
+                unfinished: done.unfinished.map(from_mirror),
                 test_secs: done.test_secs,
                 ..RunResult::default()
             },
@@ -539,7 +578,7 @@ impl Drop for Template {
 }
 
 enum Slot {
-    Live(Template),
+    Live(Box<Template>),
     Dead,
 }
 
@@ -561,7 +600,7 @@ fn with_template<T>(
         let mut slot = cell.borrow_mut();
         if !matches!(&*slot, Some((generation, _)) if *generation == schema.generation) {
             let started = match Template::start(schema) {
-                Ok(t) => Slot::Live(t),
+                Ok(t) => Slot::Live(Box::new(t)),
                 Err(e) => {
                     warn_once(&format!(
                         "a template couldn't start, its worker runs mutants normally: {e:#}"
@@ -596,6 +635,19 @@ fn warn_once(msg: &str) {
     }
 }
 
+/// Copy `from` over `to` as a new inode: `to` may be hardlinked to the
+/// user's tree, and writing through it would change their source.
+fn copy_replacing(from: &Path, to: &Path) -> Result<()> {
+    match std::fs::remove_file(to) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("removing {}", to.display())),
+    }
+    std::fs::copy(from, to)
+        .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
+    Ok(())
+}
+
 fn in_ranges(ranges: &[(u64, u64)], idx: u64) -> bool {
     ranges.iter().any(|&(lo, hi)| lo <= idx && idx <= hi)
 }
@@ -620,10 +672,13 @@ mod tests {
     }
 
     #[test]
-    fn verdicts_from_the_schema_stand_except_child_failures_and_unknown_ids() {
+    fn verdicts_from_the_schema_stand_except_child_failures_unknown_ids_and_timeouts() {
         assert!(usable(&served(Some(0), None)));
         assert!(usable(&served(Some(1), None)));
-        assert!(usable(&served(None, None)), "a timeout is a verdict");
+        assert!(
+            !usable(&served(None, None)),
+            "a timeout is re-checked on the spawn path"
+        );
         assert!(
             !usable(&served(Some(3), Some("Traceback ..."))),
             "the child broke itself"
@@ -656,22 +711,25 @@ mod tests {
         let dir = dir.canonicalize().unwrap();
         std::fs::create_dir_all(dir.join("tests")).unwrap();
         std::fs::write(dir.join("pyproject.toml"), "").unwrap();
-        let mirror =
-            super::super::build_mirror(&dir.join("tests"), crate::config::IsolationMode::Copy)
-                .unwrap();
+        let staging = super::super::build_mirror(&dir.join("tests"), IsolationMode::Copy).unwrap();
         Schema {
             generation: NEXT.fetch_add(1, Ordering::Relaxed),
-            mirror,
+            staging,
+            files: Vec::new(),
             index: HashMap::new(),
             serve_args: vec!["-c".into(), script.into()],
+            schema_json: "schema.json".into(),
+            pytest_args: Vec::new(),
+            tests: dir.join("tests"),
+            isolation: IsolationMode::Copy,
             python: "/bin/sh".into(),
             ready_timeout: Duration::from_secs(10),
             verified: OnceLock::new(),
         }
     }
 
-    /// A template that answers every request with pid 0 (never a real group,
-    /// so a timeout's kill is a no-op) and then `done`, after `delay`.
+    /// A template that answers every request with pid 0 and then `done`,
+    /// after `delay`.
     fn answering(done: &str, delay: &str) -> String {
         format!(
             "echo '{{\"ready\":true,\"unsafe\":[[2,4]]}}'; \
@@ -714,14 +772,87 @@ mod tests {
     }
 
     #[test]
-    fn a_run_past_its_timeout_has_no_status() {
+    fn a_run_the_template_timed_out_has_no_status() {
         let tmp = tempfile::tempdir().unwrap();
-        let schema = fake_schema(tmp.path(), &answering(r#"{"status":9}"#, "1"));
+        let schema = fake_schema(
+            tmp.path(),
+            &answering(r#"{"status":9,"timed_out":true}"#, "0"),
+        );
         let mut t = Template::start(&schema).unwrap();
-        let s = t
-            .request(1, None, false, Duration::from_millis(100))
-            .unwrap();
+        let s = t.request(1, None, false, Duration::from_secs(10)).unwrap();
         assert!(s.status.is_none(), "timed out");
+    }
+
+    #[test]
+    fn requests_carry_the_timeout_and_ids_map_into_and_out_of_the_mirror() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        let log = dir.join("req.json");
+        let schema = fake_schema(
+            &dir,
+            &format!(
+                r#"echo '{{"ready":true}}'; read req; echo "$req" > '{}'; echo '{{"pid":0}}'; \
+                   echo "{{\"status\":256,\"failed\":[\"tests/t.py::t[$(pwd -P)/x]\"]}}""#,
+                log.display()
+            ),
+        );
+        let mut t = Template::start(&schema).unwrap();
+        let root = t.mirror.root.display().to_string();
+        let id = format!("tests/t.py::t[{}/x]", dir.display());
+        let s = t
+            .request(
+                7,
+                Some(std::slice::from_ref(&id)),
+                false,
+                Duration::from_millis(1500),
+            )
+            .unwrap();
+        let req: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
+        assert_eq!(req["timeout"], 1.5);
+        assert_eq!(req["ids"][0], format!("tests/t.py::t[{root}/x]"));
+        assert_eq!(s.result.failures, [id], "mapped back to the project");
+    }
+
+    #[test]
+    fn each_template_runs_in_its_own_mirror_holding_the_rewritten_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        std::fs::write(dir.join("m.py"), "original").unwrap();
+        let mut schema = fake_schema(&dir, &answering(r#"{"status":0}"#, "0"));
+        std::fs::write(schema.staging.root.join("m.py"), "schema").unwrap();
+        schema.files = vec!["m.py".into()];
+        let (a, b) = (
+            Template::start(&schema).unwrap(),
+            Template::start(&schema).unwrap(),
+        );
+        assert_ne!(a.mirror.root, b.mirror.root);
+        for t in [&a, &b] {
+            assert_eq!(
+                std::fs::read_to_string(t.mirror.root.join("m.py")).unwrap(),
+                "schema"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("m.py")).unwrap(),
+            "original"
+        );
+    }
+
+    #[test]
+    fn copy_replacing_never_writes_through_a_hardlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, user, linked) = (
+            tmp.path().join("src"),
+            tmp.path().join("user"),
+            tmp.path().join("linked"),
+        );
+        std::fs::write(&src, "new").unwrap();
+        std::fs::write(&user, "old").unwrap();
+        std::fs::hard_link(&user, &linked).unwrap();
+        copy_replacing(&src, &linked).unwrap();
+        assert_eq!(std::fs::read_to_string(&linked).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(&user).unwrap(), "old");
     }
 
     #[test]
@@ -746,7 +877,7 @@ mod tests {
         assert!(check(r#"{"status":0}"#, "0", secs));
         assert!(!check(r#"{"status":256,"failed":["t.py::a"]}"#, "0", secs));
         assert!(!check(r#"{"status":768,"error":"Traceback"}"#, "0", secs));
-        assert!(!check(r#"{"status":0}"#, "1", Duration::from_millis(100)));
+        assert!(!check(r#"{"status":9,"timed_out":true}"#, "0", secs));
         assert!(!check("not json", "0", secs));
     }
 

@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: KovantAI/fermut@a0c243cd38ca742512b34e8578b03d8c58aed515 # v0.6.0
+      - uses: KovantAI/fermut@cd391286133ff91c492fb2eb837c873843685ebb # v0.6.1
         with:
           source: ${{ env.SOURCE }}
           tests: ${{ env.TESTS }}
@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: KovantAI/fermut@a0c243cd38ca742512b34e8578b03d8c58aed515 # v0.6.0
+      - uses: KovantAI/fermut@cd391286133ff91c492fb2eb837c873843685ebb # v0.6.1
         with:
           warm-only: "true"
           source: ${{ env.SOURCE }}
@@ -78,7 +78,7 @@ jobs:
         shard: [1, 2]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: KovantAI/fermut/sweep@a0c243cd38ca742512b34e8578b03d8c58aed515 # v0.6.0
+      - uses: KovantAI/fermut/sweep@cd391286133ff91c492fb2eb837c873843685ebb # v0.6.1
         with:
           shard: ${{ matrix.shard }}/2
           source: ${{ env.SOURCE }}
@@ -97,7 +97,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: trend
-        uses: KovantAI/fermut/trend@a0c243cd38ca742512b34e8578b03d8c58aed515 # v0.6.0
+        uses: KovantAI/fermut/trend@cd391286133ff91c492fb2eb837c873843685ebb # v0.6.1
         with:
           fermut-version: ${{ env.FERMUT_VERSION }}
           artifact-name: mutation-self

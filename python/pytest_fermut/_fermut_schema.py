@@ -294,7 +294,8 @@ def schematize_file(src, mutants, next_idx):
     if not any("idx" in e for e in entries.values()):
         return None, entries, []
     # After the module docstring and __future__ imports:
-    #   import builtins as _fm_b
+    #   _fm_b = __import__('builtins')   (no import statement: click's
+    #   test_light_imports audits the imports its modules make)
     #   if not hasattr(_fm_b, '_fm_active'): _fm_b._fm_active = int(os.environ...)
     # The env default lets Python subprocesses a test spawns see the mutant.
     at = 1 if docstring(tree.body) else 0
@@ -305,7 +306,7 @@ def schematize_file(src, mutants, next_idx):
     ):
         at += 1
     prelude = ast.parse(
-        "import builtins as _fm_b\n"
+        "_fm_b = __import__('builtins')\n"
         f"if not hasattr(_fm_b, {ACTIVE!r}):\n"
         f"    _fm_b.{ACTIVE} = int(__import__('os').environ.get('FM_ACTIVE', 0))\n"
     ).body
@@ -503,7 +504,9 @@ class Template:
             os.setpgid(0, 0)
             os.close(self.resp)
             self.req.close()
-            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            # Python's own handler, as in a cold run: SIG_DFL would turn a
+            # test's self-sent SIGINT (trio) into a dead child.
+            signal.signal(signal.SIGINT, signal.default_int_handler)
             # Private basetemp: siblings sharing pytest-of-<user> would prune
             # each other's tmp_path. Seeded so pytest-<N> has cold digits.
             user = self.fake_user(os.getpid())

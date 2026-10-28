@@ -78,6 +78,11 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: ci
+    # pytest7/8/9 are a deliberate compat matrix (ci.yml); a major bump would
+    # collapse the legs onto one pytest. Add a new leg by hand instead.
+    ignore:
+      - dependency-name: pytest
+        update-types: ["version-update:semver-major"]
     groups:
       ci-python:
         patterns:

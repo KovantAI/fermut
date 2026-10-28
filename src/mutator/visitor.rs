@@ -740,7 +740,11 @@ impl<'a> Collector<'a> {
                 self.push(Operator::UnaryOpSwap, r, repl);
             }
             Not => {
-                let r = TextRange::new(start, u.operand.range().start());
+                // Not up to the operand: a parenthesized operand's range
+                // excludes its `(`, so `not (a)` would lose the open paren.
+                let kw = &self.source[usize::from(start) + 3..];
+                let ws = kw.len() - kw.trim_start_matches([' ', '\t']).len();
+                let r = TextRange::at(start, TextSize::from(3 + ws as u32));
                 self.push(Operator::UnaryOpSwap, r, "");
             }
             Invert => {
@@ -1408,6 +1412,18 @@ def f(brand, color, origin, a, b, c, xs, n, d):
         assert!(contains("x = -a\n", Operator::UnaryOpSwap));
         assert!(contains("if not flag:\n    pass\n", Operator::UnaryOpSwap));
         assert!(contains("x = ~a\n", Operator::UnaryOpSwap));
+    }
+
+    #[test]
+    fn not_removal_keeps_operand_parens() {
+        assert_eq!(
+            sites("x = not (a or b)\n", Operator::UnaryOpSwap),
+            vec![(4, "not ".into(), "".into())]
+        );
+        assert_eq!(
+            sites("x = not(a)\n", Operator::UnaryOpSwap),
+            vec![(4, "not".into(), "".into())]
+        );
     }
 
     #[test]

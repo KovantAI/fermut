@@ -226,6 +226,9 @@ fn collect_checks(start: &Path) -> Vec<Check> {
 
     // ---- python ----
     out.push(check_python(vbin));
+    if let Some(py) = &venv_python {
+        out.push(check_bytecode(py));
+    }
 
     // ---- test runner ----
     let runner = loaded
@@ -306,6 +309,56 @@ fn collect_checks(start: &Path) -> Vec<Check> {
     out.extend(check_gotchas(loaded.as_ref()));
 
     out
+}
+
+/// Share of the venv's `site-packages` modules with a cached `.pyc`. Every
+/// suite spawn runs under `PYTHONDONTWRITEBYTECODE` (stale-bytecode guard), so
+/// a dependency that was never compiled is recompiled on every mutant's
+/// import; uv doesn't compile at install time unless asked.
+const BYTECODE_PROBE: &str = "\
+import os, sysconfig, importlib.util as u
+p = sysconfig.get_paths()['purelib']; c = t = 0
+for d, ds, fs in os.walk(p):
+    ds[:] = [x for x in ds if x != '__pycache__']
+    for f in fs:
+        if f.endswith('.py'):
+            t += 1; c += os.path.exists(u.cache_from_source(os.path.join(d, f)))
+print(c, t, p)";
+
+fn check_bytecode(python: &Path) -> Check {
+    let probed = Command::new(python)
+        .args(["-c", BYTECODE_PROBE])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            let text = String::from_utf8_lossy(&o.stdout).into_owned();
+            let mut it = text.trim_end().splitn(3, ' ');
+            let compiled = it.next()?.parse().ok()?;
+            let total = it.next()?.parse().ok()?;
+            Some((compiled, total, it.next()?.to_string()))
+        });
+    match probed {
+        Some((compiled, total, site)) => {
+            let fix = format!("{} -m compileall -q -j 0 {site}", python.display());
+            bytecode_verdict(compiled, total, &fix)
+        }
+        None => Check::skip("bytecode", "couldn't probe the venv's site-packages"),
+    }
+}
+
+fn bytecode_verdict(compiled: usize, total: usize, fix: &str) -> Check {
+    let pct = (compiled * 100).checked_div(total).unwrap_or(100);
+    let detail = format!("{pct}% of site-packages modules precompiled ({compiled}/{total})");
+    if pct >= 80 {
+        Check::ok("bytecode", detail)
+    } else {
+        Check::warn(
+            "bytecode",
+            format!("{detail}; uncompiled deps recompile on every mutant spawn"),
+            format!("run `{fix}`; set `UV_COMPILE_BYTECODE=1` so future uv installs compile"),
+        )
+    }
 }
 
 fn check_python(venv_bin: Option<&Path>) -> Check {
@@ -728,6 +781,13 @@ mod tests {
         // With the venv bin prepended, it resolves.
         let v = tool_version(&["fermut-faketool"], Some(&bin));
         assert_eq!(v.as_deref(), Some("faketool 9.9.9"));
+    }
+
+    #[test]
+    fn bytecode_verdict_warns_below_80_percent() {
+        assert_eq!(bytecode_verdict(7720, 17996, "x").status, Status::Warn);
+        assert_eq!(bytecode_verdict(17900, 17996, "x").status, Status::Ok);
+        assert_eq!(bytecode_verdict(0, 0, "x").status, Status::Ok);
     }
 
     #[test]

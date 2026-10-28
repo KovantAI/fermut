@@ -86,6 +86,10 @@ impl Filter for RuffFilter {
         "ruff"
     }
 
+    fn costly(&self) -> bool {
+        true
+    }
+
     fn admits(&self, mutant: &Mutant) -> Result<bool> {
         let Some(baseline) = self.baseline_count_for(&mutant.file)? else {
             return Ok(true); // ruff timed out on baseline → bypass

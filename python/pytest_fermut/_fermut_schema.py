@@ -64,6 +64,7 @@ serve
 
 import ast
 import builtins
+import gc
 import getpass
 import glob
 import json
@@ -398,7 +399,8 @@ class Template:
         # Each child gets its own pytest-of-<user> (see `child`); the seed
         # gives its counter the digit count a cold run would have now.
         self.user = getpass.getuser()
-        self.temproot = tempfile.gettempdir()
+        # pytest's own root: fermut points it at the mirror's.
+        self.temproot = os.environ.get("PYTEST_DEBUG_TEMPROOT") or tempfile.gettempdir()
         nums = [
             d.rsplit("-", 1)[1]
             for d in glob.glob(
@@ -460,6 +462,9 @@ class Template:
 
     def serve(self, session):
         by_id = {item.nodeid: item for item in session.items}
+        # Children gc-collect at session end (see `child`); frozen, the
+        # collected suite isn't rescanned on every one of those passes.
+        gc.freeze()
         self.send({"ready": True, "unsafe": sorted(self.ran)})
         for line in self.req:
             req = json.loads(line)
@@ -518,6 +523,13 @@ class Template:
             setattr(builtins, ACTIVE, req["idx"])
             os.environ["FM_ACTIVE"] = str(req["idx"])  # Python subprocesses
             code = self.run_items(session, by_id, req, emit)
+            # A cold run's session end: pytest >= 8.4 gc-collects there and
+            # fails the run on a leaked resource's unraisable warning (click:
+            # a mutant that never closes a file). Exit 1, as pytest would.
+            try:
+                session.config._ensure_unconfigure()
+            except BaseException:  # noqa: BLE001
+                code = code or 1
         except BaseException:  # noqa: BLE001 - nothing may escape a forked child
             code = 3
             emit(ev="error", tb=traceback.format_exc())

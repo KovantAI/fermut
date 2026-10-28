@@ -358,7 +358,21 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     if let Some(secs) = budgeted_timeout_secs(cfg, baseline_wall) {
         runner.set_timeout(Duration::from_secs(secs));
     }
-    runner.prepare(mutants)?;
+    // Only what the cheap filters admit (sample, coverage, …): `--schemata`
+    // builds every prepared mutant into its schema, and most never run. The
+    // costly filters and the cache drop a few more later; those just sit in
+    // the schema unused. A filter error admits, as in `precheck`.
+    let candidates: Vec<Arc<Mutant>> = mutants
+        .iter()
+        .filter(|m| {
+            filters
+                .iter()
+                .filter(|f| !f.costly())
+                .all(|f| f.admits(m).unwrap_or(true))
+        })
+        .cloned()
+        .collect();
+    runner.prepare(&candidates)?;
 
     // One read + at most one parse per unique file, deriving the cache-key
     // hash (always), the scope map (only in `scope` cache mode), and the source

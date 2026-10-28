@@ -23,7 +23,9 @@ use super::exit::{
     anomaly_message, classify_exit, is_collection_failure, ExitVerdict, TestTool,
     PYTEST_USAGE_ERROR,
 };
-use super::process_group::{kill_group, with_new_process_group};
+use super::process_group::kill_group;
+#[cfg(test)]
+use super::process_group::with_new_process_group;
 use super::pytest_result::{RunResult, REPORTER_MODULE, RESULT_ENV};
 use super::{
     build_mirror, configure_mirror_cmd, mirror_pythonpath, run_baseline_with_timeout, run_patched,
@@ -917,9 +919,10 @@ impl Runner for PytestRunner {
                 cmd.arg(&mirror.tests);
             }
         }
-        cmd.current_dir(&mirror.root);
-        with_new_process_group(&mut cmd);
-        cmd.env("PYTHONPATH", mirror_pythonpath(&mirror)?);
+        // Same environment as a mutant run (incl. the mirror's pytest temp
+        // root): a baseline that's only green under the global root would
+        // vouch for a suite the mutant runs then fail (typer wraps tmp paths).
+        configure_mirror_cmd(&mut cmd, &mirror)?;
         run_baseline_with_timeout(cmd, self.baseline_timeout)
     }
 }

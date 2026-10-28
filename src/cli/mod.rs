@@ -327,6 +327,16 @@ pub(crate) struct RunConfigArgs {
     #[arg(long)]
     pub no_pytest_plugin: bool,
 
+    /// [experimental] Schemata mode: build every function-body mutant into
+    /// one schema up front, then run each mutant by forking a pytest process
+    /// that has already imported and collected the suite, instead of starting
+    /// pytest per mutant. Same verdicts by design; mutants it can't serve
+    /// safely (module/class level, code that ran during import or collection)
+    /// run the normal way. Pytest runner on Unix only. Also settable via
+    /// `schemata = true`.
+    #[arg(long)]
+    pub schemata: bool,
+
     /// Wall-clock ceiling (seconds) on the per-mutant testing phase. When
     /// set, mutants are evaluated highest-value first (covered mutants
     /// before uncovered) and, once the deadline passes, every mutant not
@@ -342,7 +352,8 @@ pub(crate) struct RunConfigArgs {
     /// flat `--timeout`: `min(--timeout, FACTOR × baseline wall + 5 s)`. Hung
     /// mutants then stop in seconds. Needs the baseline, or `--baseline-secs`
     /// with `--no-verify-baseline`. A mutant that only slows the suite down past
-    /// the budget counts as timed out (detected). At least 2; try 3.
+    /// the budget counts as timed out (detected). Default 3; at least 2, or 0
+    /// for the flat `--timeout`.
     #[arg(long, value_name = "FACTOR")]
     pub timeout_factor: Option<f64>,
 

@@ -57,8 +57,9 @@ fermut run [PATH] [flags...]
 | `--no-smart-order`          | on                               | Disable smart test ordering. On by default, timeout or not — ordering only permutes the selected set, so the score and `--fail-on-regression` gate stay order-invariant. See [Smart test ordering](#smart-test-ordering). |
 | `--smart-order`             | off                              | Force smart test ordering on over `smart_order = false` in config. Conflicts with `--no-smart-order`. |
 | `--no-pytest-plugin`        | on                               | Don't load fermut's reporter plugin into per-mutant pytest/rstest runs; infer outcomes from exit codes and output instead. See [Result reporter plugin](#result-reporter-plugin). |
+| `--schemata`                | off                              | [experimental] Run function-body mutants by forking a pytest process that has already imported and collected the suite, instead of starting pytest per mutant. Same verdicts; pytest runner on Unix only. See [Schemata](#schemata). |
 | `--max-time <SECS>`         | off (whole catalogue)            | Wall-clock ceiling on the testing phase. Evaluates highest-value mutants first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` (excluded from the score) instead of run — in-flight mutants finish. A predictable time ceiling for PR gates. See [Time-boxed runs](#time-boxed-runs-max-time). |
-| `--timeout-factor <F>`      | off (flat `--timeout`)           | Size each mutant's timeout from the baseline run: `min(--timeout, F × baseline wall + 5 s)`, so hung mutants stop in seconds. Needs the baseline. See [Timeout budgets](#timeout-budgets). |
+| `--timeout-factor <F>`      | `3` (`0` = flat `--timeout`)     | Size each mutant's timeout from the baseline run: `min(--timeout, F × baseline wall + 5 s)`, so hung mutants stop in seconds. Needs the baseline; without one, the flat `--timeout` applies. See [Timeout budgets](#timeout-budgets). |
 | `--baseline-secs <SECS>`    | none                             | Wall time of a green whole-suite run you already did. When fermut's baseline is skipped it sizes `--timeout-factor` timeouts in its place (fermut's own baseline wins when it runs). Ignored without `--timeout-factor`. A whole-suite `pytest --fermut` session passes its session time in `FERMUT_BASELINE_SECS`. |
 | `--record-kill-sets <PATH>` | off                              | [experimental] Write each mutant's full kill-set (every covering test that fails) to `PATH` as JSONL, the input to [`subsume`](subsume.md) and [`hom`](hom.md). Drops pytest's `-x`, so it is much slower. Pytest/rstest only. Pair with `--no-cache`: a cache hit runs nothing and records nothing. |
 | `--only-dominators`         | off                              | [experimental] Run dominator mutants from `.fermut/dominators.json` and infer the kills they imply; for nightly sweeps, refused with `--diff-only`/`--since`/`--record-kill-sets`. See [`fermut subsume`](subsume.md#fermut-run-only-dominators-experimental). |
@@ -173,7 +174,7 @@ A mutant that sends the code into an infinite loop runs until `--timeout`
 (30 s by default). On a suite that takes a second or two, that wait is most
 of the run: on more-itertools 85 hung mutants took 63% of all worker time.
 
-`--timeout-factor F` sizes the timeout from the baseline run instead. The
+By default fermut sizes the timeout from the baseline run instead (`--timeout-factor 3`; `--timeout-factor 0` turns this off). The
 baseline runs the whole suite once, and each mutant runs a subset of it, so
 an honest run fits in `F × baseline wall + 5 s` (5 s covers interpreter
 start-up and running beside the other workers). `--timeout` stays the upper
@@ -181,10 +182,12 @@ limit. With a 1.4 s suite and `F = 3`, mutants get 10 s instead of 30 s.
 
 - **Verdicts.** A mutant that doesn't hang but makes the suite many times
   slower now counts as timed out (detected) instead of survived. PIT and
-  Stryker treat it the same way. On more-itertools 2 of ~3,800 mutants
-  changed this way; that is why the flag is off by default.
+  Stryker treat it the same way. Across 6 repos under `--schemata` only 2
+  mutants changed this way (more-itertools), while runs with hung mutants
+  got 1.2–3.4× faster. Set `--timeout-factor 0` to keep the old verdicts.
 - **Needs a baseline.** With `--no-verify-baseline` there is nothing to
-  scale from, so every mutant uses the flat `--timeout` (fermut warns),
+  scale from, so every mutant uses the flat `--timeout` (fermut warns if you
+  set the factor yourself),
   unless `--baseline-secs SECS` gives the wall time of a green whole-suite run
   you already did. [`pytest --fermut`](../../guides/pytest-plugin.md) does
   this on a whole-suite session: it passes its own session time (the summed
@@ -197,11 +200,50 @@ limit. With a 1.4 s suite and `F = 3`, mutants get 10 s instead of 30 s.
 - **`fermut run` only.** `autofix` and `hom` re-run mutants with the flat
   `--timeout`.
 - **History and cache.** The factor is part of the run's configuration, so
-  `fermut trend` shows turning it on as a config change. The computed budget
+  `fermut trend` shows the switch to the default as a config change, and
+  verdicts cached by flat-timeout runs are re-run once. The computed budget
   is not: it moves a little with each baseline and would otherwise invalidate
   the cache on every run.
 
 Set it in config as `timeout_factor` under `[tool.fermut]`.
+
+## Schemata (`--schemata`, experimental) { #schemata }
+
+By default every mutant gets a fresh `pytest` process: start Python, import
+pytest and your package, collect the selected tests, then run them. On a
+fast suite that startup is most of the time. `--schemata` pays it once per
+worker:
+
+1. Before the first mutant, fermut builds one *schema*: a copy of the project
+   in which every mutant inside a function body is compiled into its
+   function behind a switch on the active-mutant number.
+2. Each worker starts a *template*: a pytest session that imports and
+   collects the suite once.
+3. For each mutant, the template forks a child with that mutant switched on.
+   The child runs the same selected tests a spawned pytest would, in the same
+   order, with `-x`, its own `tmp_path` root and the same timeout.
+
+On the benchmark suite this ran each mutant roughly 6–12× cheaper, and whole
+runs got 1.2–5.7× faster with a 10 s timeout. Timeouts become the main cost,
+since forking can't make a hanging mutant finish sooner.
+
+Some mutants still run the normal way, and the verdicts are the same either
+way:
+
+- mutants outside function bodies (module level, class bodies, decorators,
+  default arguments): the template has already run that code;
+- mutants in a function that already ran while the template imported and
+  collected (a registry filled at import, a decorator factory): whatever it
+  built before the fork used the original code;
+- mutants whose source triggers a compile-time warning, which
+  `filterwarnings = error` would turn into an import error for the whole
+  file.
+
+The run logs how many mutants the schema served. Verdicts are cached
+separately from normal runs while the mode is experimental. The baseline
+check is always a normal pytest run. Use `--python` / `python` when pytest
+runs under an interpreter other than the one behind `pytest` on `PATH`; the
+project interpreter needs Python 3.10 or newer.
 
 ## Time-boxed runs (`--max-time`) { #time-boxed-runs-max-time }
 

@@ -67,7 +67,7 @@ which = "8"
 # The tests/deps_hygiene.rs guard fails if this set drifts back to defaults.
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 regex = "1"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 
 # Astral parser + AST + text-range crates. Pinned to a ruff release tag.
 # Bump the tag together to keep API consistency. Verify the tag exists at

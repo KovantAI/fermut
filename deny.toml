@@ -14,6 +14,14 @@ ignore = [
     { id = "RUSTSEC-2026-0367", reason = "zip extract() only; unused via ruff_db" },
     { id = "RUSTSEC-2026-0368", reason = "zip extract() only; unused via ruff_db" },
     { id = "RUSTSEC-2026-0369", reason = "zip extract() only; unused via ruff_db" },
+    # zstd 0.13 / zstd-safe 7 arrive via the same zip 8.x (ty_vendored's
+    # `zip/zstd` feature); fixes need zstd 0.14 / zstd-safe 8, unreachable
+    # until ruff moves to zip >=9. zstd only decompresses ty's own typeshed zip,
+    # built and embedded at compile time: no untrusted input, no reused stream
+    # contexts, no seekable API, no legacy frames.
+    { id = "RUSTSEC-2026-0391", reason = "zstd with_context reuse; unused, input is embedded typeshed" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd seekable API; unused via zip" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd legacy frames; embedded typeshed is modern zstd" },
     # ctutils (via digest -> hmac/sha2, cache MAC). Fix is >=0.4.4, published
     # 2026-10 but still inside the Aikido package-age quarantine, so cargo only
     # resolves 0.4.3. MAC compare uses subtle::ct_eq, and verification is an

@@ -81,6 +81,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         no_smart_order: cli_no_smart_order,
         smart_order: cli_smart_order,
         no_pytest_plugin: cli_no_pytest_plugin,
+        schemata: cli_schemata,
         max_time: cli_max_time,
         timeout_factor: cli_timeout_factor,
         baseline_secs: cli_baseline_secs,
@@ -350,6 +351,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     // beside cache/history.
     let smart_order = resolve_smart_order(cli_no_smart_order, cli_smart_order, file.smart_order);
     let pytest_plugin = !cli_no_pytest_plugin && file.pytest_plugin.unwrap_or(true);
+    let schemata = cli_schemata || file.schemata.unwrap_or(false);
     let kill_order_path = file
         .kill_order_path
         .clone()
@@ -388,6 +390,10 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         globset::Glob::new(pat).with_context(|| format!("invalid exclude glob: {pat:?}"))?;
     }
     let runner = cli_runner.or(file.runner).unwrap_or_default();
+    if schemata {
+        check_schemata(runner)?;
+        warn!("`--schemata` is experimental; verdicts should match a normal run, please report any that don't");
+    }
     // Resolve the pytest interpreter: explicit `--python` / config `python`
     // (relative values anchored at the config base dir) is authoritative;
     // otherwise auto-discover a venv near the source root. `None` keeps the
@@ -475,6 +481,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         cache_audit_rate,
         smart_order,
         pytest_plugin,
+        schemata,
         kill_order_path,
         dominators_path,
         history,
@@ -502,6 +509,18 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
 }
 
 /// Clap value parser for `--cache-audit-rate`: a fraction in `[0, 1]`.
+/// Schemata forks a warm pytest process: pytest runner only, and `fork` only
+/// exists on Unix.
+fn check_schemata(runner: RunnerKind) -> Result<()> {
+    if runner != RunnerKind::Pytest {
+        anyhow::bail!("`--schemata` works with the pytest runner only (runner is {runner:?})");
+    }
+    if !cfg!(unix) {
+        anyhow::bail!("`--schemata` needs fork(), which this platform doesn't have");
+    }
+    Ok(())
+}
+
 pub(crate) fn parse_audit_rate(s: &str) -> Result<f64, String> {
     let r: f64 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
     check_audit_rate(r)
@@ -875,6 +894,7 @@ mod tests {
             no_smart_order: false,
             smart_order: false,
             no_pytest_plugin: false,
+            schemata: false,
             max_time: None,
             timeout_factor: None,
             baseline_secs: None,
@@ -1141,6 +1161,13 @@ mod tests {
         let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
         assert!(cfg.coverage_path.is_none());
         assert!(cfg.coverage.is_none());
+    }
+
+    #[test]
+    fn schemata_needs_the_pytest_runner() {
+        assert!(check_schemata(RunnerKind::Rstest).is_err());
+        assert!(check_schemata(RunnerKind::Unittest).is_err());
+        assert_eq!(check_schemata(RunnerKind::Pytest).is_ok(), cfg!(unix));
     }
 
     #[test]

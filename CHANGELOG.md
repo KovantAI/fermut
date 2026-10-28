@@ -9,9 +9,18 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Added
+- `fermut run --schemata` (experimental, pytest runner on Unix): build every
+  function-body mutant into one schema, then run each mutant by forking a
+  pytest process that already imported and collected the suite, instead of
+  starting pytest per mutant. Verdicts match a normal run. Mutants it can't
+  serve safely, such as module-level code or functions that ran during
+  import, run the normal way. Also `schemata = true` in config.
 - `--timeout-factor F` (config `timeout_factor`): size each mutant's timeout
   from the baseline run, `min(--timeout, F × baseline wall + 5 s)`, so hung
-  mutants stop in seconds instead of at the flat 30 s. Off by default. With
+  mutants stop in seconds instead of at the flat 30 s. On by default
+  (`F = 3`); `--timeout-factor 0` / `timeout_factor = 0` restores the flat
+  timeout. Turning it on changes the config hash, so `fermut trend` records a
+  config change and flat-timeout cache entries re-run once. With
   `F = 3`: more-itertools 314 s → 162 s, pyjwt 79 s → 59 s, jinja2
   272 s → 236 s. Verdicts unchanged except that a mutant which only makes
   the suite many times slower counts as timed out (2 of ~3,800 mutants on

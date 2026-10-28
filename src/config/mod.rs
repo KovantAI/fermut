@@ -76,6 +76,13 @@ pub struct Config {
     /// stdout parsing. Default on; disable with `--no-pytest-plugin` /
     /// `pytest_plugin = false`.
     pub pytest_plugin: bool,
+    /// [experimental] Schemata mode for the pytest runner: build every
+    /// function-body mutant into one schema up front, then run each by forking
+    /// a pytest process that has already imported and collected the suite,
+    /// instead of spawning pytest per mutant. Verdict-equivalent by design;
+    /// any mutant it can't serve safely runs the normal way. Pytest runner on
+    /// Unix only. `--schemata` / `schemata = true`.
+    pub schemata: bool,
     /// Fraction (0.0–1.0) of killer-keyed cache hits re-run each run against
     /// just the recorded killing test, to catch flaky or order-dependent kills
     /// (at least one hit is audited whenever any occur and the rate is > 0). A
@@ -152,9 +159,10 @@ pub struct Config {
     /// mutant gets `min(timeout_secs, f × baseline wall + floor)` instead of
     /// the flat `timeout_secs`. A mutant only runs a subset of the suite, so
     /// the whole-suite baseline bounds an honest run; hung mutants then die in
-    /// seconds rather than at `timeout_secs`. Off (`None`) by default: a mutant
+    /// seconds rather than at `timeout_secs`. On by default
+    /// ([`DEFAULT_TIMEOUT_FACTOR`]); `--timeout-factor 0` turns it off. A mutant
     /// that only makes the suite many times slower becomes `timed_out`
-    /// (detected) instead of `survived`. Set via `--timeout-factor`.
+    /// (detected) instead of `survived`.
     pub timeout_factor: Option<f64>,
     /// Wall time (seconds) of a green whole-suite run the caller already did,
     /// e.g. the `pytest --fermut` session. Sizes the `timeout_factor` budget
@@ -181,6 +189,11 @@ pub struct Config {
 
 /// Default for [`Config::cache_audit_rate`].
 pub const DEFAULT_CACHE_AUDIT_RATE: f64 = 0.05;
+
+/// Default `--timeout-factor`. On schemata runs it cut wall time 1.2–3.4× on
+/// repos with hung mutants and flipped only 2 slow survivors (more-itertools)
+/// to timed out across 6 repos (benchmarks/schemata/results/tf/).
+pub const DEFAULT_TIMEOUT_FACTOR: f64 = 3.0;
 
 /// Cache-key granularity for source-file identity. See `Config::cache_scope`.
 /// Warning for the pre-0.7 profile name `default`, which now means `classic`.

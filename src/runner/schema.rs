@@ -23,7 +23,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -56,6 +56,11 @@ pub struct SchemaRunner {
     /// them on the first `run`, so a fully cached run never pays for it.
     mutants: Mutex<Vec<Arc<Mutant>>>,
     schema: OnceLock<Option<Schema>>,
+    /// Set by the worker that builds the schema; the others run their
+    /// mutants normally meanwhile instead of waiting on it.
+    building: AtomicBool,
+    /// [`Self::confirm`]'s verdict per test list.
+    confirmed: Mutex<HashMap<Vec<String>, bool>>,
     /// Mutants run from the schema vs on the spawn path, for the end-of-run
     /// summary.
     served: AtomicU64,
@@ -77,8 +82,8 @@ struct Schema {
     /// bounds the verification run.
     ready_timeout: Duration,
     /// Whether the suite passes on the schema with no mutant active (see
-    /// [`verify`]). Decided once, by the first template up.
-    verified: OnceLock<bool>,
+    /// [`verify`]), checked one slice per worker.
+    verified: Chunks,
 }
 
 #[derive(Deserialize)]
@@ -99,24 +104,35 @@ impl SchemaRunner {
             inner,
             mutants: Mutex::new(Vec::new()),
             schema: OnceLock::new(),
+            building: AtomicBool::new(false),
+            confirmed: Mutex::new(HashMap::new()),
             served: AtomicU64::new(0),
             spawned: AtomicU64::new(0),
         }
     }
 
+    /// The schema, built by the first worker to ask. `None` while another
+    /// worker is still building it (run this mutant normally) or if it
+    /// couldn't be built.
     fn schema(&self) -> Option<&Schema> {
-        self.schema
-            .get_or_init(|| {
-                let mutants = std::mem::take(&mut *lock_recover(&self.mutants));
-                match self.build_schema(&mutants) {
-                    Ok(schema) => Some(schema),
-                    Err(e) => {
-                        warn!("--schemata: couldn't build the schema, running every mutant normally: {e:#}");
-                        None
-                    }
-                }
-            })
-            .as_ref()
+        if let Some(schema) = self.schema.get() {
+            return schema.as_ref();
+        }
+        if self.building.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        let mutants = std::mem::take(&mut *lock_recover(&self.mutants));
+        let built = match self.build_schema(&mutants) {
+            Ok(schema) => Some(schema),
+            Err(e) => {
+                warn!(
+                    "--schemata: couldn't build the schema, running every mutant normally: {e:#}"
+                );
+                None
+            }
+        };
+        let _ = self.schema.set(built);
+        self.schema.get().and_then(Option::as_ref)
     }
 
     fn build_schema(&self, mutants: &[Arc<Mutant>]) -> Result<Schema> {
@@ -201,7 +217,8 @@ impl SchemaRunner {
             serve_args,
             python,
             ready_timeout: self.inner.baseline_timeout,
-            verified: OnceLock::new(),
+            // One slice per worker: built inside the run's rayon pool.
+            verified: Chunks::new(rayon::current_num_threads()),
         })
     }
 
@@ -218,20 +235,55 @@ impl SchemaRunner {
                 ids
             }
         });
+        if schema.verified.failed() {
+            return None;
+        }
         with_template(schema, |template| {
-            if !*schema
-                .verified
-                .get_or_init(|| verify(template, schema.ready_timeout))
-            {
-                return Ok(None);
+            // Until every slice of the suite has passed with no mutant active,
+            // check one more slice if any is left unclaimed, then run this
+            // mutant normally: no worker waits on another's slice.
+            if !schema.verified.passed() {
+                if let Some(k) = schema.verified.claim() {
+                    let ok = verify(template, (k, schema.verified.n), schema.ready_timeout);
+                    schema.verified.finish(ok);
+                }
+                if !schema.verified.passed() {
+                    return Ok(None);
+                }
             }
             if template.is_unsafe(idx) {
                 return Ok(None);
             }
-            template
-                .request(idx, ids.as_deref(), all, self.inner.timeout)
-                .map(Some)
+            let mut served = template.request(idx, ids.as_deref(), all, self.inner.timeout)?;
+            // A kill (exit 1) or a timeout counts as detected: either must be
+            // the mutant's doing.
+            if served.status.is_none() || served.status.and_then(|s| s.code()) == Some(1) {
+                served.unconfirmed = !self.confirm(template, &served.ran);
+            }
+            Ok(Some(served))
         })
+    }
+
+    /// Whether a kill is the mutant's: the same tests, in the same order, pass
+    /// in a fork with no mutant active. A test can fail in a fork alone, from
+    /// state another test module left behind while the template collected the
+    /// suite (agent-library: a manifest scan at import emptied a registry that
+    /// only a test's teardown restores) — a cold run never imports that
+    /// module, so the kill would be false. Cached per test list: most kills
+    /// come from the first selected test.
+    fn confirm(&self, template: &mut Template, ran: &[String]) -> bool {
+        if let Some(&ok) = lock_recover(&self.confirmed).get(ran) {
+            return ok;
+        }
+        let ok = matches!(
+            template.request(0, Some(ran), false, self.inner.timeout),
+            Ok(s) if s.error.is_none() && s.status.is_some_and(|st| st.success())
+        );
+        if !ok {
+            warn_unconfirmed(ran);
+        }
+        lock_recover(&self.confirmed).insert(ran.to_vec(), ok);
+        ok
     }
 
     /// Turn a served run into the outcome the spawn path would have produced.
@@ -271,30 +323,103 @@ impl Drop for SchemaRunner {
     }
 }
 
-/// Run the whole suite on the schema with no mutant active. It must pass, as
-/// it did in the baseline: rewriting a function into its switch is meant to
-/// change nothing until a mutant is switched on, and if some construct breaks
-/// that, every verdict from the schema would be suspect. On failure schemata
-/// is off for the run and every mutant spawns.
-fn verify(template: &mut Template, timeout: Duration) -> bool {
-    let (ok, why) = match template.request(0, None, false, timeout) {
-        Ok(s) if s.error.is_none() && s.status.is_some_and(|st| st.success()) => {
-            (true, String::new())
+/// Run slice `chunk = (k, n)` of the suite on the schema with no mutant
+/// active (every slice, across the workers, covers the suite), every test even
+/// past a failure. Tests that fail, crash or hang here don't turn schemata
+/// off: a kill or timeout from the schema only stands once the same tests pass
+/// with no mutant active ([`SchemaRunner::confirm`]), so they just cost those
+/// mutants a normal run. This reports them, and resumes a slice past a test
+/// that took its child down (a crash: macOS DNS, proxy and Kerberos frameworks
+/// aren't fork-safe; or a hang). Only a broken helper (a traceback) fails it.
+fn verify(template: &mut Template, chunk: (usize, usize), timeout: Duration) -> bool {
+    let mut req = serde_json::json!({"idx": 0, "chunk": chunk, "all": true});
+    let (mut failing, mut lost) = (Vec::new(), Vec::new());
+    let result = loop {
+        match template.send(&req, timeout) {
+            Ok(s) if s.error.is_none() => {
+                failing.extend(s.result.failures.iter().cloned());
+                let died = s.status.is_none_or(crash_signal);
+                match s.result.unfinished {
+                    // A repeat means the resume didn't skip it: stop there.
+                    Some(test) if died && !lost.contains(&test) => {
+                        req["after"] = test.clone().into();
+                        lost.push(test);
+                    }
+                    _ => break Ok(()),
+                }
+            }
+            Ok(s) => break Err(s.error.unwrap_or_default()),
+            Err(e) => break Err(format!("{e:#}")),
         }
-        Ok(s) => (
-            false,
-            match (s.status, s.error) {
-                (_, Some(tb)) => tb,
-                (None, _) => "timed out".into(),
-                (Some(st), _) => format!("{st}, failing: {}", s.result.failures.join(", ")),
-            },
-        ),
-        Err(e) => (false, format!("{e:#}")),
     };
-    if !ok {
-        warn!("--schemata: the suite doesn't pass on the schema with no mutant active ({why}); running every mutant normally. Please report this.");
+    failing.retain(|t| !lost.contains(t));
+    if !failing.is_empty() || !lost.is_empty() {
+        info!(
+            "schemata: with no mutant active, {} test(s) fail and {} crash or hang in a forked \
+             run ({}); mutants they kill run normally",
+            failing.len(),
+            lost.len(),
+            failing
+                .iter()
+                .chain(&lost)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
-    ok
+    match result {
+        Ok(()) => true,
+        Err(why) => {
+            // Once: with the check split across workers, several slices can fail.
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                warn!("--schemata: the schema helper failed checking the suite ({why}); running every mutant normally. Please report this.");
+            }
+            false
+        }
+    }
+}
+
+/// The no-mutant check, split into one slice of the suite per worker so no
+/// worker runs the whole suite while the rest wait (typer: ~60 s).
+struct Chunks {
+    n: usize,
+    next: AtomicUsize,
+    done: AtomicUsize,
+    failed: AtomicBool,
+}
+
+impl Chunks {
+    fn new(n: usize) -> Self {
+        Self {
+            n: n.max(1),
+            next: AtomicUsize::new(0),
+            done: AtomicUsize::new(0),
+            failed: AtomicBool::new(false),
+        }
+    }
+
+    /// A slice nobody has checked yet, if any.
+    fn claim(&self) -> Option<usize> {
+        let k = self.next.fetch_add(1, Ordering::AcqRel);
+        (k < self.n).then_some(k)
+    }
+
+    fn finish(&self, ok: bool) {
+        if !ok {
+            self.failed.store(true, Ordering::Release);
+        }
+        self.done.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Every slice checked, none failed.
+    fn passed(&self) -> bool {
+        !self.failed() && self.done.load(Ordering::Acquire) >= self.n
+    }
+
+    fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
 }
 
 /// Whether a served run can stand as the mutant's verdict. The schema has no
@@ -309,7 +434,37 @@ fn usable(served: &Served) -> bool {
         }
         return false;
     }
-    served.status.and_then(|s| s.code()) != Some(4)
+    // A crashed child (a fork-unsafe system framework, macOS) isn't the
+    // mutant's verdict either: pytest scores a signal death as a kill.
+    !served.unconfirmed
+        && !served.status.is_some_and(crash_signal)
+        && served.status.and_then(|s| s.code()) != Some(4)
+}
+
+fn warn_unconfirmed(ran: &[String]) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        warn!(
+            "--schemata: {} fails in a forked run even with no mutant active; mutants it kills run normally",
+            ran.join(", ")
+        );
+    }
+}
+
+/// Died of a crash signal. A timeout's kill isn't one: a timed-out run has no
+/// status at all.
+fn crash_signal(status: ExitStatus) -> bool {
+    matches!(
+        status.signal(),
+        Some(
+            libc::SIGSEGV
+                | libc::SIGBUS
+                | libc::SIGABRT
+                | libc::SIGILL
+                | libc::SIGFPE
+                | libc::SIGTRAP
+        )
+    )
 }
 
 impl Runner for SchemaRunner {
@@ -418,6 +573,11 @@ struct Served {
     wall: Duration,
     /// Traceback when the child itself broke rather than a test failing.
     error: Option<String>,
+    /// The tests the child ran, in order.
+    ran: Vec<String>,
+    /// A kill that the same tests reproduce with no mutant active: not the
+    /// mutant's doing (see [`SchemaRunner::confirm`]).
+    unconfirmed: bool,
 }
 
 #[derive(Deserialize)]
@@ -445,6 +605,8 @@ struct Done {
     unfinished: Option<String>,
     #[serde(default)]
     error: Option<String>,
+    #[serde(default)]
+    ran: Vec<String>,
 }
 
 /// A worker's template process and the protocol over its stdio.
@@ -524,7 +686,13 @@ impl Template {
         all: bool,
         timeout: Duration,
     ) -> Result<Served> {
-        let req = serde_json::json!({"idx": idx, "ids": ids, "all": all});
+        self.send(
+            &serde_json::json!({"idx": idx, "ids": ids, "all": all}),
+            timeout,
+        )
+    }
+
+    fn send(&mut self, req: &serde_json::Value, timeout: Duration) -> Result<Served> {
         writeln!(self.stdin, "{req}").context("sending a request")?;
         self.stdin.flush().context("sending a request")?;
         let pid: Pid =
@@ -550,6 +718,8 @@ impl Template {
             },
             wall,
             error: done.error,
+            ran: done.ran,
+            unconfirmed: false,
         })
     }
 }
@@ -640,6 +810,8 @@ mod tests {
             result: RunResult::default(),
             wall: Duration::ZERO,
             error: error.map(str::to_string),
+            ran: Vec::new(),
+            unconfirmed: false,
         }
     }
 
@@ -705,8 +877,31 @@ mod tests {
             serve_args: vec!["-c".into(), script.into()],
             python: "/bin/sh".into(),
             ready_timeout: Duration::from_secs(10),
-            verified: OnceLock::new(),
+            verified: Chunks::new(1),
         }
+    }
+
+    fn fake_runner(dir: &std::path::Path) -> SchemaRunner {
+        SchemaRunner::new(PytestRunner::new(super::super::pytest::PytestConfig {
+            tests: dir.join("tests"),
+            timeout: Duration::from_secs(30),
+            baseline_timeout: Duration::from_secs(30),
+            hypothesis_seed: None,
+            extra_args: Vec::new(),
+            isolation: crate::config::IsolationMode::Copy,
+            coverage: None,
+            python: Some("/bin/false".into()),
+            exe: "pytest",
+            smart_order: false,
+            kill_order: Arc::new(crate::kill_order::KillOrder::default()),
+            kill_sink: Arc::new(Mutex::new(Vec::new())),
+            record_kill_sets: false,
+            kill_set_sink: Arc::new(Mutex::new(Vec::new())),
+            learn_killer: false,
+            key_base: dir.to_path_buf(),
+            plugin: false,
+            baseline_ids: None,
+        }))
     }
 
     /// A template that answers every request with pid 0 (never a real group,
@@ -775,17 +970,124 @@ mod tests {
     }
 
     #[test]
-    fn verify_passes_only_a_clean_run_with_no_mutant_active() {
+    fn chunks_hand_out_each_slice_once_and_open_when_all_pass() {
+        let c = Chunks::new(3);
+        assert_eq!((c.claim(), c.claim()), (Some(0), Some(1)));
+        c.finish(true);
+        c.finish(true);
+        assert!(!c.passed(), "slice 2 not checked yet");
+        assert_eq!(c.claim(), Some(2));
+        assert_eq!(c.claim(), None, "every slice handed out");
+        c.finish(true);
+        assert!(c.passed());
+
+        let bad = Chunks::new(2);
+        let _ = (bad.claim(), bad.claim());
+        bad.finish(false);
+        bad.finish(true);
+        assert!(bad.failed());
+        assert!(!bad.passed(), "one failed slice keeps the schema off");
+    }
+
+    #[test]
+    fn verify_resumes_a_slice_past_a_test_whose_fork_crashed() {
+        let check = |resumed: &str| {
+            let tmp = tempfile::tempdir().unwrap();
+            // Crashes (SIGSEGV) on t.py::net unless asked to resume after it.
+            let script = format!(
+                r#"echo '{{"ready":true}}'
+while read req; do
+  echo '{{"pid":0}}'
+  case "$req" in
+    *after*) echo '{resumed}' ;;
+    *) echo '{{"status":11,"unfinished":"t.py::net"}}' ;;
+  esac
+done"#
+            );
+            let schema = fake_schema(tmp.path(), &script);
+            verify(
+                &mut Template::start(&schema).unwrap(),
+                (0, 1),
+                Duration::from_secs(10),
+            )
+        };
+        // Each returns at all only because the slice resumed past t.py::net.
+        assert!(check(r#"{"status":0}"#), "crash skipped, rest passed");
+        assert!(
+            check(r#"{"status":256,"failed":["t.py::a"]}"#),
+            "a failure is left to kill confirmation"
+        );
+        assert!(
+            check(r#"{"status":11,"unfinished":"t.py::net"}"#),
+            "the same test crashing again ends the slice instead of looping"
+        );
+        assert!(
+            !check(r#"{"status":768,"error":"Traceback"}"#),
+            "a broken helper still fails it"
+        );
+    }
+
+    #[test]
+    fn a_crashed_child_is_not_a_verdict() {
+        let served = |raw: i32| Served {
+            status: Some(ExitStatus::from_raw(raw)),
+            result: RunResult::default(),
+            wall: Duration::ZERO,
+            error: None,
+            ran: Vec::new(),
+            unconfirmed: false,
+        };
+        assert!(!usable(&served(libc::SIGSEGV)));
+        assert!(!usable(&served(libc::SIGABRT)));
+        assert!(usable(&served(1 << 8)), "exit 1: a real kill");
+        assert!(usable(&served(0)));
+    }
+
+    #[test]
+    fn a_kill_counts_only_if_its_tests_pass_with_no_mutant_active() {
+        for (no_mutant, kill_stands) in [
+            (r#"{"status":0}"#, true),
+            (r#"{"status":256,"failed":["t.py::a"]}"#, false),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let log = tmp.path().canonicalize().unwrap().join("requests");
+            let script = format!(
+                "echo '{{\"ready\":true}}'\n\
+                 while read req; do echo \"$req\" >> '{}'; echo '{{\"pid\":0}}'; echo '{no_mutant}'; done",
+                log.display()
+            );
+            let schema = fake_schema(tmp.path(), &script);
+            let runner = fake_runner(&tmp.path().canonicalize().unwrap());
+            let mut t = Template::start(&schema).unwrap();
+            let ran = vec!["t.py::a".to_string(), "t.py::b".to_string()];
+            assert_eq!(runner.confirm(&mut t, &ran), kill_stands);
+            assert_eq!(runner.confirm(&mut t, &ran), kill_stands, "cached");
+            let requests = std::fs::read_to_string(&log).unwrap();
+            assert_eq!(
+                requests.lines().count(),
+                1,
+                "one fork per test list: {requests}"
+            );
+            assert!(
+                requests.contains(r#""idx":0"#) && requests.contains(r#"["t.py::a","t.py::b"]"#),
+                "the same tests, no mutant active: {requests}"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_fails_only_when_the_helper_itself_breaks() {
         let check = |done: &str, delay: &str, timeout: Duration| {
             let tmp = tempfile::tempdir().unwrap();
             let schema = fake_schema(tmp.path(), &answering(done, delay));
-            verify(&mut Template::start(&schema).unwrap(), timeout)
+            verify(&mut Template::start(&schema).unwrap(), (0, 1), timeout)
         };
         let secs = Duration::from_secs(10);
         assert!(check(r#"{"status":0}"#, "0", secs));
-        assert!(!check(r#"{"status":256,"failed":["t.py::a"]}"#, "0", secs));
+        // Failing and hung tests are left to each kill's confirmation.
+        assert!(check(r#"{"status":256,"failed":["t.py::a"]}"#, "0", secs));
+        assert!(check(r#"{"status":0}"#, "1", Duration::from_millis(100)));
         assert!(!check(r#"{"status":768,"error":"Traceback"}"#, "0", secs));
-        assert!(!check(r#"{"status":0}"#, "1", Duration::from_millis(100)));
         assert!(!check("not json", "0", secs));
     }
 
@@ -827,26 +1129,7 @@ mod tests {
         let dir = tmp.path().canonicalize().unwrap();
         std::fs::create_dir_all(dir.join("tests")).unwrap();
         std::fs::write(dir.join("pyproject.toml"), "").unwrap();
-        let runner = SchemaRunner::new(PytestRunner::new(super::super::pytest::PytestConfig {
-            tests: dir.join("tests"),
-            timeout: Duration::from_secs(30),
-            baseline_timeout: Duration::from_secs(30),
-            hypothesis_seed: None,
-            extra_args: Vec::new(),
-            isolation: crate::config::IsolationMode::Copy,
-            coverage: None,
-            python: Some("/bin/false".into()),
-            exe: "pytest",
-            smart_order: false,
-            kill_order: Arc::new(crate::kill_order::KillOrder::default()),
-            kill_sink: Arc::new(Mutex::new(Vec::new())),
-            record_kill_sets: false,
-            kill_set_sink: Arc::new(Mutex::new(Vec::new())),
-            learn_killer: false,
-            key_base: dir.clone(),
-            plugin: false,
-            baseline_ids: None,
-        }));
+        let runner = fake_runner(&dir);
         runner.prepare(&[]).unwrap();
         assert!(runner.schema().is_none());
     }

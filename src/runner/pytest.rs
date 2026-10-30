@@ -1778,6 +1778,36 @@ mod tests {
         assert!(lines.any(|a| a == id(mirror_root)), "{out}");
     }
 
+    /// The baseline runs in a mutant run's environment, pytest temp root
+    /// included: a suite that only passes under the global root (typer wraps
+    /// tmp paths at 80 columns) must fail here, not in every mutant run.
+    #[cfg(unix)]
+    #[test]
+    fn baseline_uses_the_mirror_pytest_temp_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().canonicalize().unwrap().join("proj");
+        std::fs::create_dir_all(proj.join("tests")).unwrap();
+        std::fs::write(proj.join("pyproject.toml"), "").unwrap();
+        let seen = tmp.path().join("seen");
+        let py = tmp.path().join("python");
+        std::fs::write(
+            &py,
+            format!(
+                "#!/bin/sh\necho \"$PYTEST_DEBUG_TEMPROOT\" > '{}'\n",
+                seen.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = runner(false, breadth_ctx(&proj));
+        r.tests = proj.join("tests");
+        r.python = Some(py);
+        r.baseline().unwrap();
+        let root = std::fs::read_to_string(&seen).unwrap();
+        assert!(!root.trim().is_empty(), "PYTEST_DEBUG_TEMPROOT unset");
+    }
+
     /// The reporter's result is read through the mirror: node ids it names
     /// come back in the real project's path. Mapped after parsing, so a path
     /// JSON must escape (`"` here, `\` on Windows) still round-trips.

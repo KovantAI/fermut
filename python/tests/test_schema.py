@@ -448,6 +448,23 @@ def test_serve_checks_one_slice_of_the_suite_per_chunk(served):
     server.close()
 
 
+def test_serve_runs_requests_side_by_side(served):
+    server, idx = served
+    assert server.recv()["ready"] is True
+    server.send({"idx": idx["spin"], "ids": ["tests/test_core.py::test_spin"], "id": 1})
+    hung = server.recv()
+    assert hung["id"] == 1
+    server.send({"idx": idx["add"], "ids": ["tests/test_core.py::test_add"], "id": 2})
+    assert server.recv()["id"] == 2  # its fork reply
+    # The second request finishes while the first still hangs.
+    done = server.recv()
+    assert done["id"] == 2 and done["failed"] == ["tests/test_core.py::test_add"]
+    os.killpg(hung["pid"], 9)
+    killed = server.recv()
+    assert killed["id"] == 1 and killed["unfinished"] == "tests/test_core.py::test_spin"
+    server.close()
+
+
 def test_serve_recovers_after_the_caller_kills_a_hung_child(served):
     server, idx = served
     assert server.recv()["ready"] is True

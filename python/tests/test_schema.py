@@ -284,12 +284,16 @@ PROJECT = {
             return n
 
 
+        def guard(n):
+            return int(n)
+
+
         register("alpha")
         """
     ),
     "tests/test_core.py": textwrap.dedent(
         """\
-        from pkg.core import REGISTRY, add, spin
+        from pkg.core import REGISTRY, add, guard, spin
 
 
         def test_add():
@@ -307,6 +311,10 @@ PROJECT = {
         def test_tmp(tmp_path):
             (tmp_path / "f").write_text("x")
             assert (tmp_path / "f").read_text() == "x"
+
+
+        def test_guard():
+            assert guard(1) == 1
         """
     ),
 }
@@ -386,6 +394,9 @@ def served(tmp_path):
             "register", "pkg/core.py", "len(name)", "len(name) + 1", tmp_path
         ),
         project_mutant("spin", "pkg/core.py", "n > 0", "n >= 0", tmp_path),
+        project_mutant(
+            "guard", "pkg/core.py", "return int(n)", "raise KeyboardInterrupt", tmp_path
+        ),
     ]
     result = schema.schematize(str(tmp_path), muts)
     (tmp_path / "schema.json").write_text(json.dumps(result))
@@ -432,7 +443,7 @@ def test_serve_kills_survives_and_flags_pre_fork_functions(served):
 def test_serve_checks_one_slice_of_the_suite_per_chunk(served):
     server, idx = served
     assert server.recv()["ready"] is True
-    # 4 tests in collection order; slice k of 4 is the k-th test alone.
+    # 5 tests in collection order; slice k of 4 starts at the k-th.
     first = server.run(idx["add"], None, chunk=[0, 4])
     assert first["exit"] == 1 and first["failed"] == ["tests/test_core.py::test_add"]
     assert server.run(idx["add"], None, chunk=[1, 4])["exit"] == 0
@@ -462,6 +473,16 @@ def test_serve_runs_requests_side_by_side(served):
     os.killpg(hung["pid"], 9)
     killed = server.recv()
     assert killed["id"] == 1 and killed["unfinished"] == "tests/test_core.py::test_spin"
+    server.close()
+
+
+def test_a_mutant_raising_keyboardinterrupt_exits_2_like_pytest(served):
+    server, idx = served
+    assert server.recv()["ready"] is True
+    out = server.run(idx["guard"], ["tests/test_core.py::test_guard"])
+    # pytest: "interrupted" — scored as a kill, not a broken child.
+    assert out["exit"] == 2 and "error" not in out, out
+    assert server.run(0, ["tests/test_core.py::test_guard"])["exit"] == 0
     server.close()
 
 

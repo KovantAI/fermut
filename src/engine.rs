@@ -1055,7 +1055,9 @@ fn compute_scope_prefix(cfg: &Config) -> String {
     h.update(b"|cache_scope=");
     h.update(format!("{:?}", cfg.cache_scope).as_bytes());
     h.update(b"|runner=");
-    h.update(runner_cache_tag(cfg.runner, cfg.schemata).as_bytes());
+    // Schemata shares the pytest tag: its verdicts match a normal run's, and
+    // a cache built either way serves the other.
+    h.update(runner_cache_tag(cfg.runner).as_bytes());
     h.update(b"|python=");
     match &cfg.python {
         Some(p) => h.update(p.as_os_str().as_encoded_bytes()),
@@ -1092,11 +1094,8 @@ fn compute_scope_prefix(cfg: &Config) -> String {
 
 /// Stable cache tag for `RunnerKind`. Hard-coded so renaming a variant
 /// is a deliberate cache-busting change, not a silent one.
-fn runner_cache_tag(kind: RunnerKind, schemata: bool) -> &'static str {
+fn runner_cache_tag(kind: RunnerKind) -> &'static str {
     match kind {
-        // Its own tag while experimental: a schemata bug must not leave
-        // verdicts a normal run would trust.
-        RunnerKind::Pytest if schemata => "pytest-schemata",
         RunnerKind::Pytest => "pytest",
         RunnerKind::Rstest => "rstest",
         RunnerKind::Unittest => "unittest",
@@ -1307,14 +1306,19 @@ fn build_pool(jobs: Option<usize>) -> Result<rayon::ThreadPool> {
 mod tests {
 
     #[test]
-    fn schemata_has_its_own_cache_tag() {
-        // While experimental, a schemata verdict must never be served to a
-        // normal run from the cache (or the other way around).
-        assert_ne!(
-            runner_cache_tag(RunnerKind::Pytest, true),
-            runner_cache_tag(RunnerKind::Pytest, false)
-        );
-        assert_eq!(runner_cache_tag(RunnerKind::Pytest, false), "pytest");
+    fn schemata_shares_the_normal_runs_cache() {
+        // Same verdicts by design, so turning schemata on or off keeps the
+        // cache warm instead of re-running everything.
+        let on = Config {
+            schemata: true,
+            ..base_test_config()
+        };
+        let off = Config {
+            schemata: false,
+            ..base_test_config()
+        };
+        assert_eq!(compute_scope_prefix(&on), compute_scope_prefix(&off));
+        assert_eq!(runner_cache_tag(RunnerKind::Pytest), "pytest");
     }
 
     use super::*;

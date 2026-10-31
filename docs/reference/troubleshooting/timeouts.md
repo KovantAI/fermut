@@ -14,3 +14,9 @@ to `<=` on a loop condition), or your test fixture is slow.
   globally, or skip those tests with `--pytest-arg='-k not slow'`.
 - If timeouts are uniform across the run, raise `--timeout`
   outright (default `30` → `60`).
+- Use a [timeout budget](../cli/run.md#timeout-budgets)
+  (`--timeout-factor 3`): it sizes each mutant's timeout from the baseline
+  run, so hung mutants stop in seconds. It's on by default with
+  [schemata](../cli/run.md#schemata), where a timeout is re-run the normal
+  way before it counts. If slow-but-correct mutants start timing out on a
+  busy machine, raise the factor or lower `--jobs`.

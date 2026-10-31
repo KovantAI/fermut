@@ -35,7 +35,8 @@ slipped through. In short — it answers **"are my tests any good?"**
 
 - ⚡ **Fast** — native-Rust hot loop, `ty` pre-filter drops type-invalid
   mutants before they ever reach pytest, per-test coverage selection runs
-  only the tests that touch each mutant.
+  only the tests that touch each mutant, and mutants run in forks of one
+  pytest that already imported your suite (schemata).
 - 🤖 **Agent-first** — machine-readable JSON reports, deterministic mutant
   IDs, `next`/`explain`/`score` subcommands built for a coding agent in the loop.
 - 🔁 **Incremental** — cache-friendly warm runs (~35× on unchanged code),

@@ -23,7 +23,9 @@ use super::exit::{
     anomaly_message, classify_exit, is_collection_failure, ExitVerdict, TestTool,
     PYTEST_USAGE_ERROR,
 };
-use super::process_group::{kill_group, with_new_process_group};
+use super::process_group::kill_group;
+#[cfg(test)]
+use super::process_group::with_new_process_group;
 use super::pytest_result::{RunResult, REPORTER_MODULE, RESULT_ENV};
 use super::{
     build_mirror, configure_mirror_cmd, mirror_pythonpath, run_baseline_with_timeout, run_patched,
@@ -917,9 +919,10 @@ impl Runner for PytestRunner {
                 cmd.arg(&mirror.tests);
             }
         }
-        cmd.current_dir(&mirror.root);
-        with_new_process_group(&mut cmd);
-        cmd.env("PYTHONPATH", mirror_pythonpath(&mirror)?);
+        // Same environment as a mutant run (incl. the mirror's pytest temp
+        // root): a baseline that's only green under the global root would
+        // vouch for a suite the mutant runs then fail (typer wraps tmp paths).
+        configure_mirror_cmd(&mut cmd, &mirror)?;
         run_baseline_with_timeout(cmd, self.baseline_timeout)
     }
 }
@@ -1773,6 +1776,36 @@ mod tests {
         let mut lines = out.lines();
         let mirror_root = Path::new(lines.next().unwrap());
         assert!(lines.any(|a| a == id(mirror_root)), "{out}");
+    }
+
+    /// The baseline runs in a mutant run's environment, pytest temp root
+    /// included: a suite that only passes under the global root (typer wraps
+    /// tmp paths at 80 columns) must fail here, not in every mutant run.
+    #[cfg(unix)]
+    #[test]
+    fn baseline_uses_the_mirror_pytest_temp_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().canonicalize().unwrap().join("proj");
+        std::fs::create_dir_all(proj.join("tests")).unwrap();
+        std::fs::write(proj.join("pyproject.toml"), "").unwrap();
+        let seen = tmp.path().join("seen");
+        let py = tmp.path().join("python");
+        std::fs::write(
+            &py,
+            format!(
+                "#!/bin/sh\necho \"$PYTEST_DEBUG_TEMPROOT\" > '{}'\n",
+                seen.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = runner(false, breadth_ctx(&proj));
+        r.tests = proj.join("tests");
+        r.python = Some(py);
+        r.baseline().unwrap();
+        let root = std::fs::read_to_string(&seen).unwrap();
+        assert!(!root.trim().is_empty(), "PYTEST_DEBUG_TEMPROOT unset");
     }
 
     /// The reporter's result is read through the mirror: node ids it names

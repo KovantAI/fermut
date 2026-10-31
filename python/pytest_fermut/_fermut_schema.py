@@ -64,11 +64,13 @@ serve
 
 import ast
 import builtins
+import gc
 import getpass
 import glob
 import json
 import os
 import py_compile
+import selectors
 import shutil
 import signal
 import sys
@@ -294,7 +296,8 @@ def schematize_file(src, mutants, next_idx):
     if not any("idx" in e for e in entries.values()):
         return None, entries, []
     # After the module docstring and __future__ imports:
-    #   import builtins as _fm_b
+    #   _fm_b = __import__('builtins')   (no import statement: click's
+    #   test_light_imports audits the imports its modules make)
     #   if not hasattr(_fm_b, '_fm_active'): _fm_b._fm_active = int(os.environ...)
     # The env default lets Python subprocesses a test spawns see the mutant.
     at = 1 if docstring(tree.body) else 0
@@ -305,7 +308,7 @@ def schematize_file(src, mutants, next_idx):
     ):
         at += 1
     prelude = ast.parse(
-        "import builtins as _fm_b\n"
+        "_fm_b = __import__('builtins')\n"
         f"if not hasattr(_fm_b, {ACTIVE!r}):\n"
         f"    _fm_b.{ACTIVE} = int(__import__('os').environ.get('FM_ACTIVE', 0))\n"
     ).body
@@ -397,7 +400,8 @@ class Template:
         # Each child gets its own pytest-of-<user> (see `child`); the seed
         # gives its counter the digit count a cold run would have now.
         self.user = getpass.getuser()
-        self.temproot = tempfile.gettempdir()
+        # pytest's own root: fermut points it at the mirror's.
+        self.temproot = os.environ.get("PYTEST_DEBUG_TEMPROOT") or tempfile.gettempdir()
         nums = [
             d.rsplit("-", 1)[1]
             for d in glob.glob(
@@ -459,27 +463,69 @@ class Template:
 
     def serve(self, session):
         by_id = {item.nodeid: item for item in session.items}
+        freeze_macos_proxies()
+        # Children gc-collect at session end (see `child`); frozen, the
+        # collected suite isn't rescanned on every one of those passes.
+        gc.freeze()
         self.send({"ready": True, "unsafe": sorted(self.ran)})
-        for line in self.req:
-            req = json.loads(line)
-            r, w = os.pipe()
-            pid = os.fork()
-            if pid == 0:
-                os.close(r)
-                self.child(session, by_id, req, w)
-            os.close(w)
-            # Also set from this side: the caller may kill the group as soon as
-            # it reads the pid, possibly before the child ran its own setpgid.
-            try:
-                os.setpgid(pid, pid)
-            except OSError:
-                pass  # the child already did
-            self.send({"pid": pid})
-            with os.fdopen(r, "rb") as f:
-                events = f.read()  # EOF when the child exits or is killed
-            _, status = os.waitpid(pid, 0)
-            shutil.rmtree(self.child_temp(pid), ignore_errors=True)
-            self.send({"status": status, **summarize(events)})
+        # One template serves every worker: each request forks at once and its
+        # result goes back, tagged with the request's id, when its child exits.
+        sel = selectors.DefaultSelector()
+        req_fd = self.req.fileno()
+        sel.register(req_fd, selectors.EVENT_READ)
+        pending, running, eof = b"", {}, False
+        while not eof or running:
+            for key, _ in sel.select():
+                if key.fd == req_fd:
+                    data = os.read(req_fd, 1 << 16)
+                    if not data:
+                        eof = True
+                        sel.unregister(req_fd)
+                        for _, pid, _ in running.values():
+                            try:
+                                os.killpg(pid, signal.SIGKILL)  # the caller is gone
+                            except OSError:
+                                pass
+                        continue
+                    pending += data
+                    *lines, pending = pending.split(b"\n")
+                    for line in filter(None, lines):
+                        req = json.loads(line)
+                        r, pid = self.fork(session, by_id, req)
+                        running[r] = (req.get("id"), pid, [])
+                        sel.register(r, selectors.EVENT_READ)
+                        self.send({"id": req.get("id"), "pid": pid})
+                else:
+                    rid, pid, chunks = running[key.fd]
+                    data = os.read(key.fd, 1 << 16)
+                    if data:
+                        chunks.append(data)
+                        continue
+                    # EOF: the child exited or was killed.
+                    sel.unregister(key.fd)
+                    os.close(key.fd)
+                    del running[key.fd]
+                    _, status = os.waitpid(pid, 0)
+                    shutil.rmtree(self.child_temp(pid), ignore_errors=True)
+                    self.send(
+                        {"id": rid, "status": status, **summarize(b"".join(chunks))}
+                    )
+
+    def fork(self, session, by_id, req):
+        """Fork a child for `req`; returns its event pipe's read end and pid."""
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(r)
+            self.child(session, by_id, req, w)
+        os.close(w)
+        # Also set from this side: the caller may kill the group as soon as
+        # it reads the pid, possibly before the child ran its own setpgid.
+        try:
+            os.setpgid(pid, pid)
+        except OSError:
+            pass  # the child already did
+        return r, pid
 
     def child_temp(self, pid):
         # Same length as the real user name (pids need 7 digits), so tmp_path
@@ -503,7 +549,9 @@ class Template:
             os.setpgid(0, 0)
             os.close(self.resp)
             self.req.close()
-            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            # Python's own handler, as in a cold run: SIG_DFL would turn a
+            # test's self-sent SIGINT (trio) into a dead child.
+            signal.signal(signal.SIGINT, signal.default_int_handler)
             # Private basetemp: siblings sharing pytest-of-<user> would prune
             # each other's tmp_path. Seeded so pytest-<N> has cold digits.
             user = self.fake_user(os.getpid())
@@ -515,6 +563,13 @@ class Template:
             setattr(builtins, ACTIVE, req["idx"])
             os.environ["FM_ACTIVE"] = str(req["idx"])  # Python subprocesses
             code = self.run_items(session, by_id, req, emit)
+            # A cold run's session end: pytest >= 8.4 gc-collects there and
+            # fails the run on a leaked resource's unraisable warning (click:
+            # a mutant that never closes a file). Exit 1, as pytest would.
+            try:
+                session.config._ensure_unconfigure()
+            except BaseException:  # noqa: BLE001
+                code = code or 1
         except BaseException:  # noqa: BLE001 - nothing may escape a forked child
             code = 3
             emit(ev="error", tb=traceback.format_exc())
@@ -525,7 +580,13 @@ class Template:
     def run_items(self, session, by_id, req, emit):
         """Exit code a cold `pytest [-x] <ids>` would give."""
         ids = req.get("ids")
-        if ids is None:
+        if req.get("chunk"):
+            # Slice k of n of the suite: the no-mutant check, split across
+            # templates.
+            k, n = req["chunk"]
+            all_items = session.items
+            items = all_items[k * len(all_items) // n : (k + 1) * len(all_items) // n]
+        elif ids is None:
             items = list(session.items)
         else:
             items = [by_id.get(i) for i in dict.fromkeys(ids)]
@@ -537,8 +598,14 @@ class Template:
         session.config.hook.pytest_collection_modifyitems(
             session=session, config=session.config, items=items
         )
+        if req.get("after"):
+            # Resume a slice past a test whose fork crashed (macOS: system
+            # frameworks aren't fork-safe); the caller records that test.
+            ran = [item.nodeid for item in items]
+            if req["after"] in ran:
+                items = items[ran.index(req["after"]) + 1 :]
         if not items:
-            return 5
+            return 0 if req.get("chunk") else 5  # an empty slice checks nothing
         failed, stop_first = [], not req.get("all")
 
         class Listen:
@@ -562,9 +629,26 @@ class Template:
         return 1 if failed else 0
 
 
+def freeze_macos_proxies():
+    """macOS reads system proxy settings through CoreFoundation, which isn't
+    fork-safe: a child that looks them up (aiohttp/httpx/requests do, per
+    request) aborts. Read them once here, before any fork, and serve the
+    same values to every child."""
+    if sys.platform != "darwin":
+        return
+    import urllib.request as ur
+
+    try:
+        settings, proxies = ur._get_proxy_settings(), ur._get_proxies()
+    except Exception:  # noqa: BLE001 - no _scproxy: nothing to freeze
+        return
+    ur._get_proxy_settings = lambda: settings
+    ur._get_proxies = lambda: proxies
+
+
 def summarize(events):
     """Fold a child's event stream into one result."""
-    out = {"failed": [], "test_secs": 0.0, "unfinished": None}
+    out = {"failed": [], "test_secs": 0.0, "unfinished": None, "ran": []}
     ended = False
     for line in events.decode(errors="replace").splitlines():
         try:
@@ -574,6 +658,10 @@ def summarize(events):
         ev = e.get("ev")
         if ev == "begin":
             out["unfinished"] = e["nodeid"]
+            if e["nodeid"] not in out["ran"]:
+                out["ran"].append(
+                    e["nodeid"]
+                )  # in run order, for a kill's confirmation
         elif ev == "fail" and e["nodeid"] not in out["failed"]:
             out["failed"].append(e["nodeid"])
         elif ev == "dur":

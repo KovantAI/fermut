@@ -1005,6 +1005,195 @@ mod tests {
         assert_eq!(c.status, Status::Warn);
         assert!(c.detail.contains(".mutmut-cache"));
     }
+
+    fn find<'a>(checks: &'a [Check], name: &str) -> &'a Check {
+        checks
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("no `{name}` row"))
+    }
+
+    /// Temp project root. The `.git` marker stops the `.venv` ancestor walk.
+    fn project() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        tmp
+    }
+
+    #[cfg(unix)]
+    fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[test]
+    fn status_fail_glyph_and_label() {
+        assert_eq!(Status::Fail.glyph(), "fail");
+        assert_eq!(Status::Fail.label(), "fail");
+    }
+
+    #[test]
+    fn collect_checks_follows_fermut_toml() {
+        let tmp = project();
+        std::fs::write(
+            tmp.path().join("fermut.toml"),
+            "runner = \"unittest\"\ncoverage = \"cov.json\"\nty_filter = false\n\
+             ruff_filter = true\ntests = \"missing_tests\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("pyproject.toml"),
+            "deps = [\"hypothesis\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir(tmp.path().join("mutants")).unwrap();
+
+        let checks = collect_checks(tmp.path());
+        assert_eq!(find(&checks, "config").status, Status::Ok);
+        assert_eq!(find(&checks, "runner").detail, "unittest (stdlib)");
+        let cov = find(&checks, "coverage-data");
+        assert_eq!(cov.status, Status::Warn);
+        assert!(cov.detail.contains("cov.json"), "got: {}", cov.detail);
+        assert_eq!(find(&checks, "ty").status, Status::Skip);
+        find(&checks, "ruff");
+        assert_eq!(find(&checks, "tests").status, Status::Fail);
+        assert_eq!(find(&checks, "hypothesis").status, Status::Warn);
+        assert_eq!(find(&checks, "legacy-artifacts").status, Status::Warn);
+    }
+
+    #[test]
+    fn collect_checks_reads_pyproject_and_autodiscovers_sqlite() {
+        let tmp = project();
+        std::fs::write(
+            tmp.path().join("pyproject.toml"),
+            "[tool.fermut]\nrunner = \"rstest\"\n",
+        )
+        .unwrap();
+        // Hypothesis only in the lockfile, not pyproject.
+        std::fs::write(tmp.path().join("uv.lock"), "name = \"hypothesis\"\n").unwrap();
+        let conn = rusqlite::Connection::open(tmp.path().join(".coverage")).unwrap();
+        conn.execute("CREATE TABLE context (id integer, context text)", [])
+            .unwrap();
+        conn.execute("INSERT INTO context VALUES (1, 't.py::test_a')", [])
+            .unwrap();
+        drop(conn);
+
+        let checks = collect_checks(tmp.path());
+        let config = find(&checks, "config");
+        assert!(
+            config.detail.contains("pyproject.toml"),
+            "got: {}",
+            config.detail
+        );
+        find(&checks, "rstest");
+        assert_eq!(find(&checks, "coverage-data").status, Status::Ok);
+        assert_eq!(find(&checks, "hypothesis").status, Status::Warn);
+        // ruff is off by default → no row.
+        assert!(checks.iter().all(|c| c.name != "ruff"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_checks_probes_a_dot_venv() {
+        if std::env::var_os("VIRTUAL_ENV").is_some() {
+            return; // VIRTUAL_ENV wins over `.venv` discovery.
+        }
+        let tmp = project();
+        script(&tmp.path().join(".venv/bin"), "python", "echo '9 10 /site'");
+        let checks = collect_checks(tmp.path());
+        assert_eq!(find(&checks, "venv").status, Status::Ok);
+        assert_eq!(find(&checks, "bytecode").status, Status::Ok);
+    }
+
+    #[test]
+    fn gotchas_empty_without_config() {
+        assert!(check_gotchas(None).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_bytecode_parses_probe_or_skips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let low = script(tmp.path(), "low", "echo '1 10 /site'");
+        let c = check_bytecode(&low);
+        assert_eq!(c.status, Status::Warn);
+        assert!(c.detail.contains("(1/10)"), "got: {}", c.detail);
+        assert!(c.hint.unwrap().contains("compileall -q -j 0 /site"));
+
+        let broken = script(tmp.path(), "broken", "exit 1");
+        assert_eq!(check_bytecode(&broken).status, Status::Skip);
+        let garbage = script(tmp.path(), "garbage", "echo nonsense");
+        assert_eq!(check_bytecode(&garbage).status, Status::Skip);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tool_version_rejects_failure_and_empty_output_uses_stderr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path();
+        script(bin, "fermut-fails", "echo 'x 1.0'; exit 3");
+        script(bin, "fermut-silent", "true");
+        script(bin, "fermut-stderr", "echo 'err 2.0' >&2");
+        assert_eq!(tool_version(&["fermut-fails"], Some(bin)), None);
+        assert_eq!(tool_version(&["fermut-silent"], Some(bin)), None);
+        assert_eq!(
+            tool_version(&["fermut-stderr"], Some(bin)).as_deref(),
+            Some("err 2.0")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_pytest_cov_fails_when_not_importable() {
+        let tmp = tempfile::tempdir().unwrap();
+        script(tmp.path(), "python3", "exit 1");
+        assert_eq!(check_pytest_cov(Some(tmp.path())).status, Status::Fail);
+    }
+
+    #[test]
+    fn check_tool_missing_is_fail_when_required_else_warn() {
+        let cmd = ["fermut-definitely-not-a-tool"];
+        assert_eq!(
+            check_tool("x", &cmd, "p", "h", true, None).status,
+            Status::Fail
+        );
+        assert_eq!(
+            check_tool("x", &cmd, "p", "h", false, None).status,
+            Status::Warn
+        );
+    }
+
+    #[test]
+    fn check_coverage_file_honours_absolute_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abs = tmp.path().join("elsewhere.json");
+        let c = check_coverage_file(Path::new("/unused"), &abs);
+        assert_eq!(c.status, Status::Warn);
+        assert!(c.detail.contains("elsewhere.json"), "got: {}", c.detail);
+    }
+
+    #[test]
+    fn check_coverage_file_fails_on_non_utf8_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("coverage.json"), [0xff, 0xfe, 0xfd]).unwrap();
+        let c = check_coverage_file(tmp.path(), Path::new("coverage.json"));
+        assert_eq!(c.status, Status::Fail);
+    }
+
+    #[test]
+    fn check_coverage_file_fails_on_sqlite_without_context_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = rusqlite::Connection::open(tmp.path().join(".coverage")).unwrap();
+        conn.execute("CREATE TABLE other (x integer)", []).unwrap();
+        drop(conn);
+        let c = check_coverage_file(tmp.path(), Path::new(".coverage"));
+        assert_eq!(c.status, Status::Fail);
+        assert!(c.detail.contains("context` table"), "got: {}", c.detail);
+    }
 }
 
 #[derive(clap::Args, Debug)]

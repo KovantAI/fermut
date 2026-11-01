@@ -432,15 +432,22 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
             "--baseline-secs must be a non-negative number of seconds (got {s})"
         );
     }
-    let timeout_factor = cli_timeout_factor.or(file.timeout_factor);
+    // On by default; `0` turns it off (flat `--timeout`).
+    let explicit_factor = cli_timeout_factor.or(file.timeout_factor);
+    let timeout_factor = match explicit_factor {
+        Some(0.0) => None,
+        Some(f) => Some(f),
+        None => Some(crate::config::DEFAULT_TIMEOUT_FACTOR),
+    };
     if let Some(f) = timeout_factor {
         anyhow::ensure!(
             f.is_finite() && f >= 2.0,
-            "timeout factor must be at least 2 (got {f}): a mutant can rerun the whole \
-             suite (unittest, or pytest without coverage) beside other workers, so a \
-             tighter budget times out real survivors and scores them detected"
+            "timeout factor must be at least 2, or 0 to turn it off (got {f}): a mutant \
+             can rerun the whole suite (unittest, or pytest without coverage) beside other \
+             workers, so a tighter budget times out real survivors and scores them detected"
         );
-        if !verify_baseline && cli_baseline_secs.is_none() {
+        // Only warn when asked for: the default quietly falls back to the flat timeout.
+        if explicit_factor.is_some() && !verify_baseline && cli_baseline_secs.is_none() {
             warn!(
                 "--timeout-factor needs the baseline run to size timeouts; with \
                  --no-verify-baseline (and no --baseline-secs or \
@@ -1295,6 +1302,21 @@ mod tests {
             .to_string();
         assert!(err.contains("at least 2"), "{err}");
 
+        // Default is on; 0 turns it off, from the flag or from config.
+        let none = tempfile::tempdir().unwrap();
+        let cfg = call_with_filter(none.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert_eq!(
+            cfg.timeout_factor,
+            Some(crate::config::DEFAULT_TIMEOUT_FACTOR)
+        );
+        let mut args = run_args(empty_filter());
+        args.timeout_factor = Some(0.0);
+        let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
+        assert_eq!(cfg.timeout_factor, None);
+        std::fs::write(none.path().join("fermut.toml"), "timeout_factor = 0\n").unwrap();
+        let cfg = call_with_filter(none.path().to_path_buf(), None, empty_filter()).unwrap();
+        assert_eq!(cfg.timeout_factor, None);
+
         let mut args = run_args(empty_filter());
         args.baseline_secs = Some(1.5);
         let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
@@ -1344,6 +1366,13 @@ mod tests {
         assert!(warns(true, None));
         assert!(!warns(false, None), "baseline run sizes it");
         assert!(!warns(true, Some(2.0)), "--baseline-secs sizes it");
+        let mut args = run_args(empty_filter());
+        args.no_verify_baseline = true;
+        let default_warns = logged(|| {
+            build_config(tmp.path().to_path_buf(), args).unwrap();
+        })
+        .contains("--timeout-factor needs the baseline run");
+        assert!(!default_warns, "the default factor stays quiet");
     }
 
     #[test]

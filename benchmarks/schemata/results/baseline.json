@@ -1,0 +1,2 @@
+{"_note": "plain `pytest -q -p no:cacheprovider tests` wall on the original fixture (s), 2026-10-25; stands in for fermut's baseline run",
+ "pyjwt": 5.07, "markupsafe": 0.19, "typer": 52.25, "starlette": 3.10, "more-itertools": 1.30}

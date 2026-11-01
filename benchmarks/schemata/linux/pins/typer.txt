@@ -1,0 +1,15 @@
+annotated-doc==0.0.4
+coverage==7.14.1
+execnet==2.1.2
+iniconfig==2.3.0
+markdown-it-py==4.2.0
+mdurl==0.1.2
+packaging==26.2
+pluggy==1.6.0
+Pygments==2.20.0
+pytest==9.0.3
+pytest-cov==7.1.0
+pytest-xdist==3.8.0
+rich==15.0.0
+shellingham==1.5.4
+wheel==0.47.0

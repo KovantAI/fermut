@@ -60,8 +60,8 @@ fermut run [PATH] [flags...]
 | `--no-schemata`             | schemata on                      | Start a fresh pytest per mutant instead of forking one that already imported and collected the suite. Schemata is on by default with the pytest runner on Unix. See [Schemata](#schemata). |
 | `--schemata`                | on where supported               | Require schemata: an unsupported runner or platform is an error instead of a silent normal run. Overrides `schemata = false`. |
 | `--max-time <SECS>`         | off (whole catalogue)            | Wall-clock ceiling on the testing phase. Evaluates highest-value mutants first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` (excluded from the score) instead of run — in-flight mutants finish. A predictable time ceiling for PR gates. See [Time-boxed runs](#time-boxed-runs-max-time). |
-| `--timeout-factor <F>`      | 3 with schemata, else off        | Size each mutant's timeout from the baseline run: `min(--timeout, F × baseline wall + 5 s)`, so hung mutants stop in seconds. Needs the baseline. See [Timeout budgets](#timeout-budgets). |
-| `--no-timeout-factor`       | off                              | Use the flat `--timeout` for every mutant, even with schemata. Same as `timeout_factor = 0`. |
+| `--timeout-factor <F>`      | `3` (`0` = flat `--timeout`)     | Size each mutant's timeout from the baseline run: `min(--timeout, F × baseline wall + 5 s)`, so hung mutants stop in seconds. Needs the baseline; without one, the flat `--timeout` applies. See [Timeout budgets](#timeout-budgets). |
+| `--no-timeout-factor`       | off                              | Use the flat `--timeout` for every mutant. Same as `--timeout-factor 0` / `timeout_factor = 0`. |
 | `--max-memory <SIZE>`       | auto on Linux/macOS              | Cap each mutant's memory, e.g. `512M`, `4G`; `0` for off. A mutant past it fails with `MemoryError` and counts as killed. See [Memory cap](#memory-cap). |
 | `--no-max-memory`           | off                              | Don't cap mutant memory. Same as `max_memory = "0"`. |
 | `--baseline-secs <SECS>`    | none                             | Wall time of a green whole-suite run you already did. When fermut's baseline is skipped it sizes `--timeout-factor` timeouts in its place (fermut's own baseline wins when it runs). Ignored without `--timeout-factor`. A whole-suite `pytest --fermut` session passes its session time in `FERMUT_BASELINE_SECS`. |
@@ -178,7 +178,7 @@ A mutant that sends the code into an infinite loop runs until `--timeout`
 (30 s by default). On a suite that takes a second or two, that wait is most
 of the run: on more-itertools 85 hung mutants took 63% of all worker time.
 
-`--timeout-factor F` sizes the timeout from the baseline run instead. The
+By default fermut sizes the timeout from the baseline run instead (`--timeout-factor 3`; `--timeout-factor 0` turns this off). The
 baseline runs the whole suite once, and each mutant runs a subset of it, so
 an honest run fits in `F × baseline wall + 5 s` (5 s covers interpreter
 start-up and running beside the other workers). `--timeout` stays the upper
@@ -186,14 +186,12 @@ limit. With a 1.4 s suite and `F = 3`, mutants get 10 s instead of 30 s.
 
 - **Verdicts.** A mutant that doesn't hang but makes the suite many times
   slower now counts as timed out (detected) instead of survived. PIT and
-  Stryker treat it the same way. On more-itertools 2 of ~3,800 mutants
-  changed this way.
-- **Default.** With [schemata](#schemata) on, `F` defaults to 3: a fork that
-  times out is re-run the normal way before it counts, so a hung mutant pays
-  its timeout twice. Without schemata it's off unless you set it.
-  `--no-timeout-factor` or `timeout_factor = 0` keep the flat `--timeout`.
+  Stryker treat it the same way. Across 6 repos under `--schemata` only 2
+  mutants changed this way (more-itertools), while runs with hung mutants
+  got 1.2–3.4× faster. Set `--timeout-factor 0` (or `--no-timeout-factor`) to keep the old verdicts.
 - **Needs a baseline.** With `--no-verify-baseline` there is nothing to
-  scale from, so every mutant uses the flat `--timeout` (fermut warns),
+  scale from, so every mutant uses the flat `--timeout` (fermut warns if you
+  set the factor yourself),
   unless `--baseline-secs SECS` gives the wall time of a green whole-suite run
   you already did. [`pytest --fermut`](../../guides/pytest-plugin.md) does
   this on a whole-suite session: it passes its own session time (the summed
@@ -206,7 +204,8 @@ limit. With a 1.4 s suite and `F = 3`, mutants get 10 s instead of 30 s.
 - **`fermut run` only.** `autofix` and `hom` re-run mutants with the flat
   `--timeout`.
 - **History and cache.** The factor is part of the run's configuration, so
-  `fermut trend` shows turning it on as a config change. The computed budget
+  `fermut trend` shows the switch to the default as a config change, and
+  verdicts cached by flat-timeout runs are re-run once. The computed budget
   is not: it moves a little with each baseline and would otherwise invalidate
   the cache on every run.
 

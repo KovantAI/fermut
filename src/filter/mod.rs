@@ -58,6 +58,11 @@ pub trait Filter: Send + Sync {
     fn name(&self) -> &'static str;
     /// Returns Ok(true) if the mutant should be tested, Ok(false) to drop it.
     fn admits(&self, mutant: &Mutant) -> Result<bool>;
+    /// Spawns a subprocess per mutant (ruff/ty/tce). Cheap filters are pure
+    /// and also run up front to size what the runner prepares.
+    fn costly(&self) -> bool {
+        false
+    }
 }
 
 /// Write `patched` to a temp `.py` file for a subprocess linter/type-checker.

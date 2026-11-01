@@ -350,6 +350,10 @@ impl Filter for TyFilter {
         "ty"
     }
 
+    fn costly(&self) -> bool {
+        true
+    }
+
     fn admits(&self, mutant: &Mutant) -> Result<bool> {
         if let Some(file_hash) = self.ast_hash_for(&mutant.file) {
             let key = self.cache_key(&file_hash, mutant);

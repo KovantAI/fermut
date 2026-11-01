@@ -381,7 +381,10 @@ fn schemata_gives_the_same_verdicts_as_a_normal_run() {
     // spike: a decorator factory whose closure is built when the test module
     // imports (the switch must sit in the closure, not the factory), a function
     // that runs at import (must fall back to spawning: its result was stored
-    // before the fork), a mutant that hangs (timeout), and `tmp_path`.
+    // before the fork), a mutant that hangs (timeout), and `tmp_path`. Then
+    // the ones that broke the real runner: a test that SIGINTs itself (trio),
+    // a test auditing the module's imports (click), and a leaked file only
+    // found when pytest gc-collects at session end (click, pytest >= 8.4).
     let tmp = tempfile::tempdir().unwrap();
     let proj = tmp.path();
     let write = |rel: &str, body: &str| {
@@ -392,7 +395,8 @@ fn schemata_gives_the_same_verdicts_as_a_normal_run() {
     write(
         "pyproject.toml",
         "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
-         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n",
+         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n\
+         filterwarnings = [\"error::ResourceWarning\", \"error::pytest.PytestUnraisableExceptionWarning\"]\n",
     );
     write("src/pkg/__init__.py", "");
     write(
@@ -406,17 +410,43 @@ fn schemata_gives_the_same_verdicts_as_a_normal_run() {
          def add(a, b):\n    return a + b\n\n\n\
          def countdown(n):\n    while n > 0:\n        n = n - 1\n    return n\n\n\n\
          def save(path, text):\n    path.write_text(text.upper())\n    return path.read_text()\n\n\n\
+         def first_line(path):\n    f = open(path)\n    cycle = [f]\n    cycle.append(cycle)\n    \
+         line = f.readline()\n    closing = True\n    if closing:\n        f.close()\n    return line\n\n\n\
+         MODE = \"ok\"\n\n\n\
+         def mode():\n    return MODE[:2]\n\n\n\
          register(\"alpha\")\n",
+    );
+    // Collecting test_leak.py leaves MODE wrong until a test's teardown puts it
+    // back (agent-library). A cold run of test_mode never imports it; a fork of
+    // the template that collected everything does, so its test_mode fails with
+    // no mutant active and every kill it reports must be confirmed.
+    write(
+        "tests/conftest.py",
+        "import pytest\n\nimport pkg.m\n\n\n\
+         @pytest.fixture(autouse=True)\ndef _restore_mode():\n    yield\n    pkg.m.MODE = \"ok\"\n",
+    );
+    write(
+        "tests/test_leak.py",
+        "import pkg.m\n\npkg.m.MODE = \"leaked\"\n\n\ndef test_nothing():\n    pass\n",
     );
     write(
         "tests/test_m.py",
-        "from pkg.m import REGISTRY, add, countdown, requires, save\n\n\n\
+        "import ast\nimport inspect\nimport signal\n\nimport pytest\n\nimport pkg.m\n\
+         from pkg.m import REGISTRY, add, countdown, first_line, requires, save\n\n\n\
          @requires(\"admin\")\ndef secret():\n    return 42\n\n\n\
          def test_add():\n    assert add(2, 3) == 5\n\n\n\
          def test_secret():\n    assert secret() == 42\n\n\n\
          def test_registry():\n    assert REGISTRY == {\"alpha\": 10}\n\n\n\
          def test_countdown():\n    assert countdown(3) == 0\n\n\n\
-         def test_save(tmp_path):\n    assert save(tmp_path / \"f\", \"hi\") == \"HI\"\n",
+         def test_save(tmp_path):\n    assert save(tmp_path / \"f\", \"hi\") == \"HI\"\n\n\n\
+         def test_first_line(tmp_path):\n    (tmp_path / \"f\").write_text(\"a\\nb\\n\")\n    \
+         assert first_line(tmp_path / \"f\") == \"a\\n\"\n\n\n\
+         def test_sigint():\n    with pytest.raises(KeyboardInterrupt):\n        \
+         signal.raise_signal(signal.SIGINT)\n\n\n\
+         def test_mode():\n    assert pkg.m.mode() == \"ok\"\n\n\n\
+         def test_imports():\n    tree = ast.parse(inspect.getsource(pkg.m))\n    \
+         names = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}\n    \
+         assert names == {\"functools\"}\n",
     );
     // A second file covering `add`, edited below to change its mutants' scope
     // while their killer in test_m.py stays put.
@@ -446,6 +476,12 @@ fn schemata_gives_the_same_verdicts_as_a_normal_run() {
     assert!(
         normal.values().any(|s| s == "timed_out"),
         "the countdown mutant must hang: {normal:#?}"
+    );
+    assert!(
+        normal
+            .iter()
+            .any(|(id, s)| id.contains("True->False") && s == "killed"),
+        "the leaked-file mutant must die at session end: {normal:#?}"
     );
     assert_eq!(schemata, normal);
 

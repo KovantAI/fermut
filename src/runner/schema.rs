@@ -3,9 +3,10 @@
 //! Instead of splicing one mutant into a mirror and starting pytest per
 //! mutant, every function-body mutant is compiled into one *schema* up front:
 //! each mutated function gets a switch on an active-mutant index (see
-//! `python/pytest_fermut/_fermut_schema.py`). Each rayon worker then keeps a
-//! *template* — a pytest process that imported and collected the suite once —
-//! and runs a mutant by asking it to fork a child with that index active. The
+//! `python/pytest_fermut/_fermut_schema.py`). One *template* — a pytest
+//! process that imported and collected the suite once — serves every rayon
+//! worker: a worker runs a mutant by asking it to fork a child with that index
+//! active, and the template runs those children side by side. The
 //! child runs the same selected tests a spawned pytest would, in the same
 //! order, and the verdict goes through the same classification as the spawn
 //! path.
@@ -17,13 +18,12 @@
 //! a template that failed to start or died, and a child that broke itself.
 //! The baseline is always the cold, spawn-path run.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -56,6 +56,11 @@ pub struct SchemaRunner {
     /// them on the first `run`, so a fully cached run never pays for it.
     mutants: Mutex<Vec<Arc<Mutant>>>,
     schema: OnceLock<Option<Schema>>,
+    /// Set by the worker that builds the schema; the others run their
+    /// mutants normally meanwhile instead of waiting on it.
+    building: AtomicBool,
+    /// [`Self::confirm`]'s verdict per test list.
+    confirmed: Mutex<HashMap<Vec<String>, bool>>,
     /// Mutants run from the schema vs on the spawn path, for the end-of-run
     /// summary.
     served: AtomicU64,
@@ -64,9 +69,6 @@ pub struct SchemaRunner {
 
 /// The built schema: one read-only mirror shared by every template.
 struct Schema {
-    /// Distinguishes this schema from one built by an earlier run in the same
-    /// process (watch mode), so a worker never reuses a stale template.
-    generation: u64,
     mirror: Mirror,
     /// Mutant id → its index in the schema. Absent ids run on the spawn path.
     index: HashMap<String, u64>,
@@ -77,8 +79,13 @@ struct Schema {
     /// bounds the verification run.
     ready_timeout: Duration,
     /// Whether the suite passes on the schema with no mutant active (see
-    /// [`verify`]). Decided once, by the first template up.
-    verified: OnceLock<bool>,
+    /// [`verify`]), checked one slice per worker.
+    verified: Chunks,
+    /// The one template every worker forks from; started by the first worker
+    /// to need it (see [`with_template`]).
+    template: OnceLock<Option<Template>>,
+    template_starting: AtomicBool,
+    template_dead: AtomicBool,
 }
 
 #[derive(Deserialize)]
@@ -99,28 +106,38 @@ impl SchemaRunner {
             inner,
             mutants: Mutex::new(Vec::new()),
             schema: OnceLock::new(),
+            building: AtomicBool::new(false),
+            confirmed: Mutex::new(HashMap::new()),
             served: AtomicU64::new(0),
             spawned: AtomicU64::new(0),
         }
     }
 
+    /// The schema, built by the first worker to ask. `None` while another
+    /// worker is still building it (run this mutant normally) or if it
+    /// couldn't be built.
     fn schema(&self) -> Option<&Schema> {
-        self.schema
-            .get_or_init(|| {
-                let mutants = std::mem::take(&mut *lock_recover(&self.mutants));
-                match self.build_schema(&mutants) {
-                    Ok(schema) => Some(schema),
-                    Err(e) => {
-                        warn!("--schemata: couldn't build the schema, running every mutant normally: {e:#}");
-                        None
-                    }
-                }
-            })
-            .as_ref()
+        if let Some(schema) = self.schema.get() {
+            return schema.as_ref();
+        }
+        if self.building.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        let mutants = std::mem::take(&mut *lock_recover(&self.mutants));
+        let built = match self.build_schema(&mutants) {
+            Ok(schema) => Some(schema),
+            Err(e) => {
+                warn!(
+                    "--schemata: couldn't build the schema, running every mutant normally: {e:#}"
+                );
+                None
+            }
+        };
+        let _ = self.schema.set(built);
+        self.schema.get().and_then(Option::as_ref)
     }
 
     fn build_schema(&self, mutants: &[Arc<Mutant>]) -> Result<Schema> {
-        static GENERATION: AtomicU64 = AtomicU64::new(0);
         let mirror = Mirror::build(&self.inner.tests, self.inner.isolation)?;
         let script = mirror.plugin_dir.join("_fermut_schema.py");
         std::fs::write(&script, SCRIPT_SOURCE)
@@ -195,13 +212,16 @@ impl SchemaRunner {
         serve_args.extend(self.inner.extra_args.iter().map(Into::into));
         serve_args.push(mirror.tests.clone().into());
         Ok(Schema {
-            generation: GENERATION.fetch_add(1, Ordering::Relaxed),
             mirror,
             index,
             serve_args,
             python,
             ready_timeout: self.inner.baseline_timeout,
-            verified: OnceLock::new(),
+            // One slice per worker: built inside the run's rayon pool.
+            verified: Chunks::new(rayon::current_num_threads()),
+            template: OnceLock::new(),
+            template_starting: AtomicBool::new(false),
+            template_dead: AtomicBool::new(false),
         })
     }
 
@@ -218,20 +238,57 @@ impl SchemaRunner {
                 ids
             }
         });
+        if schema.verified.failed() {
+            return None;
+        }
         with_template(schema, |template| {
-            if !*schema
-                .verified
-                .get_or_init(|| verify(template, schema.ready_timeout))
-            {
-                return Ok(None);
+            // Until every slice of the suite has passed with no mutant active,
+            // help check them, then run this mutant normally: no worker waits
+            // on a slice another one is checking.
+            if !schema.verified.passed() {
+                // Check slices until none is left unclaimed: other workers
+                // claim theirs side by side, and a small run that keeps few
+                // workers busy still gets through all of them.
+                while let Some(k) = schema.verified.claim() {
+                    let ok = verify(template, (k, schema.verified.n), schema.ready_timeout);
+                    schema.verified.finish(ok);
+                }
+                if !schema.verified.passed() {
+                    return Ok(None);
+                }
             }
             if template.is_unsafe(idx) {
                 return Ok(None);
             }
-            template
-                .request(idx, ids.as_deref(), all, self.inner.timeout)
-                .map(Some)
+            let mut served = template.request(idx, ids.as_deref(), all, self.inner.timeout)?;
+            // A kill must be the mutant's doing (timeouts go to the spawn path).
+            if served.status.and_then(|s| s.code()) == Some(1) {
+                served.unconfirmed = !self.confirm(template, &served.ran);
+            }
+            Ok(Some(served))
         })
+    }
+
+    /// Whether a kill is the mutant's: the same tests, in the same order, pass
+    /// in a fork with no mutant active. A test can fail in a fork alone, from
+    /// state another test module left behind while the template collected the
+    /// suite (agent-library: a manifest scan at import emptied a registry that
+    /// only a test's teardown restores) — a cold run never imports that
+    /// module, so the kill would be false. Cached per test list: most kills
+    /// come from the first selected test.
+    fn confirm(&self, template: &Template, ran: &[String]) -> bool {
+        if let Some(&ok) = lock_recover(&self.confirmed).get(ran) {
+            return ok;
+        }
+        let ok = matches!(
+            template.request(0, Some(ran), false, self.inner.timeout),
+            Ok(s) if s.error.is_none() && s.status.is_some_and(|st| st.success())
+        );
+        if !ok {
+            warn_unconfirmed(ran);
+        }
+        lock_recover(&self.confirmed).insert(ran.to_vec(), ok);
+        ok
     }
 
     /// Turn a served run into the outcome the spawn path would have produced.
@@ -271,30 +328,103 @@ impl Drop for SchemaRunner {
     }
 }
 
-/// Run the whole suite on the schema with no mutant active. It must pass, as
-/// it did in the baseline: rewriting a function into its switch is meant to
-/// change nothing until a mutant is switched on, and if some construct breaks
-/// that, every verdict from the schema would be suspect. On failure schemata
-/// is off for the run and every mutant spawns.
-fn verify(template: &mut Template, timeout: Duration) -> bool {
-    let (ok, why) = match template.request(0, None, false, timeout) {
-        Ok(s) if s.error.is_none() && s.status.is_some_and(|st| st.success()) => {
-            (true, String::new())
+/// Run slice `chunk = (k, n)` of the suite on the schema with no mutant
+/// active (every slice, across the workers, covers the suite), every test even
+/// past a failure. Tests that fail, crash or hang here don't turn schemata
+/// off: a kill from the schema only stands once the same tests pass with no
+/// mutant active ([`SchemaRunner::confirm`]), and a timeout never does, so
+/// they just cost those mutants a normal run. This reports them, and resumes a slice past a test
+/// that took its child down (a crash: macOS DNS, proxy and Kerberos frameworks
+/// aren't fork-safe; or a hang). Only a broken helper (a traceback) fails it.
+fn verify(template: &Template, chunk: (usize, usize), timeout: Duration) -> bool {
+    let mut req = serde_json::json!({"idx": 0, "chunk": chunk, "all": true});
+    let (mut failing, mut lost) = (Vec::new(), Vec::new());
+    let result = loop {
+        match template.send(&req, timeout) {
+            Ok(s) if s.error.is_none() => {
+                failing.extend(s.result.failures.iter().cloned());
+                let died = s.status.is_none_or(crash_signal);
+                match s.result.unfinished {
+                    // A repeat means the resume didn't skip it: stop there.
+                    Some(test) if died && !lost.contains(&test) => {
+                        req["after"] = test.clone().into();
+                        lost.push(test);
+                    }
+                    _ => break Ok(()),
+                }
+            }
+            Ok(s) => break Err(s.error.unwrap_or_default()),
+            Err(e) => break Err(format!("{e:#}")),
         }
-        Ok(s) => (
-            false,
-            match (s.status, s.error) {
-                (_, Some(tb)) => tb,
-                (None, _) => "timed out".into(),
-                (Some(st), _) => format!("{st}, failing: {}", s.result.failures.join(", ")),
-            },
-        ),
-        Err(e) => (false, format!("{e:#}")),
     };
-    if !ok {
-        warn!("--schemata: the suite doesn't pass on the schema with no mutant active ({why}); running every mutant normally. Please report this.");
+    failing.retain(|t| !lost.contains(t));
+    if !failing.is_empty() || !lost.is_empty() {
+        info!(
+            "schemata: with no mutant active, {} test(s) fail and {} crash or hang in a forked \
+             run ({}); mutants they kill run normally",
+            failing.len(),
+            lost.len(),
+            failing
+                .iter()
+                .chain(&lost)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
-    ok
+    match result {
+        Ok(()) => true,
+        Err(why) => {
+            // Once: with the check split across workers, several slices can fail.
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                warn!("--schemata: the schema helper failed checking the suite ({why}); running every mutant normally. Please report this.");
+            }
+            false
+        }
+    }
+}
+
+/// The no-mutant check, split into one slice of the suite per worker so no
+/// worker runs the whole suite while the rest wait (typer: ~60 s).
+struct Chunks {
+    n: usize,
+    next: AtomicUsize,
+    done: AtomicUsize,
+    failed: AtomicBool,
+}
+
+impl Chunks {
+    fn new(n: usize) -> Self {
+        Self {
+            n: n.max(1),
+            next: AtomicUsize::new(0),
+            done: AtomicUsize::new(0),
+            failed: AtomicBool::new(false),
+        }
+    }
+
+    /// A slice nobody has checked yet, if any.
+    fn claim(&self) -> Option<usize> {
+        let k = self.next.fetch_add(1, Ordering::AcqRel);
+        (k < self.n).then_some(k)
+    }
+
+    fn finish(&self, ok: bool) {
+        if !ok {
+            self.failed.store(true, Ordering::Release);
+        }
+        self.done.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Every slice checked, none failed.
+    fn passed(&self) -> bool {
+        !self.failed() && self.done.load(Ordering::Acquire) >= self.n
+    }
+
+    fn failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
 }
 
 /// Whether a served run can stand as the mutant's verdict. The schema has no
@@ -309,7 +439,41 @@ fn usable(served: &Served) -> bool {
         }
         return false;
     }
-    served.status.and_then(|s| s.code()) != Some(4)
+    // A crashed child (a fork-unsafe system framework, macOS) isn't the
+    // mutant's verdict either: pytest scores a signal death as a kill.
+    // A timeout isn't one either: a fork skips the import a cold run pays, so
+    // the budget means something else, and a fork-unsafe framework can hang
+    // it on a path only the mutant takes. Rare; the spawn path decides.
+    served.status.is_some()
+        && !served.unconfirmed
+        && !served.status.is_some_and(crash_signal)
+        && served.status.and_then(|s| s.code()) != Some(4)
+}
+
+fn warn_unconfirmed(ran: &[String]) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        warn!(
+            "--schemata: {} fails in a forked run even with no mutant active; mutants it kills run normally",
+            ran.join(", ")
+        );
+    }
+}
+
+/// Died of a crash signal. A timeout's kill isn't one: a timed-out run has no
+/// status at all.
+fn crash_signal(status: ExitStatus) -> bool {
+    matches!(
+        status.signal(),
+        Some(
+            libc::SIGSEGV
+                | libc::SIGBUS
+                | libc::SIGABRT
+                | libc::SIGILL
+                | libc::SIGFPE
+                | libc::SIGTRAP
+        )
+    )
 }
 
 impl Runner for SchemaRunner {
@@ -418,6 +582,11 @@ struct Served {
     wall: Duration,
     /// Traceback when the child itself broke rather than a test failing.
     error: Option<String>,
+    /// The tests the child ran, in order.
+    ran: Vec<String>,
+    /// A kill that the same tests reproduce with no mutant active: not the
+    /// mutant's doing (see [`SchemaRunner::confirm`]).
+    unconfirmed: bool,
 }
 
 #[derive(Deserialize)]
@@ -445,15 +614,21 @@ struct Done {
     unfinished: Option<String>,
     #[serde(default)]
     error: Option<String>,
+    #[serde(default)]
+    ran: Vec<String>,
 }
 
-/// A worker's template process and the protocol over its stdio.
+/// The template process every worker shares, and the protocol over its
+/// stdio: requests carry an id, the template forks each at once and answers
+/// with that id, so many children run side by side under one parent that
+/// imported and collected the suite once.
 struct Template {
-    child: Child,
-    stdin: ChildStdin,
-    /// Lines from the template's stdout, read on a thread so every wait can
-    /// have a deadline.
-    lines: Receiver<String>,
+    child: Mutex<Child>,
+    stdin: Mutex<ChildStdin>,
+    /// Requests waiting on an answer, by id; the reader thread routes lines to
+    /// them and drops them all when the template exits.
+    waiting: Arc<Mutex<HashMap<u64, mpsc::Sender<String>>>>,
+    next_id: AtomicU64,
     /// Index ranges of functions that ran inside the template before forking.
     unsafe_ranges: Vec<(u64, u64)>,
 }
@@ -474,22 +649,26 @@ impl Template {
             .context("starting a schemata template")?;
         let stdin = child.stdin.take().context("template stdin")?;
         let stdout = child.stdout.take().context("template stdout")?;
-        let (tx, lines) = mpsc::channel();
+        let waiting: Arc<Mutex<HashMap<u64, mpsc::Sender<String>>>> = Arc::default();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let routes = Arc::clone(&waiting);
         std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
+            let mut lines = BufReader::new(stdout).lines();
+            if let Some(Ok(line)) = lines.next() {
+                let _ = ready_tx.send(line);
+            }
+            for line in lines {
                 let Ok(line) = line else { break };
-                if tx.send(line).is_err() {
-                    break;
+                let id = serde_json::from_str::<Routed>(&line)
+                    .ok()
+                    .and_then(|r| r.id);
+                if let Some(tx) = id.and_then(|id| lock_recover(&routes).get(&id).cloned()) {
+                    let _ = tx.send(line);
                 }
             }
+            lock_recover(&routes).clear(); // every waiter sees the exit
         });
-        let mut template = Self {
-            child,
-            stdin,
-            lines,
-            unsafe_ranges: Vec::new(),
-        };
-        let line = template.recv(schema.ready_timeout).with_context(|| {
+        let line = recv(&ready_rx, schema.ready_timeout).with_context(|| {
             let stderr = std::fs::read_to_string(log.path()).unwrap_or_default();
             format!(
                 "template never became ready; its stderr:\n{}",
@@ -501,40 +680,63 @@ impl Template {
         if !ready.ready {
             bail!("template refused: {}", ready.error.unwrap_or_default());
         }
-        template.unsafe_ranges = ready.unsafe_ranges;
-        Ok(template)
+        Ok(Self {
+            child: Mutex::new(child),
+            stdin: Mutex::new(stdin),
+            waiting,
+            next_id: AtomicU64::new(0),
+            unsafe_ranges: ready.unsafe_ranges,
+        })
     }
 
     fn is_unsafe(&self, idx: u64) -> bool {
         in_ranges(&self.unsafe_ranges, idx)
     }
 
-    fn recv(&self, timeout: Duration) -> Result<String> {
-        match self.lines.recv_timeout(timeout) {
-            Ok(line) => Ok(line),
-            Err(RecvTimeoutError::Timeout) => bail!("no answer within {timeout:?}"),
-            Err(RecvTimeoutError::Disconnected) => bail!("the template exited"),
-        }
-    }
-
     fn request(
-        &mut self,
+        &self,
         idx: u64,
         ids: Option<&[String]>,
         all: bool,
         timeout: Duration,
     ) -> Result<Served> {
-        let req = serde_json::json!({"idx": idx, "ids": ids, "all": all});
-        writeln!(self.stdin, "{req}").context("sending a request")?;
-        self.stdin.flush().context("sending a request")?;
+        self.send(
+            &serde_json::json!({"idx": idx, "ids": ids, "all": all}),
+            timeout,
+        )
+    }
+
+    fn send(&self, req: &serde_json::Value, timeout: Duration) -> Result<Served> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
+        lock_recover(&self.waiting).insert(id, tx);
+        let answer = self.exchange(id, req, &rx, timeout);
+        lock_recover(&self.waiting).remove(&id);
+        answer
+    }
+
+    fn exchange(
+        &self,
+        id: u64,
+        req: &serde_json::Value,
+        rx: &Receiver<String>,
+        timeout: Duration,
+    ) -> Result<Served> {
+        let mut req = req.clone();
+        req["id"] = id.into();
+        {
+            let mut stdin = lock_recover(&self.stdin);
+            writeln!(stdin, "{req}").context("sending a request")?;
+            stdin.flush().context("sending a request")?;
+        }
         let pid: Pid =
-            serde_json::from_str(&self.recv(FORK_TIMEOUT)?).context("parsing the fork reply")?;
+            serde_json::from_str(&recv(rx, FORK_TIMEOUT)?).context("parsing the fork reply")?;
         let started = Instant::now();
-        let (line, timed_out) = match self.recv(timeout) {
+        let (line, timed_out) = match recv(rx, timeout) {
             Ok(line) => (line, false),
-            Err(_) if !matches!(self.child.try_wait(), Ok(Some(_))) => {
+            Err(_) if !matches!(lock_recover(&self.child).try_wait(), Ok(Some(_))) => {
                 super::process_group::kill_pgid(pid.pid);
-                (self.recv(REAP_GRACE)?, true)
+                (recv(rx, REAP_GRACE)?, true)
             }
             Err(e) => return Err(e),
         };
@@ -550,67 +752,71 @@ impl Template {
             },
             wall,
             error: done.error,
+            ran: done.ran,
+            unconfirmed: false,
         })
+    }
+}
+
+/// Just enough of a template line to route it.
+#[derive(Deserialize)]
+struct Routed {
+    id: Option<u64>,
+}
+
+fn recv(rx: &Receiver<String>, timeout: Duration) -> Result<String> {
+    match rx.recv_timeout(timeout) {
+        Ok(line) => Ok(line),
+        Err(RecvTimeoutError::Timeout) => bail!("no answer within {timeout:?}"),
+        Err(RecvTimeoutError::Disconnected) => bail!("the template exited"),
     }
 }
 
 impl Drop for Template {
     fn drop(&mut self) {
         // EOF on stdin ends it cleanly; the kill covers a wedged one.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let child = self.child.get_mut().unwrap_or_else(|e| e.into_inner());
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }
 
-enum Slot {
-    Live(Template),
-    Dead,
-}
-
-thread_local! {
-    /// This worker's template, tagged with the schema generation it serves.
-    static TEMPLATE: RefCell<Option<(u64, Slot)>> = const { RefCell::new(None) };
-}
-
-/// Run `f` on this worker's template, starting one on first use. `None` →
-/// run the mutant on the spawn path. A template that failed to start, or
-/// whose request failed (it may be wedged, or its replies out of step), is
-/// dropped for the rest of the run: one bad environment costs one warning,
-/// not a retry per mutant.
-fn with_template<T>(
-    schema: &Schema,
-    f: impl FnOnce(&mut Template) -> Result<Option<T>>,
-) -> Option<T> {
-    TEMPLATE.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        if !matches!(&*slot, Some((generation, _)) if *generation == schema.generation) {
-            let started = match Template::start(schema) {
-                Ok(t) => Slot::Live(t),
-                Err(e) => {
-                    warn_once(&format!(
-                        "a template couldn't start, its worker runs mutants normally: {e:#}"
-                    ));
-                    Slot::Dead
-                }
-            };
-            *slot = Some((schema.generation, started));
-        }
-        let Some((_, Slot::Live(template))) = slot.as_mut() else {
-            return None;
-        };
-        match f(template) {
-            Ok(out) => out,
-            Err(e) => {
-                warn_once(&format!(
-                    "a template stopped answering, its worker runs mutants normally: {e:#}"
-                ));
-                if let Some((_, s)) = slot.as_mut() {
-                    *s = Slot::Dead; // drops (and kills) the template
-                }
-                None
+/// Run `f` on the shared template, which the first worker to ask starts while
+/// the others run their mutants normally instead of waiting on it. `None` →
+/// run the mutant on the spawn path. A template that failed to start, or whose
+/// request failed (it may be wedged), is off for the rest of the run: one bad
+/// environment costs one warning, not a retry per mutant.
+fn with_template<T>(schema: &Schema, f: impl FnOnce(&Template) -> Result<Option<T>>) -> Option<T> {
+    if schema.template_dead.load(Ordering::Acquire) {
+        return None;
+    }
+    let template = match schema.template.get() {
+        Some(t) => t.as_ref()?,
+        None => {
+            if schema.template_starting.swap(true, Ordering::AcqRel) {
+                return None;
             }
+            let started = Template::start(schema)
+                .map_err(|e| {
+                    warn_once(&format!(
+                        "the template couldn't start, running every mutant normally: {e:#}"
+                    ));
+                })
+                .ok();
+            let _ = schema.template.set(started);
+            schema.template.get()?.as_ref()?
         }
-    })
+    };
+    match f(template) {
+        Ok(out) => out,
+        Err(e) => {
+            warn_once(&format!(
+                "the template stopped answering, running the remaining mutants normally: {e:#}"
+            ));
+            schema.template_dead.store(true, Ordering::Release);
+            None
+        }
+    }
 }
 
 fn warn_once(msg: &str) {
@@ -640,6 +846,8 @@ mod tests {
             result: RunResult::default(),
             wall: Duration::ZERO,
             error: error.map(str::to_string),
+            ran: Vec::new(),
+            unconfirmed: false,
         }
     }
 
@@ -647,7 +855,10 @@ mod tests {
     fn verdicts_from_the_schema_stand_except_child_failures_and_unknown_ids() {
         assert!(usable(&served(Some(0), None)));
         assert!(usable(&served(Some(1), None)));
-        assert!(usable(&served(None, None)), "a timeout is a verdict");
+        assert!(
+            !usable(&served(None, None)),
+            "a timeout: a forked run is faster (no import) and can hang where a cold one wouldn't"
+        );
         assert!(
             !usable(&served(Some(3), Some("Traceback ..."))),
             "the child broke itself"
@@ -688,10 +899,10 @@ mod tests {
     }
 
     /// A schema whose "template" is `sh -c script`, so the protocol and its
-    /// failure handling run without pytest. Each schema gets its own
-    /// generation, so a test never inherits a template from another.
+    /// failure handling run without pytest. Every script gets [`FAKE`]: in its
+    /// request loop `$id` is the request's id and `reply '<json object>'`
+    /// answers it.
     fn fake_schema(dir: &std::path::Path, script: &str) -> Schema {
-        static NEXT: AtomicU64 = AtomicU64::new(1 << 62);
         let dir = dir.canonicalize().unwrap();
         std::fs::create_dir_all(dir.join("tests")).unwrap();
         std::fs::write(dir.join("pyproject.toml"), "").unwrap();
@@ -699,14 +910,84 @@ mod tests {
             super::super::build_mirror(&dir.join("tests"), crate::config::IsolationMode::Copy)
                 .unwrap();
         Schema {
-            generation: NEXT.fetch_add(1, Ordering::Relaxed),
             mirror,
             index: HashMap::new(),
-            serve_args: vec!["-c".into(), script.into()],
+            serve_args: vec!["-c".into(), format!("{FAKE}{script}").into()],
             python: "/bin/sh".into(),
             ready_timeout: Duration::from_secs(10),
-            verified: OnceLock::new(),
+            verified: Chunks::new(1),
+            template: OnceLock::new(),
+            template_starting: AtomicBool::new(false),
+            template_dead: AtomicBool::new(false),
         }
+    }
+
+    const FAKE: &str = r#"reply() { printf '{"id":%s,%s\n' "$id" "${1#\{}"; }
+idof() { id=$(printf %s "$1" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); }
+"#;
+
+    #[test]
+    fn the_template_answers_concurrent_requests_out_of_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Each request answers after `idx` seconds, in its own background job.
+        let schema = fake_schema(
+            tmp.path(),
+            r#"echo '{"ready":true}'
+while read req; do
+  idof "$req"; reply '{"pid":0}'
+  idx=$(printf %s "$req" | sed -n 's/.*"idx":\([0-9]*\).*/\1/p')
+  ( sleep "$idx"; reply "{\"status\":$((idx << 8))}" ) &
+done"#,
+        );
+        let t = Template::start(&schema).unwrap();
+        let started = Instant::now();
+        let (slow, fast) = std::thread::scope(|s| {
+            let slow = s.spawn(|| t.request(2, None, false, Duration::from_secs(10)));
+            std::thread::sleep(Duration::from_millis(200));
+            let fast = s.spawn(|| t.request(0, None, false, Duration::from_secs(10)));
+            (slow.join().unwrap().unwrap(), fast.join().unwrap().unwrap())
+        });
+        assert_eq!(
+            slow.status.and_then(|s| s.code()),
+            Some(2),
+            "its own answer"
+        );
+        assert_eq!(
+            fast.status.and_then(|s| s.code()),
+            Some(0),
+            "its own answer"
+        );
+        assert!(
+            fast.wall < Duration::from_secs(1),
+            "not queued behind the slow one"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "ran side by side"
+        );
+    }
+
+    fn fake_runner(dir: &std::path::Path) -> SchemaRunner {
+        SchemaRunner::new(PytestRunner::new(super::super::pytest::PytestConfig {
+            tests: dir.join("tests"),
+            timeout: Duration::from_secs(30),
+            baseline_timeout: Duration::from_secs(30),
+            hypothesis_seed: None,
+            extra_args: Vec::new(),
+            isolation: crate::config::IsolationMode::Copy,
+            coverage: None,
+            python: Some("/bin/false".into()),
+            exe: "pytest",
+            smart_order: false,
+            kill_order: Arc::new(crate::kill_order::KillOrder::default()),
+            kill_sink: Arc::new(Mutex::new(Vec::new())),
+            record_kill_sets: false,
+            kill_set_sink: Arc::new(Mutex::new(Vec::new())),
+            learn_killer: false,
+            key_base: dir.to_path_buf(),
+            plugin: false,
+            baseline_ids: None,
+        }))
     }
 
     /// A template that answers every request with pid 0 (never a real group,
@@ -714,7 +995,7 @@ mod tests {
     fn answering(done: &str, delay: &str) -> String {
         format!(
             "echo '{{\"ready\":true,\"unsafe\":[[2,4]]}}'; \
-             while read req; do echo '{{\"pid\":0}}'; sleep {delay}; echo '{done}'; done"
+             while read req; do idof \"$req\"; reply '{{\"pid\":0}}'; sleep {delay}; reply '{done}'; done"
         )
     }
 
@@ -728,7 +1009,7 @@ mod tests {
                 "0",
             ),
         );
-        let mut t = Template::start(&schema).unwrap();
+        let t = Template::start(&schema).unwrap();
         assert!(t.is_unsafe(3) && !t.is_unsafe(5));
         let s = t.request(5, None, false, Duration::from_secs(10)).unwrap();
         assert_eq!(s.status.and_then(|st| st.code()), Some(1));
@@ -756,7 +1037,7 @@ mod tests {
     fn a_run_past_its_timeout_has_no_status() {
         let tmp = tempfile::tempdir().unwrap();
         let schema = fake_schema(tmp.path(), &answering(r#"{"status":9}"#, "1"));
-        let mut t = Template::start(&schema).unwrap();
+        let t = Template::start(&schema).unwrap();
         let s = t
             .request(1, None, false, Duration::from_millis(100))
             .unwrap();
@@ -768,25 +1049,132 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let schema = fake_schema(
             tmp.path(),
-            r#"echo '{"ready":true}'; read req; echo '{"pid":0}'; exit 0"#,
+            r#"echo '{"ready":true}'; read req; idof "$req"; reply '{"pid":0}'; exit 0"#,
         );
-        let mut t = Template::start(&schema).unwrap();
+        let t = Template::start(&schema).unwrap();
         assert!(t.request(1, None, false, Duration::from_secs(10)).is_err());
     }
 
     #[test]
-    fn verify_passes_only_a_clean_run_with_no_mutant_active() {
+    fn chunks_hand_out_each_slice_once_and_open_when_all_pass() {
+        let c = Chunks::new(3);
+        assert_eq!((c.claim(), c.claim()), (Some(0), Some(1)));
+        c.finish(true);
+        c.finish(true);
+        assert!(!c.passed(), "slice 2 not checked yet");
+        assert_eq!(c.claim(), Some(2));
+        assert_eq!(c.claim(), None, "every slice handed out");
+        c.finish(true);
+        assert!(c.passed());
+
+        let bad = Chunks::new(2);
+        let _ = (bad.claim(), bad.claim());
+        bad.finish(false);
+        bad.finish(true);
+        assert!(bad.failed());
+        assert!(!bad.passed(), "one failed slice keeps the schema off");
+    }
+
+    #[test]
+    fn verify_resumes_a_slice_past_a_test_whose_fork_crashed() {
+        let check = |resumed: &str| {
+            let tmp = tempfile::tempdir().unwrap();
+            // Crashes (SIGSEGV) on t.py::net unless asked to resume after it.
+            let script = format!(
+                r#"echo '{{"ready":true}}'
+while read req; do
+  idof "$req"; reply '{{"pid":0}}'
+  case "$req" in
+    *after*) reply '{resumed}' ;;
+    *) reply '{{"status":11,"unfinished":"t.py::net"}}' ;;
+  esac
+done"#
+            );
+            let schema = fake_schema(tmp.path(), &script);
+            verify(
+                &Template::start(&schema).unwrap(),
+                (0, 1),
+                Duration::from_secs(10),
+            )
+        };
+        // Each returns at all only because the slice resumed past t.py::net.
+        assert!(check(r#"{"status":0}"#), "crash skipped, rest passed");
+        assert!(
+            check(r#"{"status":256,"failed":["t.py::a"]}"#),
+            "a failure is left to kill confirmation"
+        );
+        assert!(
+            check(r#"{"status":11,"unfinished":"t.py::net"}"#),
+            "the same test crashing again ends the slice instead of looping"
+        );
+        assert!(
+            !check(r#"{"status":768,"error":"Traceback"}"#),
+            "a broken helper still fails it"
+        );
+    }
+
+    #[test]
+    fn a_crashed_child_is_not_a_verdict() {
+        let served = |raw: i32| Served {
+            status: Some(ExitStatus::from_raw(raw)),
+            result: RunResult::default(),
+            wall: Duration::ZERO,
+            error: None,
+            ran: Vec::new(),
+            unconfirmed: false,
+        };
+        assert!(!usable(&served(libc::SIGSEGV)));
+        assert!(!usable(&served(libc::SIGABRT)));
+        assert!(usable(&served(1 << 8)), "exit 1: a real kill");
+        assert!(usable(&served(0)));
+    }
+
+    #[test]
+    fn a_kill_counts_only_if_its_tests_pass_with_no_mutant_active() {
+        for (no_mutant, kill_stands) in [
+            (r#"{"status":0}"#, true),
+            (r#"{"status":256,"failed":["t.py::a"]}"#, false),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let log = tmp.path().canonicalize().unwrap().join("requests");
+            let script = format!(
+                "echo '{{\"ready\":true}}'\n\
+                 while read req; do echo \"$req\" >> '{}'; idof \"$req\"; reply '{{\"pid\":0}}'; reply '{no_mutant}'; done",
+                log.display()
+            );
+            let schema = fake_schema(tmp.path(), &script);
+            let runner = fake_runner(&tmp.path().canonicalize().unwrap());
+            let t = Template::start(&schema).unwrap();
+            let ran = vec!["t.py::a".to_string(), "t.py::b".to_string()];
+            assert_eq!(runner.confirm(&t, &ran), kill_stands);
+            assert_eq!(runner.confirm(&t, &ran), kill_stands, "cached");
+            let requests = std::fs::read_to_string(&log).unwrap();
+            assert_eq!(
+                requests.lines().count(),
+                1,
+                "one fork per test list: {requests}"
+            );
+            assert!(
+                requests.contains(r#""idx":0"#) && requests.contains(r#"["t.py::a","t.py::b"]"#),
+                "the same tests, no mutant active: {requests}"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_fails_only_when_the_helper_itself_breaks() {
         let check = |done: &str, delay: &str, timeout: Duration| {
             let tmp = tempfile::tempdir().unwrap();
             let schema = fake_schema(tmp.path(), &answering(done, delay));
-            verify(&mut Template::start(&schema).unwrap(), timeout)
+            verify(&Template::start(&schema).unwrap(), (0, 1), timeout)
         };
         let secs = Duration::from_secs(10);
         assert!(check(r#"{"status":0}"#, "0", secs));
-        assert!(!check(r#"{"status":256,"failed":["t.py::a"]}"#, "0", secs));
+        // Failing and hung tests are left to each kill's confirmation.
+        assert!(check(r#"{"status":256,"failed":["t.py::a"]}"#, "0", secs));
+        assert!(check(r#"{"status":0}"#, "1", Duration::from_millis(100)));
         assert!(!check(r#"{"status":768,"error":"Traceback"}"#, "0", secs));
-        assert!(!check(r#"{"status":0}"#, "1", Duration::from_millis(100)));
-        assert!(!check("not json", "0", secs));
+        assert!(!check(r#"{"not":"a result"}"#, "0", secs));
     }
 
     #[test]
@@ -827,26 +1215,7 @@ mod tests {
         let dir = tmp.path().canonicalize().unwrap();
         std::fs::create_dir_all(dir.join("tests")).unwrap();
         std::fs::write(dir.join("pyproject.toml"), "").unwrap();
-        let runner = SchemaRunner::new(PytestRunner::new(super::super::pytest::PytestConfig {
-            tests: dir.join("tests"),
-            timeout: Duration::from_secs(30),
-            baseline_timeout: Duration::from_secs(30),
-            hypothesis_seed: None,
-            extra_args: Vec::new(),
-            isolation: crate::config::IsolationMode::Copy,
-            coverage: None,
-            python: Some("/bin/false".into()),
-            exe: "pytest",
-            smart_order: false,
-            kill_order: Arc::new(crate::kill_order::KillOrder::default()),
-            kill_sink: Arc::new(Mutex::new(Vec::new())),
-            record_kill_sets: false,
-            kill_set_sink: Arc::new(Mutex::new(Vec::new())),
-            learn_killer: false,
-            key_base: dir.clone(),
-            plugin: false,
-            baseline_ids: None,
-        }));
+        let runner = fake_runner(&dir);
         runner.prepare(&[]).unwrap();
         assert!(runner.schema().is_none());
     }

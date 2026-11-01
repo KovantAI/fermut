@@ -688,8 +688,9 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
     // run tests against ~megabytes of source.
     //
     // What we prune:
-    //   - hidden *directories* (`.git`, `.venv`, `.claude`, `.pytest_cache`, ...) —
-    //     the bulk of the junk, via the `filter_entry` predicate below.
+    //   - named junk directories (`.git`, `.venv`, `.claude`, `.pytest_cache`, ...;
+    //     see `util::is_pruned_dir_name`). Other hidden dirs like `.github` are
+    //     kept: tests may read scripts or fixtures from them.
     //   - `__pycache__` directories and stray `.pyc`/`.pyo` files. CRITICAL for
     //     correctness, not just size: the mirror is reused across mutants, and a
     //     stale compiled `.pyc` whose (mtime, size) still validates against the
@@ -702,7 +703,7 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
     //
     // What we keep: hidden *files*. Dotfiles like `.env`, `.python-version`,
     // `.coveragerc`, `.flake8` are tiny but can change test behavior, so `hidden`
-    // filtering stays off and we only drop hidden directories. `require_git(false)`
+    // filtering stays off and we only drop the named directories. `require_git(false)`
     // keeps `.gitignore` honored even though the walk root need not be a git
     // checkout. Third-party deps load from the ambient interpreter (the `pytest`
     // on PATH), never from a copied virtualenv, so dropping `.venv` is safe.
@@ -719,8 +720,8 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
             }
             let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
             let name = entry.file_name().to_str();
-            // Drop hidden directories and `__pycache__` (stale bytecode).
-            !(is_dir && name.is_some_and(|n| n.starts_with('.') || n == "__pycache__"))
+            // Drop junk directories and `__pycache__` (stale bytecode).
+            !(is_dir && name.is_some_and(crate::util::is_pruned_dir_name))
         })
         .build();
     for entry in walker {
@@ -948,7 +949,13 @@ mod tests {
         // Hidden *file* — tiny config that can affect tests; must be kept.
         fs::write(s.join(".env"), "K=v\n").unwrap();
 
-        // Hidden *directories* — the bulk of the junk; must be pruned.
+        // Non-junk hidden dir — tests may run scripts from it; must be kept.
+        fs::create_dir_all(s.join(".github/scripts")).unwrap();
+        fs::write(s.join(".github/scripts/tool.py"), "x = 1\n").unwrap();
+
+        // Named junk directories — the bulk of the junk; must be pruned.
+        fs::create_dir_all(s.join(".git/objects")).unwrap();
+        fs::write(s.join(".git/objects/big"), "junk").unwrap();
         fs::create_dir_all(s.join(".venv/lib")).unwrap();
         fs::write(s.join(".venv/lib/big"), "junk").unwrap();
         fs::create_dir_all(s.join(".claude")).unwrap();
@@ -987,6 +994,11 @@ mod tests {
             mirror.join(".env").exists(),
             "hidden config file must be kept"
         );
+        assert!(
+            mirror.join(".github/scripts/tool.py").exists(),
+            "non-junk hidden dir must be kept"
+        );
+        assert!(!mirror.join(".git").exists(), "junk dir must be pruned");
         assert!(!mirror.join(".venv").exists(), "hidden dir must be pruned");
         assert!(
             !mirror.join(".claude").exists(),

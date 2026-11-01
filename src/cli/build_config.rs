@@ -669,25 +669,9 @@ fn is_pruned_dir(entry: &walkdir::DirEntry) -> bool {
     if !entry.file_type().is_dir() {
         return false;
     }
-    matches!(
-        entry.file_name().to_str(),
-        Some(
-            ".git"
-                | ".hg"
-                | ".svn"
-                | ".venv"
-                | "venv"
-                | "node_modules"
-                | "__pycache__"
-                | "site-packages"
-                | ".fermut"
-                | ".tox"
-                | ".nox"
-                | ".mypy_cache"
-                | ".pytest_cache"
-                | ".ruff_cache"
-        )
-    )
+    entry.file_name().to_str().is_some_and(|n| {
+        crate::util::is_pruned_dir_name(n) || matches!(n, "venv" | "node_modules" | "site-packages")
+    })
 }
 
 fn parse_isolation_env(s: String) -> Option<IsolationMode> {

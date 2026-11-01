@@ -64,10 +64,9 @@ pub(crate) fn kill_group(child: &mut Child) {
     let _ = child.kill();
 }
 
-/// SIGKILL the process group led by `pid`. Also used directly for a process
-/// fermut has no `Child` for: a schemata child forked by the template.
+/// SIGKILL the process group led by `pid`.
 #[cfg(unix)]
-pub(crate) fn kill_pgid(pid: u32) {
+fn kill_pgid(pid: u32) {
     // Refuse what isn't a real leader pid: kill(-0) would signal fermut's own
     // group and an overflowing cast a different process.
     let Ok(pid) = i32::try_from(pid) else { return };

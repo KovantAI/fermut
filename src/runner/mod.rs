@@ -105,11 +105,26 @@ impl std::fmt::Display for BaselineStatus {
     }
 }
 
-/// Build a one-shot mirror for a baseline run. Unlike [`with_worker_mirror`],
-/// this isn't cached in a thread-local — the baseline runs once on the calling
-/// thread before the rayon pool spins up, so there is nothing to reuse.
+/// Build a one-shot, unprecompiled mirror (tests).
+#[cfg(test)]
 pub(crate) fn build_mirror(tests: &Path, mode: IsolationMode) -> Result<Mirror> {
     Mirror::build(tests, mode)
+}
+
+/// Build a one-shot mirror for a baseline run, precompiled like every worker
+/// mirror: the baseline must see the same tree as the mutant runs
+/// (`__pycache__` included), or a test that lists the package passes the
+/// baseline and fails every mutant. Unlike [`with_worker_mirror`], this isn't
+/// cached in a thread-local — the baseline runs once on the calling thread
+/// before the rayon pool spins up, so there is nothing to reuse.
+pub(crate) fn build_baseline_mirror(
+    tests: &Path,
+    mode: IsolationMode,
+    python: Option<&Path>,
+) -> Result<Mirror> {
+    let mirror = Mirror::build(tests, mode)?;
+    precompile(&mirror.root, &python::pytest_interpreter(python));
+    Ok(mirror)
 }
 
 /// PYTHONPATH that makes the mirror's (possibly mutated) package win over an
@@ -192,13 +207,14 @@ pub(crate) fn configure_mirror_cmd(cmd: &mut std::process::Command, mirror: &Mir
 pub(crate) fn run_patched<F>(
     tests: &Path,
     mode: IsolationMode,
+    python: Option<&Path>,
     mutant: &Mutant,
     f: F,
 ) -> Result<MutantOutcome>
 where
     F: FnOnce(&Mirror) -> Result<MutantOutcome>,
 {
-    with_worker_mirror(tests, mode, |mirror| {
+    with_worker_mirror(tests, mode, python, |mirror| {
         let _guard = apply_patch(mirror, mutant)?;
         f(mirror)
     })
@@ -651,8 +667,14 @@ thread_local! {
 
 /// Run `f` against this worker's mirror, building one on first call.
 /// The mirror is rebuilt only if `tests` or isolation mode changes — neither
-/// should within a run.
-pub(crate) fn with_worker_mirror<F, T>(tests: &Path, mode: IsolationMode, f: F) -> Result<T>
+/// should within a run. A fresh mirror is precompiled for `python` (the
+/// runner's `--python`, else pytest's interpreter); see [`precompile`].
+pub(crate) fn with_worker_mirror<F, T>(
+    tests: &Path,
+    mode: IsolationMode,
+    python: Option<&Path>,
+    f: F,
+) -> Result<T>
 where
     F: FnOnce(&Mirror) -> Result<T>,
 {
@@ -661,12 +683,46 @@ where
         let needs_build = !matches!(&*slot, Some((p, m, _)) if p == tests && *m == mode);
         if needs_build {
             *slot = None;
-            let mirror = Mirror::build(tests, mode)?;
+            let mirror = build_baseline_mirror(tests, mode, python)?;
             *slot = Some((tests.to_path_buf(), mode, mirror));
         }
         let mirror = &slot.as_ref().unwrap().2;
         f(mirror)
     })
+}
+
+/// Compile the mirror's sources to checked-hash `.pyc` (PEP 552), so each
+/// per-mutant process loads untouched project modules instead of recompiling
+/// them (~3–12% per spawn on large projects). Safe against the stale-`.pyc`
+/// false survivor that `copy_dir_all` prunes for: a checked-hash `.pyc` is
+/// validated by a hash of the source bytes, not (mtime, size), so the mutated
+/// file always misses and compiles from source, and `PYTHONDONTWRITEBYTECODE`
+/// stops its bytecode being written back. Never use `unchecked-hash` here.
+/// Best effort: a failure (unparseable file, wrong interpreter) only costs
+/// the speedup.
+fn precompile(root: &Path, python: &Path) {
+    let out = std::process::Command::new(python)
+        .args([
+            "-m",
+            "compileall",
+            "-q",
+            "-j",
+            "0",
+            "--invalidation-mode",
+            "checked-hash",
+        ])
+        .arg(root)
+        .stdin(std::process::Stdio::null())
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => tracing::debug!(
+            "precompiling mirror: compileall exited {}: {}",
+            o.status,
+            tail_lines(&String::from_utf8_lossy(&o.stdout), 5)
+        ),
+        Err(e) => tracing::debug!("precompiling mirror: can't run {}: {e}", python.display()),
+    }
 }
 
 pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
@@ -1270,5 +1326,79 @@ mod tests {
             BaselineStatus::Failed { output } => assert!(output.contains("boom"), "{output}"),
             BaselineStatus::Passed { .. } => panic!("exit 3 must fail the baseline"),
         }
+    }
+
+    /// A baseline that ran without the `__pycache__` the mutant mirrors get
+    /// would pass a package-listing test that every mutant run then fails.
+    #[test]
+    fn baseline_mirror_is_precompiled_like_worker_mirrors() {
+        let py = super::interpreter(None);
+        if std::process::Command::new(&py)
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return; // no Python on this box
+        }
+        let (_tmp, root, tests, _src) = fake_project();
+        fs::write(root.join("m.py"), "X = 1\n").unwrap();
+        let mirror = super::build_baseline_mirror(&tests, IsolationMode::Copy, Some(&py)).unwrap();
+        assert!(mirror.root.join("__pycache__").is_dir());
+    }
+
+    /// The stale-`.pyc` false survivor, against a precompiled mirror: a
+    /// same-size mutation with the original mtime would still validate a
+    /// timestamp `.pyc`, so Python would run the original bytecode. The
+    /// checked-hash `.pyc` from `precompile` must miss and compile the patch.
+    #[test]
+    fn precompiled_mirror_still_applies_same_size_same_mtime_mutation() {
+        let py = super::interpreter(None);
+        if std::process::Command::new(&py)
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return; // no Python on this box
+        }
+        let (_tmp, root, tests, _src) = fake_project();
+        let module = root.join("m.py");
+        fs::write(&module, "def f(a, b):\n    return a < b\n").unwrap();
+        let mirror = Mirror::build(&tests, IsolationMode::Copy).unwrap();
+        super::precompile(&mirror.root, &py);
+
+        let pyc = fs::read_dir(mirror.root.join("__pycache__"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.file_name().unwrap().to_string_lossy().starts_with("m."))
+            .expect("precompile wrote m's .pyc");
+        let header = fs::read(&pyc).unwrap();
+        assert_eq!(header[4..8], [3, 0, 0, 0], "flags must be checked-hash");
+
+        let target = mirror.root.join("m.py");
+        let mtime = fs::metadata(&target).unwrap().modified().unwrap();
+        let f_of_1_2 = || {
+            std::process::Command::new(&py)
+                .args(["-c", "import sys, m; sys.exit(0 if m.f(1, 2) else 1)"])
+                .current_dir(&mirror.root)
+                .env("PYTHONDONTWRITEBYTECODE", "1")
+                .status()
+                .unwrap()
+                .code()
+        };
+        {
+            let _guard = apply_patch(&mirror, &make_mutant(module, 26, 27, ">")).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&target)
+                .unwrap()
+                .set_modified(mtime)
+                .unwrap();
+            assert_eq!(
+                f_of_1_2(),
+                Some(1),
+                "mutation must apply, not the cached original"
+            );
+        }
+        assert_eq!(f_of_1_2(), Some(0), "restored original runs from its .pyc");
     }
 }

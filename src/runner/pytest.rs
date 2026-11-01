@@ -40,6 +40,8 @@ use crate::sync::lock_recover;
 pub struct PytestRunner {
     pub(super) tests: PathBuf,
     pub(super) timeout: Duration,
+    /// Per-mutant memory cap in bytes, set after the baseline.
+    pub(super) mem_cap: Option<u64>,
     pub(super) baseline_timeout: Duration,
     pub(super) hypothesis_seed: Option<u64>,
     pub(super) extra_args: Vec<String>,
@@ -141,6 +143,7 @@ impl PytestRunner {
         Self {
             tests,
             timeout,
+            mem_cap: None,
             baseline_timeout,
             hypothesis_seed,
             extra_args,
@@ -329,6 +332,9 @@ impl PytestRunner {
             }
         };
         configure_mirror_cmd(&mut cmd, mirror)?;
+        if let Some(bytes) = self.mem_cap {
+            super::memory::cap_memory(&mut cmd, bytes);
+        }
         if let Some(path) = &result {
             cmd.env("PYTHONPATH", plugin_pythonpath(mirror)?);
             cmd.env(RESULT_ENV, path);
@@ -798,6 +804,10 @@ impl Runner for PytestRunner {
         self.timeout = timeout;
     }
 
+    fn set_memory_cap(&mut self, bytes: u64) {
+        self.mem_cap = Some(bytes);
+    }
+
     fn take_kill_records(&self) -> Vec<crate::kill_order::KillRecord> {
         std::mem::take(&mut *lock_recover(&self.kill_sink))
     }
@@ -817,7 +827,9 @@ impl Runner for PytestRunner {
             let result = result.map(ResultFile);
             let started = Instant::now();
             let child = cmd.spawn().context("spawning test runner")?;
+            let watch = super::memory::watch(child.id(), self.mem_cap);
             let (status, output) = wait_draining_stdout(child, self.timeout, kill_group)?;
+            drop(watch);
             let waited = (status, output.map(|o| mirror.text_from_mirror(&o)));
             let wall = started.elapsed();
             let reported = read_reported(mirror, result.as_ref(), waited.0.is_some());
@@ -870,7 +882,9 @@ impl Runner for PytestRunner {
             let result = result.map(ResultFile);
             let started = Instant::now();
             let child = cmd.spawn().context("spawning audit run")?;
+            let watch = super::memory::watch(child.id(), self.mem_cap);
             let (status, output) = wait_draining_stdout(child, self.timeout, kill_group)?;
+            drop(watch);
             let waited = (status, output.map(|o| mirror.text_from_mirror(&o)));
             let wall = started.elapsed();
             let reported = read_reported(mirror, result.as_ref(), waited.0.is_some());
@@ -1712,6 +1726,30 @@ mod tests {
         let m = Arc::new(mutant_in(&proj));
         let o = r.audit(&m, "tests/t.py::k").unwrap().unwrap();
         assert!(matches!(o, MutantOutcome::TimedOut { .. }), "{o:?}");
+    }
+
+    /// A mutant that allocates past `set_memory_cap` fails with `MemoryError`
+    /// and is killed; uncapped, the same run survives.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn memory_cap_kills_a_runaway_allocation() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(proj.join("tests")).unwrap();
+        std::fs::write(proj.join("pyproject.toml"), "").unwrap();
+        let py = tmp.path().join("python");
+        std::fs::write(&py, "#!/bin/sh\nexec python3 -c 'bytearray(1 << 30)'\n").unwrap();
+        std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = runner(false, breadth_ctx(&proj));
+        r.tests = proj.join("tests");
+        r.python = Some(py);
+        let m = Arc::new(mutant_in(&proj));
+        let o = r.audit(&m, "tests/t.py::k").unwrap().unwrap();
+        assert!(matches!(o, MutantOutcome::Survived { .. }), "{o:?}");
+        r.set_memory_cap(256 << 20);
+        let o = r.audit(&m, "tests/t.py::k").unwrap().unwrap();
+        assert!(matches!(o, MutantOutcome::Killed { .. }), "{o:?}");
     }
 
     /// A lone selected id with no output capture names the killer; several

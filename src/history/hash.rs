@@ -70,6 +70,11 @@ fn hash_with_shard(cfg: &Config, shard: Option<(u32, u32)>) -> String {
         h.update(b"|timeout_factor=");
         h.update(f.to_le_bytes());
     }
+    // Explicit caps only, as in the cache scope (engine.rs).
+    if let crate::config::MemoryCap::Bytes(b) = cfg.max_memory {
+        h.update(b"|max_memory=");
+        h.update(b.to_le_bytes());
+    }
     h.update(b"|hseed=");
     if let Some(s) = cfg.hypothesis_seed {
         h.update(s.to_le_bytes());
@@ -287,6 +292,7 @@ mod tests {
             max_time_secs: None,
             timeout_factor: None,
             baseline_secs: None,
+            max_memory: crate::config::MemoryCap::Auto,
             record_kill_sets: None,
         }
     }
@@ -391,6 +397,11 @@ mod tests {
             ..cfg()
         });
         assert_ne!(base, budgeted, "a budgeted-timeout run must differ");
+        let capped = config_hash(&Config {
+            max_memory: crate::config::MemoryCap::Bytes(1 << 30),
+            ..cfg()
+        });
+        assert_ne!(base, capped, "an explicitly memory-capped run must differ");
 
         // Sharding partitions the mutant set; index and total both matter.
         let sh1 = config_hash(&Config {

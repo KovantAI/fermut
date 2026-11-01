@@ -88,6 +88,8 @@ struct Schema {
     /// Template command line after the interpreter: script, `serve`, args.
     serve_args: Vec<std::ffi::OsString>,
     python: PathBuf,
+    /// Per-mutant memory cap each forked child sets on itself.
+    mem_cap: Option<u64>,
     /// How long a template may take to import and collect the suite; also
     /// bounds the verification run.
     ready_timeout: Duration,
@@ -241,6 +243,7 @@ impl SchemaRunner {
             index,
             serve_args,
             python,
+            mem_cap: self.inner.mem_cap,
             ready_timeout: self.inner.baseline_timeout,
             // One slice per worker: built inside the run's rayon pool.
             verified: Chunks::new(rayon::current_num_threads()),
@@ -556,6 +559,10 @@ impl Runner for SchemaRunner {
         self.inner.set_timeout(timeout);
     }
 
+    fn set_memory_cap(&mut self, bytes: u64) {
+        self.inner.set_memory_cap(bytes);
+    }
+
     fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
         let all = self.inner.record_kill_sets;
         match self.serve(mutant, None, all) {
@@ -698,6 +705,9 @@ struct Done {
 /// imported and collected the suite once.
 struct Template {
     child: Mutex<Child>,
+    /// Memory cap the watchdog holds each forked child to (macOS; on Linux
+    /// the child sets its own rlimit).
+    mem_cap: Option<u64>,
     stdin: Mutex<ChildStdin>,
     /// Requests waiting on an answer, by id; the reader thread routes lines to
     /// them and drops them all when the template exits.
@@ -713,6 +723,11 @@ impl Template {
         cmd.args(&schema.serve_args);
         configure_mirror_cmd(&mut cmd, &schema.mirror)?;
         cmd.env_remove("FM_ACTIVE");
+        // The template stays uncapped; each forked child caps itself.
+        match schema.mem_cap {
+            Some(bytes) => cmd.env(super::memory::CAP_ENV, bytes.to_string()),
+            None => cmd.env_remove(super::memory::CAP_ENV),
+        };
         let log = tempfile::NamedTempFile::new_in(&schema.mirror.plugin_dir)
             .context("creating template log")?;
         let mut child = cmd
@@ -756,6 +771,7 @@ impl Template {
         }
         Ok(Self {
             child: Mutex::new(child),
+            mem_cap: schema.mem_cap,
             stdin: Mutex::new(stdin),
             waiting,
             next_id: AtomicU64::new(0),
@@ -806,6 +822,7 @@ impl Template {
         let pid: Pid =
             serde_json::from_str(&recv(rx, FORK_TIMEOUT)?).context("parsing the fork reply")?;
         let started = Instant::now();
+        let watch = super::memory::watch(pid.pid, self.mem_cap);
         let (line, timed_out) = match recv(rx, timeout) {
             Ok(line) => (line, false),
             Err(_) if !matches!(lock_recover(&self.child).try_wait(), Ok(Some(_))) => {
@@ -814,6 +831,7 @@ impl Template {
             }
             Err(e) => return Err(e),
         };
+        drop(watch);
         let wall = started.elapsed();
         let done: Done = serde_json::from_str(&line).context("parsing the run result")?;
         Ok(Served {
@@ -988,6 +1006,7 @@ mod tests {
             index: HashMap::new(),
             serve_args: vec!["-c".into(), format!("{FAKE}{script}").into()],
             python: "/bin/sh".into(),
+            mem_cap: None,
             ready_timeout: Duration::from_secs(10),
             verified: Chunks::new(1),
             template: OnceLock::new(),

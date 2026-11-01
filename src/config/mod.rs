@@ -168,6 +168,9 @@ pub struct Config {
     /// when fermut skips its own baseline (`--no-verify-baseline`); a baseline
     /// fermut runs itself wins. Set via `--baseline-secs`.
     pub baseline_secs: Option<f64>,
+    /// Per-mutant memory cap (Linux; see `runner::memory`). Set via
+    /// `--max-memory` / `--no-max-memory` / `max_memory`.
+    pub max_memory: MemoryCap,
     /// Experiment hook: when `Some(path)`, the pytest runner drops `-x` and
     /// records, per mutant, the FULL set of covering tests that fail (the
     /// mutant's kill-set `K(m)`), writing one JSON object per mutant to `path`
@@ -184,6 +187,17 @@ pub struct Config {
     pub only_dominators: bool,
     /// Fraction of inferred kills re-verified (`--audit-inferred`).
     pub inferred_audit_rate: f64,
+}
+
+/// [`Config::max_memory`]: how big a mutant's process may grow before it
+/// fails with `MemoryError` (scored killed).
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+pub enum MemoryCap {
+    /// Sized from the baseline's peak RSS; off when fermut ran no baseline.
+    #[default]
+    Auto,
+    Off,
+    Bytes(u64),
 }
 
 /// Default for [`Config::cache_audit_rate`].

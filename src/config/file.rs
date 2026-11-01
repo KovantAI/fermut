@@ -102,6 +102,8 @@ pub struct FileConfig {
     /// catalogue. Set via `--max-time`.
     pub max_time: Option<u64>,
     pub timeout_factor: Option<f64>,
+    /// Per-mutant memory cap, e.g. `"4G"`; `"0"` = off. Unset = auto.
+    pub max_memory: Option<String>,
     /// Glob patterns matched against paths relative to `source_root`. Files
     /// (and directories) matching any pattern are pruned during mutation
     /// collection. Examples: `"alembic/**"`, `"tests/integration/**"`,

@@ -368,6 +368,17 @@ pub(crate) struct RunConfigArgs {
     #[arg(long, conflicts_with = "timeout_factor")]
     pub no_timeout_factor: bool,
 
+    /// Cap each mutant's memory (Linux), e.g. `512M`, `4G`; `0` for off. A
+    /// mutant past it fails with `MemoryError` and counts as killed. Default:
+    /// 4 × the baseline's peak memory, at least 2 GiB. Also `max_memory` in
+    /// config.
+    #[arg(long, value_name = "SIZE", value_parser = crate::runner::memory::parse_size)]
+    pub max_memory: Option<u64>,
+
+    /// Don't cap mutant memory.
+    #[arg(long, conflicts_with = "max_memory")]
+    pub no_max_memory: bool,
+
     /// Wall time of a green whole-suite run you already did (seconds). When
     /// fermut's baseline is skipped it stands in for it when sizing
     /// `--timeout-factor` timeouts; ignored without `--timeout-factor`.

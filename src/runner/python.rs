@@ -214,6 +214,31 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
+/// The interpreter the spawn path's pytest runs on: `--python` when given,
+/// else the one in the shebang of the `pytest` the spawn path would find on
+/// `PATH` (a different interpreter may not even have pytest installed).
+pub(crate) fn pytest_interpreter(python: Option<&Path>) -> PathBuf {
+    if let Some(p) = python {
+        return p.to_path_buf();
+    }
+    which::which("pytest")
+        .ok()
+        .and_then(|script| std::fs::read(script).ok())
+        .and_then(|bytes| shebang_interpreter(&bytes))
+        .unwrap_or_else(|| interpreter(None))
+}
+
+/// `/path/to/python` from a `#!/path/to/python` first line, when it exists.
+/// pip writes a `#!/bin/sh` trampoline instead for very long paths; that and
+/// `#!/usr/bin/env python3` (no single interpreter path) give `None`.
+fn shebang_interpreter(script: &[u8]) -> Option<PathBuf> {
+    let first = script.split(|&b| b == b'\n').next()?;
+    let line = std::str::from_utf8(first.strip_prefix(b"#!")?).ok()?.trim();
+    let path = PathBuf::from(line.split_whitespace().next()?);
+    let name = path.file_name()?.to_string_lossy();
+    (name.starts_with("python") && path.is_file()).then_some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,5 +483,20 @@ mod tests {
             None
         );
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn shebang_names_the_interpreter_only_when_it_is_a_python_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let python = dir.path().join("python3.12");
+        std::fs::write(&python, "").unwrap();
+        let script = format!("#!{}\nimport pytest\n", python.display());
+        assert_eq!(shebang_interpreter(script.as_bytes()), Some(python.clone()));
+        let with_flag = format!("#!{} -E\n", python.display());
+        assert_eq!(shebang_interpreter(with_flag.as_bytes()), Some(python));
+        assert_eq!(shebang_interpreter(b"#!/usr/bin/env python3\n"), None);
+        assert_eq!(shebang_interpreter(b"#!/bin/sh\n'''exec' x\n"), None);
+        assert_eq!(shebang_interpreter(b"#!/no/such/python3\n"), None);
+        assert_eq!(shebang_interpreter(b"import pytest\n"), None);
     }
 }

@@ -358,13 +358,12 @@ pub(crate) struct RunConfigArgs {
     /// flat `--timeout`: `min(--timeout, FACTOR × baseline wall + 5 s)`. Hung
     /// mutants then stop in seconds. Needs the baseline, or `--baseline-secs`
     /// with `--no-verify-baseline`. A mutant that only slows the suite down past
-    /// the budget counts as timed out (detected). At least 2. Defaults to 3
-    /// with schemata (where a timeout is re-run the normal way, so it costs
-    /// twice); also `timeout_factor` in config, `0` for off.
+    /// the budget counts as timed out (detected). Default 3; at least 2, or 0
+    /// for the flat `--timeout`.
     #[arg(long, value_name = "FACTOR")]
     pub timeout_factor: Option<f64>,
 
-    /// Use the flat `--timeout` for every mutant, even with schemata.
+    /// Use the flat `--timeout` for every mutant. Same as `--timeout-factor 0`.
     #[arg(long, conflicts_with = "timeout_factor")]
     pub no_timeout_factor: bool,
 

@@ -188,9 +188,9 @@ limit. With a 1.4 s suite and `F = 3`, mutants get 10 s instead of 30 s.
   slower now counts as timed out (detected) instead of survived. PIT and
   Stryker treat it the same way. On more-itertools 2 of ~3,800 mutants
   changed this way.
-- **Default.** With [schemata](#schemata) on, `F` defaults to 3: a fork that
-  times out is re-run the normal way before it counts, so a hung mutant pays
-  its timeout twice. Without schemata it's off unless you set it.
+- **Default.** With [schemata](#schemata) on, `F` defaults to 3: forking
+  can't make a hung mutant finish sooner, so its timeout is most of what it
+  costs. Without schemata it's off unless you set it.
   `--no-timeout-factor` or `timeout_factor = 0` keep the flat `--timeout`.
 - **Needs a baseline.** With `--no-verify-baseline` there is nothing to
   scale from, so every mutant uses the flat `--timeout` (fermut warns),
@@ -280,16 +280,18 @@ the verdict is the same either way:
 - **mutants whose source triggers a compile-time warning**, which
   `filterwarnings = error` would turn into an import error for the whole
   file;
-- **a kill the same tests reproduce with no mutant active.** Every kill from
-  the schema is confirmed by re-running the tests that child ran, in the same
-  order, in a fork with no mutant switched on. They can fail there when
-  collecting the whole suite left state behind that a cold run of a few tests
-  never sees — a test module that changes a global at import, which only a
-  test's teardown puts back. Confirmation is cached per list of tests, so it
-  usually costs one short fork;
-- **any timeout**: a fork skips the import a cold run pays, so the budget
-  means something different, and a fork can hang where a fresh process
-  wouldn't;
+- **a kill or timeout the same tests reproduce with no mutant active.** Every
+  kill from the schema, and every timeout inside a test, is confirmed by
+  re-running the tests that child ran, in the same order, in a fork with no
+  mutant switched on. They can fail or hang there when collecting the whole
+  suite left state behind that a cold run of a few tests never sees — a test
+  module that changes a global at import, which only a test's teardown puts
+  back. Confirmation is cached per list of tests, so it usually costs one
+  short fork. A confirmed timeout stands without a normal re-run: the fork
+  had already imported and collected, so a cold run given the same budget
+  would run out of time too;
+- **a timeout before any test began** (collection, a fixture, the helper):
+  there is nothing to confirm it against;
 - **a fork that crashes.** Some system libraries aren't safe to use in a
   forked child — on macOS, DNS lookups, Kerberos (psycopg2 connecting) and
   some native libraries crash it. (System proxy settings, which aiohttp,
@@ -300,13 +302,14 @@ Before serving mutants, fermut runs the suite on the schema with no mutant
 active, split across the workers. Tests that fail, crash or hang there are
 logged, and mutants they kill run the normal way.
 
-Kill confirmation guards one direction; a **survivor audit** spot-checks the
-other. About 5% of survivors from the schema (picked by mutant id, so the same
+Confirmation guards one direction; an **audit** spot-checks the other. About
+5% of survivors and timeouts from the schema (picked by mutant id, so the same
 ones every run, plus the first one) are re-run the normal way, and that run's
-verdict is the one reported. If the normal run kills a mutant the fork let
-survive, fermut warns with its id — please report it; `--no-schemata` gives
-the normal-run verdict for every mutant. The summary line counts how many
-survivors were audited and how many agreed.
+verdict is the one reported. If the normal run disagrees on detection — it
+kills a mutant the fork let survive, or lets survive one the fork timed out —
+fermut warns with its id; please report it. `--no-schemata` gives the normal-run verdict for
+every mutant. The summary line counts how many were audited and how many
+agreed.
 
 The run logs how many mutants the schema served and how many ran normally.
 Cached verdicts are shared with normal runs. The baseline check is always a

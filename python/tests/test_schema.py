@@ -355,15 +355,6 @@ PROJECT = {
             assert spin(0) == 0  # hangs under the spin mutant
 
 
-        def test_add_in_a_clean_subprocess():
-            import subprocess
-            import sys
-
-            check = "from pkg.core import add; assert add(2, 3) == 5"
-            env = {"PATH": os.environ.get("PATH", "")}
-            subprocess.run([sys.executable, "-c", check], env=env, check=True)
-
-
         def test_crashes_leaving_a_helper():
             import builtins
             import subprocess
@@ -437,8 +428,17 @@ class Server:
         self.proc.stdin.write(json.dumps(obj) + "\n")
         self.proc.stdin.flush()
 
-    def run(self, idx, ids, timeout=None):
-        self.send({"idx": idx, "ids": ids, "all": False, "timeout": timeout})
+    def run(self, idx, ids, timeout=None, chunk=None, after=None):
+        self.send(
+            {
+                "idx": idx,
+                "ids": ids,
+                "all": False,
+                "timeout": timeout,
+                "chunk": chunk,
+                "after": after,
+            }
+        )
         self.recv()  # pid
         result = self.recv()
         status = result.pop("status")
@@ -483,6 +483,16 @@ def test_serve_kills_survives_and_flags_pre_fork_functions(served):
 
     killed = server.run(idx["add"], ["tests/test_core.py::test_add"])
     assert killed["exit"] == 1 and killed["failed"] == ["tests/test_core.py::test_add"]
+    # The tests it ran, in order: what a kill's confirmation re-runs.
+    assert killed["ran"] == ["tests/test_core.py::test_add"]
+    both = server.run(
+        idx["add"],
+        ["tests/test_core.py::test_registry", "tests/test_core.py::test_add"],
+    )
+    assert both["ran"] == [
+        "tests/test_core.py::test_registry",
+        "tests/test_core.py::test_add",
+    ]
 
     survived = server.run(idx["add"], ["tests/test_core.py::test_registry"])
     assert survived["exit"] == 0 and survived["failed"] == []
@@ -494,6 +504,44 @@ def test_serve_kills_survives_and_flags_pre_fork_functions(served):
     swept = server.run(0, None)
     assert swept["exit"] == 0
 
+    server.close()
+
+
+def test_serve_checks_one_slice_of_the_suite_per_chunk(served):
+    server, idx = served
+    assert server.recv()["ready"] is True
+    # n tests in collection order; slice k of n is the k-th test alone.
+    n = PROJECT["tests/test_core.py"].count("\ndef test_")
+    first = server.run(idx["add"], None, chunk=[0, n])
+    assert first["exit"] == 1 and first["failed"] == ["tests/test_core.py::test_add"]
+    assert server.run(idx["add"], None, chunk=[1, n])["exit"] == 0
+    # More slices than tests: an empty slice checks nothing and passes.
+    assert server.run(idx["add"], None, chunk=[0, 2 * n])["exit"] == 0
+    # Resuming past a test (its fork crashed) skips it and runs the rest:
+    # slice 0 of n/2 is test_add, test_registry.
+    whole = server.run(idx["add"], None, chunk=[0, n // 2])
+    assert whole["failed"] == ["tests/test_core.py::test_add"]
+    after = server.run(
+        idx["add"], None, chunk=[0, n // 2], after="tests/test_core.py::test_add"
+    )
+    assert after["exit"] == 0
+    server.close()
+
+
+def test_serve_runs_requests_side_by_side(served):
+    server, idx = served
+    assert server.recv()["ready"] is True
+    server.send({"idx": idx["spin"], "ids": ["tests/test_core.py::test_spin"], "id": 1})
+    hung = server.recv()
+    assert hung["id"] == 1
+    server.send({"idx": idx["add"], "ids": ["tests/test_core.py::test_add"], "id": 2})
+    assert server.recv()["id"] == 2  # its fork reply
+    # The second request finishes while the first still hangs.
+    done = server.recv()
+    assert done["id"] == 2 and done["failed"] == ["tests/test_core.py::test_add"]
+    os.killpg(hung["pid"], 9)
+    killed = server.recv()
+    assert killed["id"] == 1 and killed["unfinished"] == "tests/test_core.py::test_spin"
     server.close()
 
 
@@ -551,15 +599,6 @@ def test_a_child_that_loses_its_event_pipe_still_times_out(served):
         timeout=1,
     )
     assert hung["timed_out"] is True and hung["signal"] == 9
-    server.close()
-
-
-def test_a_subprocess_with_a_scrubbed_environment_sees_the_mutant(served):
-    server, idx = served
-    assert server.recv()["ready"] is True
-    ids = ["tests/test_core.py::test_add_in_a_clean_subprocess"]
-    assert server.run(0, ids)["exit"] == 0
-    assert server.run(idx["add"], ids)["exit"] == 1
     server.close()
 
 

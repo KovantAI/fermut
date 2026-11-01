@@ -73,6 +73,10 @@ impl Filter for TceFilter {
         "tce"
     }
 
+    fn costly(&self) -> bool {
+        true
+    }
+
     fn admits(&self, mutant: &Mutant) -> Result<bool> {
         // Fail open on an unreadable source: a filter must never drop a mutant
         // it cannot prove equivalent, and this keeps the two call sites

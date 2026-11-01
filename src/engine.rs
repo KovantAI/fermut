@@ -358,7 +358,7 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     if let Some(secs) = budgeted_timeout_secs(cfg, baseline_wall) {
         runner.set_timeout(Duration::from_secs(secs));
     }
-    runner.prepare(mutants)?;
+    runner.prepare(&prepare_candidates(&filters, mutants))?;
 
     // One read + at most one parse per unique file, deriving the cache-key
     // hash (always), the scope map (only in `scope` cache mode), and the source
@@ -405,6 +405,24 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
         stats: CacheStats::default(),
         killer_hits: Mutex::new(Vec::new()),
     })
+}
+
+/// The mutants worth handing `Runner::prepare`: those the cheap filters
+/// admit (sample, coverage, …). `--schemata` builds every prepared mutant into
+/// its schema, and most never run. The costly filters and the cache drop a few
+/// more later; those just sit in the schema unused. A filter error admits, as
+/// in [`precheck`].
+fn prepare_candidates(filters: &[Box<dyn Filter>], mutants: &[Arc<Mutant>]) -> Vec<Arc<Mutant>> {
+    mutants
+        .iter()
+        .filter(|m| {
+            filters
+                .iter()
+                .filter(|f| !f.costly())
+                .all(|f| f.admits(m).unwrap_or(true))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Post-testing wrap-up: warn on a budget-truncated run, report cache
@@ -1622,6 +1640,47 @@ mod tests {
             let tree = TestTree::walk(&cfg.tests_path());
             compute_mutant_scope(&compute_scope_prefix(cfg), cfg, &tree, &self.mutant(line))
         }
+    }
+
+    #[test]
+    fn prepare_candidates_applies_only_cheap_filters() {
+        struct F(&'static str, bool, fn(&Mutant) -> Result<bool>);
+        impl Filter for F {
+            fn name(&self) -> &'static str {
+                self.0
+            }
+            fn admits(&self, m: &Mutant) -> Result<bool> {
+                (self.2)(m)
+            }
+            fn costly(&self) -> bool {
+                self.1
+            }
+        }
+        let mutants: Vec<Arc<Mutant>> = (1..=3)
+            .map(|line| {
+                let mut m = arith_mutant("x = 1 + 1", "+", "-");
+                m.line = line;
+                Arc::new(m)
+            })
+            .collect();
+        let filters: Vec<Box<dyn Filter>> = vec![
+            Box::new(F("cheap", false, |m| Ok(m.line != 2))),
+            Box::new(F("erroring", false, |m| {
+                if m.line == 3 {
+                    anyhow::bail!("boom")
+                } else {
+                    Ok(true)
+                }
+            })),
+            Box::new(F("costly", true, |_| Ok(false))),
+        ];
+        let lines: Vec<u32> = prepare_candidates(&filters, &mutants)
+            .iter()
+            .map(|m| m.line)
+            .collect();
+        // Line 2: cheap reject. Line 3: an error admits. The costly filter
+        // (which rejects everything) isn't consulted.
+        assert_eq!(lines, [1, 3]);
     }
 
     #[test]

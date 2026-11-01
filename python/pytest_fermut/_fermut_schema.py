@@ -31,15 +31,11 @@ schematize
     the docstring, or raising a compile-time warning are reported as
     fallbacks for the caller to run the normal way. Rewritten files replace
     the mirror file (new inode — the mirror may hardlink the user's tree).
-    fermut copies them into each template's own mirror and precompiles it, so
-    every Python subprocess a test spawns skips recompiling the (much larger)
-    schema source.
+    fermut then precompiles the mirror, so every Python subprocess a test
+    spawns skips recompiling the (much larger) schema source.
 
     stdout: {"mutants": {id: {"idx": n} | {"fallback": why}},
-             "functions": {relpath: [[co_firstlineno, lo, hi], ...]}}
-
-    `functions` keys are relative to <mirror_root>, so the rewritten files
-    can be copied into other mirrors and served from there.
+             "functions": {realpath: [[co_firstlineno, lo, hi], ...]}}
 
 serve
     The template: one pytest session that imports and collects the suite
@@ -48,12 +44,16 @@ serve
     one JSON object per line:
 
         -> {"ready": true, "unsafe": [[lo, hi], ...]}   once, after collection
-        <- {"idx": n, "ids": [nodeid, ...] | null, "all": false,
+        <- {"id": r, "idx": n, "ids": [nodeid, ...] | null, "all": false,
             "timeout": secs | null}
-        -> {"pid": p}
-        -> {"status": <raw waitpid status>, "timed_out": bool,
+        -> {"id": r, "pid": p}
+        -> {"id": r, "status": <raw waitpid status>, "timed_out": bool,
             "failed": [nodeid, ...], "test_secs": s, "unfinished": nodeid | null,
+            "ran": [nodeid, ...],
             "error": traceback (only when the child itself broke: exit 3)}
+
+    Requests are served side by side: each forks at once, and its answers
+    carry its `id`.
 
     `unfinished` is the test a child was in when it was killed (a timeout).
 
@@ -66,17 +66,18 @@ serve
     reaped, so only it can kill the group without hitting a recycled pid. A
     child reports its exit code in its last event, `end`; the template then
     sweeps its group before reaping it, so a helper process a test left
-    behind can't hold the event pipe open. EOF on stdin ends the template
-    at once — pytest's own session wrap-up is skipped.
+    behind can't hold the event pipe open. EOF on stdin kills every child and
+    ends the template — pytest's own session wrap-up is skipped.
 """
 
 import ast
 import builtins
+import gc
 import getpass
 import glob
 import json
 import os
-import select
+import selectors
 import shutil
 import signal
 import sys
@@ -88,9 +89,6 @@ import warnings
 from collections import defaultdict
 
 ACTIVE = "_fm_active"  # attribute on the builtins module
-# Beside the mirror root (in fermut's workdir, out of the project): the active
-# index for Python subprocesses whose environment lost FM_ACTIVE.
-ACTIVE_FILE = "fermut-active"
 SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
 # --- schematize ------------------------------------------------------------------
@@ -322,10 +320,11 @@ def schematize_file(src, mutants, next_idx):
 
     if not any("idx" in e for e in entries.values()):
         return None, entries, []
-    # After the module docstring and __future__ imports: the active index from
-    # builtins (set by the template), else FM_ACTIVE, else ACTIVE_FILE in an
-    # ancestor directory — so Python subprocesses a test spawns see the
-    # mutant, even with a scrubbed environment (`env={...}`).
+    # After the module docstring and __future__ imports:
+    #   _fm_b = __import__('builtins')   (no import statement: click's
+    #   test_light_imports audits the imports its modules make)
+    #   if not hasattr(_fm_b, '_fm_active'): _fm_b._fm_active = int(os.environ...)
+    # The env default lets Python subprocesses a test spawns see the mutant.
     at = 1 if docstring(tree.body) else 0
     while (
         at < len(tree.body)
@@ -333,35 +332,17 @@ def schematize_file(src, mutants, next_idx):
         and tree.body[at].module == "__future__"
     ):
         at += 1
-    prelude = ast.parse(PRELUDE).body
+    prelude = ast.parse(
+        "_fm_b = __import__('builtins')\n"
+        f"if not hasattr(_fm_b, {ACTIVE!r}):\n"
+        f"    _fm_b.{ACTIVE} = int(__import__('os').environ.get('FM_ACTIVE', 0))\n"
+    ).body
     tree.body[at:at] = prelude
     out = ast.unparse(ast.fix_missing_locations(tree))
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         compile(out, "<schema>", "exec")
     return out, entries, switched_functions(out)
-
-
-PRELUDE = f"""\
-import builtins as _fm_b
-if not hasattr(_fm_b, {ACTIVE!r}):
-    def _fm_load():
-        import os
-        if 'FM_ACTIVE' in os.environ:
-            return int(os.environ['FM_ACTIVE'])
-        here = globals().get('__file__')
-        d = os.path.dirname(os.path.abspath(here)) if here else None
-        while d:
-            try:
-                with open(os.path.join(d, {ACTIVE_FILE!r})) as f:
-                    return int(f.read())
-            except (OSError, ValueError):
-                pass
-            d = None if os.path.dirname(d) == d else os.path.dirname(d)
-        return 0
-    _fm_b.{ACTIVE} = _fm_load()
-    del _fm_load
-"""
 
 
 def switched_functions(out):
@@ -413,7 +394,7 @@ def schematize(mirror_root, mutants):
         entries.update(file_entries)
         if out is not None:
             replace_file(path, out)
-            functions[rel] = fns
+            functions[os.path.realpath(path)] = fns
     return {"mutants": entries, "functions": functions}
 
 
@@ -423,17 +404,12 @@ def schematize(mirror_root, mutants):
 class Template:
     def __init__(self, mirror_root, schema_path, pytest_args):
         self.mirror_root = mirror_root
-        self.active_file = os.path.join(
-            os.path.dirname(os.path.abspath(mirror_root)), ACTIVE_FILE
-        )
         self.pytest_args = pytest_args
         with open(schema_path) as f:
             functions = json.load(f)["functions"]
         self.switched = {
-            os.path.realpath(os.path.join(mirror_root, rel)): {
-                first: (lo, hi) for first, lo, hi in fns
-            }
-            for rel, fns in functions.items()
+            path: {first: (lo, hi) for first, lo, hi in fns}
+            for path, fns in functions.items()
         }
         self.by_filename = {}  # co_filename -> switched map (realpath memo)
         self.ran = set()
@@ -450,7 +426,7 @@ class Template:
         # Each child gets its own pytest-of-<user> (see `child`); the seed
         # gives its counter the digit count a cold run would have now.
         self.user = getpass.getuser()
-        # Where pytest puts pytest-of-<user>: fermut points it at the mirror.
+        # pytest's own root: fermut points it at the mirror's.
         self.temproot = os.environ.get("PYTEST_DEBUG_TEMPROOT") or tempfile.gettempdir()
         nums = [
             d.rsplit("-", 1)[1]
@@ -529,46 +505,108 @@ class Template:
 
     def serve(self, session):
         by_id = {item.nodeid: item for item in session.items}
+        freeze_macos_proxies()
+        # Children gc-collect at session end (see `child`); frozen, the
+        # collected suite isn't rescanned on every one of those passes.
+        gc.freeze()
         self.send({"ready": True, "unsafe": sorted(self.ran)})
-        for line in self.req:
-            req = json.loads(line)
-            r, w = os.pipe()
-            pid = os.fork()
-            if pid == 0:
-                os.close(r)
-                self.child(session, by_id, req, w)
-            os.close(w)
-            # Also set from this side: the caller may kill the group as soon as
-            # it reads the pid, possibly before the child ran its own setpgid.
-            try:
-                os.setpgid(pid, pid)
-            except OSError:
-                pass  # the child already did
-            self.send({"pid": pid})
-            timeout = req.get("timeout")
-            deadline = None if timeout is None else time.monotonic() + timeout
-            events, end, timed_out = read_events(r, deadline)
-            os.close(r)
-            status = None
-            if not (end or timed_out):
+        # One template serves every worker: each request forks at once and its
+        # result goes back, tagged with the request's id, when its child ends.
+        sel = selectors.DefaultSelector()
+        req_fd = self.req.fileno()
+        sel.register(req_fd, selectors.EVENT_READ)
+        pending, eof = b"", False
+        running = {}  # pid -> Run
+        while not eof or running:
+            wait = None
+            deadlines = [c.deadline for c in running.values() if c.deadline]
+            if deadlines:
+                wait = max(0.0, min(deadlines) - time.monotonic())
+            if any(c.fd is None for c in running.values()):
+                wait = 0.01 if wait is None else min(wait, 0.01)  # polling exits
+            for key, _ in sel.select(wait):
+                if key.fd == req_fd:
+                    data = os.read(req_fd, 1 << 16)
+                    if not data:
+                        eof = True
+                        sel.unregister(req_fd)
+                        for pid in running:
+                            try:
+                                os.killpg(pid, signal.SIGKILL)  # the caller is gone
+                            except OSError:
+                                pass
+                        continue
+                    pending += data
+                    *lines, pending = pending.split(b"\n")
+                    for line in filter(None, lines):
+                        req = json.loads(line)
+                        r, pid = self.fork(session, by_id, req)
+                        timeout = req.get("timeout")
+                        running[pid] = Run(req.get("id"), pid, r, timeout)
+                        sel.register(r, selectors.EVENT_READ, pid)
+                        self.send({"id": req.get("id"), "pid": pid})
+                    continue
+                c = running[key.data]
+                data = os.read(c.fd, 1 << 16)
+                if data:
+                    c.buf += data
+                    end = end_event(c.buf)
+                    if end:
+                        self.finish(sel, running, c, end=end)
+                    continue
                 # EOF without `end`: the child crashed, or a test closed the
                 # pipe and may still be running. Keep its deadline.
-                exited, status = wait_exit(pid, deadline)
-                timed_out = not exited
-            if status is None:
-                # Not reaped yet, so the group id can't have been recycled.
-                # After `end` this only sweeps processes the child left behind;
-                # its own exit code came with `end`.
-                try:
-                    os.killpg(pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                _, status = os.waitpid(pid, 0)
-            if end:
-                status = end["code"] << 8  # raw wait status of exit(code)
-            # Answer first: cleanup must not eat into the caller's deadline.
-            self.send({"status": status, "timed_out": timed_out, **summarize(events)})
-            shutil.rmtree(self.child_temp(pid), ignore_errors=True)
+                sel.unregister(c.fd)
+                os.close(c.fd)
+                c.fd = None
+            now = time.monotonic()
+            for c in list(running.values()):
+                if c.fd is None:
+                    exited, status = poll_exit(c.pid)
+                    if exited:
+                        self.finish(sel, running, c, status=status)
+                        continue
+                if c.deadline and now >= c.deadline:
+                    self.finish(sel, running, c, timed_out=True)
+
+    def finish(self, sel, running, c, end=None, timed_out=False, status=None):
+        """Answer `c`'s request and reap its child."""
+        if c.fd is not None:
+            sel.unregister(c.fd)
+            os.close(c.fd)
+        del running[c.pid]
+        if status is None:
+            # Not reaped yet, so the group id can't have been recycled. After
+            # `end` this only sweeps processes the child left behind; its own
+            # exit code came with `end`.
+            try:
+                os.killpg(c.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            _, status = os.waitpid(c.pid, 0)
+        if end:
+            status = end["code"] << 8  # raw wait status of exit(code)
+        # Answer first: cleanup must not eat into the caller's deadline.
+        self.send(
+            {"id": c.id, "status": status, "timed_out": timed_out, **summarize(c.buf)}
+        )
+        shutil.rmtree(self.child_temp(c.pid), ignore_errors=True)
+
+    def fork(self, session, by_id, req):
+        """Fork a child for `req`; returns its event pipe's read end and pid."""
+        r, w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(r)
+            self.child(session, by_id, req, w)
+        os.close(w)
+        # Also set from this side: the caller may kill the group as soon as
+        # it reads the pid, possibly before the child ran its own setpgid.
+        try:
+            os.setpgid(pid, pid)
+        except OSError:
+            pass  # the child already did
+        return r, pid
 
     def child_temp(self, pid):
         # Same length as the real user name when the pid fits, so tmp_path is
@@ -595,7 +633,9 @@ class Template:
             os.setpgid(0, 0)
             os.close(self.resp)
             self.req.close()
-            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            # Python's own handler, as in a cold run: SIG_DFL would turn a
+            # test's self-sent SIGINT (trio) into a dead child.
+            signal.signal(signal.SIGINT, signal.default_int_handler)
             # Private basetemp: siblings sharing pytest-of-<user> would prune
             # each other's tmp_path. Seeded so pytest-<N> has cold digits.
             user = self.fake_user(os.getpid())
@@ -606,11 +646,14 @@ class Template:
             os.environ["USER"] = os.environ["LOGNAME"] = user
             setattr(builtins, ACTIVE, req["idx"])
             os.environ["FM_ACTIVE"] = str(req["idx"])  # Python subprocesses
-            # ...and those that drop the environment. One child at a time per
-            # mirror, so the file can't be another child's.
-            with open(self.active_file, "w") as f:
-                f.write(str(req["idx"]))
             code = self.run_items(session, by_id, req, emit)
+            # A cold run's session end: pytest >= 8.4 gc-collects there and
+            # fails the run on a leaked resource's unraisable warning (click:
+            # a mutant that never closes a file). Exit 1, as pytest would.
+            try:
+                session.config._ensure_unconfigure()
+            except BaseException:  # noqa: BLE001
+                code = code or 1
         except BaseException:  # noqa: BLE001 - nothing may escape a forked child
             code = 3
             emit(ev="error", tb=traceback.format_exc())
@@ -623,7 +666,13 @@ class Template:
     def run_items(self, session, by_id, req, emit):
         """Exit code a cold `pytest [-x] <ids>` would give."""
         ids = req.get("ids")
-        if ids is None:
+        if req.get("chunk"):
+            # Slice k of n of the suite: the no-mutant check, split across
+            # templates.
+            k, n = req["chunk"]
+            all_items = session.items
+            items = all_items[k * len(all_items) // n : (k + 1) * len(all_items) // n]
+        elif ids is None:
             items = list(session.items)
         else:
             items = [by_id.get(i) for i in dict.fromkeys(ids)]
@@ -635,8 +684,14 @@ class Template:
         session.config.hook.pytest_collection_modifyitems(
             session=session, config=session.config, items=items
         )
+        if req.get("after"):
+            # Resume a slice past a test whose fork crashed (macOS: system
+            # frameworks aren't fork-safe); the caller records that test.
+            ran = [item.nodeid for item in items]
+            if req["after"] in ran:
+                items = items[ran.index(req["after"]) + 1 :]
         if not items:
-            return 5
+            return 0 if req.get("chunk") else 5  # an empty slice checks nothing
         failed, stop_first = [], not req.get("all")
 
         class Listen:
@@ -663,6 +718,38 @@ class Template:
         return 1 if failed else 0
 
 
+class Run:
+    """A child serving one request."""
+
+    def __init__(self, rid, pid, fd, timeout):
+        self.id, self.pid, self.fd, self.buf = rid, pid, fd, b""
+        self.deadline = None if timeout is None else time.monotonic() + timeout
+
+
+def end_event(buf):
+    """The child's `end` event when it is the last complete line, else None.
+    The child is done at `end`, not at EOF: a process it started may still
+    hold the pipe."""
+    if not buf.endswith(b"\n"):
+        return None
+    try:
+        last = json.loads(buf[buf.rfind(b"\n", 0, -1) + 1 :])
+    except ValueError:
+        return None
+    return last if isinstance(last, dict) and last.get("ev") == "end" else None
+
+
+def poll_exit(pid):
+    """(exited?, raw status if it had to be reaped to tell). With waitid (not
+    on macOS before 3.13) an exited child stays unreaped, so the caller can
+    still sweep its group safely."""
+    if hasattr(os, "waitid"):
+        exited = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        return exited is not None, None
+    done, status = os.waitpid(pid, os.WNOHANG)
+    return bool(done), status if done else None
+
+
 def teardown_all(session):
     state = session._setupstate
     try:
@@ -674,48 +761,26 @@ def teardown_all(session):
         pass
 
 
-def wait_exit(pid, deadline):
-    """(exited by `deadline`?, raw status if it had to be reaped to tell). With
-    waitid (not on macOS before 3.13) an exited child stays unreaped, so the
-    caller can still sweep its group safely."""
-    while True:
-        if hasattr(os, "waitid"):
-            if os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT):
-                return True, None
-        else:
-            done, status = os.waitpid(pid, os.WNOHANG)
-            if done:
-                return True, status
-        if deadline is not None and time.monotonic() >= deadline:
-            return False, None
-        time.sleep(0.01)
+def freeze_macos_proxies():
+    """macOS reads system proxy settings through CoreFoundation, which isn't
+    fork-safe: a child that looks them up (aiohttp/httpx/requests do, per
+    request) aborts. Read them once here, before any fork, and serve the
+    same values to every child."""
+    if sys.platform != "darwin":
+        return
+    import urllib.request as ur
 
-
-def read_events(fd, deadline):
-    """(the child's events, its `end` event | None, timed out?). Stops at
-    `end` or EOF, not EOF alone: a process the child started may still hold
-    the pipe."""
-    buf = b""
-    while True:
-        if buf.endswith(b"\n"):
-            try:
-                last = json.loads(buf[buf.rfind(b"\n", 0, -1) + 1 :])
-            except ValueError:
-                last = None
-            if isinstance(last, dict) and last.get("ev") == "end":
-                return buf, last, False
-        wait = None if deadline is None else max(0.0, deadline - time.monotonic())
-        if not select.select([fd], [], [], wait)[0]:
-            return buf, None, True
-        chunk = os.read(fd, 65536)
-        if not chunk:
-            return buf, None, False
-        buf += chunk
+    try:
+        settings, proxies = ur._get_proxy_settings(), ur._get_proxies()
+    except Exception:  # noqa: BLE001 - no _scproxy: nothing to freeze
+        return
+    ur._get_proxy_settings = lambda: settings
+    ur._get_proxies = lambda: proxies
 
 
 def summarize(events):
     """Fold a child's event stream into one result."""
-    out = {"failed": [], "test_secs": 0.0, "unfinished": None}
+    out = {"failed": [], "test_secs": 0.0, "unfinished": None, "ran": []}
     ended = False
     for line in events.decode(errors="replace").splitlines():
         try:
@@ -725,6 +790,10 @@ def summarize(events):
         ev = e.get("ev")
         if ev == "begin":
             out["unfinished"] = e["nodeid"]
+            if e["nodeid"] not in out["ran"]:
+                out["ran"].append(
+                    e["nodeid"]
+                )  # in run order, for a kill's confirmation
         elif ev == "fail" and e["nodeid"] not in out["failed"]:
             out["failed"].append(e["nodeid"])
         elif ev == "dur":

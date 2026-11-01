@@ -15,7 +15,8 @@
 //! [`PytestRunner`] exactly as without `--schemata`: mutants outside function
 //! bodies, ones that would warn at compile time, functions that already ran
 //! inside the template (their results may have been stored before the fork),
-//! a template that failed to start or died, and a child that broke itself.
+//! a template that failed to start or died, a child that broke itself, and
+//! a run that timed out.
 //! The baseline is always the cold, spawn-path run.
 
 use std::collections::HashMap;
@@ -34,7 +35,8 @@ use tracing::{info, warn};
 
 use super::pytest::{run_timing, PytestRunner};
 use super::pytest_result::RunResult;
-use super::{configure_mirror_cmd, interpreter, BaselineStatus, Mirror, Runner};
+use super::python::pytest_interpreter;
+use super::{configure_mirror_cmd, precompile, BaselineStatus, Mirror, Runner};
 use crate::mutator::Mutant;
 use crate::report::MutantOutcome;
 use crate::sync::lock_recover;
@@ -46,8 +48,9 @@ const SCRIPT_SOURCE: &str = include_str!("../../python/pytest_fermut/_fermut_sch
 /// missing this means the template is wedged.
 const FORK_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Waiting for the result after killing a timed-out child's group: the
-/// template only has to reap it.
+/// Waiting for the result past the run's timeout: the template enforces the
+/// timeout itself and only has to kill and reap the child. Missing this means
+/// the template is wedged.
 const REAP_GRACE: Duration = Duration::from_secs(5);
 
 pub struct SchemaRunner {
@@ -82,7 +85,8 @@ const SURVIVOR_AUDIT_SEED: u64 = 0x5c4e_a0d1;
 
 /// The built schema: one read-only mirror shared by every template.
 struct Schema {
-    mirror: Mirror,
+    /// Shared with the template, which maps node ids into and out of it.
+    mirror: Arc<Mirror>,
     /// Mutant id → its index in the schema. Absent ids run on the spawn path.
     index: HashMap<String, u64>,
     /// Template command line after the interpreter: script, `serve`, args.
@@ -181,6 +185,9 @@ impl SchemaRunner {
         let out = run_with_stdin(cmd, &serde_json::to_vec(&input)?)?;
         let parsed: SchematizeOutput =
             serde_json::from_slice(&out).context("parsing the schematize output")?;
+        // After the rewrite: every Python subprocess a test spawns then skips
+        // recompiling the (much larger) schema source.
+        precompile(&mirror.root, &python);
 
         let mut index = HashMap::new();
         let mut fallbacks: HashMap<String, usize> = HashMap::new();
@@ -228,7 +235,7 @@ impl SchemaRunner {
         serve_args.extend(self.inner.extra_args.iter().map(Into::into));
         serve_args.push(mirror.tests.clone().into());
         Ok(Schema {
-            mirror,
+            mirror: Arc::new(mirror),
             index,
             serve_args,
             python,
@@ -575,31 +582,6 @@ impl Runner for SchemaRunner {
     }
 }
 
-/// The interpreter the spawn path's pytest runs on: `--python` when given,
-/// else the one in the shebang of the `pytest` the spawn path would find on
-/// `PATH` (a different interpreter may not even have pytest installed).
-fn pytest_interpreter(python: Option<&std::path::Path>) -> PathBuf {
-    if let Some(p) = python {
-        return p.to_path_buf();
-    }
-    which::which("pytest")
-        .ok()
-        .and_then(|script| std::fs::read(script).ok())
-        .and_then(|bytes| shebang_interpreter(&bytes))
-        .unwrap_or_else(|| interpreter(None))
-}
-
-/// `/path/to/python` from a `#!/path/to/python` first line, when it exists.
-/// pip writes a `#!/bin/sh` trampoline instead for very long paths; that and
-/// `#!/usr/bin/env python3` (no single interpreter path) give `None`.
-fn shebang_interpreter(script: &[u8]) -> Option<PathBuf> {
-    let first = script.split(|&b| b == b'\n').next()?;
-    let line = std::str::from_utf8(first.strip_prefix(b"#!")?).ok()?.trim();
-    let path = PathBuf::from(line.split_whitespace().next()?);
-    let name = path.file_name()?.to_string_lossy();
-    (name.starts_with("python") && path.is_file()).then_some(path)
-}
-
 /// Run `cmd` with `input` on stdin; its stdout on success.
 fn run_with_stdin(mut cmd: Command, input: &[u8]) -> Result<Vec<u8>> {
     let mut child = cmd
@@ -653,14 +635,18 @@ struct Ready {
     error: Option<String>,
 }
 
+/// Read only to keep replies in step: the template does any killing.
 #[derive(Deserialize)]
 struct Pid {
-    pid: u32,
+    #[serde(rename = "pid")]
+    _pid: u32,
 }
 
 #[derive(Deserialize)]
 struct Done {
     status: i32,
+    #[serde(default)]
+    timed_out: bool,
     #[serde(default)]
     failed: Vec<String>,
     #[serde(default)]
@@ -686,6 +672,8 @@ struct Template {
     next_id: AtomicU64,
     /// Index ranges of functions that ran inside the template before forking.
     unsafe_ranges: Vec<(u64, u64)>,
+    /// The schema's mirror; node ids are mapped in and out of it.
+    mirror: Arc<Mirror>,
 }
 
 impl Template {
@@ -741,6 +729,7 @@ impl Template {
             waiting,
             next_id: AtomicU64::new(0),
             unsafe_ranges: ready.unsafe_ranges,
+            mirror: Arc::clone(&schema.mirror),
         })
     }
 
@@ -779,35 +768,47 @@ impl Template {
     ) -> Result<Served> {
         let mut req = req.clone();
         req["id"] = id.into();
+        // The template kills a child past `timeout` itself: it alone knows the
+        // child isn't reaped yet, so its group id can't have been recycled.
+        req["timeout"] = timeout.as_secs_f64().into();
+        // Ids as pytest names them in the mirror (parametrize ids can embed
+        // the project path), and results mapped back, as on the spawn path.
+        let into_mirror = |v: &serde_json::Value| -> Option<serde_json::Value> {
+            v.as_str().map(|id| self.mirror.id_into_mirror(id).into())
+        };
+        if let Some(ids) = req["ids"].as_array_mut() {
+            for v in ids.iter_mut() {
+                if let Some(mapped) = into_mirror(v) {
+                    *v = mapped;
+                }
+            }
+        }
+        if let Some(mapped) = into_mirror(&req["after"]) {
+            req["after"] = mapped;
+        }
         {
             let mut stdin = lock_recover(&self.stdin);
             writeln!(stdin, "{req}").context("sending a request")?;
             stdin.flush().context("sending a request")?;
         }
-        let pid: Pid =
+        let _: Pid =
             serde_json::from_str(&recv(rx, FORK_TIMEOUT)?).context("parsing the fork reply")?;
         let started = Instant::now();
-        let (line, timed_out) = match recv(rx, timeout) {
-            Ok(line) => (line, false),
-            Err(_) if !matches!(lock_recover(&self.child).try_wait(), Ok(Some(_))) => {
-                super::process_group::kill_pgid(pid.pid);
-                (recv(rx, REAP_GRACE)?, true)
-            }
-            Err(e) => return Err(e),
-        };
+        let line = recv(rx, timeout + REAP_GRACE)?;
         let wall = started.elapsed();
         let done: Done = serde_json::from_str(&line).context("parsing the run result")?;
+        let from_mirror = |id: String| self.mirror.text_from_mirror(&id);
         Ok(Served {
-            status: (!timed_out).then(|| ExitStatus::from_raw(done.status)),
+            status: (!done.timed_out).then(|| ExitStatus::from_raw(done.status)),
             result: RunResult {
-                failures: done.failed,
-                unfinished: done.unfinished,
+                failures: done.failed.into_iter().map(from_mirror).collect(),
+                unfinished: done.unfinished.map(from_mirror),
                 test_secs: done.test_secs,
                 ..RunResult::default()
             },
             wall,
             error: done.error,
-            ran: done.ran,
+            ran: done.ran.into_iter().map(from_mirror).collect(),
             unconfirmed: false,
         })
     }
@@ -925,21 +926,6 @@ mod tests {
     }
 
     #[test]
-    fn shebang_names_the_interpreter_only_when_it_is_a_python_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let python = dir.path().join("python3.12");
-        std::fs::write(&python, "").unwrap();
-        let script = format!("#!{}\nimport pytest\n", python.display());
-        assert_eq!(shebang_interpreter(script.as_bytes()), Some(python.clone()));
-        let with_flag = format!("#!{} -E\n", python.display());
-        assert_eq!(shebang_interpreter(with_flag.as_bytes()), Some(python));
-        assert_eq!(shebang_interpreter(b"#!/usr/bin/env python3\n"), None);
-        assert_eq!(shebang_interpreter(b"#!/bin/sh\n'''exec' x\n"), None);
-        assert_eq!(shebang_interpreter(b"#!/no/such/python3\n"), None);
-        assert_eq!(shebang_interpreter(b"import pytest\n"), None);
-    }
-
-    #[test]
     fn unsafe_ranges_are_inclusive() {
         let ranges = [(3, 5), (9, 9)];
         assert!(!in_ranges(&ranges, 2));
@@ -965,7 +951,7 @@ mod tests {
             super::super::build_mirror(&dir.join("tests"), crate::config::IsolationMode::Copy)
                 .unwrap();
         Schema {
-            mirror,
+            mirror: Arc::new(mirror),
             index: HashMap::new(),
             serve_args: vec!["-c".into(), format!("{FAKE}{script}").into()],
             python: "/bin/sh".into(),
@@ -1045,8 +1031,8 @@ done"#,
         }))
     }
 
-    /// A template that answers every request with pid 0 (never a real group,
-    /// so a timeout's kill is a no-op) and then `done`, after `delay`.
+    /// A template that answers every request with pid 0 and then `done`,
+    /// after `delay`.
     fn answering(done: &str, delay: &str) -> String {
         format!(
             "echo '{{\"ready\":true,\"unsafe\":[[2,4]]}}'; \
@@ -1089,14 +1075,46 @@ done"#,
     }
 
     #[test]
-    fn a_run_past_its_timeout_has_no_status() {
+    fn a_run_the_template_timed_out_has_no_status() {
         let tmp = tempfile::tempdir().unwrap();
-        let schema = fake_schema(tmp.path(), &answering(r#"{"status":9}"#, "1"));
+        let schema = fake_schema(
+            tmp.path(),
+            &answering(r#"{"status":9,"timed_out":true}"#, "0"),
+        );
         let t = Template::start(&schema).unwrap();
-        let s = t
-            .request(1, None, false, Duration::from_millis(100))
-            .unwrap();
+        let s = t.request(1, None, false, Duration::from_secs(10)).unwrap();
         assert!(s.status.is_none(), "timed out");
+    }
+
+    #[test]
+    fn requests_carry_the_timeout_and_ids_map_into_and_out_of_the_mirror() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        let log = dir.join("req.json");
+        let schema = fake_schema(
+            &dir,
+            &format!(
+                r#"echo '{{"ready":true}}'; read req; echo "$req" > '{}'; idof "$req"; reply '{{"pid":0}}'; \
+                   reply "{{\"status\":256,\"failed\":[\"tests/t.py::t[$(pwd -P)/x]\"]}}""#,
+                log.display()
+            ),
+        );
+        let t = Template::start(&schema).unwrap();
+        let root = schema.mirror.root.display().to_string();
+        let id = format!("tests/t.py::t[{}/x]", dir.display());
+        let s = t
+            .request(
+                7,
+                Some(std::slice::from_ref(&id)),
+                false,
+                Duration::from_millis(1500),
+            )
+            .unwrap();
+        let req: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&log).unwrap()).unwrap();
+        assert_eq!(req["timeout"], 1.5);
+        assert_eq!(req["ids"][0], format!("tests/t.py::t[{root}/x]"));
+        assert_eq!(s.result.failures, [id], "mapped back to the project");
     }
 
     #[test]
@@ -1245,7 +1263,7 @@ done"#
         assert!(check(r#"{"status":0}"#, "0", secs));
         // Failing and hung tests are left to each kill's confirmation.
         assert!(check(r#"{"status":256,"failed":["t.py::a"]}"#, "0", secs));
-        assert!(check(r#"{"status":0}"#, "1", Duration::from_millis(100)));
+        assert!(check(r#"{"status":9,"timed_out":true}"#, "0", secs));
         assert!(!check(r#"{"status":768,"error":"Traceback"}"#, "0", secs));
         assert!(!check(r#"{"not":"a result"}"#, "0", secs));
     }

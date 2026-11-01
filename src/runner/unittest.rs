@@ -37,8 +37,8 @@ use wait_timeout::ChildExt;
 use super::exit::{anomaly_message, classify_exit, ExitVerdict, TestTool};
 use super::process_group::kill_group;
 use super::{
-    build_mirror, configure_mirror_cmd, mirror_pythonpath, run_baseline_with_timeout, run_patched,
-    sanitize_python_env, BaselineStatus, Mirror, Runner,
+    build_baseline_mirror, configure_mirror_cmd, mirror_pythonpath, run_baseline_with_timeout,
+    run_patched, sanitize_python_env, BaselineStatus, Mirror, Runner,
 };
 use crate::config::IsolationMode;
 use crate::mutator::Mutant;
@@ -128,53 +128,60 @@ impl Runner for UnittestRunner {
     }
 
     fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
-        run_patched(&self.tests, self.isolation, mutant, |mirror| {
-            let mut cmd = self.discover_command(mirror)?;
-            // Discard per-mutant output — only the exit status decides
-            // survived/killed. unittest writes its dots and tracebacks to
-            // stderr; left inherited, every killed mutant spews a traceback to
-            // the terminal. The baseline run still captures output for
-            // diagnosis.
-            cmd.stdout(Stdio::null()).stderr(Stdio::null());
-            let started = std::time::Instant::now();
-            let mut child = cmd.spawn().context("spawning python -m unittest")?;
+        run_patched(
+            &self.tests,
+            self.isolation,
+            Some(&self.python),
+            mutant,
+            |mirror| {
+                let mut cmd = self.discover_command(mirror)?;
+                // Discard per-mutant output — only the exit status decides
+                // survived/killed. unittest writes its dots and tracebacks to
+                // stderr; left inherited, every killed mutant spews a traceback to
+                // the terminal. The baseline run still captures output for
+                // diagnosis.
+                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                let started = std::time::Instant::now();
+                let mut child = cmd.spawn().context("spawning python -m unittest")?;
 
-            let outcome = match child
-                .wait_timeout(self.timeout)
-                .context("waiting on unittest")?
-            {
-                // Share the pytest runner's exit→verdict logic: a usage error
-                // (exit 2) or "no tests ran" (exit 5 on Python 3.12+) is an
-                // infrastructure fault, not a kill — scoring it as a kill would
-                // inflate the mutation score. Only a genuine failure/error
-                // (exit 1, including a mutant that broke import) counts.
-                Some(status) => match classify_exit(TestTool::Unittest, status.code()) {
-                    ExitVerdict::Survived => Ok(MutantOutcome::survived(mutant.clone())),
-                    ExitVerdict::Killed => Ok(MutantOutcome::killed(mutant.clone())),
-                    ExitVerdict::Anomaly(code) => Ok(MutantOutcome::error(
-                        mutant.clone(),
-                        anomaly_message(TestTool::Unittest, code),
-                    )),
-                },
-                None => {
-                    kill_group(&mut child);
-                    let _ = child.wait();
-                    Ok(MutantOutcome::timed_out(mutant.clone()))
-                }
-            };
-            outcome.map(|o| {
-                o.with_timing(Timing {
-                    duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    test_ms: None,
+                let outcome = match child
+                    .wait_timeout(self.timeout)
+                    .context("waiting on unittest")?
+                {
+                    // Share the pytest runner's exit→verdict logic: a usage error
+                    // (exit 2) or "no tests ran" (exit 5 on Python 3.12+) is an
+                    // infrastructure fault, not a kill — scoring it as a kill would
+                    // inflate the mutation score. Only a genuine failure/error
+                    // (exit 1, including a mutant that broke import) counts.
+                    Some(status) => match classify_exit(TestTool::Unittest, status.code()) {
+                        ExitVerdict::Survived => Ok(MutantOutcome::survived(mutant.clone())),
+                        ExitVerdict::Killed => Ok(MutantOutcome::killed(mutant.clone())),
+                        ExitVerdict::Anomaly(code) => Ok(MutantOutcome::error(
+                            mutant.clone(),
+                            anomaly_message(TestTool::Unittest, code),
+                        )),
+                    },
+                    None => {
+                        kill_group(&mut child);
+                        let _ = child.wait();
+                        Ok(MutantOutcome::timed_out(mutant.clone()))
+                    }
+                };
+                outcome.map(|o| {
+                    o.with_timing(Timing {
+                        duration_ms: u64::try_from(started.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
+                        test_ms: None,
+                    })
                 })
-            })
-        })
+            },
+        )
     }
 
     fn baseline(&self) -> Result<BaselineStatus> {
         // Run the unmutated suite once via `unittest discover`, capped at
         // `--baseline-timeout` so a hanging suite can't stall the run forever.
-        let mirror = build_mirror(&self.tests, self.isolation)?;
+        let mirror = build_baseline_mirror(&self.tests, self.isolation, Some(&self.python))?;
 
         // Zero-collection guard: `unittest discover` with no matching tests
         // exits 0, so the baseline would vacuously "pass" and then EVERY mutant
@@ -556,7 +563,8 @@ mod tests {
         let Some(py) = python_or_skip() else { return };
         let tmp = tempfile::tempdir().unwrap();
         project_with_test(tmp.path(), "widget_test.py");
-        let mirror = build_mirror(&tmp.path().join("tests"), IsolationMode::Auto).unwrap();
+        let mirror =
+            crate::runner::build_mirror(&tmp.path().join("tests"), IsolationMode::Auto).unwrap();
         // Default pattern misses `*_test.py` → 0; the convention pattern finds 1.
         let r_default = runner(tmp.path().join("tests"), py.clone(), None);
         assert_eq!(r_default.count_tests(&mirror), Some(0));

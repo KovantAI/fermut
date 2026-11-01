@@ -270,7 +270,7 @@ pub(crate) fn run(args: HomArgs) -> Result<()> {
             if inter_vec.is_empty() && outside.is_empty() {
                 return None; // no tests to run — cannot classify
             }
-            let staged = crate::runner::with_worker_mirror(&tests, cfg.isolation, |mirror| {
+            let staged = crate::runner::with_worker_mirror(&tests, cfg.isolation, python, |mirror| {
                 run_hom_staged(
                     mirror, python, exe, timeout, &a.mutant, &b.mutant, &inter_vec, &outside,
                 )

@@ -14,7 +14,10 @@ several pytest sessions that append to the same file):
 - ``{"ev":"config_error","exc":...,"project":bool}`` -- configuring pytest
   failed some other way, e.g. a ``filterwarnings`` entry that imports the
   package under test; ``project`` says whether the exception chain passed
-  through project code (under the rootdir, outside site-packages)
+  through project code (under the rootdir, outside site-packages). pytest
+  9.2+ applies ``filterwarnings`` before importing ``-p`` plugins, so there a
+  filter that imports broken project code ends the run before this plugin
+  loads; fermut's ``--collect-only`` probe reads it from pytest's output.
 - ``{"ev":"collect","nodeid":...}`` -- a collector failed (import error)
 - ``{"ev":"deselect","nodeid":...}`` -- a test was deselected (``--deselect``,
   ``-k``, ``-m``, or a plugin calling ``pytest_deselected``)

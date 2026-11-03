@@ -11,7 +11,9 @@
 //!   imports the mutated code, or a `config_error` raised through project code
 //!   while pytest configures itself (a `filterwarnings` entry naming a warning
 //!   class in the package under test imports it). The last two fail before
-//!   any session starts. No `--collect-only` probe re-run is needed.
+//!   any session starts. No `--collect-only` probe re-run is needed, except
+//!   on pytest 9.2+, which applies warning filters before loading the plugin:
+//!   that `config_error` never reaches the file and the probe reads it.
 //! - **The killer.** The first failed test phase names the killing test, with
 //!   no stdout capture or `-rfE` summary parsing.
 //! - **The hang.** A run killed on timeout leaves a test that began but whose

@@ -20,8 +20,8 @@ use anyhow::{Context, Result};
 use wait_timeout::ChildExt;
 
 use super::exit::{
-    anomaly_message, classify_exit, is_collection_failure, ExitVerdict, TestTool,
-    PYTEST_USAGE_ERROR,
+    anomaly_message, classify_exit, is_collection_failure, is_project_config_error, ExitVerdict,
+    TestTool, PYTEST_USAGE_ERROR,
 };
 use super::process_group::kill_group;
 #[cfg(test)]
@@ -411,8 +411,10 @@ impl PytestRunner {
 
     /// Re-run the mutant's exact selection with `--collect-only`, capturing
     /// stdout and stderr together, and report whether a selected module failed
-    /// to collect ([`is_collection_failure`]). Called only after an exit-4 run,
-    /// with the mutant still applied in `mirror`.
+    /// to collect ([`is_collection_failure`]) or project code raised while
+    /// pytest configured itself ([`is_project_config_error`]; on pytest 9.2+
+    /// that happens before the reporter plugin loads). Called only after an
+    /// exit-4 run, with the mutant still applied in `mirror`.
     ///
     /// Output goes to a temp file rather than a pipe: both streams
     /// share one file description (so their writes interleave instead of
@@ -442,7 +444,8 @@ impl PytestRunner {
                 return Ok(false); // timed out — no evidence either way
             }
             let out = std::fs::read(log.path()).context("reading collection probe log")?;
-            Ok(is_collection_failure(&String::from_utf8_lossy(&out)))
+            let out = String::from_utf8_lossy(&out);
+            Ok(is_collection_failure(&out) || is_project_config_error(&out, &mirror.root))
         };
         probe().unwrap_or(false)
     }

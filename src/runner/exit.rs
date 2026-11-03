@@ -28,6 +28,8 @@
 //!
 //! [exit codes]: https://docs.pytest.org/en/stable/reference/exit-codes.html
 
+use std::path::Path;
+
 /// Which framework produced the exit status — selects the code→verdict table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TestTool {
@@ -106,6 +108,33 @@ pub(crate) fn is_collection_failure(output: &str) -> bool {
             || l.contains(" errors in ")
     });
     unresolved && collect_errored
+}
+
+/// Whether pytest output shows configuring pytest failed because project code
+/// under `root` raised: a `filterwarnings` entry (ini or `-W`) naming a warning
+/// class in the package under test imports it, and the mutated module raises.
+///
+/// The reporter plugin reports this itself on pytest < 9.2. pytest 9.2 applies
+/// the filters before it imports `-p` plugins, so the run dies before the
+/// reporter exists and only this output remains. pytest 7–9.2 print `ERROR:
+/// while parsing the following warning configuration:` followed by the full
+/// traceback. A traceback frame (or a `SyntaxError`'s file line, same format)
+/// under `root` and outside `site-packages` is project code; a bad filter that
+/// only fails inside pytest (`ignore::NoSuchClass`) is a usage error, not this.
+pub(crate) fn is_project_config_error(output: &str, root: &Path) -> bool {
+    if !output.contains("while parsing the following warning configuration") {
+        return false;
+    }
+    // Tracebacks may name either spelling of a symlinked root (/var vs /private/var).
+    let real = root.canonicalize().ok();
+    output
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix("File \"")?.split_once('"'))
+        .map(|(path, _)| Path::new(path))
+        .any(|p| {
+            (p.starts_with(root) || real.as_deref().is_some_and(|r| p.starts_with(r)))
+                && !p.components().any(|c| c.as_os_str() == "site-packages")
+        })
 }
 
 /// Human-readable label for an anomaly exit code, used to describe the
@@ -242,5 +271,63 @@ E   ZeroDivisionError: division by zero
             anomaly_message(TestTool::Unittest, 2),
             "unittest exit 2: usage error (not a kill)"
         );
+    }
+
+    // pytest 9.2.0, `--collect-only -x --tb=no -q`, with `filterwarnings =
+    // ignore::proj.W` and `proj.py` raising at import (abridged; 9.1 prints
+    // the same). The reporter plugin never loads on 9.2, so this is all there is.
+    const CONFIG_ERROR_PROJECT: &str = r#"ERROR: while parsing the following warning configuration:
+
+  ignore::proj.W
+
+This error occurred:
+
+Traceback (most recent call last):
+  File "/venv/lib/python3.13/site-packages/_pytest/config/__init__.py", line 2472, in _resolve_warning_category
+    m = importlib.import_module(module)
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/proj/proj.py", line 1, in <module>
+    raise ValueError('broken')
+ValueError: broken
+"#;
+    // `-W ignore::NoSuch`: the filter fails inside pytest only.
+    const CONFIG_ERROR_PYTEST: &str = r#"ERROR: while parsing the following warning configuration:
+
+  ignore::NoSuch
+
+This error occurred:
+
+Traceback (most recent call last):
+  File "/proj/.venv/lib/python3.13/site-packages/_pytest/config/__init__.py", line 2473, in _resolve_warning_category
+    cat = getattr(m, klass)
+AttributeError: module 'builtins' has no attribute 'NoSuch'
+"#;
+    // A mutant that makes `proj.py` unparsable: the file line has no `in`.
+    const CONFIG_ERROR_SYNTAX: &str = r#"ERROR: while parsing the following warning configuration:
+Traceback (most recent call last):
+  File "<frozen importlib._bootstrap_external>", line 1087, in source_to_code
+  File "/proj/proj.py", line 1
+    def f(:
+          ^
+SyntaxError: invalid syntax
+"#;
+
+    #[test]
+    fn config_error_through_project_code_is_detected() {
+        let root = Path::new("/proj");
+        assert!(is_project_config_error(CONFIG_ERROR_PROJECT, root));
+        assert!(is_project_config_error(CONFIG_ERROR_SYNTAX, root));
+        // A project venv's site-packages is not project code.
+        assert!(!is_project_config_error(CONFIG_ERROR_PYTEST, root));
+        // Another root, or no warning-config header, is not this error.
+        assert!(!is_project_config_error(
+            CONFIG_ERROR_PROJECT,
+            Path::new("/other")
+        ));
+        assert!(!is_project_config_error(
+            "  File \"/proj/proj.py\", line 1, in <module>\n",
+            root
+        ));
+        assert!(!is_collection_failure(CONFIG_ERROR_PROJECT));
     }
 }

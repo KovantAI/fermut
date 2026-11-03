@@ -977,6 +977,74 @@ fn conftest_import_break_is_killed_and_plugin_matches_fallback() {
 
 #[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn warning_filter_import_break_is_killed_with_and_without_plugin() {
+    // A `filterwarnings` entry naming a warning class in the mutated module
+    // imports it while pytest configures (exit 4, no session). pytest < 9.2
+    // reports it through the reporter's `config_error` event; 9.2 applies the
+    // filters before loading `-p` plugins, so there only the `--collect-only`
+    // probe sees it. Either way it is a kill, and both paths agree.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n\
+         filterwarnings = [\"ignore::pkg.warn.W\"]\n",
+    );
+    write("src/pkg/__init__.py", "");
+    write(
+        "src/pkg/warn.py",
+        "def check(name):\n    if not name:\n        raise ValueError(\"empty name\")\n    \
+         return name\n\n\nclass W(Warning):\n    pass\n\n\nDEFAULT = check(\"default\")\n",
+    );
+    write(
+        "tests/test_warn.py",
+        "from pkg.warn import check\n\n\ndef test_check():\n    assert check(\"a\") == \"a\"\n",
+    );
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(proj)
+        .assert()
+        .success();
+
+    let verdicts = |outcomes: &[serde_json::Value]| -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = outcomes
+            .iter()
+            .map(|o| (o["mutant"]["id"].to_string(), o["status"].to_string()))
+            .collect();
+        v.sort();
+        v
+    };
+    let with_plugin = run_outcomes(proj, &[]);
+    let fallback = run_outcomes(proj, &["--no-pytest-plugin"]);
+    for (label, outcomes) in [("plugin", &with_plugin), ("fallback", &fallback)] {
+        let errored: Vec<_> = outcomes.iter().filter(|o| o["status"] == "error").collect();
+        assert!(
+            errored.is_empty(),
+            "{label}: warning-filter import breaks must not be errors: {errored:#?}"
+        );
+        assert!(
+            outcomes
+                .iter()
+                .any(|o| o["status"] == "killed" && o["mutant"]["line"] == 2),
+            "{label}: guard mutant on line 2 must be killed"
+        );
+    }
+    assert_eq!(
+        verdicts(&with_plugin),
+        verdicts(&fallback),
+        "the reporter plugin must not change any verdict"
+    );
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn pytest_fermut_front_end_runs_and_gates() {
     // `pytest --fermut` (python/pytest_fermut/plugin.py) against the real
     // binary: green suite → `fermut coverage` + `fermut run` → survivors in the

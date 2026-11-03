@@ -104,6 +104,16 @@ def test_conftest_import_failure_is_reported_before_any_session(pytester, report
     assert events[0]["path"].endswith("conftest.py")
 
 
+# pytest 9.2 applies warning filters before importing `-p` plugins, so a
+# filter that fails ends the run before the reporter loads (fermut's probe
+# reads pytest's output instead). If a later pytest loads plugins first again,
+# the "no events" assertion fails and the events can be relied on again.
+FILTERS_BEFORE_PLUGINS = tuple(int(p) for p in pytest.__version__.split(".")[:2]) >= (
+    9,
+    2,
+)
+
+
 def test_config_error_from_project_code_is_flagged(pytester, report):
     # A filterwarnings entry naming a warning class in the project imports it
     # while pytest configures; if that module raises, the run dies there.
@@ -114,6 +124,9 @@ def test_config_error_from_project_code_is_flagged(pytester, report):
     pytester.makepyfile(test_a="def test_x():\n    pass\n")
     ret, events = report()
     assert ret == 4
+    if FILTERS_BEFORE_PLUGINS:
+        assert events == []
+        return
     assert kinds(events) == ["config_error"]
     assert events[0]["project"] is True
 
@@ -122,6 +135,9 @@ def test_config_error_outside_project_is_not_flagged(pytester, report):
     pytester.makepyfile(test_a="def test_x():\n    pass\n")
     ret, events = report("-W", "ignore::NoSuchWarningClass")
     assert ret == 4
+    if FILTERS_BEFORE_PLUGINS:
+        assert events == []
+        return
     assert kinds(events) == ["config_error"]
     assert events[0]["project"] is False
 

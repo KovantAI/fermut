@@ -413,6 +413,7 @@ class Template:
         }
         self.by_filename = {}  # co_filename -> switched map (realpath memo)
         self.ran = set()
+        self.allowed_threads = []
         # Protocol on the original stdin/stdout; pytest's stdout goes to
         # /dev/null. stderr stays: fermut shows its tail if the template
         # never becomes ready.
@@ -486,6 +487,30 @@ class Template:
             sys.setprofile(None)
             threading.setprofile(None)
 
+    def threads(self):
+        """The template's other threads, described, as (allowed, refused).
+
+        A daemon thread running third-party code (sqlmesh's analytics
+        flusher) is allowed: such threads rarely call back into the code under
+        test (the survivor audit is the net if one does), and a lock one holds
+        at fork time only hangs or crashes a child, which goes to the spawn
+        path like any served timeout or crash. A thread running project
+        code, a non-daemon thread, or one whose code can't be found is refused.
+        """
+        root = os.path.realpath(self.mirror_root) + os.sep
+        allowed, refused = [], []
+        for t in threading.enumerate():
+            if t is threading.main_thread():
+                continue
+            origin, path = thread_code(t)
+            third_party = path is not None and (
+                not os.path.realpath(path).startswith(root)
+                or "site-packages" in path.split(os.sep)
+            )
+            desc = f"{t.name} ({origin})" if origin else t.name
+            (allowed if t.daemon and third_party else refused).append(desc)
+        return allowed, refused
+
     def run(self):
         os.chdir(self.mirror_root)
         setattr(builtins, ACTIVE, 0)
@@ -498,22 +523,20 @@ class Template:
             @pytest.hookimpl(tryfirst=True)
             def pytest_runtestloop(self, session):
                 template.untrace()
-                others = [
-                    t.name
-                    for t in threading.enumerate()
-                    if t is not threading.main_thread()
-                ]
-                if others:
-                    # A thread started at import or collection can hold a lock
-                    # at fork time (a child deadlocks on it), and keeps calling
-                    # switched functions in the template after `unsafe` was sent.
+                allowed, refused = template.threads()
+                if refused:
+                    # A thread running project code keeps calling switched
+                    # functions in the template after `unsafe` was sent, and a
+                    # non-daemon one is something the suite waits on.
                     template.send(
                         {
                             "ready": False,
-                            "error": f"threads running in the template: {', '.join(others)}",
+                            "error": "threads running in the template: "
+                            + ", ".join(refused),
                         }
                     )
                     os._exit(0)
+                template.allowed_threads = allowed
                 if session.testsfailed:
                     # Collection errors: a cold run would stop here too.
                     template.send(
@@ -541,7 +564,9 @@ class Template:
         # Children gc-collect at session end (see `child`); frozen, the
         # collected suite isn't rescanned on every one of those passes.
         gc.freeze()
-        self.send({"ready": True, "unsafe": sorted(self.ran)})
+        self.send(
+            {"ready": True, "unsafe": sorted(self.ran), "threads": self.allowed_threads}
+        )
         # One template serves every worker: each request forks at once and its
         # result goes back, tagged with the request's id, when its child ends.
         sel = selectors.DefaultSelector()
@@ -812,6 +837,23 @@ def teardown_all(session):
             state.teardown_all()
     except Exception:  # noqa: BLE001, S110 - a cold run reports it outside the verdict
         pass
+
+
+def thread_code(t):
+    """`module.qualname` of the function thread `t` runs, and its source file;
+    (None, None) when unknown (a builtin target such as `time.sleep`)."""
+    if type(t).run is not threading.Thread.run:
+        fn = type(t).run
+    else:
+        fn = getattr(t, "_target", None)  # CPython; deleted once run() ends
+    fn = getattr(fn, "__func__", fn)  # a bound method
+    code = getattr(fn, "__code__", None)
+    if code is None:
+        return None, None
+    origin = (
+        f"{getattr(fn, '__module__', '?')}.{getattr(fn, '__qualname__', code.co_name)}"
+    )
+    return origin, code.co_filename
 
 
 def freeze_macos_proxies():

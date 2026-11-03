@@ -87,6 +87,11 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   be removed in a later release.
 
 ### Fixed
+- Schemata no longer refuses the template over a third-party daemon thread
+  started at import (sqlmesh's analytics flusher made every apb-mutation
+  mutant run the normal way: 790 s instead of 233 s). Threads running project
+  code, non-daemon threads and threads whose code can't be found still refuse
+  it, and the message now names each thread's code.
 - Mutants covered only by tests pytest deselects (`--deselect`, `-k`, `-m`
   in `--pytest-arg` or `addopts`) ran with no tests and scored `error`
   (pytest exit 5). The baseline now reports what pytest deselected, and those

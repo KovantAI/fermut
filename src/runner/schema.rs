@@ -696,6 +696,9 @@ struct Ready {
     unsafe_ranges: Vec<(u64, u64)>,
     #[serde(default)]
     error: Option<String>,
+    /// Third-party daemon threads the template allowed (name and code).
+    #[serde(default)]
+    threads: Vec<String>,
 }
 
 /// Read only to keep replies in step: the template does any killing.
@@ -792,6 +795,12 @@ impl Template {
             serde_json::from_str(&line).context("parsing the template's ready line")?;
         if !ready.ready {
             bail!("template refused: {}", ready.error.unwrap_or_default());
+        }
+        if !ready.threads.is_empty() {
+            info!(
+                "schemata: forking beside third-party daemon thread(s): {}",
+                ready.threads.join(", ")
+            );
         }
         debug!(unsafe_ranges = ?ready.unsafe_ranges, "template ready");
         Ok(Self {

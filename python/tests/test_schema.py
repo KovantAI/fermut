@@ -718,18 +718,45 @@ def test_fake_user_matches_real_user_length():
     assert t.fake_user(654321) == "f654321", "a longer pid still fits"
 
 
-def test_serve_refuses_with_threads_running(tmp_path):
+def serve_with_thread(tmp_path, start):
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests/test_bg.py").write_text(
-        "import threading, time\n"
-        "threading.Thread(target=time.sleep, args=(30,), name='poller', daemon=True).start()\n"
+        "import threading, time, queue\n"
+        "def loop():\n    time.sleep(30)\n"
+        f"{start}.start()\n"
         "def test_ok():\n    pass\n"
     )
     (tmp_path / "schema.json").write_text(json.dumps({"functions": {}}))
     server = Server(tmp_path, tmp_path / "schema.json")
     msg = server.recv()
-    assert msg["ready"] is False and "poller" in msg["error"]
     server.close()
+    return msg
+
+
+@pytest.mark.parametrize(
+    "start, why",
+    [
+        ("threading.Thread(target=loop, name='poller', daemon=True)", "project code"),
+        (
+            "threading.Thread(target=time.sleep, args=(30,), name='poller', daemon=True)",
+            "unknown",
+        ),
+        ("threading.Thread(target=queue.Queue().get, name='poller')", "non-daemon"),
+    ],
+)
+def test_serve_refuses_risky_threads(tmp_path, start, why):
+    msg = serve_with_thread(tmp_path, start)
+    assert msg["ready"] is False and "poller" in msg["error"], why
+
+
+def test_serve_allows_third_party_daemon_threads(tmp_path):
+    # Like sqlmesh's analytics flusher: a daemon thread in library code.
+    msg = serve_with_thread(
+        tmp_path,
+        "threading.Thread(target=queue.Queue().get, name='poller', daemon=True)",
+    )
+    assert msg["ready"] is True
+    assert msg["threads"] == ["poller (queue.Queue.get)"]
 
 
 def test_serve_refuses_on_collection_errors(tmp_path):

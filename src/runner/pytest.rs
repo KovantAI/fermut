@@ -642,11 +642,11 @@ fn select_args(
 ) -> Selection {
     match ids {
         Some(ids) if !ids.is_empty() => {
-            let ordered = if smart_order {
+            let ordered = modules_last(if smart_order {
                 kill_order.order(ids, key_file, key_op)
             } else {
                 ids.to_vec()
-            };
+            });
             let capture = should_capture(capture_killer, ordered.len());
             let mut args = ordered;
             if capture {
@@ -659,6 +659,26 @@ fn select_args(
         }
         _ => Selection::Sweep,
     }
+}
+
+/// Put whole test modules (import-time coverage ids, no `::`) after every node
+/// id, and drop node ids inside a module that is selected whole. pytest 8.4
+/// collects a module twice when its node ids straddle another module's path
+/// argument; a one-shot parametrize iterator (click's `chain(...)`) is empty the
+/// second time, so those ids are "not found" and the run exits 4. Modules first
+/// is no better: pytest then silently drops some of the node ids that follow.
+fn modules_last(ids: Vec<String>) -> Vec<String> {
+    let (modules, nodes): (Vec<String>, Vec<String>) =
+        ids.into_iter().partition(|id| !id.contains("::"));
+    let mut out: Vec<String> = nodes
+        .into_iter()
+        .filter(|id| {
+            id.split_once("::")
+                .is_none_or(|(file, _)| !modules.iter().any(|m| m == file))
+        })
+        .collect();
+    out.extend(modules);
+    out
 }
 
 /// How long to wait for the stdout drain to *settle* once the direct child has
@@ -1082,6 +1102,39 @@ mod tests {
                 args
             }
             Selection::Sweep => panic!("expected Ids, got Sweep"),
+        }
+    }
+
+    #[test]
+    fn select_args_puts_whole_modules_last_and_drops_their_node_ids() {
+        // click: an import-time module id between two `test_basic.py` ids made
+        // pytest re-collect test_basic.py and exit 4.
+        let ko = KillOrder::default();
+        for smart in [true, false] {
+            let sel = select_args(
+                Some(&sids(&[
+                    "tests/a.py::x",
+                    "tests/m.py",
+                    "tests/m.py::inside",
+                    "tests/a.py::y[1-2]",
+                    "tests/n.py",
+                ])),
+                smart,
+                false,
+                &ko,
+                "src/f.py",
+                "op",
+            );
+            assert_ids(
+                sel,
+                &[
+                    "tests/a.py::x",
+                    "tests/a.py::y[1-2]",
+                    "tests/m.py",
+                    "tests/n.py",
+                ],
+                false,
+            );
         }
     }
 

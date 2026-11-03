@@ -1,8 +1,12 @@
-# `minimal` profile gate: results (2026-10-07)
+# `minimal` profile gate: results (2026-11-03)
 
-Branch `features/subsume/draft` @ 69dff21696, release build. Reproduce with
-`benchmarks/subsumption/run-gate.sh` (reports land in `results/`, not committed;
-~11 MB each for click/starlette).
+Branch `features/template/fixes` @ 202122637d plus the `modules_last` selection
+fix (below), release build, Python 3.13. Reproduce with
+`benchmarks/subsumption/run-gate.sh [repo...]`: it rebuilds each repo's
+`.coverage` (`fermut coverage --full`) and writes reports to `results/` (not
+committed; ~12 MB for click). Regenerated for backlog #31; the first run was
+2026-10-07 on `features/subsume/draft` @ 69dff21696 (300 sites, 79 checked,
+0 violations).
 
 ## Rule checked
 
@@ -12,46 +16,62 @@ detected. Run under the hidden `ror-all` profile so ordering sites carry all 7 f
 
 ## Result: 0 violations
 
-| repo | sites | all-minimal-detected (checked) | violations |
-|---|---|---|---|
-| pyjwt | 38 | 19 | 0 |
-| markupsafe | 3 | 1 | 0 |
-| typer | 47 | 6 | 0 |
-| click | 129 | 30 | 0 |
-| starlette | 83 | 23 | 0 |
-| **total** | **300** | **79** | **0** |
-
-The other 221 sites have a surviving minimal mutant, so the model makes no claim
-there (5 starlette sites include an errored mutant). No NaN/set/numpy/custom-`__lt__`
-triage was needed.
-
-## Mutant count (default → minimal), `fermut list` with coverage + ty filters
-
-| repo | default | minimal | Δ | full |
+| repo | pytest | sites | all-minimal-detected (checked) | violations |
 |---|---|---|---|---|
-| pyjwt | 1877 | 1934 | +3.0% | 1974 |
-| markupsafe | 211 | 217 | +2.8% | 220 |
-| typer | 1507 | 1597 | +6.0% | 1635 |
-| click | 6587 | 6800 | +3.2% | 6951 |
-| starlette | 6056 | 6161 | +1.7% | 6261 |
+| pyjwt | 9.2.0 | 38 | 19 | 0 |
+| markupsafe | 9.2.0 | 3 | 1 | 0 |
+| typer | 9.2.0 | 47 | 6 | 0 |
+| click | 8.4.2 | 129 | 30 | 0 |
+| starlette | 8.4.2 | 84 | 26 | 0 |
+| **total** | | **301** | **82** | **0** |
 
-All within the ±10% acceptance band.
+No mutant errored. The other 219 sites have a surviving minimal mutant, so the
+model makes no claim there.
+
+## Mutant count (classic → minimal), `fermut list` with coverage + ty filters
+
+| repo | classic | minimal | Δ | full |
+|---|---|---|---|---|
+| pyjwt | 1682 | 1739 | +3.4% | 1779 |
+| markupsafe | 216 | 222 | +2.8% | 225 |
+| typer | 1834 | 1924 | +4.9% | 1962 |
+| click | 6721 | 6934 | +3.2% | 7085 |
+| starlette | 6735 | 6842 | +1.6% | 6940 |
+
+All within the ±10% acceptance band. Counts differ from 2026-10-07 because the
+operator catalogue changed since (and `default` is now `classic`).
+
+## Setup notes
+
+- markupsafe now runs with `--coverage` (the 2026-10-07 run needed
+  `--no-coverage`: the mirror skipped the gitignored `_speedups*.so`; fixed
+  2026-10-20).
+- starlette runs its whole suite: its venv moved from pytest 7.4 to 8.x
+  (`configs/repos.toml`), where `test_lifespan_with_on_events` passes. The
+  2026-10-07 run deselected it.
+- typer deselects `test_path/test_tutorial002.py::test_not_exists` and
+  `test_type_conversion.py::test_path_convert_failures` (they fail on this env:
+  rich-formatted click errors), as `schemata/run10.sh` does.
+- The first click run had 37 mutants error with pytest exit 4: an import-time
+  coverage id (a whole test module, `tests/test_options.py`) between two
+  `test_basic.py` node ids made pytest 8.4 collect `test_basic.py` twice, and its
+  `chain(...)` parametrize iterator was empty the second time. fermut now puts
+  whole-module ids after the node ids and drops node ids inside them
+  (`modules_last` in `src/runner/pytest.rs`); the table is the rerun.
 
 ## Caveats
 
-- **Small evidence base.** 79 checked sites across 5 repos. Weak suites leave most
-  sites unchecked (typer: 6 of 47). None of the corpus does float/NaN-heavy or
-  numpy comparisons, so those caveats are untested, not refuted.
-- markupsafe ran with `--no-coverage` here: with `--coverage`, every mutant exited
-  pytest 4. Cause: the mirror skipped the gitignored `_speedups*.so`, so ids
-  parametrized on `markupsafe._speedups` didn't exist. Fixed 2026-10-20; a rerun
-  with `--coverage` gives the same result (3 sites, 1 checked, 0 violations).
-- starlette ran with `test_lifespan_with_on_events` deselected (baseline failure on
-  this env).
+- **Small evidence base.** 82 checked sites across 5 repos. Weak suites leave most
+  sites unchecked (typer: 6 of 47). The sections below add 8 more repos,
+  including float/NaN and numpy/pandas comparisons.
 
 ---
 
 # Widened gate (2026-10-21, issue #28)
+
+Not regenerated: of these repos only more-itertools, jinja2, flask and werkzeug
+still have fixtures (uncertainties, pyquaternion, pvlib and pint were set up
+ad hoc). Kept as dated history.
 
 Branch `features/pytest/fermut`, release build. Same rule and `gate.py`, run
 under `--operators ror-all --ops <site-tagged ops>` with coverage, on six more
@@ -72,7 +92,8 @@ fresh venvs (the fixture venvs broke when Homebrew removed python@3.13).
 
 werkzeug: rerun after the mirror node-id fix (124 mutants had errored with
 pytest exit 4; first run: 171 sites, 34 checked). With the 2026-10-07 run:
-**848 sites, 253 checked, 0 violations, 11 repos.**
+**848 sites, 253 checked, 0 violations, 11 repos.** (With the 2026-11-03 rerun of
+the first five: 849 sites, 256 checked.)
 
 ## Mutant count (classic → minimal), `fermut list`
 
@@ -118,7 +139,8 @@ picked for numpy/pandas comparisons and strong suites:
 | pint | 0.24.4 | 125 | 64 | 0 |
 | **total** | | **474** | **113** | **0** |
 
-**All runs: 1322 sites, 366 checked, 0 violations, 13 repos.**
+**All runs: 1322 sites, 366 checked, 0 violations, 13 repos** (1323 sites, 369
+checked with the 2026-11-03 rerun of the first five).
 
 ## Which checked sites compare numpy values
 

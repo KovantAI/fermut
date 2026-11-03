@@ -12,7 +12,7 @@ pyjwt jwt tests 1
 markupsafe src/markupsafe tests 1
 more-itertools more_itertools tests 1
 typer typer tests 1 --pytest-arg=--deselect=tests/test_tutorial/test_parameter_types/test_path/test_tutorial002.py::test_not_exists --pytest-arg=--deselect=tests/test_type_conversion.py::test_path_convert_failures
-starlette starlette tests 1 --pytest-arg=--deselect=tests/test_routing.py::test_lifespan_with_on_events
+starlette starlette tests 1
 click src/click tests 0.3
 flask src/flask tests 0.3 --pytest-arg=--deselect=tests/test_reqctx.py::test_bad_environ_raises_bad_request
 jinja2 src/jinja2 tests 0.3

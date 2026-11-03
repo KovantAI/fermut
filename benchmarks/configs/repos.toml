@@ -85,15 +85,15 @@ url = "https://github.com/encode/starlette.git"
 ref = "0.52.1"
 src_path = "starlette"
 test_path = "tests"
-# Pinned: httpx<0.28 (JSON serialization), pytest<8 (PytestUnraisableExc),
-# anyio<4.5 (deprecation-emission test in 0.41.x is sensitive to anyio
-# internals; 0.52.x is newer + tolerant but kept pin for stability).
-install_cmd = "pip install -e . && pip install 'pytest<8' httpx 'anyio<4.5' trio itsdangerous jinja2 python-multipart pyyaml typing_extensions"
+# Pinned: httpx<0.28 (JSON serialization), anyio<4.5 (deprecation-emission
+# test in 0.41.x is sensitive to anyio internals; 0.52.x is newer + tolerant
+# but kept pin for stability), pytest 8.x: on 7.4 + Python 3.13
+# test_lifespan_with_on_events fails its own baseline (deprecated_call: DID
+# NOT WARN); <9 keeps clear of pytest 9.2's new deprecations under
+# filterwarnings=error (as click).
+install_cmd = "pip install -e . && pip install 'pytest>=8,<9' httpx 'anyio<4.5' trio itsdangerous jinja2 python-multipart pyyaml typing_extensions"
 test_cmd = "pytest tests"
 loop_edit_file = "starlette/routing.py"
-# Fails its own baseline on Python 3.13 + pytest 7.4 (nested pytest.warns in
-# deprecated_call: DID NOT WARN). Backlog #31.
-pytest_extra_args = ["--deselect=tests/test_routing.py::test_lifespan_with_on_events"]
 
 [pyjwt]
 url = "https://github.com/jpadilla/pyjwt.git"

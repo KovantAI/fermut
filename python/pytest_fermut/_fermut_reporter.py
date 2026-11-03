@@ -16,6 +16,8 @@ several pytest sessions that append to the same file):
   package under test; ``project`` says whether the exception chain passed
   through project code (under the rootdir, outside site-packages)
 - ``{"ev":"collect","nodeid":...}`` -- a collector failed (import error)
+- ``{"ev":"deselect","nodeid":...}`` -- a test was deselected (``--deselect``,
+  ``-k``, ``-m``, or a plugin calling ``pytest_deselected``)
 - ``{"ev":"begin","nodeid":...}`` -- a test started
 - ``{"ev":"test","nodeid":...,"when":...,"dur":...}`` -- a test phase failed
 - ``{"ev":"dur","nodeid":...,"dur":...}`` -- a passing test's call duration
@@ -144,6 +146,11 @@ def pytest_sessionstart(session):
 def pytest_collectreport(report):
     if report.failed:
         _emit({"ev": "collect", "nodeid": report.nodeid})
+
+
+def pytest_deselected(items):
+    for item in items:
+        _emit({"ev": "deselect", "nodeid": item.nodeid})
 
 
 def pytest_runtest_logstart(nodeid, location):

@@ -87,6 +87,11 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   be removed in a later release.
 
 ### Fixed
+- Mutants covered only by tests pytest deselects (`--deselect`, `-k`, `-m`
+  in `--pytest-arg` or `addopts`) ran with no tests and scored `error`
+  (pytest exit 5). The baseline now reports what pytest deselected, and those
+  mutants are skipped as `selection`, like `--select-tests`. On werkzeug with
+  `--deselect=tests/test_serving.py`, 32 errored mutants are now skipped.
 - Mutants whose selected tests are parametrized with an absolute path
   (e.g. werkzeug's `test_from_directory[/repo/tests/res/test.txt]`) were
   scored `error` (pytest exit 4): fermut runs in a copy of the project, where

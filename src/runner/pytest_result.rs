@@ -59,6 +59,10 @@ pub(crate) struct RunResult {
     pub unfinished: Option<String>,
     /// Seconds spent in reported test phases (see [`crate::report::Timing`]).
     pub test_secs: f64,
+    /// Node ids of every test that began, in order.
+    pub began: Vec<String>,
+    /// Node ids pytest deselected (`--deselect`, `-k`, `-m`, ...).
+    pub deselected: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -120,9 +124,11 @@ impl RunResult {
                 "begin" => {
                     if let Some(id) = event.nodeid {
                         running.retain(|(pid, _)| *pid != event.pid);
-                        running.push((event.pid, id));
+                        running.push((event.pid, id.clone()));
+                        out.began.push(id);
                     }
                 }
+                "deselect" => out.deselected.extend(event.nodeid),
                 "finish" => running.retain(|(pid, _)| *pid != event.pid),
                 _ => {}
             }
@@ -148,6 +154,19 @@ impl RunResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deselected_and_began_tests_are_listed() {
+        let text = r#"{"v":1,"ev":"start","pytest":"8.4.2","pid":1}
+{"ev":"deselect","nodeid":"tests/t.py::gone","pid":1}
+{"ev":"begin","nodeid":"tests/t.py::a","pid":1}
+{"ev":"begin","nodeid":"tests/t.py::b","pid":1}
+{"ev":"finish","exit":0,"pid":1}
+"#;
+        let r = RunResult::parse(text).unwrap();
+        assert_eq!(r.deselected, ["tests/t.py::gone"]);
+        assert_eq!(r.began, ["tests/t.py::a", "tests/t.py::b"]);
+    }
 
     #[test]
     fn test_failure_names_first_failed_test() {

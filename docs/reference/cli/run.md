@@ -470,6 +470,14 @@ root are dropped with a warning.
 - It needs coverage data. Without it fermut warns, ignores the file and runs
   every mutant against the whole suite.
 
+Tests pytest deselects on its own (`--deselect`, `-k`, `-m`, from
+`--pytest-arg` or `addopts`) narrow the run the same way, with no file: the
+baseline reports what pytest deselected, and a mutant only those tests cover
+is skipped as `selection` instead of running with no tests (pytest exit 5,
+scored `error`). Unlike `--select-tests`, the run is still recorded in history.
+It needs the baseline (`verify_baseline`) and fermut's pytest plugin
+(`--no-pytest-plugin` turns it off).
+
 ## Incremental runs (`--since`)
 
 `--diff-only main` is branch-relative. fermut resolves `git merge-base main

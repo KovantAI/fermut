@@ -54,6 +54,14 @@ pub trait Runner: Send + Sync {
         Ok(())
     }
 
+    /// The tests the last green [`baseline`](Self::baseline) deselected
+    /// (`--deselect`, `-k`, `-m` among the pytest args), so the engine can
+    /// narrow coverage selection to what pytest actually runs. Default `None`:
+    /// not known.
+    fn baseline_deselection(&self) -> Option<Deselection> {
+        None
+    }
+
     /// Replace the per-mutant timeout, for the `--timeout-factor` budget sized
     /// after the baseline. Default no-op, for test doubles that never time out.
     fn set_timeout(&mut self, _timeout: Duration) {}
@@ -88,6 +96,14 @@ pub trait Runner: Send + Sync {
     ) -> Result<Option<MutantOutcome>> {
         Ok(None)
     }
+}
+
+/// What a baseline run's pytest deselected, and the tests it ran, by
+/// coverage node id.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Deselection {
+    pub deselected: std::collections::BTreeSet<String>,
+    pub ran: std::collections::BTreeSet<String>,
 }
 
 /// Result of the pre-flight baseline run (the unmutated suite).

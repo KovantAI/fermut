@@ -82,6 +82,8 @@ pub struct PytestRunner {
     /// `--select-tests`: the baseline runs only these node ids (the tests
     /// mutants will be run against), not the whole suite. `None` → full suite.
     baseline_ids: Option<Vec<String>>,
+    /// What the last green baseline deselected (needs the plugin).
+    deselection: Mutex<Option<super::Deselection>>,
 }
 
 /// Construction parameters for [`PytestRunner`], bundled so the runner is
@@ -160,6 +162,7 @@ impl PytestRunner {
             key_base,
             plugin,
             baseline_ids,
+            deselection: Mutex::new(None),
         }
     }
 
@@ -538,6 +541,8 @@ impl ResultFile {
         r.collect_errors.iter_mut().for_each(map);
         r.failures.iter_mut().for_each(map);
         r.unfinished.iter_mut().for_each(map);
+        r.began.iter_mut().for_each(map);
+        r.deselected.iter_mut().for_each(map);
         Some(r)
     }
 }
@@ -800,6 +805,10 @@ fn wait_draining_stdout_with_grace(
 }
 
 impl Runner for PytestRunner {
+    fn baseline_deselection(&self) -> Option<super::Deselection> {
+        lock_recover(&self.deselection).clone()
+    }
+
     fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
     }
@@ -949,7 +958,28 @@ impl Runner for PytestRunner {
         // root): a baseline that's only green under the global root would
         // vouch for a suite the mutant runs then fail (typer wraps tmp paths).
         configure_mirror_cmd(&mut cmd, &mirror)?;
-        run_baseline_with_timeout(cmd, self.baseline_timeout)
+        // The reporter lists what pytest deselected and ran, so mutants only
+        // covered by deselected tests can skip as `selection` instead of
+        // exiting 5 ("no tests collected").
+        let result = self
+            .plugin
+            .then(|| ResultFile(next_result_path(&mirror.plugin_dir)));
+        if let Some(file) = &result {
+            cmd.arg("-p").arg(REPORTER_MODULE);
+            cmd.env("PYTHONPATH", plugin_pythonpath(&mirror)?);
+            cmd.env(RESULT_ENV, &file.0);
+        }
+        let status = run_baseline_with_timeout(cmd, self.baseline_timeout)?;
+        if matches!(status, BaselineStatus::Passed { .. }) {
+            *lock_recover(&self.deselection) =
+                result
+                    .and_then(|f| f.read(&mirror))
+                    .map(|r| super::Deselection {
+                        deselected: r.deselected.into_iter().collect(),
+                        ran: r.began.into_iter().collect(),
+                    });
+        }
+        Ok(status)
     }
 }
 

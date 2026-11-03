@@ -111,6 +111,7 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
     // Everything read-only for the testing phase: filter chain, runner, cache,
     // per-file artifacts, equiv pipeline, deadline — plus the baseline check.
     let state = prepare(cfg, &mutants)?;
+    let cfg = state.narrowed.as_ref().unwrap_or(cfg);
 
     let ctx = EvalCtx {
         cfg,
@@ -318,6 +319,10 @@ struct RunState {
     deadline: Option<Instant>,
     stats: CacheStats,
     killer_hits: Mutex<Vec<KillerHit>>,
+    /// The run's config narrowed to the tests the baseline's pytest kept
+    /// ([`narrow_to_baseline`]); the rest of the run reads it in place of the
+    /// caller's.
+    narrowed: Option<Config>,
 }
 
 /// Per-run cache counters, reported in the post-run summary. Atomics so the
@@ -347,10 +352,18 @@ struct KillerHit {
 /// derive the per-file artifacts, cache, equiv pipeline, and testing-phase
 /// deadline. Everything the per-mutant loop reads, in one place.
 fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
-    let filters = filter::build_chain(cfg)?;
+    let mut filters = filter::build_chain(cfg)?;
     let mut runner = runner::build(cfg);
 
     let own_baseline = preflight_baseline(cfg, runner.as_ref(), mutants)?;
+    let narrowed = own_baseline
+        .and_then(|_| runner.baseline_deselection())
+        .and_then(|d| narrow_to_baseline(cfg, &d));
+    if let Some(n) = &narrowed {
+        filters = filter::build_chain(n)?;
+        runner = runner::build(n);
+    }
+    let cfg = narrowed.as_ref().unwrap_or(cfg);
     if let Some(bytes) = memory_cap_bytes(
         cfg.max_memory,
         own_baseline.and_then(|_| runner::memory::children_peak_rss()),
@@ -432,6 +445,30 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
         deadline,
         stats: CacheStats::default(),
         killer_hits: Mutex::new(Vec::new()),
+        narrowed,
+    })
+}
+
+/// `cfg` narrowed the way `--select-tests` narrows it, to the tests a green
+/// baseline ran, when its pytest deselected some (`--deselect`, `-k`, `-m` in
+/// the pytest args or `addopts`). A mutant only deselected tests cover then
+/// skips as `selection` instead of exiting 5 ("no tests collected"). `None`
+/// when nothing was deselected, there's no coverage to narrow, or
+/// `--select-tests` already narrowed it.
+fn narrow_to_baseline(cfg: &Config, d: &runner::Deselection) -> Option<Config> {
+    if d.deselected.is_empty() || cfg.coverage_unselected.is_some() {
+        return None;
+    }
+    let full = cfg.coverage.clone()?;
+    info!(
+        deselected = d.deselected.len(),
+        "pytest deselected tests in the baseline; mutants only they cover are skipped \
+         as `selection`"
+    );
+    Some(Config {
+        coverage: Some(full.deselect(&d.deselected, &d.ran)),
+        coverage_unselected: Some(full),
+        ..cfg.clone()
     })
 }
 
@@ -2468,6 +2505,35 @@ mod tests {
         assert_eq!(
             preflight_baseline(&cfg, &RedBaselineRunner, &ms).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn narrow_to_baseline_needs_a_deselection_and_no_select_tests() {
+        let fx = two_covering();
+        let cfg = fx.config(RunnerKind::Pytest, true);
+        let set = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect();
+        let d = runner::Deselection {
+            deselected: set(&[TEST_A]),
+            ran: set(&[TEST_B]),
+        };
+        assert!(narrow_to_baseline(&cfg, &runner::Deselection::default()).is_none());
+        let n = narrow_to_baseline(&cfg, &d).expect("narrowed");
+        let line1 = |c: &Config| {
+            c.coverage
+                .as_ref()
+                .unwrap()
+                .tests_for_mutant(&fx.mutant(1))
+                .map(<[String]>::to_vec)
+        };
+        assert_eq!(line1(&n), Some(vec![TEST_B.to_string()]));
+        assert!(
+            n.coverage_unselected.is_some(),
+            "full contexts kept for the filter"
+        );
+        assert!(
+            narrow_to_baseline(&n, &d).is_none(),
+            "--select-tests already narrowed"
         );
     }
 

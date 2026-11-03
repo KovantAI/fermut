@@ -632,6 +632,10 @@ impl Runner for SchemaRunner {
         self.inner.baseline()
     }
 
+    fn baseline_deselection(&self) -> Option<super::Deselection> {
+        self.inner.baseline_deselection()
+    }
+
     fn take_kill_records(&self) -> Vec<crate::kill_order::KillRecord> {
         self.inner.take_kill_records()
     }

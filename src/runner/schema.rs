@@ -750,6 +750,13 @@ impl Template {
         cmd.args(&schema.serve_args);
         configure_mirror_cmd(&mut cmd, &schema.mirror)?;
         cmd.env_remove("FM_ACTIVE");
+        // macOS unified logging isn't fork-safe: a forked child that reads a
+        // system preference (PDFium's CoreGraphics, psycopg's Kerberos) dies
+        // in `_os_log_preferences_refresh`. Off from the template's start, the
+        // children never reach it. A value the user exports wins.
+        if cfg!(target_os = "macos") && std::env::var_os("OS_ACTIVITY_MODE").is_none() {
+            cmd.env("OS_ACTIVITY_MODE", "disable");
+        }
         // The template stays uncapped; each forked child caps itself.
         match schema.mem_cap {
             Some(bytes) => cmd.env(super::memory::CAP_ENV, bytes.to_string()),

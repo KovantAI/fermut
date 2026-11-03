@@ -14,6 +14,7 @@ ignore = [
     { id = "RUSTSEC-2026-0367", reason = "zip extract() only; unused via ruff_db" },
     { id = "RUSTSEC-2026-0368", reason = "zip extract() only; unused via ruff_db" },
     { id = "RUSTSEC-2026-0369", reason = "zip extract() only; unused via ruff_db" },
+    { id = "RUSTSEC-2026-0429", reason = "zip extract() symlink size abort; unused via ruff_db" },
     # zstd 0.13 / zstd-safe 7 arrive via the same zip 8.x (ty_vendored's
     # `zip/zstd` feature); fixes need zstd 0.14 / zstd-safe 8, unreachable
     # until ruff moves to zip >=9. zstd only decompresses ty's own typeshed zip,

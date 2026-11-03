@@ -32,7 +32,9 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   way as an audit; a disagreement is logged and the normal verdict used. `--no-schemata` / `schemata = false` turn it
   off; `--schemata` / `schemata = true` make an unsupported runner or
   platform an error instead of a silent normal run. Cached verdicts are
-  shared with normal runs.
+  shared with normal runs. The schema holds only mutants that will run:
+  cache hits and remembered ty rejects stay out, so a warm run after a
+  small edit spawns its few misses instead of starting a template.
 - `--timeout-factor F` (config `timeout_factor`): size each mutant's timeout
   from the baseline run, `min(--timeout, F × baseline wall + 5 s)`, so hung
   mutants stop in seconds instead of at the flat 30 s. On by default

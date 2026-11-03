@@ -368,8 +368,6 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     if let Some(secs) = budgeted_timeout_secs(cfg, baseline_wall) {
         runner.set_timeout(Duration::from_secs(secs));
     }
-    runner.prepare(&prepare_candidates(&filters, mutants))?;
-
     // One read + at most one parse per unique file, deriving the cache-key
     // hash (always), the scope map (only in `scope` cache mode), and the source
     // for the equiv detector (only when it's on).
@@ -395,6 +393,26 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     } else {
         Mutex::new(Cache::default())
     };
+    // Only the mutants that will actually run: a warm watch iteration with a
+    // handful of misses then spawns them instead of starting a template.
+    {
+        let cache = lock_recover(&cache);
+        let candidates: Vec<Arc<Mutant>> = prepare_candidates(&filters, mutants)
+            .into_iter()
+            .filter(|m| {
+                !is_cached(
+                    cfg,
+                    &cache,
+                    &file_hashes,
+                    &scope_maps,
+                    &scope_prefix,
+                    &test_tree,
+                    m,
+                )
+            })
+            .collect();
+        runner.prepare(&candidates)?;
+    }
 
     // Testing-phase wall-clock ceiling. Computed here — after baseline
     // verification and the source-hash pass — so the budget covers the
@@ -418,21 +436,48 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
 }
 
 /// The mutants worth handing `Runner::prepare`: those the cheap filters
-/// admit (sample, coverage, …). `--schemata` builds every prepared mutant into
-/// its schema, and most never run. The costly filters and the cache drop a few
-/// more later; those just sit in the schema unused. A filter error admits, as
-/// in [`precheck`].
+/// admit (sample, coverage, …) and no costly filter already remembers
+/// rejecting. `--schemata` builds every prepared mutant into its schema, and
+/// most never run. [`prepare`] also drops cache hits; the costly filters drop
+/// a few more later, and those just sit in the schema unused. A filter error
+/// admits, as in [`precheck`].
 fn prepare_candidates(filters: &[Box<dyn Filter>], mutants: &[Arc<Mutant>]) -> Vec<Arc<Mutant>> {
     mutants
         .iter()
         .filter(|m| {
-            filters
-                .iter()
-                .filter(|f| !f.costly())
-                .all(|f| f.admits(m).unwrap_or(true))
+            filters.iter().all(|f| {
+                if f.costly() {
+                    f.cached_verdict(m) != Some(false)
+                } else {
+                    f.admits(m).unwrap_or(true)
+                }
+            })
         })
         .cloned()
         .collect()
+}
+
+/// Whether [`evaluate_admitted`] would serve `mutant` from the cache (a full
+/// or killer hit) without running it.
+fn is_cached(
+    cfg: &Config,
+    cache: &Cache,
+    file_hashes: &HashMap<PathBuf, String>,
+    scope_maps: &HashMap<PathBuf, ScopeMap>,
+    scope_prefix: &str,
+    test_tree: &TestTree,
+    mutant: &Mutant,
+) -> bool {
+    let Some(hash) = mutant_identity_hash(cfg, mutant, file_hashes, scope_maps) else {
+        return false;
+    };
+    let scope = compute_mutant_scope(scope_prefix, cfg, test_tree, mutant);
+    cache.lookup_entry(&mutant.id, &hash, &scope).is_some()
+        || cache
+            .lookup_killer(&mutant.id, &hash, |t| {
+                compute_killer_scope(scope_prefix, cfg, test_tree, mutant, t)
+            })
+            .is_some()
 }
 
 /// Post-testing wrap-up: warn on a budget-truncated run, report cache
@@ -1685,8 +1730,12 @@ mod tests {
             fn costly(&self) -> bool {
                 self.1
             }
+            // The costly filter remembers rejecting line 4, nothing else.
+            fn cached_verdict(&self, m: &Mutant) -> Option<bool> {
+                (self.1 && m.line == 4).then_some(false)
+            }
         }
-        let mutants: Vec<Arc<Mutant>> = (1..=3)
+        let mutants: Vec<Arc<Mutant>> = (1..=4)
             .map(|line| {
                 let mut m = arith_mutant("x = 1 + 1", "+", "-");
                 m.line = line;
@@ -1709,7 +1758,8 @@ mod tests {
             .map(|m| m.line)
             .collect();
         // Line 2: cheap reject. Line 3: an error admits. The costly filter
-        // (which rejects everything) isn't consulted.
+        // (which rejects everything) isn't run, only its cached reject of
+        // line 4 counts.
         assert_eq!(lines, [1, 3]);
     }
 
@@ -2259,6 +2309,39 @@ mod tests {
         let second = ScriptRunner::killing(Some(TEST_A));
         let (_, stats) = eval_cached(&fx, &second, &cache, "src-1", None);
         (second, stats)
+    }
+
+    #[test]
+    fn is_cached_agrees_with_evaluate() {
+        let fx = two_covering();
+        let cfg = fx.config(RunnerKind::Pytest, true);
+        let cache = Mutex::new(Cache::default());
+        let cached = |fx: &ScopeFixture| {
+            let mut hashes = HashMap::new();
+            hashes.insert(fx.mutant(1).file, "src-1".to_string());
+            is_cached(
+                &cfg,
+                &lock_recover(&cache),
+                &hashes,
+                &HashMap::new(),
+                &compute_scope_prefix(&cfg),
+                &TestTree::walk(&cfg.tests_path()),
+                &fx.mutant(1),
+            )
+        };
+        assert!(!cached(&fx), "empty cache");
+        eval_cached(
+            &fx,
+            &ScriptRunner::killing(Some(TEST_A)),
+            &cache,
+            "src-1",
+            None,
+        );
+        assert!(cached(&fx), "full hit");
+        fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
+        assert!(cached(&fx), "killer hit");
+        fx.write("tests/a/test_a.py", "def test_a(): assert 2\n");
+        assert!(!cached(&fx), "killer edited");
     }
 
     #[test]

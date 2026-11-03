@@ -640,6 +640,29 @@ mod tests {
         assert!(matches!(o, MutantOutcome::TimedOut { .. }), "{o:?}");
     }
 
+    /// `--max-memory` reaches the mutant's process: a mutant allocating past
+    /// the cap is killed (MemoryError on Linux, the watchdog's SIGKILL on
+    /// macOS), and one under it runs as before.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn memory_cap_kills_a_runaway_mutant_only() {
+        let Some(py) = python_or_skip() else { return };
+        let (dir, calc) = project();
+        let mut r = runner_timeout(dir.path().join("tests"), py, Duration::from_secs(30));
+        r.set_memory_cap(256 << 20);
+        // Still returns 1, so only the cap can fail `test_f`.
+        let hog = mutant(
+            calc.clone(),
+            "return 1",
+            "return (b'x' * (1 << 30), __import__('time').sleep(10))[1] or 1",
+        );
+        let o = r.run(&Arc::new(hog)).unwrap();
+        assert!(matches!(o, MutantOutcome::Killed { .. }), "{o:?}");
+        let small = mutant(calc, "return 10", "return 20");
+        let o = r.run(&Arc::new(small)).unwrap();
+        assert!(matches!(o, MutantOutcome::Survived { .. }), "{o:?}");
+    }
+
     #[test]
     #[ignore = "requires python on PATH"]
     fn hanging_mutant_times_out_and_is_reaped() {

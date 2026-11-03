@@ -228,6 +228,19 @@ pub(crate) fn pytest_interpreter(python: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| interpreter(None))
 }
 
+/// A stable name for interpreter `p`, for cache keys: the canonical directory
+/// it sits in plus the canonical file it resolves to. The directory keeps two
+/// venvs on the same base Python apart (their `bin/python` symlinks resolve
+/// to the same file); the file makes `bin/python` and `bin/python3.13`, or
+/// `x/../.venv` and `.venv`, one interpreter. Unresolvable parts fall back to
+/// the path as given.
+pub(crate) fn interpreter_identity(p: &Path) -> String {
+    let abs = absolute_program(p);
+    let canon = |q: &Path| q.canonicalize().unwrap_or_else(|_| q.to_path_buf());
+    let dir = abs.parent().map(canon).unwrap_or_default();
+    format!("{}|{}", dir.display(), canon(&abs).display())
+}
+
 /// `/path/to/python` from a `#!/path/to/python` first line, when it exists.
 /// pip writes a `#!/bin/sh` trampoline instead for very long paths; that and
 /// `#!/usr/bin/env python3` (no single interpreter path) give `None`.
@@ -243,6 +256,25 @@ fn shebang_interpreter(script: &[u8]) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[cfg(unix)]
+    #[test]
+    fn interpreter_identity_merges_spellings_and_keeps_venvs_apart() {
+        let d = tmp("identity");
+        fs::create_dir_all(d.join("base")).unwrap();
+        fs::write(d.join("base/python3.13"), "").unwrap();
+        for venv in ["a", "b"] {
+            let bin = d.join(venv).join("bin");
+            fs::create_dir_all(&bin).unwrap();
+            std::os::unix::fs::symlink(d.join("base/python3.13"), bin.join("python3.13")).unwrap();
+            std::os::unix::fs::symlink("python3.13", bin.join("python")).unwrap();
+        }
+        let a = interpreter_identity(&d.join("a/bin/python"));
+        assert_eq!(a, interpreter_identity(&d.join("a/bin/python3.13")));
+        assert_eq!(a, interpreter_identity(&d.join("b/../a/bin/python")));
+        assert_ne!(a, interpreter_identity(&d.join("b/bin/python")));
+        let _ = fs::remove_dir_all(&d);
+    }
 
     fn tmp(label: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("fermut-py-{label}-{}", std::process::id()));

@@ -1152,6 +1152,11 @@ fn remap_cached_outcome(
 /// Mixed into every cached entry's scope so cache hits require the same shape.
 fn compute_scope_prefix(cfg: &Config) -> String {
     let mut h = Sha256::new();
+    // v8: `|python=` hashes the interpreter actually used, by identity
+    // (`interpreter_identity`), not the configured path's spelling — the same
+    // venv reached via `$VIRTUAL_ENV`, `PATH` or `x/../.venv` keyed three
+    // different caches that evicted each other.
+    //
     // v7: `Killed` entries also carry a killer scope (see
     // `compute_killer_scope`) and the runner names the killing test.
     //
@@ -1168,7 +1173,7 @@ fn compute_scope_prefix(cfg: &Config) -> String {
     // computed. Mix the mode into the scope prefix so a `file`-mode entry
     // can't satisfy a `scope`-mode lookup (and vice versa) — the two modes
     // produce different identity hashes for the same source.
-    h.update(b"v7");
+    h.update(b"v8");
     h.update(b"|cache_scope=");
     h.update(format!("{:?}", cfg.cache_scope).as_bytes());
     h.update(b"|runner=");
@@ -1176,10 +1181,13 @@ fn compute_scope_prefix(cfg: &Config) -> String {
     // a cache built either way serves the other.
     h.update(runner_cache_tag(cfg.runner).as_bytes());
     h.update(b"|python=");
-    match &cfg.python {
-        Some(p) => h.update(p.as_os_str().as_encoded_bytes()),
-        None => h.update(b"none"),
-    }
+    let used = match cfg.runner {
+        RunnerKind::Pytest | RunnerKind::Rstest => {
+            crate::runner::python::pytest_interpreter(cfg.python.as_deref())
+        }
+        RunnerKind::Unittest => crate::runner::python::interpreter(cfg.python.as_deref()),
+    };
+    h.update(crate::runner::python::interpreter_identity(&used).as_bytes());
     h.update(b"|timeout=");
     h.update(cfg.timeout_secs.to_le_bytes());
     // A budgeted timeout can turn a slow survivor into a timeout, so the
@@ -1824,6 +1832,26 @@ mod tests {
         let before = compute_scope_prefix(&cfg);
         fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
         assert_eq!(before, compute_scope_prefix(&cfg));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scope_prefix_keys_the_interpreter_not_its_spelling() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("python3.13"), "").unwrap();
+        for venv in ["a", "b"] {
+            let bin = d.path().join(venv).join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::os::unix::fs::symlink(d.path().join("python3.13"), bin.join("python")).unwrap();
+        }
+        let with = |p: &str| {
+            compute_scope_prefix(&Config {
+                python: Some(d.path().join(p)),
+                ..base_test_config()
+            })
+        };
+        assert_eq!(with("a/bin/python"), with("b/../a/bin/python"));
+        assert_ne!(with("a/bin/python"), with("b/bin/python"));
     }
 
     #[test]

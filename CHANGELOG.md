@@ -87,6 +87,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   be removed in a later release.
 
 ### Fixed
+- The verdict cache keyed the interpreter by how its path was spelled, so
+  the same venv reached through an activated `VIRTUAL_ENV`, through `PATH`
+  only, or as `x/../.venv` used three separate caches that evicted each
+  other, and every run after a switch re-ran everything (typer: ~150 s
+  instead of ~60 s). The key now names the interpreter actually used (pytest's
+  shebang when `--python` isn't set), by its canonical directory and target.
+  Existing cache entries are invalidated once.
 - Schemata no longer refuses the template over a third-party daemon thread
   started at import (sqlmesh's analytics flusher made every apb-mutation
   mutant run the normal way: 790 s instead of 233 s). Threads running project

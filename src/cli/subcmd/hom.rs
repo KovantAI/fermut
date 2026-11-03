@@ -272,7 +272,7 @@ pub(crate) fn run(args: HomArgs) -> Result<()> {
             }
             let staged = crate::runner::with_worker_mirror(&tests, cfg.isolation, python, |mirror| {
                 run_hom_staged(
-                    mirror, python, exe, timeout, &a.mutant, &b.mutant, &inter_vec, &outside,
+                    mirror, cfg.private_home, python, exe, timeout, &a.mutant, &b.mutant, &inter_vec, &outside,
                 )
             });
             let (inter_kill, outside_kill) = match staged {
@@ -388,6 +388,7 @@ fn ranges_overlap(a: &Mutant, b: &Mutant) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn run_hom_staged(
     mirror: &Mirror,
+    private_home: bool,
     python: Option<&Path>,
     exe: &str,
     timeout: Duration,
@@ -407,12 +408,12 @@ fn run_hom_staged(
     let inter_kill = if inter_tests.is_empty() {
         false
     } else {
-        any_test_fails(mirror, python, exe, timeout, inter_tests)?
+        any_test_fails(mirror, private_home, python, exe, timeout, inter_tests)?
     };
     let outside_kill = if outside_tests.is_empty() {
         false
     } else {
-        any_test_fails(mirror, python, exe, timeout, outside_tests)?
+        any_test_fails(mirror, private_home, python, exe, timeout, outside_tests)?
     };
     Ok((inter_kill, outside_kill))
 }
@@ -422,6 +423,7 @@ fn run_hom_staged(
 /// is a cheap "any killer?" probe.
 fn any_test_fails(
     mirror: &Mirror,
+    private_home: bool,
     python: Option<&Path>,
     exe: &str,
     timeout: Duration,
@@ -432,7 +434,7 @@ fn any_test_fails(
     for t in tests {
         cmd.arg(t);
     }
-    configure_mirror_cmd(&mut cmd, mirror)?;
+    configure_mirror_cmd(&mut cmd, mirror, private_home)?;
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
     let child = cmd.spawn().context("spawning HOM test run")?;

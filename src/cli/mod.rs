@@ -291,6 +291,13 @@ pub(crate) struct RunConfigArgs {
     #[arg(long)]
     pub no_verify_baseline: bool,
 
+    /// Run tests with your real `HOME`. By default every worker (and every
+    /// schemata fork) gets a private, empty `HOME`, so tests that write
+    /// under `~` don't race each other or touch your home. Use this when the
+    /// suite needs real home state: `~/.gitconfig`, credentials, caches.
+    #[arg(long)]
+    pub no_private_home: bool,
+
     /// Wall-clock cap (seconds) for the baseline run. The baseline runs
     /// the whole suite once, so this is separate from `--timeout` (which
     /// bounds a single mutant). Default 300. Raise it for large suites; a

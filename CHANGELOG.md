@@ -87,6 +87,14 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   be removed in a later release.
 
 ### Fixed
+- Tests that write under `~` no longer cause false kills. typer's app-dir
+  tests create and remove a directory under the real `HOME`; parallel workers
+  failed each other's runs, and each failure counted as a kill. fermut now
+  gives every worker, and every schemata fork, a private, empty `HOME` (and
+  `XDG_*` dirs), which also keeps tests out of your real home.
+  `--no-private-home` / `private_home = false` keeps the real home for suites
+  that need it (a red baseline says so). Cached verdicts from shared-home
+  runs are not reused; history hashes are unchanged.
 - Verdicts no longer depend on Python's random string hash seed. fermut now
   pins `PYTHONHASHSEED` (a fixed value, or the one you export) for the
   baseline, every mutant run and the schemata template, so a mutant whose

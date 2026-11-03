@@ -94,6 +94,9 @@ pub struct FileConfig {
     /// Run the unmutated suite once before mutating and abort if it isn't
     /// green. Default true; set false to skip (e.g. CI already ran the suite).
     pub verify_baseline: Option<bool>,
+    /// Private, empty `HOME` per worker. Default true; false keeps the real
+    /// home (suites reading `~/.gitconfig`, credentials, home caches).
+    pub private_home: Option<bool>,
     /// Wall-clock cap (seconds) for the baseline run. Default 300.
     pub baseline_timeout: Option<u64>,
     /// Wall-clock ceiling (seconds) on the per-mutant testing phase. Mutants

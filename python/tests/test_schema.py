@@ -331,6 +331,14 @@ PROJECT = {
             assert (tmp_path / "f").read_text() == "x"
 
 
+        def test_home():
+            home = os.environ["HOME"]
+            assert os.path.basename(home) == f"h-{os.getpid()}"
+            assert os.path.isdir(home)
+            assert os.environ["XDG_CONFIG_HOME"] == os.path.join(home, ".config")
+            os.makedirs(os.path.join(home, ".config", "app"))
+
+
         def test_add_with_marker(marker):
             assert add(1, 1) == 2
 
@@ -418,6 +426,10 @@ class Server:
             "PYTHONPATH": str(root),
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTEST_DEBUG_TEMPROOT": str(self.temproot),
+            # As fermut runs it by default: a private home per mirror, and a
+            # marker telling the template to give each fork its own.
+            "HOME": str(root / "mirror-home"),
+            "FERMUT_PRIVATE_HOME": "1",
         }
         env.pop("FM_ACTIVE", None)
         # Another tool holding sys.monitoring's profiler slot pushes the
@@ -721,6 +733,16 @@ def test_children_get_private_tmp_roots_of_cold_length(served, tmp_path):
         if d.startswith("pytest-of-f")
     ]
     assert leftovers == []
+
+
+def test_each_child_gets_a_private_home_removed_after(served):
+    server, _ = served
+    assert server.recv()["ready"] is True
+    # Twice: a second fork must not see the first one's app dir.
+    assert server.run(0, ["tests/test_core.py::test_home"])["exit"] == 0
+    assert server.run(0, ["tests/test_core.py::test_home"])["exit"] == 0
+    server.close()
+    assert [d for d in os.listdir(server.temproot) if d.startswith("h-")] == []
 
 
 def test_fake_user_matches_real_user_length():

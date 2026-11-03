@@ -725,9 +725,17 @@ fn preflight_baseline(
              until they pass) or, if you accept the risk, re-run with \
              --no-verify-baseline.\n\n\
              If the same tests pass when you run them yourself, fermut's \
-             copy of the project broke them: please report it at {}\n\n\
+             copy of the project broke them: please report it at {}{}\n\n\
              --- test output (tail) ---\n{output}",
-            crate::ISSUES_URL
+            crate::ISSUES_URL,
+            if cfg.private_home {
+                "\n\nfermut runs tests with a private, empty HOME, so a suite \
+                 that reads ~/.gitconfig, credentials or caches under your \
+                 home fails here; --no-private-home (private_home = false) \
+                 keeps your real home."
+            } else {
+                ""
+            }
         )),
     }
 }
@@ -1206,7 +1214,8 @@ fn remap_cached_outcome(
 /// Mixed into every cached entry's scope so cache hits require the same shape.
 fn compute_scope_prefix(cfg: &Config) -> String {
     let mut h = Sha256::new();
-    // v8 also folds in the pinned `PYTHONHASHSEED` (`runner::hash_seed`):
+    // v8 also folds in the private-home setting (backlog #57) and the pinned
+    // `PYTHONHASHSEED` (`runner::hash_seed`):
     // entries from random-seed runs carry order-dependent verdicts.
     //
     // v8: `|python=` hashes the interpreter actually used, by identity
@@ -1268,6 +1277,12 @@ fn compute_scope_prefix(cfg: &Config) -> String {
     }
     h.update(b"|pyhashseed=");
     h.update(crate::runner::hash_seed().as_bytes());
+    // A shared real home let tests race across workers (false kills).
+    h.update(if cfg.private_home {
+        &b"|home=private"[..]
+    } else {
+        &b"|home=real"[..]
+    });
     h.update(b"|args=");
     for a in &cfg.pytest_args {
         h.update(b"|");
@@ -1893,6 +1908,16 @@ mod tests {
         assert_eq!(before, compute_scope_prefix(&cfg));
     }
 
+    #[test]
+    fn scope_prefix_tracks_the_private_home() {
+        let on = base_test_config();
+        let off = Config {
+            private_home: false,
+            ..base_test_config()
+        };
+        assert_ne!(compute_scope_prefix(&on), compute_scope_prefix(&off));
+    }
+
     #[cfg(unix)]
     #[test]
     fn scope_prefix_keys_the_interpreter_not_its_spelling() {
@@ -2123,6 +2148,7 @@ mod tests {
             fail_under: None,
             exclude: Vec::new(),
             verify_baseline: false,
+            private_home: true,
             baseline_timeout_secs: 300,
             max_time_secs: None,
             timeout_factor: None,

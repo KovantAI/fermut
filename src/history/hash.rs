@@ -84,6 +84,11 @@ fn hash_with_shard(cfg: &Config, shard: Option<(u32, u32)>) -> String {
     // Fed only when the user overrides the pinned default, so existing
     // history keeps its hash (runs before the pin used a random seed, which
     // moved only order-dependent mutants).
+    // Fed only on opt-out, like the seed below: existing history keeps its
+    // hash under the (new) private-home default.
+    if !cfg.private_home {
+        h.update(b"|home=real");
+    }
     let seed = crate::runner::hash_seed();
     if seed != crate::runner::DEFAULT_HASH_SEED {
         h.update(b"|pyhashseed=");
@@ -296,6 +301,7 @@ mod tests {
             fail_under: None,
             exclude: Vec::new(),
             verify_baseline: false,
+            private_home: true,
             baseline_timeout_secs: 300,
             max_time_secs: None,
             timeout_factor: None,
@@ -303,6 +309,14 @@ mod tests {
             max_memory: crate::config::MemoryCap::Auto,
             record_kill_sets: None,
         }
+    }
+
+    #[test]
+    fn only_opting_out_of_the_private_home_changes_the_hash() {
+        // The pinned classic hash below is taken with the default (on).
+        let mut off = cfg();
+        off.private_home = false;
+        assert_ne!(config_hash(&cfg()), config_hash(&off));
     }
 
     #[test]

@@ -380,6 +380,7 @@ mod chain_order_tests {
             fail_under: None,
             exclude: Vec::new(),
             verify_baseline: false,
+            private_home: true,
             baseline_timeout_secs: 300,
             max_time_secs: None,
             timeout_factor: None,

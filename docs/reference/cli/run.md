@@ -53,6 +53,7 @@ fermut run [PATH] [flags...]
 | `--cache-scope file\|scope` | `file`                           | Cache-key granularity. `file` hashes the whole file's AST; `scope` hashes the enclosing top-level def/class only, so sibling-function edits keep cache hits. `scope` can return stale verdicts when one test indirectly exercises another function. |
 | `--fail-under <SCORE>`      | none (any survivor fails)        | Pass when mutation score is at least `SCORE` (0.0–100.0). Equal to threshold passes. |
 | `--no-verify-baseline`      | baseline check on                | Skip the pre-flight run of the unmutated suite. By default fermut runs your full suite once and aborts if it isn't green (a red suite would inflate the score toward 100%). Skip only when you've already confirmed green (e.g. CI ran it). |
+| `--no-private-home`         | private home on                  | Run tests with your real `HOME`. By default every worker, and every schemata fork, gets a private, empty `HOME` (and `XDG_*` dirs), so tests that create files under `~` can't fail each other across workers (a false kill) or write into your home. Use this when the suite needs real home state: `~/.gitconfig`, credentials, caches under `~`. Such a suite fails the baseline check otherwise, with a hint naming this flag. |
 | `--baseline-timeout <SECS>` | `300`                            | Wall-clock cap for the baseline run. Separate from `--timeout` (which bounds a single mutant) because the baseline runs the whole suite. A suite that exceeds it is killed and the run aborts. Raise for large suites. |
 | `--no-smart-order`          | on                               | Disable smart test ordering. On by default, timeout or not — ordering only permutes the selected set, so the score and `--fail-on-regression` gate stay order-invariant. See [Smart test ordering](#smart-test-ordering). |
 | `--smart-order`             | off                              | Force smart test ordering on over `smart_order = false` in config. Conflicts with `--no-smart-order`. |
@@ -330,7 +331,9 @@ One thing behaves differently in a fork, by nature: test parameters computed
 during collection (`datetime.now()`) are as old as the template. Hash order
 doesn't: fermut pins `PYTHONHASHSEED` for the template and every normal run
 alike (your own exported value wins), so set and dict iteration order is the
-same in a fork, a normal run, and the next run.
+same in a fork, a normal run, and the next run. Each fork also gets its own private `HOME`
+(see `--no-private-home`), removed when it exits, as each worker does in a
+normal run.
 
 ## Time-boxed runs (`--max-time`) { #time-boxed-runs-max-time }
 

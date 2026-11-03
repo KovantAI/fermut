@@ -79,6 +79,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         cache_scope: cli_cache_scope,
         fail_under: cli_fail_under,
         no_verify_baseline: cli_no_verify_baseline,
+        no_private_home: cli_no_private_home,
         baseline_timeout: cli_baseline_timeout,
         no_smart_order: cli_no_smart_order,
         smart_order: cli_smart_order,
@@ -424,6 +425,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     } else {
         file.verify_baseline.unwrap_or(true)
     };
+    let private_home = !cli_no_private_home && file.private_home.unwrap_or(true);
     let baseline_timeout_secs = cli_baseline_timeout
         .or(file.baseline_timeout)
         .unwrap_or(DEFAULT_BASELINE_TIMEOUT_SECS);
@@ -510,6 +512,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         fail_under,
         exclude,
         verify_baseline,
+        private_home,
         baseline_timeout_secs,
         max_time_secs,
         timeout_factor,
@@ -935,6 +938,7 @@ mod tests {
             cache_scope: None,
             fail_under: None,
             no_verify_baseline: false,
+            no_private_home: false,
             baseline_timeout: None,
             no_smart_order: false,
             smart_order: false,

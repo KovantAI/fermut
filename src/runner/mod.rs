@@ -226,7 +226,11 @@ pub(crate) fn sanitize_python_env(cmd: &mut std::process::Command) {
 /// disabled (a stale `.pyc` that still validates against the patched source
 /// would mask the mutation and falsely report a survivor). Shared by the pytest
 /// and unittest runners so these correctness-critical knobs can't drift apart.
-pub(crate) fn configure_mirror_cmd(cmd: &mut std::process::Command, mirror: &Mirror) -> Result<()> {
+pub(crate) fn configure_mirror_cmd(
+    cmd: &mut std::process::Command,
+    mirror: &Mirror,
+    private_home: bool,
+) -> Result<()> {
     cmd.current_dir(&mirror.root);
     process_group::with_new_process_group(cmd);
     cmd.env("PYTHONPATH", mirror_pythonpath(mirror)?);
@@ -240,8 +244,38 @@ pub(crate) fn configure_mirror_cmd(cmd: &mut std::process::Command, mirror: &Mir
     // a passing suite at 14 workers, each a false kill. A mirror runs one
     // pytest at a time, so its own root can't race.
     cmd.env("PYTEST_DEBUG_TEMPROOT", &mirror.pytest_temproot);
+    // A private home per mirror, same reason: tests that create and delete
+    // an app dir under `~` (typer's `get_app_dir`) fail each other's runs
+    // across workers, each failure a false kill, and write into the real
+    // home. The schemata template gives each fork its own (`PRIVATE_HOME_ENV`).
+    if private_home {
+        set_home(cmd, &mirror.home);
+        cmd.env(PRIVATE_HOME_ENV, "1");
+    }
     Ok(())
 }
+
+/// Tells the schemata template to give each fork its own home.
+pub(crate) const PRIVATE_HOME_ENV: &str = "FERMUT_PRIVATE_HOME";
+
+/// `HOME` and the XDG base dirs, all inside `home`. Setting the XDG dirs
+/// (not just removing them) matters: an exported `XDG_CONFIG_HOME` would
+/// otherwise stay shared.
+fn set_home(cmd: &mut std::process::Command, home: &Path) {
+    cmd.env("HOME", home);
+    for (var, rel) in XDG_DIRS {
+        cmd.env(var, home.join(rel));
+    }
+}
+
+/// XDG base dirs and their spec defaults under `HOME`; kept in step with the
+/// schemata helper's per-fork copy (`Template.child`).
+const XDG_DIRS: [(&str, &str); 4] = [
+    ("XDG_CONFIG_HOME", ".config"),
+    ("XDG_CACHE_HOME", ".cache"),
+    ("XDG_DATA_HOME", ".local/share"),
+    ("XDG_STATE_HOME", ".local/state"),
+];
 
 /// Run `f` against this worker's mirror with `mutant`'s patch spliced in for the
 /// duration of the call: reuse (or lazily build) the thread-local mirror, apply
@@ -402,6 +436,7 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
         baseline_timeout,
         hypothesis_seed: cfg.hypothesis_seed,
         extra_args: cfg.pytest_args.clone(),
+        private_home: cfg.private_home,
         isolation,
         coverage: cfg.coverage.clone(),
         python: cfg.python.clone(),
@@ -433,6 +468,7 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
             timeout,
             baseline_timeout,
             isolation,
+            cfg.private_home,
             // Resolve the interpreter once: the configured `--python` when set,
             // else a PATH-probed `python3`/`python`. `unittest` has no console
             // script, so it's always `<interp> -m unittest`.
@@ -458,6 +494,8 @@ pub(crate) struct Mirror {
     /// pytest's temp root for runs in this mirror (`PYTEST_DEBUG_TEMPROOT`),
     /// beside the project copy. See [`configure_mirror_cmd`].
     pub pytest_temproot: PathBuf,
+    /// The private `HOME` for runs in this mirror, beside the project copy.
+    pub home: PathBuf,
     /// Directory beside (not inside) the project copy holding fermut's pytest
     /// reporter plugin and its per-run result files. Kept out of `root` so it
     /// can't be collected, imported by the project, or swept into a test path.
@@ -529,6 +567,8 @@ impl Mirror {
         let pytest_temproot = base.join("t");
         std::fs::create_dir_all(&pytest_temproot)
             .with_context(|| format!("mkdir -p {}", pytest_temproot.display()))?;
+        let home = base.join("h");
+        std::fs::create_dir_all(&home).with_context(|| format!("mkdir -p {}", home.display()))?;
         let plugin_dir = base.join("fermut-plugin");
         std::fs::create_dir_all(&plugin_dir)
             .with_context(|| format!("mkdir -p {}", plugin_dir.display()))?;
@@ -549,6 +589,7 @@ impl Mirror {
             project_real,
             root_shown,
             pytest_temproot,
+            home,
             plugin_dir,
         })
     }
@@ -1256,7 +1297,7 @@ mod tests {
         let a = Mirror::build(&tests, IsolationMode::Auto).unwrap();
         let b = Mirror::build(&tests, IsolationMode::Auto).unwrap();
         let mut cmd = std::process::Command::new("true");
-        crate::runner::configure_mirror_cmd(&mut cmd, &a).unwrap();
+        crate::runner::configure_mirror_cmd(&mut cmd, &a, true).unwrap();
         let env: std::collections::HashMap<_, _> = cmd.get_envs().collect();
         let root = env[std::ffi::OsStr::new("PYTEST_DEBUG_TEMPROOT")].unwrap();
         assert_eq!(std::path::Path::new(root), a.pytest_temproot);
@@ -1272,6 +1313,44 @@ mod tests {
             crate::runner::hash_seed().as_str(),
             "every run, one order"
         );
+    }
+
+    /// Tests creating app dirs under `~` race across workers (typer's
+    /// `get_app_dir`); each mirror gets its own home unless opted out.
+    #[test]
+    fn mirror_commands_get_a_private_home_unless_opted_out() {
+        let (_tmp, _root, tests, _src) = fake_project();
+        let a = Mirror::build(&tests, IsolationMode::Auto).unwrap();
+        let b = Mirror::build(&tests, IsolationMode::Auto).unwrap();
+        let env_of = |m: &Mirror, private: bool| {
+            let mut cmd = std::process::Command::new("true");
+            crate::runner::configure_mirror_cmd(&mut cmd, m, private).unwrap();
+            cmd.get_envs()
+                .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        let var = |env: &std::collections::HashMap<_, Option<std::ffi::OsString>>, k: &str| {
+            env.get(std::ffi::OsStr::new(k)).cloned().flatten()
+        };
+        let on = env_of(&a, true);
+        assert_eq!(var(&on, "HOME"), Some(a.home.clone().into()));
+        assert!(a.home.is_dir() && !a.home.starts_with(&a.root));
+        assert_eq!(
+            var(&on, "XDG_CONFIG_HOME"),
+            Some(a.home.join(".config").into())
+        );
+        assert_eq!(
+            var(&on, "XDG_STATE_HOME"),
+            Some(a.home.join(".local/state").into())
+        );
+        assert_eq!(
+            var(&on, crate::runner::PRIVATE_HOME_ENV).as_deref(),
+            Some(std::ffi::OsStr::new("1"))
+        );
+        assert_ne!(var(&on, "HOME"), var(&env_of(&b, true), "HOME"));
+        let off = env_of(&a, false);
+        assert_eq!(var(&off, "HOME"), None, "inherits the real home");
+        assert_eq!(var(&off, crate::runner::PRIVATE_HOME_ENV), None);
     }
 
     /// werkzeug parametrizes on absolute paths, so the recorded id carries the

@@ -84,6 +84,8 @@ pub struct PytestRunner {
     baseline_ids: Option<Vec<String>>,
     /// What the last green baseline deselected (needs the plugin).
     deselection: Mutex<Option<super::Deselection>>,
+    /// A private `HOME` per mirror (and per schemata fork).
+    pub(super) private_home: bool,
 }
 
 /// Construction parameters for [`PytestRunner`], bundled so the runner is
@@ -95,6 +97,7 @@ pub struct PytestConfig {
     pub baseline_timeout: Duration,
     pub hypothesis_seed: Option<u64>,
     pub extra_args: Vec<String>,
+    pub private_home: bool,
     pub isolation: IsolationMode,
     pub coverage: Option<Arc<CoverageContexts>>,
     pub python: Option<PathBuf>,
@@ -118,6 +121,7 @@ impl PytestRunner {
             baseline_timeout,
             hypothesis_seed,
             extra_args,
+            private_home,
             isolation,
             coverage,
             python,
@@ -149,6 +153,7 @@ impl PytestRunner {
             baseline_timeout,
             hypothesis_seed,
             extra_args,
+            private_home,
             isolation,
             coverage,
             python,
@@ -334,7 +339,7 @@ impl PytestRunner {
                 }
             }
         };
-        configure_mirror_cmd(&mut cmd, mirror)?;
+        configure_mirror_cmd(&mut cmd, mirror, self.private_home)?;
         if let Some(bytes) = self.mem_cap {
             super::memory::cap_memory(&mut cmd, bytes);
         }
@@ -960,7 +965,7 @@ impl Runner for PytestRunner {
         // Same environment as a mutant run (incl. the mirror's pytest temp
         // root): a baseline that's only green under the global root would
         // vouch for a suite the mutant runs then fail (typer wraps tmp paths).
-        configure_mirror_cmd(&mut cmd, &mirror)?;
+        configure_mirror_cmd(&mut cmd, &mirror, self.private_home)?;
         // The reporter lists what pytest deselected and ran, so mutants only
         // covered by deselected tests can skip as `selection` instead of
         // exiting 5 ("no tests collected").
@@ -1463,6 +1468,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             baseline_timeout: Duration::from_secs(300),
             hypothesis_seed: None,
+            private_home: true,
             extra_args: Vec::new(),
             isolation: IsolationMode::Auto,
             coverage: Some(coverage),

@@ -98,6 +98,8 @@ struct Schema {
     python: PathBuf,
     /// Per-mutant memory cap each forked child sets on itself.
     mem_cap: Option<u64>,
+    /// The template runs with a private `HOME` and gives each fork its own.
+    private_home: bool,
     /// How long a template may take to import and collect the suite; also
     /// bounds the verification run.
     ready_timeout: Duration,
@@ -197,7 +199,7 @@ impl SchemaRunner {
         let python = pytest_interpreter(self.inner.python.as_deref());
         let mut cmd = Command::new(&python);
         cmd.arg(&script).arg("schematize").arg(&mirror.root);
-        configure_mirror_cmd(&mut cmd, &mirror)?;
+        configure_mirror_cmd(&mut cmd, &mirror, self.inner.private_home)?;
         let out = run_with_stdin(cmd, &serde_json::to_vec(&input)?)?;
         let parsed: SchematizeOutput =
             serde_json::from_slice(&out).context("parsing the schematize output")?;
@@ -256,6 +258,7 @@ impl SchemaRunner {
             serve_args,
             python,
             mem_cap: self.inner.mem_cap,
+            private_home: self.inner.private_home,
             ready_timeout: self.inner.baseline_timeout,
             // One slice per worker: built inside the run's rayon pool.
             verified: Chunks::new(rayon::current_num_threads()),
@@ -748,7 +751,7 @@ impl Template {
     fn start(schema: &Schema) -> Result<Self> {
         let mut cmd = Command::new(&schema.python);
         cmd.args(&schema.serve_args);
-        configure_mirror_cmd(&mut cmd, &schema.mirror)?;
+        configure_mirror_cmd(&mut cmd, &schema.mirror, schema.private_home)?;
         cmd.env_remove("FM_ACTIVE");
         // macOS unified logging isn't fork-safe: a forked child that reads a
         // system preference (PDFium's CoreGraphics, psycopg's Kerberos) dies
@@ -1054,6 +1057,7 @@ mod tests {
             serve_args: vec!["-c".into(), format!("{FAKE}{script}").into()],
             python: "/bin/sh".into(),
             mem_cap: None,
+            private_home: true,
             ready_timeout: Duration::from_secs(10),
             verified: Chunks::new(1),
             template: OnceLock::new(),
@@ -1112,6 +1116,7 @@ done"#,
             tests: dir.join("tests"),
             timeout: Duration::from_secs(30),
             baseline_timeout: Duration::from_secs(30),
+            private_home: true,
             hypothesis_seed: None,
             extra_args: Vec::new(),
             isolation: crate::config::IsolationMode::Copy,

@@ -821,6 +821,84 @@ fn assert_cached_run_skips_a_red_baseline(extra: &[&str]) {
 
 #[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn tests_writing_under_home_neither_race_nor_touch_the_real_home() {
+    // #57: tests that create and remove a fixed dir under `~` (typer's
+    // `get_app_dir`) failed each other across parallel workers, each failure
+    // a false kill, and wrote into the user's home. They never check `f`, so
+    // every mutant must survive, and the "real" HOME given to fermut must
+    // stay empty.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path().join("proj");
+    let real_home = tmp.path().join("real-home");
+    std::fs::create_dir_all(&real_home).unwrap();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n",
+    );
+    write("src/pkg/__init__.py", "");
+    write(
+        "src/pkg/m.py",
+        "def f(x):\n    y = x + 1\n    z = y * 2\n    if z > 3:\n        return z - 1\n    return z\n",
+    );
+    let race = "import pathlib, time\nfrom pkg.m import f\n\n\n\
+                def test_app_dir():\n    try:\n        f(3)\n    except Exception:\n        pass\n    d = pathlib.Path.home() / \".fermut-e2e-appdir\"\n    \
+                assert not d.exists()\n    d.mkdir()\n    time.sleep(0.3)\n    d.rmdir()\n";
+    for i in 0..4 {
+        write(&format!("tests/test_race_{i}.py"), race);
+    }
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(&proj)
+        .env("HOME", &real_home)
+        .assert()
+        .success();
+    let report = proj.join("report.json");
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("run")
+        .arg(proj.join("src"))
+        .arg("--tests")
+        .arg(proj.join("tests"))
+        .arg("--coverage")
+        .arg(proj.join(".coverage"))
+        .args([
+            "--no-ty-filter",
+            "--no-cache",
+            "--no-history",
+            "--jobs",
+            "4",
+        ])
+        .args(["--fail-under", "0", "--json"])
+        .arg(&report)
+        .env("HOME", &real_home)
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    let ran: Vec<&serde_json::Value> = json["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|o| o["status"] != "skipped")
+        .collect();
+    assert!(ran.len() >= 4, "{ran:#?}");
+    assert!(
+        ran.iter().all(|o| o["status"] == "survived"),
+        "no test checks f, so a kill here is the race: {ran:#?}"
+    );
+    let left: Vec<_> = std::fs::read_dir(&real_home).unwrap().collect();
+    assert!(left.is_empty(), "wrote into the real home: {left:?}");
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn deselected_tests_skip_their_mutants_as_selection() {
     // #47: a mutant only a deselected test covers used to run with every one
     // of its tests deselected, so pytest exited 5 and it scored `error`. The

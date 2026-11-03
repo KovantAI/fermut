@@ -89,6 +89,15 @@ import warnings
 from collections import defaultdict
 
 ACTIVE = "_fm_active"  # attribute on the builtins module
+# Set by fermut (`runner::PRIVATE_HOME_ENV`) when tests run with a private home;
+# then each fork gets its own. XDG dirs as in `runner::XDG_DIRS`.
+PRIVATE_HOME_ENV = "FERMUT_PRIVATE_HOME"
+XDG_DIRS = (
+    ("XDG_CONFIG_HOME", ".config"),
+    ("XDG_CACHE_HOME", ".cache"),
+    ("XDG_DATA_HOME", ".local/share"),
+    ("XDG_STATE_HOME", ".local/state"),
+)
 
 
 def active_dir(mirror_root):
@@ -668,10 +677,14 @@ class Template:
             {"id": c.id, "status": status, "timed_out": timed_out, **summarize(c.buf)}
         )
         shutil.rmtree(self.child_temp(c.pid), ignore_errors=True)
+        shutil.rmtree(self.child_home(c.pid), ignore_errors=True)
         try:
             os.unlink(self.active_file(c.pid))  # before a later fork reuses the pid
         except FileNotFoundError:
             pass  # the child died before writing it
+
+    def child_home(self, pid):
+        return os.path.join(self.temproot, f"h-{pid}")
 
     def active_file(self, pid):
         return os.path.join(self.active_dir, str(pid))
@@ -729,6 +742,15 @@ class Template:
                 exist_ok=True,
             )
             os.environ["USER"] = os.environ["LOGNAME"] = user
+            if os.environ.get(PRIVATE_HOME_ENV) == "1":
+                # Siblings run at once: one shared private home would race
+                # like the real one (an app dir one test removes under
+                # another). HOME is read at call time, so tests see this one.
+                home = self.child_home(os.getpid())
+                os.makedirs(home, exist_ok=True)
+                os.environ["HOME"] = home
+                for var, rel in XDG_DIRS:
+                    os.environ[var] = os.path.join(home, rel)
             setattr(builtins, ACTIVE, req["idx"])
             os.environ["FM_ACTIVE"] = str(req["idx"])  # Python subprocesses
             # ...and those that drop the environment: they stay in this group.

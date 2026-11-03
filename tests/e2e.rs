@@ -725,10 +725,22 @@ fn select_tests_skips_mutants_outside_the_selection() {
 #[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn fully_cached_run_skips_the_baseline() {
-    // #54: when every mutant is a cache hit nothing runs, so the baseline
-    // suite isn't run either. A suite made red from the environment (no
-    // source or test edit, so the cache still holds) proves it: the warm run
-    // succeeds with the cold run's verdicts instead of aborting.
+    assert_cached_run_skips_a_red_baseline(&[]);
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn fully_cached_run_skips_the_baseline_with_a_deselection() {
+    // test_b also covers fa, so fa's cached scopes were narrowed: only the
+    // saved deselection reproduces them without a baseline.
+    assert_cached_run_skips_a_red_baseline(&["--pytest-arg=--deselect=tests/test_b.py::test_fb"]);
+}
+
+/// #54: when every mutant is a cache hit nothing runs, so the baseline suite
+/// isn't run either. A suite made red from the environment (no source or test
+/// edit, so the cache still holds) proves it: the warm run succeeds with the
+/// cold run's verdicts instead of aborting.
+fn assert_cached_run_skips_a_red_baseline(extra: &[&str]) {
     let tmp = tempfile::tempdir().unwrap();
     let proj = tmp.path();
     let write = |rel: &str, body: &str| {
@@ -742,11 +754,22 @@ fn fully_cached_run_skips_the_baseline() {
          [tool.pytest.ini_options]\npythonpath = [\"src\"]\n",
     );
     write("src/pkg/__init__.py", "");
-    write("src/pkg/m.py", "def fa(x):\n    return x + 1\n");
+    // The guard's boundary mutants survive: their cached verdicts are keyed
+    // by every covering test, which a deselection narrows. (Kills are keyed
+    // by their killer alone and would hit either way.)
+    write(
+        "src/pkg/m.py",
+        "def fa(x):\n    if x > 100:\n        return 0\n    return x + 1\n",
+    );
     write(
         "tests/test_a.py",
         "import os\n\nfrom pkg.m import fa\n\n\ndef test_fa():\n    \
          assert not os.environ.get(\"FERMUT_E2E_RED\")\n    assert fa(1) == 2\n",
+    );
+    write(
+        "tests/test_b.py",
+        "import os\n\nfrom pkg.m import fa\n\n\ndef test_fb():\n    \
+         assert not os.environ.get(\"FERMUT_E2E_RED\")\n    assert fa(2) == 3\n",
     );
     Command::cargo_bin("fermut")
         .unwrap()
@@ -768,7 +791,8 @@ fn fully_cached_run_skips_the_baseline() {
             .arg("--fail-under")
             .arg("0")
             .arg("--json")
-            .arg(&report);
+            .arg(&report)
+            .args(extra);
         if red {
             cmd.env("FERMUT_E2E_RED", "1");
         }
@@ -791,6 +815,7 @@ fn fully_cached_run_skips_the_baseline() {
     };
     let cold = run(false);
     assert!(cold.iter().any(|(_, s)| s == "killed"), "{cold:#?}");
+    assert!(cold.iter().any(|(_, s)| s == "survived"), "{cold:#?}");
     assert_eq!(run(true), cold, "warm run must skip the red baseline");
 }
 

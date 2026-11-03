@@ -87,6 +87,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   be removed in a later release.
 
 ### Fixed
+- Verdicts no longer depend on Python's random string hash seed. fermut now
+  pins `PYTHONHASHSEED` (a fixed value, or the one you export) for the
+  baseline, every mutant run and the schemata template, so a mutant whose
+  effect depends on set or dict iteration order (starlette `schemas.py:77`)
+  gets the same verdict every run, in a fork or not. `PYTHONHASHSEED=random`
+  opts out. Cached verdicts from random-seed runs are not reused; history
+  hashes are unchanged.
 - The verdict cache keyed the interpreter by how its path was spelled, so
   the same venv reached through an activated `VIRTUAL_ENV`, through `PATH`
   only, or as `x/../.venv` used three separate caches that evicted each

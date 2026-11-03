@@ -81,6 +81,14 @@ fn hash_with_shard(cfg: &Config, shard: Option<(u32, u32)>) -> String {
     } else {
         h.update(b"none");
     }
+    // Fed only when the user overrides the pinned default, so existing
+    // history keeps its hash (runs before the pin used a random seed, which
+    // moved only order-dependent mutants).
+    let seed = crate::runner::hash_seed();
+    if seed != crate::runner::DEFAULT_HASH_SEED {
+        h.update(b"|pyhashseed=");
+        h.update(seed.as_bytes());
+    }
     h.update(b"|args=");
     h.update((cfg.pytest_args.len() as u64).to_le_bytes());
     for a in &cfg.pytest_args {

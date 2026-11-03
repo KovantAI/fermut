@@ -172,6 +172,8 @@ def pytest_runtest_logreport(report):
 
 
 def pytest_sessionfinish(session, exitstatus):
+    global _fh
     _emit({"ev": "finish", "exit": int(exitstatus)})
     if _fh is not None:
-        _fh.flush()
+        _fh.close()
+        _fh = None

@@ -326,11 +326,11 @@ silent normal run. It needs:
   `python` when pytest runs under an interpreter other than the one behind
   `pytest` on `PATH`.
 
-Two things behave differently in a fork, by nature: every child shares the
-template's hash seed (a cold run gets a fresh one per mutant, so a test that
-depends on set or dict order flakes per mutant rather than per run), and test
-parameters computed during collection (`datetime.now()`) are as old as the
-template.
+One thing behaves differently in a fork, by nature: test parameters computed
+during collection (`datetime.now()`) are as old as the template. Hash order
+doesn't: fermut pins `PYTHONHASHSEED` for the template and every normal run
+alike (your own exported value wins), so set and dict iteration order is the
+same in a fork, a normal run, and the next run.
 
 ## Time-boxed runs (`--max-time`) { #time-boxed-runs-max-time }
 

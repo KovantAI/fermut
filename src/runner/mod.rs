@@ -100,7 +100,7 @@ pub trait Runner: Send + Sync {
 
 /// What a baseline run's pytest deselected, and the tests it ran, by
 /// coverage node id.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Deselection {
     pub deselected: std::collections::BTreeSet<String>,
     pub ran: std::collections::BTreeSet<String>,
@@ -181,6 +181,28 @@ pub(crate) const SANITIZED_ENV_VARS: &[&str] = &[
     "PYTHONINSPECT",
 ];
 
+/// The `PYTHONHASHSEED` every Python process fermut starts runs under.
+/// Python fixes it at interpreter start and forks inherit it, so a random seed
+/// gives order-dependent mutants (iterating a set of str) a verdict that
+/// changes from run to run, and under schemata all of them flip together.
+/// Pinned, every run, the baseline, and served and spawned mutants alike see
+/// one iteration order; finding order-dependent tests is the test tool's job.
+/// A seed the user exports wins (`PYTHONHASHSEED=random` opts out).
+/// Non-zero: `0` would switch hash randomization off, which a few suites check.
+pub(crate) const DEFAULT_HASH_SEED: &str = "1";
+
+/// The seed [`configure_mirror_cmd`] sets: the user's `PYTHONHASHSEED`, else
+/// [`DEFAULT_HASH_SEED`]. Part of the cache key and the history config hash.
+pub(crate) fn hash_seed() -> String {
+    hash_seed_from(std::env::var_os("PYTHONHASHSEED").as_deref())
+}
+
+fn hash_seed_from(user: Option<&std::ffi::OsStr>) -> String {
+    user.filter(|v| !v.is_empty())
+        .map(|v| v.to_string_lossy().into_owned())
+        .unwrap_or_else(|| DEFAULT_HASH_SEED.to_string())
+}
+
 /// Set on every suite run fermut spawns. The `pytest --fermut` front-end
 /// (`python/pytest_fermut/plugin.py`) stays inert when it sees this, so a
 /// project with `--fermut` in its pytest `addopts` can't recurse into another
@@ -209,6 +231,7 @@ pub(crate) fn configure_mirror_cmd(cmd: &mut std::process::Command, mirror: &Mir
     process_group::with_new_process_group(cmd);
     cmd.env("PYTHONPATH", mirror_pythonpath(mirror)?);
     cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+    cmd.env("PYTHONHASHSEED", hash_seed());
     sanitize_python_env(cmd);
     // A pytest temp root per mirror. Parallel sessions sharing
     // `$TMPDIR/pytest-of-$USER` race in its numbered-dir cleanup; the
@@ -900,6 +923,16 @@ mod tests {
     };
 
     #[test]
+    fn hash_seed_is_pinned_unless_the_user_sets_one() {
+        use crate::runner::{hash_seed_from, DEFAULT_HASH_SEED};
+        use std::ffi::OsStr;
+        assert_eq!(hash_seed_from(None), DEFAULT_HASH_SEED);
+        assert_eq!(hash_seed_from(Some(OsStr::new(""))), DEFAULT_HASH_SEED);
+        assert_eq!(hash_seed_from(Some(OsStr::new("123"))), "123");
+        assert_eq!(hash_seed_from(Some(OsStr::new("random"))), "random");
+    }
+
+    #[test]
     fn sanitize_python_env_removes_caller_overrides() {
         let mut cmd = std::process::Command::new("python");
         cmd.env("PYTEST_ADDOPTS", "-n auto");
@@ -1233,6 +1266,12 @@ mod tests {
             "outside the project copy"
         );
         assert_ne!(a.pytest_temproot, b.pytest_temproot);
+        let seed = env[std::ffi::OsStr::new("PYTHONHASHSEED")].unwrap();
+        assert_eq!(
+            seed,
+            crate::runner::hash_seed().as_str(),
+            "every run, one order"
+        );
     }
 
     /// werkzeug parametrizes on absolute paths, so the recorded id carries the

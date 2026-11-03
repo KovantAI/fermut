@@ -395,12 +395,18 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
             })
             .collect()
     };
-    let mut to_run = uncached(cfg, &filters);
+    // The last baseline's deselection, when nothing that decides it changed:
+    // the narrowing the baseline would reproduce, without running it.
+    let dkey = deselection_key(cfg, &scope_prefix, &test_tree);
+    let saved = lock_recover(&cache)
+        .deselection(&dkey)
+        .and_then(|d| narrow_to_baseline(cfg, d));
+    let mut to_run = match &saved {
+        Some(n) => uncached(n, &filter::build_chain(n)?),
+        None => uncached(cfg, &filters),
+    };
 
     // Nothing will run: the baseline would only guard runs that don't happen.
-    // Checked against the un-narrowed config: a hit there was stored for the
-    // same tests this run would use, and a scope only narrowing reproduces
-    // misses, so that run still pays for the baseline.
     let own_baseline = if to_run.is_empty() {
         if cfg.verify_baseline && !mutants.is_empty() {
             info!("every mutant is cached or filtered: skipping the baseline");
@@ -409,13 +415,22 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     } else {
         preflight_baseline(cfg, runner.as_ref(), mutants)?
     };
-    let narrowed = own_baseline
-        .and_then(|_| runner.baseline_deselection())
-        .and_then(|d| narrow_to_baseline(cfg, &d));
+    let narrowed = if own_baseline.is_some() {
+        let d = runner.baseline_deselection();
+        if let Some(d) = d.as_ref().filter(|d| cfg.cache && !d.deselected.is_empty()) {
+            lock_recover(&cache).remember_deselection(dkey, d.clone());
+        }
+        let narrowed = d.and_then(|d| narrow_to_baseline(cfg, &d));
+        if let Some(n) = &narrowed {
+            to_run = uncached(n, &filter::build_chain(n)?);
+        }
+        narrowed
+    } else {
+        saved
+    };
     if let Some(n) = &narrowed {
         filters = filter::build_chain(n)?;
         runner = runner::build(n);
-        to_run = uncached(n, &filters);
     }
     let cfg = narrowed.as_ref().unwrap_or(cfg);
     if let Some(bytes) = memory_cap_bytes(
@@ -462,6 +477,45 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
         killer_hits: Mutex::new(Vec::new()),
         narrowed,
     })
+}
+
+/// Fingerprint of what decides the baseline's deselection: the pytest args
+/// and run shape (`scope_prefix`), the tests tree, `PYTEST_ADDOPTS`, and every
+/// pytest config file and `conftest.py` in the tests root's ancestors (where
+/// pytest looks for `addopts` and root conftests).
+fn deselection_key(cfg: &Config, scope_prefix: &str, test_tree: &TestTree) -> String {
+    const CONFIGS: &[&str] = &[
+        "pyproject.toml",
+        "pytest.ini",
+        ".pytest.ini",
+        "setup.cfg",
+        "tox.ini",
+        "conftest.py",
+    ];
+    let mut h = Sha256::new();
+    h.update(scope_prefix.as_bytes());
+    h.update(b"|tests=");
+    h.update(test_tree.whole().as_bytes());
+    h.update(b"|addopts=");
+    h.update(
+        std::env::var("PYTEST_ADDOPTS")
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    let tests = cfg.tests_path();
+    let tests = tests.canonicalize().unwrap_or(tests);
+    for dir in tests.ancestors().skip(1) {
+        for name in CONFIGS {
+            let path = dir.join(name);
+            if let Ok(body) = std::fs::read(&path) {
+                h.update(b"|");
+                h.update(path.as_os_str().as_encoded_bytes());
+                h.update(b"=");
+                h.update(Sha256::digest(&body));
+            }
+        }
+    }
+    hex::encode(h.finalize())
 }
 
 /// `cfg` narrowed the way `--select-tests` narrows it, to the tests a green
@@ -1152,6 +1206,9 @@ fn remap_cached_outcome(
 /// Mixed into every cached entry's scope so cache hits require the same shape.
 fn compute_scope_prefix(cfg: &Config) -> String {
     let mut h = Sha256::new();
+    // v8 also folds in the pinned `PYTHONHASHSEED` (`runner::hash_seed`):
+    // entries from random-seed runs carry order-dependent verdicts.
+    //
     // v8: `|python=` hashes the interpreter actually used, by identity
     // (`interpreter_identity`), not the configured path's spelling — the same
     // venv reached via `$VIRTUAL_ENV`, `PATH` or `x/../.venv` keyed three
@@ -1209,6 +1266,8 @@ fn compute_scope_prefix(cfg: &Config) -> String {
     } else {
         h.update(b"none");
     }
+    h.update(b"|pyhashseed=");
+    h.update(crate::runner::hash_seed().as_bytes());
     h.update(b"|args=");
     for a in &cfg.pytest_args {
         h.update(b"|");

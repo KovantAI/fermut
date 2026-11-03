@@ -242,6 +242,20 @@ mod tests {
         assert_eq!(auto_cap(1 << 30), 4 << 30);
     }
 
+    /// Peak RSS is in bytes on every platform (Linux reports kilobytes).
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn children_peak_rss_reports_bytes() {
+        let ok = Command::new("python3")
+            .args(["-c", "x = b'x' * (64 << 20)"])
+            .status()
+            .expect("python3 on PATH")
+            .success();
+        assert!(ok);
+        let peak = children_peak_rss().unwrap();
+        assert!(peak >= 64 << 20, "{peak}");
+    }
+
     /// The watchdog SIGKILLs a process that grows past the cap, and leaves
     /// one under it alone.
     #[cfg(target_os = "macos")]

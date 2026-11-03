@@ -1348,7 +1348,7 @@ done"#
 while read req; do
   idof "$req"; reply '{{"pid":0}}'
   case "$req" in
-    *'"idx":5'*) sleep 1; reply '{{"status":9,"unfinished":"t.py::loops","ran":["t.py::a","t.py::loops"]}}' ;;
+    *'"idx":5'*) sleep 1; reply '{{"status":9,"timed_out":true,"unfinished":"t.py::loops","ran":["t.py::a","t.py::loops"]}}' ;;
     *) reply '{no_mutant}' ;;
   esac
 done"#

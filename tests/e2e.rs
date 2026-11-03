@@ -372,6 +372,53 @@ fn run_outcomes(proj: &std::path::Path, extra: &[&str]) -> Vec<serde_json::Value
     json["outcomes"].as_array().expect("outcomes array").clone()
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn max_memory_kills_a_runaway_mutant() {
+    // `>>` -> `<<` makes `pad` build 1 GiB instead of 1 KiB, which the loose
+    // test still accepts: only the memory cap can kill it.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n",
+    );
+    write("src/pkg/__init__.py", "");
+    write(
+        "src/pkg/m.py",
+        "def pad(n):\n    return b\"x\" * (n >> 10)\n",
+    );
+    write(
+        "tests/test_m.py",
+        "from pkg.m import pad\n\n\ndef test_pad():\n    assert len(pad(1 << 20)) >= 1024\n",
+    );
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(proj)
+        .assert()
+        .success();
+    let shift = |extra: &[&str]| -> String {
+        let outcomes = run_outcomes(proj, &[&["--timeout", "30"], extra].concat());
+        let o = outcomes
+            .iter()
+            .find(|o| o["mutant"]["replacement"] == "<<")
+            .unwrap_or_else(|| panic!("no >> -> << mutant: {outcomes:#?}"));
+        o["status"].as_str().unwrap().to_string()
+    };
+    // The auto cap never drops below 2 GiB.
+    assert_eq!(shift(&[]), "survived");
+    assert_eq!(shift(&["--max-memory", "256M"]), "killed");
+    assert_eq!(shift(&["--max-memory", "256M", "--schemata"]), "killed");
+}
+
 #[cfg(unix)]
 #[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]

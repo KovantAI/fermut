@@ -381,6 +381,15 @@ PROJECT = {
 
         def test_guard():
             assert guard(1) == 1
+
+
+        def test_add_in_a_scrubbed_subprocess():
+            import subprocess
+            import sys
+
+            check = "from pkg.core import add; assert add(2, 3) == 5"
+            env = {"PYTHONPATH": os.getcwd()}  # no FM_ACTIVE
+            subprocess.run([sys.executable, "-c", check], env=env, check=True)
         """
     ),
 }
@@ -400,6 +409,7 @@ def project_mutant(id_, file, needle, replacement, root):
 
 class Server:
     def __init__(self, root, schema_path, occupy_profiler=False):
+        self.root = root
         # As fermut runs it: pytest's temp root inside the mirror's workdir.
         self.temproot = root / "pytest-temproot"
         self.temproot.mkdir(exist_ok=True)
@@ -544,10 +554,15 @@ def test_serve_kills_survives_and_flags_pre_fork_functions(served):
     unknown = server.run(idx["add"], ["tests/test_core.py::nope"])
     assert unknown["exit"] == 4
 
+    scrubbed = ["tests/test_core.py::test_add_in_a_scrubbed_subprocess"]
+    assert server.run(idx["add"], scrubbed)["exit"] == 1
+    assert server.run(idx["spin"], scrubbed)["exit"] == 0
+
     swept = server.run(0, None)
     assert swept["exit"] == 0
 
     server.close()
+    assert not os.listdir(schema.active_dir(server.root))  # each child's file reaped
 
 
 def test_serve_checks_one_slice_of_the_suite_per_chunk(served):

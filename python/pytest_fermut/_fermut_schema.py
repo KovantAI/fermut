@@ -89,6 +89,15 @@ import warnings
 from collections import defaultdict
 
 ACTIVE = "_fm_active"  # attribute on the builtins module
+
+
+def active_dir(mirror_root):
+    """Beside the mirror (out of the project): one file per template child,
+    named by its process group, holding its index. Python subprocesses that
+    lost FM_ACTIVE (`env={...}`) look themselves up there."""
+    return os.path.join(os.path.dirname(os.path.realpath(mirror_root)), "fermut-active")
+
+
 SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
 # --- schematize ------------------------------------------------------------------
@@ -251,7 +260,7 @@ def mutated_function(src, starts, fn, m):
     return mut_fn, problem
 
 
-def schematize_file(src, mutants, next_idx):
+def schematize_file(src, mutants, next_idx, active_dir=os.devnull):
     """(new source | None, {id: entry}, [(co_firstlineno, lo, hi)])."""
     tree, starts = ast.parse(src), line_starts(src)
     entries, by_fn = {}, defaultdict(list)
@@ -324,7 +333,8 @@ def schematize_file(src, mutants, next_idx):
     #   _fm_b = __import__('builtins')   (no import statement: click's
     #   test_light_imports audits the imports its modules make)
     #   if not hasattr(_fm_b, '_fm_active'): _fm_b._fm_active = int(os.environ...)
-    # The env default lets Python subprocesses a test spawns see the mutant.
+    # The env default lets Python subprocesses a test spawns see the mutant;
+    # without FM_ACTIVE, the file for their process group (see `active_dir`).
     at = 1 if docstring(tree.body) else 0
     while (
         at < len(tree.body)
@@ -336,6 +346,13 @@ def schematize_file(src, mutants, next_idx):
         "_fm_b = __import__('builtins')\n"
         f"if not hasattr(_fm_b, {ACTIVE!r}):\n"
         f"    _fm_b.{ACTIVE} = int(__import__('os').environ.get('FM_ACTIVE', 0))\n"
+        "    if 'FM_ACTIVE' not in __import__('os').environ:\n"
+        "        try:\n"
+        f"            with open({active_dir!r} + '/' + str(__import__('os').getpgrp())) as _fm_f:\n"
+        f"                _fm_b.{ACTIVE} = int(_fm_f.read())\n"
+        "            del _fm_f\n"
+        "        except (OSError, ValueError, AttributeError):\n"
+        "            pass\n"
     ).body
     tree.body[at:at] = prelude
     out = ast.unparse(ast.fix_missing_locations(tree))
@@ -379,12 +396,13 @@ def schematize(mirror_root, mutants):
         by_file[m["file"]].append(m)
     counter = iter(range(1, 1 << 62))
     entries, functions = {}, {}
+    files = active_dir(mirror_root)
     for rel, ms in sorted(by_file.items()):
         path = os.path.join(mirror_root, rel)
         try:
             with open(path, "rb") as f:
                 out, file_entries, fns = schematize_file(
-                    f.read(), ms, lambda: next(counter)
+                    f.read(), ms, lambda: next(counter), files
                 )
         except (OSError, SyntaxError, ValueError, RecursionError) as e:
             file_entries, out = (
@@ -404,6 +422,8 @@ def schematize(mirror_root, mutants):
 class Template:
     def __init__(self, mirror_root, schema_path, pytest_args):
         self.mirror_root = mirror_root
+        self.active_dir = active_dir(mirror_root)
+        os.makedirs(self.active_dir, exist_ok=True)
         self.pytest_args = pytest_args
         with open(schema_path) as f:
             functions = json.load(f)["functions"]
@@ -648,6 +668,13 @@ class Template:
             {"id": c.id, "status": status, "timed_out": timed_out, **summarize(c.buf)}
         )
         shutil.rmtree(self.child_temp(c.pid), ignore_errors=True)
+        try:
+            os.unlink(self.active_file(c.pid))  # before a later fork reuses the pid
+        except FileNotFoundError:
+            pass  # the child died before writing it
+
+    def active_file(self, pid):
+        return os.path.join(self.active_dir, str(pid))
 
     def fork(self, session, by_id, req):
         """Fork a child for `req`; returns its event pipe's read end and pid."""
@@ -704,6 +731,9 @@ class Template:
             os.environ["USER"] = os.environ["LOGNAME"] = user
             setattr(builtins, ACTIVE, req["idx"])
             os.environ["FM_ACTIVE"] = str(req["idx"])  # Python subprocesses
+            # ...and those that drop the environment: they stay in this group.
+            with open(self.active_file(os.getpid()), "w") as f:
+                f.write(str(req["idx"]))
             try:
                 code = self.run_items(session, by_id, req, emit)
             except KeyboardInterrupt:

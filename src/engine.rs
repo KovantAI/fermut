@@ -355,13 +355,67 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     let mut filters = filter::build_chain(cfg)?;
     let mut runner = runner::build(cfg);
 
-    let own_baseline = preflight_baseline(cfg, runner.as_ref(), mutants)?;
+    // One read + at most one parse per unique file, deriving the cache-key
+    // hash (always), the scope map (only in `scope` cache mode), and the source
+    // for the equiv detector (only when it's on). Narrowing (below) changes
+    // none of these, nor the scope prefix.
+    let FileArtifacts {
+        hashes: file_hashes,
+        scope_maps,
+        sources: file_sources,
+    } = analyze_unique_files(
+        mutants,
+        matches!(cfg.cache_scope, CacheScope::Scope),
+        cfg.equiv_detect,
+    );
+    let scope_prefix = compute_scope_prefix(cfg);
+    // Walked and hashed once; each mutant's test fingerprint folds from it.
+    let test_tree = TestTree::walk(&cfg.tests_path());
+    let cache = if cfg.cache {
+        Mutex::new(Cache::load(&cfg.cache_path))
+    } else {
+        Mutex::new(Cache::default())
+    };
+    // Only the mutants that will actually run: a warm watch iteration with a
+    // handful of misses then spawns them instead of starting a template.
+    let uncached = |cfg: &Config, filters: &[Box<dyn Filter>]| -> Vec<Arc<Mutant>> {
+        let cache = lock_recover(&cache);
+        prepare_candidates(filters, mutants)
+            .into_iter()
+            .filter(|m| {
+                !is_cached(
+                    cfg,
+                    &cache,
+                    &file_hashes,
+                    &scope_maps,
+                    &scope_prefix,
+                    &test_tree,
+                    m,
+                )
+            })
+            .collect()
+    };
+    let mut to_run = uncached(cfg, &filters);
+
+    // Nothing will run: the baseline would only guard runs that don't happen.
+    // Checked against the un-narrowed config: a hit there was stored for the
+    // same tests this run would use, and a scope only narrowing reproduces
+    // misses, so that run still pays for the baseline.
+    let own_baseline = if to_run.is_empty() {
+        if cfg.verify_baseline && !mutants.is_empty() {
+            info!("every mutant is cached or filtered: skipping the baseline");
+        }
+        None
+    } else {
+        preflight_baseline(cfg, runner.as_ref(), mutants)?
+    };
     let narrowed = own_baseline
         .and_then(|_| runner.baseline_deselection())
         .and_then(|d| narrow_to_baseline(cfg, &d));
     if let Some(n) = &narrowed {
         filters = filter::build_chain(n)?;
         runner = runner::build(n);
+        to_run = uncached(n, &filters);
     }
     let cfg = narrowed.as_ref().unwrap_or(cfg);
     if let Some(bytes) = memory_cap_bytes(
@@ -381,51 +435,12 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     if let Some(secs) = budgeted_timeout_secs(cfg, baseline_wall) {
         runner.set_timeout(Duration::from_secs(secs));
     }
-    // One read + at most one parse per unique file, deriving the cache-key
-    // hash (always), the scope map (only in `scope` cache mode), and the source
-    // for the equiv detector (only when it's on).
-    let FileArtifacts {
-        hashes: file_hashes,
-        scope_maps,
-        sources: file_sources,
-    } = analyze_unique_files(
-        mutants,
-        matches!(cfg.cache_scope, CacheScope::Scope),
-        cfg.equiv_detect,
-    );
+    runner.prepare(&to_run)?;
     let equiv = if cfg.equiv_detect {
         Some(EquivPipeline::default_pipeline())
     } else {
         None
     };
-    let scope_prefix = compute_scope_prefix(cfg);
-    // Walked and hashed once; each mutant's test fingerprint folds from it.
-    let test_tree = TestTree::walk(&cfg.tests_path());
-    let cache = if cfg.cache {
-        Mutex::new(Cache::load(&cfg.cache_path))
-    } else {
-        Mutex::new(Cache::default())
-    };
-    // Only the mutants that will actually run: a warm watch iteration with a
-    // handful of misses then spawns them instead of starting a template.
-    {
-        let cache = lock_recover(&cache);
-        let candidates: Vec<Arc<Mutant>> = prepare_candidates(&filters, mutants)
-            .into_iter()
-            .filter(|m| {
-                !is_cached(
-                    cfg,
-                    &cache,
-                    &file_hashes,
-                    &scope_maps,
-                    &scope_prefix,
-                    &test_tree,
-                    m,
-                )
-            })
-            .collect();
-        runner.prepare(&candidates)?;
-    }
 
     // Testing-phase wall-clock ceiling. Computed here — after baseline
     // verification and the source-hash pass — so the budget covers the

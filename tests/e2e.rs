@@ -724,6 +724,78 @@ fn select_tests_skips_mutants_outside_the_selection() {
 
 #[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn fully_cached_run_skips_the_baseline() {
+    // #54: when every mutant is a cache hit nothing runs, so the baseline
+    // suite isn't run either. A suite made red from the environment (no
+    // source or test edit, so the cache still holds) proves it: the warm run
+    // succeeds with the cold run's verdicts instead of aborting.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n",
+    );
+    write("src/pkg/__init__.py", "");
+    write("src/pkg/m.py", "def fa(x):\n    return x + 1\n");
+    write(
+        "tests/test_a.py",
+        "import os\n\nfrom pkg.m import fa\n\n\ndef test_fa():\n    \
+         assert not os.environ.get(\"FERMUT_E2E_RED\")\n    assert fa(1) == 2\n",
+    );
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(proj)
+        .assert()
+        .success();
+    let run = |red: bool| {
+        let report = proj.join("report.json");
+        let mut cmd = Command::cargo_bin("fermut").unwrap();
+        cmd.arg("run")
+            .arg(proj.join("src"))
+            .arg("--tests")
+            .arg(proj.join("tests"))
+            .arg("--coverage")
+            .arg(proj.join(".coverage"))
+            .arg("--no-ty-filter")
+            .arg("--no-history")
+            .arg("--fail-under")
+            .arg("0")
+            .arg("--json")
+            .arg(&report);
+        if red {
+            cmd.env("FERMUT_E2E_RED", "1");
+        }
+        cmd.assert().success();
+        let raw = std::fs::read_to_string(&report).expect("report written");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("report is JSON");
+        let mut verdicts: Vec<(String, String)> = json["outcomes"]
+            .as_array()
+            .expect("outcomes array")
+            .iter()
+            .map(|o| {
+                (
+                    o["mutant"]["id"].as_str().unwrap().to_string(),
+                    o["status"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        verdicts.sort();
+        verdicts
+    };
+    let cold = run(false);
+    assert!(cold.iter().any(|(_, s)| s == "killed"), "{cold:#?}");
+    assert_eq!(run(true), cold, "warm run must skip the red baseline");
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn deselected_tests_skip_their_mutants_as_selection() {
     // #47: a mutant only a deselected test covers used to run with every one
     // of its tests deselected, so pytest exited 5 and it scored `error`. The

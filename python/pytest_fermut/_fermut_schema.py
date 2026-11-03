@@ -466,11 +466,7 @@ class Template:
         holds the profiler slot, `setprofile` otherwise."""
         mon = getattr(sys, "monitoring", None)
         self.tool = None
-        if (
-            mon is not None
-            and mon.get_tool(mon.PROFILER_ID) is None
-            and os.environ.get("FERMUT_SCHEMA_TRACER") != "setprofile"
-        ):
+        if mon is not None and mon.get_tool(mon.PROFILER_ID) is None:
             self.tool = mon.PROFILER_ID
             mon.use_tool_id(self.tool, "fermut")
             mon.register_callback(self.tool, mon.events.PY_START, self.on_start)

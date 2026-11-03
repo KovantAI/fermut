@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -34,10 +35,10 @@ class FermutAdapter(Adapter):
         (worktree / "fermut.toml").write_text("\n".join(lines))
 
     def _coverage_is_stale(self, cov: Path, worktree: Path, repo: RepoCfg) -> bool:
-        """True if coverage.json is missing or older than any test file.
+        """True if the coverage DB is missing or older than any test file.
 
         The score_3pct scenario adds NEW tests under tests/_bench_added/; if
-        we kept a stale coverage.json those tests would never be selected for
+        we kept a stale coverage DB those tests would never be selected for
         any mutant (the coverage filter only runs tests it has contexts for),
         so they could never kill a survivor and the score would look frozen.
         Regenerate whenever the test tree is newer than the coverage file.
@@ -54,19 +55,21 @@ class FermutAdapter(Adapter):
         return False
 
     def _ensure_coverage(self, repo: RepoCfg, worktree: Path) -> Path | None:
-        """Generate a per-test-context coverage.json in the worktree.
+        """Generate coverage.py's per-test-context `.coverage` DB in the worktree.
 
         fermut's coverage filter narrows the test set per mutant — without it
         every mutant runs the *whole* suite, which is the slow path. This is
         a core part of running fermut as designed, so the benchmark enables
-        it. The cost (one un-mutated suite run + JSON export) is incurred on
+        it. fermut reads the SQLite DB directly; a `coverage json` export would
+        be the legacy path (typer's came to 3.9 GB, re-parsed on every warm
+        run). The cost (one un-mutated suite run) is incurred on
         the first run and reused thereafter (warm runs skip it) — unless the
         test tree changed, in which case we regenerate so new tests are seen.
 
-        Returns the coverage.json path, or None if generation produced no
+        Returns the `.coverage` path, or None if generation produced no
         usable contexts (caller then runs without the coverage filter).
         """
-        cov = worktree / "coverage.json"
+        cov = worktree / ".coverage"
         if not self._coverage_is_stale(cov, worktree, repo):
             return cov
 
@@ -97,6 +100,9 @@ class FermutAdapter(Adapter):
         cov_cmd = (
             f"{repo.test_cmd} --cov={repo.src_path} --cov-context=test --cov-report="
         )
+        # Pin the DB where fermut is pointed: a repo's own `data_file`
+        # (typer: `coverage/.coverage`) would put it elsewhere.
+        env["COVERAGE_FILE"] = str(cov)
         baseline = subprocess.run(
             ["/bin/sh", "-c", cov_cmd],
             cwd=worktree,
@@ -105,27 +111,10 @@ class FermutAdapter(Adapter):
             capture_output=True,
             text=True,
         )
-        cj = subprocess.run(
-            [
-                self.python,
-                "-m",
-                "coverage",
-                "json",
-                "--show-contexts",
-                "-o",
-                "coverage.json",
-            ],
-            cwd=worktree,
-            env=env,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if cj.returncode != 0 or not cov.exists():
+        if not cov.exists():
             # Almost always a test-collection failure (missing test dep) →
             # coverage wrote no data file. Surface the baseline tail so the
-            # missing import is obvious, instead of a bare `coverage json`
-            # nonzero exit.
+            # missing import is obvious.
             tail = "\n".join((baseline.stdout + baseline.stderr).splitlines()[-15:])
             raise RuntimeError(
                 f"coverage generation for {repo.name!r} produced no data — the "
@@ -135,12 +124,12 @@ class FermutAdapter(Adapter):
         return cov if cov.exists() else None
 
     def prepare(self, repo: RepoCfg, worktree: Path) -> None:
-        """Generate coverage.json ahead of the timed run (cold scenario).
+        """Generate the coverage DB ahead of the timed run (cold scenario).
 
         Hoists the pytest-cov install + baseline coverage pass out of
         `mutation_run` and into the cold `coverage_prep` phase. `run()` still
         calls `_ensure_coverage`, but after this it finds a fresh, non-stale
-        coverage.json and returns immediately — zero coverage cost inside the
+        coverage DB and returns immediately — zero coverage cost inside the
         timed mutation phase.
         """
         (worktree / ".fermut").mkdir(exist_ok=True)
@@ -177,4 +166,16 @@ class FermutAdapter(Adapter):
         # hyphen-prefixed token as a separate flag.
         for extra in repo.pytest_extra_args:
             argv.append(f"--pytest-arg={extra}")
-        return self._exec(argv, cwd=worktree, timeout=timeout)
+        # Score and mutant count come from the report, never from stdout: a run
+        # that aborts (red baseline) prints pytest's `[  7%]` progress after
+        # "mutation score", which the regex once scraped as a score of 7.0.
+        report = worktree / ".fermut/report.json"
+        report.unlink(missing_ok=True)
+        result = self._exec(argv, cwd=worktree, timeout=timeout)
+        try:
+            summary = json.loads(report.read_text())["summary"]
+        except (OSError, ValueError, KeyError):
+            summary = None
+        result.score = summary.get("mutation_score") if summary else None
+        result.mutants = summary.get("total") if summary else None
+        return result

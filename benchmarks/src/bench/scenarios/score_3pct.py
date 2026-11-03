@@ -136,16 +136,17 @@ def _cleanup_added_tests(worktree: Path, repo: RepoCfg) -> None:
 
     Claude writes new tests under `tests/_bench_added/`; if we leave them
     behind, a later warm/loop run on the same worktree (without a fresh cold)
-    inherits an inflated baseline. We also drop fermut's coverage.json — it
+    inherits an inflated baseline. We also drop fermut's coverage DB — it
     was regenerated to include the added tests, so it now references contexts
     for files we're deleting. Removing it forces a clean regen next run.
     """
     added = worktree / repo.test_path / "_bench_added"
     if added.exists():
         shutil.rmtree(added, ignore_errors=True)
-    cov = worktree / "coverage.json"
-    if cov.exists():
-        cov.unlink()
+    for name in (".coverage", "coverage.json"):
+        cov = worktree / name
+        if cov.exists():
+            cov.unlink()
 
 
 def score_3pct(

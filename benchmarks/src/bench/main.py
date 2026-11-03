@@ -78,6 +78,12 @@ def cmd_run(args: argparse.Namespace) -> int:
                     rc = 1
                     print(f"    !! ERROR: {exc}", flush=True)
                 cell_dur = time.perf_counter() - cell_start
+                # A run that produced no score (red baseline, crash) isn't ok.
+                if out.get("status", "ok") == "ok" and (
+                    out.get("score") is None and out.get("final_score") is None
+                ):
+                    out["status"] = "no-score"
+                    rc = 1
                 # Provenance block — populated post-run so it reflects what
                 # actually got built / cloned, not what was requested.
                 worktree = repos_mod.worktree_for(tool, repos[repo])

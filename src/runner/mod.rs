@@ -362,6 +362,9 @@ pub(crate) fn run_baseline_with_timeout(
         }
         Err(e) => return Err(e).context("spawning baseline test process"),
     };
+    // No cap on the baseline, but Windows measures its peak this way (the
+    // auto `--max-memory` cap is sized from it); elsewhere a no-op.
+    let _measure = memory::watch(child.id(), None);
 
     let read_tail = || -> String {
         let mut s = std::fs::read_to_string(out_file.path()).unwrap_or_default();

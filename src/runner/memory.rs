@@ -1,4 +1,4 @@
-//! Per-mutant memory cap (Linux).
+//! Per-mutant memory cap (Linux, macOS, Windows).
 //!
 //! A runaway mutant (an infinite append, a doubling loop) grows until its
 //! timeout: single processes reached 4–8 GB and whole runs 10–18 GB. On Linux
@@ -18,11 +18,12 @@
 //! pytest process, or the schemata child), not xdist workers or test
 //! subprocesses; sum the group via `proc_listpids` if a real run needs it.
 //!
-//! ponytail: Windows runs uncapped. The analog is a Job Object with
-//! `JOB_OBJECT_LIMIT_PROCESS_MEMORY` (kernel-enforced, inherited by child
-//! processes, allocation fails → `MemoryError`): assign the test process
-//! after spawn, `windows-sys` feature `Win32_System_JobObjects`. Add it when
-//! a Windows user asks.
+//! On Windows each run joins a Job Object with `JOB_OBJECT_LIMIT_PROCESS_MEMORY`
+//! ([`watch`]): the kernel caps every process in it (test subprocesses join
+//! too) at the same per-process committed memory, so an allocation past the
+//! cap fails → `MemoryError`, as on Linux. The baseline's job (no limit)
+//! measures its peak for the auto cap ([`children_peak_rss`]). See
+//! `plan-windows-memory-cap.md`.
 
 use std::process::Command;
 
@@ -36,7 +37,11 @@ const CAP_FACTOR: u64 = 4;
 const CAP_FLOOR: u64 = 2 << 30;
 
 /// Whether this platform enforces the cap.
-pub(crate) const ENFORCED: bool = cfg!(any(target_os = "linux", target_os = "macos"));
+pub(crate) const ENFORCED: bool = cfg!(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows"
+));
 
 /// The auto cap for a suite whose baseline peaked at `peak` bytes.
 pub(crate) fn auto_cap(peak: u64) -> u64 {
@@ -101,33 +106,165 @@ pub(crate) fn children_peak_rss() -> Option<u64> {
     usage.map(|u| u64::try_from(u.ru_maxrss).unwrap_or(0))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Windows: the largest committed memory of any process in a finished run's
+/// job (the baseline's, first). See [`watch`].
+#[cfg(windows)]
+pub(crate) fn children_peak_rss() -> Option<u64> {
+    let peak = job::PEAK.load(std::sync::atomic::Ordering::Relaxed);
+    (peak > 0).then_some(peak)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub(crate) fn children_peak_rss() -> Option<u64> {
     None
 }
 
-/// Watch the running process group led by `pid` against `cap` until the
-/// returned guard drops (drop it once the run is over). macOS only; elsewhere
-/// the kernel enforces the cap and this does nothing.
+/// Watch the running process `pid` (just spawned) against `cap` until the
+/// returned guard drops (drop it once the run is over). macOS: the watchdog
+/// samples its group. Windows: `pid` joins a Job Object capping each process
+/// in it, and the guard records the run's peak; with no cap (the baseline) the
+/// job only measures. Linux: nothing, the kernel enforces `RLIMIT_DATA`.
 pub(crate) fn watch(pid: u32, cap: Option<u64>) -> Watch {
     #[cfg(target_os = "macos")]
     if let Some(cap) = cap {
         watchdog::add(pid, cap);
         return Watch(Some(pid));
     }
-    let _ = (pid, cap);
-    Watch(None)
+    #[cfg(windows)]
+    return Watch(job::assign(pid, cap));
+    #[cfg(not(windows))]
+    {
+        let _ = (pid, cap);
+        Watch(None)
+    }
 }
 
-/// Stops watching on drop. See [`watch`].
+/// Stops watching on drop. See [`watch`]. Holds the watched pid on macOS and
+/// the job handle (as an integer, so the guard stays `Send`) on Windows.
 #[must_use]
-pub(crate) struct Watch(#[cfg_attr(not(target_os = "macos"), allow(dead_code))] Option<u32>);
+pub(crate) struct Watch(
+    #[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))] Option<WatchId>,
+);
+
+#[cfg(windows)]
+type WatchId = isize;
+#[cfg(not(windows))]
+type WatchId = u32;
 
 impl Drop for Watch {
     fn drop(&mut self) {
         #[cfg(target_os = "macos")]
         if let Some(pid) = self.0 {
             watchdog::remove(pid);
+        }
+        #[cfg(windows)]
+        if let Some(handle) = self.0 {
+            job::release(handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+mod job {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        QueryInformationJobObject, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+
+    /// Largest committed memory of any process in any finished run's job.
+    pub(super) static PEAK: AtomicU64 = AtomicU64::new(0);
+
+    const INFO_LEN: u32 = std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+
+    /// A new job holding process `pid`, capping each of its processes'
+    /// committed memory at `cap`. `None` (warned once, run uncapped) when
+    /// Windows refuses, e.g. fermut sits in a job that forbids nesting.
+    ///
+    /// ponytail: `pid` runs a few microseconds before it joins, far too short
+    /// to allocate gigabytes or spawn children; spawn `CREATE_SUSPENDED` and
+    /// resume after assigning if that ever matters (needs the thread handle,
+    /// which `std::process::Child` doesn't expose).
+    pub(super) fn assign(pid: u32, cap: Option<u64>) -> Option<isize> {
+        // SAFETY: plain Win32 calls on handles this function owns: the job
+        // (closed on failure here, else by `release`) and the process handle
+        // (closed before returning). The limit struct is a zeroed,
+        // caller-owned local passed with its exact size.
+        #[allow(unsafe_code)] // sole FFI site: put a mutant run in a capped job
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                warn_once();
+                return None;
+            }
+            let joined = (|| {
+                if let Some(cap) = cap {
+                    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+                    info.ProcessMemoryLimit = usize::try_from(cap).unwrap_or(usize::MAX);
+                    let set = SetInformationJobObject(
+                        job,
+                        JobObjectExtendedLimitInformation,
+                        std::ptr::from_ref(&info).cast(),
+                        INFO_LEN,
+                    );
+                    if set == 0 {
+                        return false;
+                    }
+                }
+                let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+                if process.is_null() {
+                    return false;
+                }
+                let assigned = AssignProcessToJobObject(job, process) != 0;
+                CloseHandle(process);
+                assigned
+            })();
+            if !joined {
+                warn_once();
+                CloseHandle(job);
+                return None;
+            }
+            Some(job as isize)
+        }
+    }
+
+    /// Fold the job's peak per-process memory into [`PEAK`], then close it.
+    /// Closing doesn't touch the processes (no kill-on-close).
+    pub(super) fn release(handle: isize) {
+        let job = handle as HANDLE;
+        // SAFETY: `job` is the handle `assign` returned, closed exactly once
+        // here; the query writes at most `INFO_LEN` bytes into a zeroed local.
+        #[allow(unsafe_code)] // sole FFI site: read a finished run's peak, close its job
+        unsafe {
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            let read = QueryInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_mut(&mut info).cast(),
+                INFO_LEN,
+                std::ptr::null_mut(),
+            );
+            if read != 0 {
+                PEAK.fetch_max(info.PeakProcessMemoryUsed as u64, Ordering::Relaxed);
+            }
+            CloseHandle(job);
+        }
+    }
+
+    fn warn_once() {
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        let err = std::io::Error::last_os_error();
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                "couldn't put a test run in a Windows job object ({err}); \
+                 runs are not memory-capped"
+            );
         }
     }
 }
@@ -234,6 +371,71 @@ mod tests {
         assert_eq!(parse_size("8kb"), Ok(8 << 10));
         assert!(parse_size("lots").is_err());
         assert!(parse_size("-1G").is_err());
+    }
+
+    /// Run `script` under a Windows job capped at `cap` (`None`: measure
+    /// only). `None` when no `python` is on PATH (GitHub's Windows images
+    /// ship one; skip elsewhere rather than fail).
+    #[cfg(windows)]
+    fn run_in_job(script: &str, cap: Option<u64>) -> Option<std::process::Output> {
+        let Ok(py) = which::which("python") else {
+            eprintln!("skipping: no python on PATH");
+            return None;
+        };
+        let child = Command::new(py)
+            .args(["-c", script])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let guard = watch(child.id(), cap);
+        let out = child.wait_with_output().unwrap();
+        drop(guard);
+        Some(out)
+    }
+
+    /// The sleep puts the allocation well after the process joins its job.
+    #[cfg(windows)]
+    const ALLOC_512M: &str = "import time; time.sleep(0.3); x = bytearray(512 << 20)";
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_turns_an_oversized_allocation_into_memory_error() {
+        let Some(out) = run_in_job(ALLOC_512M, Some(64 << 20)) else {
+            return;
+        };
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{stderr}");
+        assert!(stderr.contains("MemoryError"), "{stderr}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_without_a_cap_only_measures_the_peak() {
+        let Some(out) = run_in_job(ALLOC_512M, None) else {
+            return;
+        };
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let peak = children_peak_rss().expect("peak recorded");
+        assert!(peak >= 500 << 20, "peak {peak}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_job_caps_a_test_subprocess_too() {
+        let script = "import subprocess, sys, time; time.sleep(0.3); \
+                      sys.exit(subprocess.call([sys.executable, '-c', 'bytearray(512 << 20)']))";
+        let Some(out) = run_in_job(script, Some(64 << 20)) else {
+            return;
+        };
+        assert!(
+            !out.status.success(),
+            "the child joined the job and its cap"
+        );
     }
 
     #[test]

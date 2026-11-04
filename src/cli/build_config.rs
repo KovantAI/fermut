@@ -541,7 +541,7 @@ fn resolve_max_memory(cli_no: bool, cli: Option<u64>, file: Option<&str>) -> Res
         Some(0) => MemoryCap::Off,
         Some(b) => {
             if !crate::runner::memory::ENFORCED {
-                warn!("--max-memory is only enforced on Linux; mutants run uncapped here");
+                warn!("--max-memory isn't enforced on this platform; mutants run uncapped");
             }
             MemoryCap::Bytes(b)
         }

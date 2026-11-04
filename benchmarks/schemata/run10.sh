@@ -24,6 +24,9 @@ echo "$SPECS" | while read -r repo src tests sample extra; do
   [ -z "$repo" ] && continue
   [ $# -gt 0 ] && [[ "$want" != *" $repo "* ]] && continue
   wt=$FX/fermut-$repo
+  # Root ignores chmod (the Linux container): starlette's permission test gets 200, not 401.
+  [ "$repo" = starlette ] && [ "$(id -u)" = 0 ] && \
+    extra="--pytest-arg=--deselect=tests/test_staticfiles.py::test_staticfiles_with_invalid_dir_permissions_returns_401"
   cov=$wt/.coverage; [ -f "$cov" ] || cov=$wt/coverage.json
   for mode in ${MODES:-ref schemata}; do
     case $mode in

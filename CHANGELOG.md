@@ -9,7 +9,7 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Added
-- **Per-mutant memory cap on Linux and macOS** (`--max-memory`, on by default). A
+- **Per-mutant memory cap on Linux, macOS and Windows** (`--max-memory`, on by default). A
   runaway mutant (an endless append) used to grow until its timeout — 4–8 GB
   per process, 10–18 GB per run on markupsafe, more-itertools and trio. Each
   mutant now gets `RLIMIT_DATA` of 4 × the baseline's peak memory (at least
@@ -17,7 +17,9 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   Schemata children cap themselves after the fork. `--max-memory 4G` sets it,
   `--no-max-memory` / `max_memory = "0"` turn it off. macOS ignores the
   limit, so there a watchdog samples each mutant's test process every 50 ms
-  and kills it past the cap. Not yet on Windows.
+  and kills it past the cap. On Windows each run joins a Job Object with a
+  per-process memory limit (subprocesses included), and the baseline's job
+  measures the peak the default is sized from.
 - **Schemata mode, on by default** with the pytest runner on Unix: every
   function-body mutant is built into one schema, and each mutant runs in a
   fork of a single pytest process that imported and collected the suite

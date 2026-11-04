@@ -24,15 +24,19 @@ years, and the existing tools weren't built for the new shape:
    selection, and a fast pre-filter that drops type-invalid
    mutants before they cost a pytest run. None of the existing
    tools have all three.
-3. **`ty`** — Astral's static type checker — is fast enough
-   (~25 ms / file on warm caches) that it makes economic sense to
-   *check* every mutant for type validity before running tests.
-   That filter alone drops 20–40% of naive mutants on type-hinted
-   codebases. Built on a stack that pre-dates `ty`, the existing
-   tools can't take advantage of it.
+3. **`ty`** — Astral's static type checker — is fast enough that
+   it makes economic sense to *check* every mutant for type validity
+   before running tests. That filter alone drops about 30–40% of
+   covered mutants across 9 benchmarked libraries
+   ([benchmarks](../reference/benchmarks.md#ty-filter)). Built on a
+   stack that pre-dates `ty`, the existing tools can't take
+   advantage of it.
 
 fermut's bet: the mutator runs in native Rust on top of `ruff`'s
-parser, the filter chain is composable and cheap, the cache is
+parser, each mutant runs in a fork of one pytest that already
+collected the suite instead of a fresh process
+([schemata](../reference/cli/run.md#schemata): 1.5–3.9× faster end to
+end on most suites tested), the filter chain is composable and cheap, the cache is
 content-hashed for reproducibility, and the JSON shape is treated as
 API. That gives the speed budget for PR gates and the determinism
 budget for agents.
@@ -47,7 +51,7 @@ bottom for what fermut still doesn't do that the others do.
 |----------------------------------|-----------------------------------------------------------------------------------------|-----------------------------------------------------|-----------------------------------------------------------|
 | Language                         | Rust (mutator) + Python (test runner)                                                    | Python (everything)                                  | Python (everything)                                        |
 | Parser                           | [`ruff_python_parser`](https://github.com/astral-sh/ruff)                                | `parso`                                              | `ast` (stdlib)                                            |
-| Type-aware filter                | :material-check:{ .yes } [`ty`](https://github.com/astral-sh/ty) pre-filter, on by default; ~25 ms/file warm | :material-check:{ .yes } optional `mypy` pre-check (opt-in; pays mypy startup cost on each invocation, so typically off in CI loops) | :material-close:{ .no }                                                          |
+| Type-aware filter                | :material-check:{ .yes } [`ty`](https://github.com/astral-sh/ty) pre-filter, on by default, in-process | :material-check:{ .yes } optional `mypy` pre-check (opt-in; pays mypy startup cost on each invocation, so typically off in CI loops) | :material-close:{ .no }                                                          |
 | Operator catalogue (stable)      | 30                                                                                       | ~17 (mutmut's "default")                             | ~20 (configurable; cosmic-ray ships several "subjects")    |
 | Inline ignore markers            | :material-check:{ .yes } `# fermut: ignore[op-name]`                                                            | :material-check:{ .yes } `# pragma: no mutate`                              | :material-close:{ .no } (use config exclusions)                                  |
 | Docstring auto-skip              | :material-check:{ .yes }                                                                                        | :material-check:{ .yes }                                                    | depends on subject                                         |
@@ -185,10 +189,11 @@ tools' survivor lists (the `benchmarks/parity/` harness automates exactly this).
 mutmut runs above use the default invocation (no mypy pre-check)
 for an apples-to-apples comparison — the mypy pre-check is opt-in
 and not how most mutmut users invoke it. fermut's ty filter is on
-by default and benefits from `ty`'s warm ~25 ms / file checks.
+by default and runs in-process.
 
-On codebases with stronger type hints, the ty filter typically
-drops 20–40% of naive mutants before they cost a pytest run.
+Across 9 benchmarked libraries the ty filter dropped 28–39% of
+covered mutants before they cost a pytest run
+([benchmarks](../reference/benchmarks.md#ty-filter)).
 
 ## Migrating
 

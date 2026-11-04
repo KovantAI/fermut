@@ -204,9 +204,9 @@ slow tests.
 
 Astral's fast Python type checker (Rust-based). fermut's ty filter
 rejects mutants that introduce *new* type errors — e.g. swapping a
-numeric op into a string context. Drops 20–40% of naive mutants on
-type-hinted codebases at ~25ms each, much cheaper than running
-pytest ([benchmarks](../reference/benchmarks.md)). Runs in-process
+numeric op into a string context. Drops about 30–40% of covered
+mutants before they cost a pytest run
+([benchmarks](../reference/benchmarks.md#ty-filter)). Runs in-process
 by default (embedded checker); the `ty` binary is only needed when
 `FERMUT_TY_EMBEDDED=0` or the embedded checker can't be built. See [ty-not-found troubleshooting](../reference/troubleshooting/ty-not-found.md).
 

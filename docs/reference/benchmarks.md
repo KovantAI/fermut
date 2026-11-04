@@ -145,6 +145,30 @@ benchmark harness now generates it automatically for fermut. Mutmut has no equiv
 full suite — which is also why it wins on a tiny-suite repo like
 more-itertools where the full suite is already cheap.
 
+### The `ty` filter { #ty-filter }
+
+The `ty` filter runs after the coverage filter, so its share is measured
+against the mutants that would otherwise run: `ty` drops ÷ (`ty` drops +
+scored). From the default-config runs in the memory-cap A/B
+(2026-11-01, Linux, schemata on, `benchmarks/schemata/results/memcap/`):
+
+| Repo           | Scored | Dropped by `ty` | Share   |
+|----------------|--------|-----------------|---------|
+| more-itertools | 3326   | 1305            | 28%     |
+| click          | 1408   | 636             | 31%     |
+| markupsafe     | 217    | 105             | 33%     |
+| typer          | 1597   | 909             | 36%     |
+| werkzeug       | 2486   | 1407            | 36%     |
+| pyjwt          | 1739   | 1017            | 37%     |
+| jinja2         | 1911   | 1108            | 37%     |
+| flask          | 788    | 473             | 38%     |
+| trio           | 2340   | 1475            | 39%     |
+
+So roughly **30–40% of the covered mutants never reach pytest**. On
+application suites outside this set the share has ranged from 12% to
+53%. Each drop saves one mutant's test run. The filter's own cost isn't
+broken out separately: it's part of the `mutation` column above.
+
 ### mutmut and cosmic-ray — cold + warm
 
 Neither tool has a coverage filter, so both run the full suite per

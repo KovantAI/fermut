@@ -6,7 +6,7 @@ it can do.
 - **[Installation](installation.md)** — prerequisites, build paths,
   pre-commit hooks, MSRV policy.
 - **[First steps](first-steps.md)** — five minutes from zero to a
-  mutation report. `fermut init` then `fermut run`.
+  mutation report. `fermut init`, `fermut baseline`, then `fermut run`.
 - **[Features](features.md)** — short tour of what fermut can do:
   operators, filters, cache, CI hooks, reports.
 - **[Getting help](getting-help.md)** — `fermut doctor`,

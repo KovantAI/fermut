@@ -238,10 +238,10 @@ Order is cheap → expensive:
 | ty             | in-process  | Drop mutants that introduce new ty diagnostics (embedded checker; subprocess fallback) |
 | tce            | subprocess  | Drop mutants whose bytecode is identical to the original (optional, `--tce`) |
 
-The ty filter matters because 20–40% of naive mutants (e.g. swapping
-an arithmetic op into a string-context binop) are type-invalid on
-type-hinted codebases — see [benchmarks](../reference/benchmarks.md).
-Catching them with a ~25ms type check is dramatically cheaper than
+The ty filter matters because about 30–40% of covered mutants (e.g.
+swapping an arithmetic op into a string-context binop) are
+type-invalid — see [benchmarks](../reference/benchmarks.md#ty-filter).
+Catching them with an in-process type check is much cheaper than
 catching them with a pytest run.
 
 Inline-ignore markers and the docstring auto-skip work earlier: those

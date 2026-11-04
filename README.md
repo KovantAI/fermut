@@ -59,13 +59,10 @@ cargo install --git https://github.com/KovantAI/fermut --locked    # from source
 
 # in your project (needs pytest, coverage, pytest-cov, ty on the same PATH — see Installation)
 fermut init                     # detect source/tests/runner, write fermut.toml
-
-# fermut init wires per-test coverage when pytest-cov is present;
-# generate it before the first run (skip if your config has no `coverage` key):
-pytest --cov=src --cov-context=test    # writes .coverage; fermut auto-discovers it at the project root
-# (or, manually: coverage json -o coverage.json --show-contexts, then --coverage coverage.json)
-
-fermut run src/ --tests tests/  # first mutation report (add -q to silence progress logs)
+fermut baseline                 # where you stand: checks the env, builds .coverage,
+                                # line coverage vs a sampled mutation score + worst files
+fermut run src/ --tests tests/  # full mutation report (add -q to silence progress logs)
+fermut next                     # the survivor worth a test first
 ```
 
 For a CI gate, generate the opinionated profile instead — diff-only +

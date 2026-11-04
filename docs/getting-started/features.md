@@ -30,8 +30,8 @@ guide or reference page.
   normal way. See **[Schemata](../reference/cli/run.md#schemata)**.
 - **`ty` pre-filter.** Type-invalid mutants are dropped via
   [`ty`](https://github.com/astral-sh/ty) before they cost a pytest
-  invocation. Typically removes 20–40% of naive mutants on type-hinted
-  codebases.
+  invocation. Removed 28–39% of covered mutants across 9 benchmarked
+  libraries ([benchmarks](../reference/benchmarks.md#ty-filter)).
 - **Per-mutant result cache.** Keyed on `(mutant.id, ast_hash(file), scope)`.
   Any code change to a file invalidates every mutant in that file (the
   AST hash changes). Whitespace/comment edits keep the AST hash, but the

@@ -59,6 +59,35 @@ For the solo loop, the auto-detected defaults are fine. Profile choice
 
 ## 2. Get an honest baseline
 
+The quickest answer to "where do I stand" is one command:
+
+```sh
+fermut baseline
+```
+
+It runs [`fermut doctor`](../reference/cli/doctor.md), builds per-test
+coverage, and runs a sampled mutation pass over covered code. Then it
+prints line coverage next to the mutation score, a grade, and the files
+with the most survivors:
+
+```text
+  line coverage     92%
+  mutation score    61%  (on covered code, 10% sample)
+  ───────────────────────────────
+  test-quality gap  39 pts   ← covered code whose behavior no test checks
+  untested risk     8%     ← lines no test executes at all
+
+  grade: Ok — real gaps in covered code
+```
+
+The gap between the two numbers is the point: covered lines whose
+behavior no test checks. The run is logged as run zero in the
+[trend](#5-watch-the-trend). `--full` gives the exact score instead of
+the 10% sample. See [`fermut baseline`](../reference/cli/baseline.md).
+
+The rest of this section does the same by hand with a full
+`fermut run`, which you need for the per-survivor report in step 3.
+
 Generate per-test coverage first. fermut uses it to run only the tests
 whose execution touched the mutated line — biggest wall-clock win on any
 non-trivial suite.

@@ -270,6 +270,9 @@ PROJECT = {
     "pkg/__init__.py": "",
     "pkg/core.py": textwrap.dedent(
         """\
+        import threading
+        import time
+
         REGISTRY = {}
 
 
@@ -292,6 +295,10 @@ PROJECT = {
             return int(n)
 
 
+        def start_worker():
+            threading.Thread(target=time.sleep, args=(30,), daemon=True).start()
+
+
         register("alpha")
         """
     ),
@@ -311,7 +318,9 @@ PROJECT = {
         import os
         import time
 
-        from pkg.core import REGISTRY, add, guard, spin
+        from concurrent.futures import ThreadPoolExecutor
+
+        from pkg.core import REGISTRY, add, guard, spin, start_worker
 
 
         def test_add():
@@ -389,6 +398,14 @@ PROJECT = {
 
         def test_guard():
             assert guard(1) == 1
+
+
+        def test_worker():
+            start_worker()
+
+
+        def test_leaves_an_idle_executor():
+            ThreadPoolExecutor(1).submit(add, 1, 2).result()
 
 
         def test_add_in_a_scrubbed_subprocess():
@@ -513,6 +530,9 @@ def served(tmp_path, request):
         project_mutant(
             "guard", "pkg/core.py", "return int(n)", "raise KeyboardInterrupt", tmp_path
         ),
+        project_mutant(
+            "worker", "pkg/core.py", "daemon=True", "daemon=False", tmp_path
+        ),
     ]
     result = schema.schematize(str(tmp_path), muts)
     (tmp_path / "schema.json").write_text(json.dumps(result))
@@ -633,6 +653,21 @@ def test_serve_kills_a_hung_child_at_its_timeout_and_recovers(served):
     assert hung["exit"] is None and hung["signal"] == 9
     assert hung["unfinished"] == "tests/test_core.py::test_spin"
     assert server.run(0, ["tests/test_core.py::test_spin"])["exit"] == 0
+    server.close()
+
+
+def test_a_non_daemon_thread_left_running_hangs_the_child_like_a_cold_exit(served):
+    server, idx = served
+    assert server.recv()["ready"] is True
+    ids = ["tests/test_core.py::test_worker"]
+    assert server.run(0, ids, timeout=5)["exit"] == 0
+    hung = server.run(idx["worker"], ids, timeout=1)
+    assert hung["timed_out"] is True and hung["signal"] == 9
+    # Idle executor workers are non-daemon too, but its exit hook stops them.
+    idle = server.run(
+        0, ["tests/test_core.py::test_leaves_an_idle_executor"], timeout=5
+    )
+    assert idle["exit"] == 0 and idle["timed_out"] is False
     server.close()
 
 

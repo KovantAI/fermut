@@ -462,7 +462,9 @@ fn schemata_gives_the_same_verdicts_as_a_normal_run() {
         .success();
 
     let verdicts = |extra: &[&str]| -> std::collections::BTreeMap<String, String> {
-        run_outcomes(proj, &[&["--timeout", "5"], extra].concat())
+        // Pinned jobs: a schema needs 2 mutants per worker to get a template,
+        // and this fixture's ~40 must clear that on a many-core runner too.
+        run_outcomes(proj, &[&["--timeout", "5", "--jobs", "4"], extra].concat())
             .iter()
             .filter(|o| o["status"] != "skipped")
             .map(|o| {
@@ -497,7 +499,7 @@ fn schemata_gives_the_same_verdicts_as_a_normal_run() {
             "--fail-under",
             "0",
         ])
-        .args(["--timeout", "5", "--schemata"])
+        .args(["--timeout", "5", "--jobs", "4", "--schemata"])
         .arg(proj.join("src"))
         .arg("--tests")
         .arg(proj.join("tests"))
@@ -530,7 +532,7 @@ fn schemata_gives_the_same_verdicts_as_a_normal_run() {
         run_outcomes(
             proj,
             &[
-                &["--timeout", "5", "--record-kill-sets"],
+                &["--timeout", "5", "--jobs", "4", "--record-kill-sets"],
                 &[path.to_str().unwrap()][..],
                 extra,
             ]

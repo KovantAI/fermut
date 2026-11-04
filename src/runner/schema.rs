@@ -144,7 +144,16 @@ impl SchemaRunner {
             return None;
         }
         let mutants = std::mem::take(&mut *lock_recover(&self.mutants));
+        let workers = rayon::current_num_threads();
         let built = match self.build_schema(&mutants) {
+            Ok(schema) if !worth_a_template(schema.index.len(), workers) => {
+                info!(
+                    "schemata: {} mutant(s) in the schema for {workers} workers — not worth \
+                     a template; running them normally",
+                    schema.index.len()
+                );
+                None
+            }
             Ok(schema) => Some(schema),
             Err(e) => {
                 warn!(
@@ -284,8 +293,9 @@ impl SchemaRunner {
                 return Ok(None);
             }
             let mut served = template.request(idx, ids.as_deref(), all, self.inner.timeout)?;
-            // A kill must be the mutant's doing (timeouts go to the spawn path).
-            if served.status.and_then(|s| s.code()) == Some(1) {
+            // A kill must be the mutant's doing (timeouts go to the spawn path):
+            // a failing test (1) or one interrupting the run (2).
+            if matches!(served.status.and_then(|s| s.code()), Some(1 | 2)) {
                 served.unconfirmed = !self.confirm(template, &served.ran);
             }
             Ok(Some(served))
@@ -441,6 +451,15 @@ fn verify(template: &Template, chunk: (usize, usize), timeout: Duration) -> bool
             false
         }
     }
+}
+
+/// Whether a schema this small pays for its template. Until the template has
+/// imported and collected the suite, workers run mutants the normal way, so
+/// a run with only a couple of mutants per worker finishes before it serves
+/// any: the template and its no-mutant check would be pure overhead (a
+/// `--diff-only` PR touching a few lines).
+fn worth_a_template(in_schema: usize, workers: usize) -> bool {
+    in_schema >= 2 * workers
 }
 
 /// The no-mutant check, split into one slice of the suite per worker so no
@@ -1202,6 +1221,14 @@ done"#
         assert_eq!(pa[1..], pb[1..], "the same mutants every run");
         let n = pa[1..].iter().filter(|&&p| p).count();
         assert!((140..=260).contains(&n), "~5% of 3999: {n}");
+    }
+
+    #[test]
+    fn a_tiny_schema_skips_the_template() {
+        assert!(!worth_a_template(0, 14));
+        assert!(!worth_a_template(27, 14), "under 2 per worker");
+        assert!(worth_a_template(28, 14));
+        assert!(worth_a_template(2, 1));
     }
 
     #[test]

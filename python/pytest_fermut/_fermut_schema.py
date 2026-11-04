@@ -646,7 +646,12 @@ class Template:
             os.environ["USER"] = os.environ["LOGNAME"] = user
             setattr(builtins, ACTIVE, req["idx"])
             os.environ["FM_ACTIVE"] = str(req["idx"])  # Python subprocesses
-            code = self.run_items(session, by_id, req, emit)
+            try:
+                code = self.run_items(session, by_id, req, emit)
+            except KeyboardInterrupt:
+                # Escaped a test (a mutant that raises it): pytest stops and
+                # exits 2, "interrupted", which fermut scores as a kill.
+                code = 2
             # A cold run's session end: pytest >= 8.4 gc-collects there and
             # fails the run on a leaked resource's unraisable warning (click:
             # a mutant that never closes a file). Exit 1, as pytest would.

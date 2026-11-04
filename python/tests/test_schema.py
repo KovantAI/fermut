@@ -288,6 +288,10 @@ PROJECT = {
             return n
 
 
+        def guard(n):
+            return int(n)
+
+
         register("alpha")
         """
     ),
@@ -307,7 +311,7 @@ PROJECT = {
         import os
         import time
 
-        from pkg.core import REGISTRY, add, spin
+        from pkg.core import REGISTRY, add, guard, spin
 
 
         def test_add():
@@ -373,6 +377,10 @@ PROJECT = {
                 time.sleep(30)
                 os._exit(0)
             assert add(2, 3) == 5
+
+
+        def test_guard():
+            assert guard(1) == 1
         """
     ),
 }
@@ -464,6 +472,9 @@ def served(tmp_path):
             "register", "pkg/core.py", "len(name)", "len(name) + 1", tmp_path
         ),
         project_mutant("spin", "pkg/core.py", "n > 0", "n >= 0", tmp_path),
+        project_mutant(
+            "guard", "pkg/core.py", "return int(n)", "raise KeyboardInterrupt", tmp_path
+        ),
     ]
     result = schema.schematize(str(tmp_path), muts)
     (tmp_path / "schema.json").write_text(json.dumps(result))
@@ -542,6 +553,16 @@ def test_serve_runs_requests_side_by_side(served):
     os.killpg(hung["pid"], 9)
     killed = server.recv()
     assert killed["id"] == 1 and killed["unfinished"] == "tests/test_core.py::test_spin"
+    server.close()
+
+
+def test_a_mutant_raising_keyboardinterrupt_exits_2_like_pytest(served):
+    server, idx = served
+    assert server.recv()["ready"] is True
+    out = server.run(idx["guard"], ["tests/test_core.py::test_guard"])
+    # pytest: "interrupted" — scored as a kill, not a broken child.
+    assert out["exit"] == 2 and "error" not in out, out
+    assert server.run(0, ["tests/test_core.py::test_guard"])["exit"] == 0
     server.close()
 
 

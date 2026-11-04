@@ -55,29 +55,39 @@ pub(crate) fn cap_memory(cmd: &mut Command, bytes: u64) {
     {
         use std::os::unix::process::CommandExt;
         // SAFETY: the closure runs in the forked child before exec and only
-        // calls getrlimit/setrlimit, both async-signal-safe syscalls on a
-        // stack-local struct; it allocates nothing and touches no shared state.
-        #[allow(unsafe_code)] // sole FFI site: set the child's data limit
+        // calls `set_data_limit`, which is async-signal-safe.
+        #[allow(unsafe_code)] // pre_exec: set the child's data limit
         unsafe {
-            cmd.pre_exec(move || {
-                let mut lim = libc::rlimit {
-                    rlim_cur: 0,
-                    rlim_max: 0,
-                };
-                if libc::getrlimit(libc::RLIMIT_DATA, &mut lim) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                let cap = (bytes as libc::rlim_t).min(lim.rlim_max);
-                lim.rlim_cur = cap;
-                lim.rlim_max = cap;
-                if libc::setrlimit(libc::RLIMIT_DATA, &lim) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+            cmd.pre_exec(move || set_data_limit(bytes));
         }
     }
     let _ = (cmd, bytes);
+}
+
+/// Cap this process's `RLIMIT_DATA` at `bytes`, never above its hard limit.
+/// A separate fn so tests can run it in-process: the forked child execs
+/// before its coverage counters are written.
+#[cfg(target_os = "linux")]
+fn set_data_limit(bytes: u64) -> std::io::Result<()> {
+    // SAFETY: getrlimit/setrlimit are async-signal-safe syscalls on a
+    // stack-local struct; nothing is allocated and no shared state touched.
+    #[allow(unsafe_code)] // sole FFI site: set the process's data limit
+    unsafe {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_DATA, &mut lim) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let cap = (bytes as libc::rlim_t).min(lim.rlim_max);
+        lim.rlim_cur = cap;
+        lim.rlim_max = cap;
+        if libc::setrlimit(libc::RLIMIT_DATA, &lim) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 /// Peak RSS (bytes) of the largest child fermut has reaped so far — after the
@@ -490,5 +500,22 @@ mod tests {
         let out = cmd.output().expect("python3 on PATH");
         assert!(!out.status.success());
         assert!(String::from_utf8_lossy(&out.stderr).contains("MemoryError"));
+    }
+
+    /// A cap above the hard limit clamps to it. In-process: `u64::MAX` only
+    /// raises the soft limit to the hard one, so the test runner is unharmed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn set_data_limit_clamps_to_the_hard_limit() {
+        set_data_limit(u64::MAX).unwrap();
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit fills a stack-local struct.
+        #[allow(unsafe_code)]
+        let rc = unsafe { libc::getrlimit(libc::RLIMIT_DATA, &mut lim) };
+        assert_eq!(rc, 0);
+        assert_eq!(lim.rlim_cur, lim.rlim_max);
     }
 }

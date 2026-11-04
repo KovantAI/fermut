@@ -21,7 +21,7 @@ use wait_timeout::ChildExt;
 
 use super::exit::{
     anomaly_message, classify_exit, is_collection_failure, is_project_config_error, ExitVerdict,
-    TestTool, PYTEST_USAGE_ERROR,
+    TestTool, PYTEST_INTERNAL_ERROR, PYTEST_USAGE_ERROR,
 };
 use super::process_group::kill_group;
 #[cfg(test)]
@@ -399,7 +399,11 @@ impl PytestRunner {
                 }
                 // Broken import: collection failed before any test ran, so
                 // there is no failing node id to record.
-                ExitVerdict::Anomaly(PYTEST_USAGE_ERROR) if import_broke => ("killed", Vec::new()),
+                ExitVerdict::Anomaly(PYTEST_USAGE_ERROR | PYTEST_INTERNAL_ERROR)
+                    if import_broke =>
+                {
+                    ("killed", Vec::new())
+                }
                 ExitVerdict::Anomaly(_) => ("error", Vec::new()),
             },
             None => ("timed_out", Vec::new()),
@@ -419,7 +423,7 @@ impl PytestRunner {
     /// to collect ([`is_collection_failure`]) or project code raised while
     /// pytest configured itself ([`is_project_config_error`]; on pytest 9.2+
     /// that happens before the reporter plugin loads). Called only after an
-    /// exit-4 run, with the mutant still applied in `mirror`.
+    /// exit-3 or exit-4 run, with the mutant still applied in `mirror`.
     ///
     /// Output goes to a temp file rather than a pipe: both streams
     /// share one file description (so their writes interleave instead of
@@ -468,7 +472,8 @@ impl PytestRunner {
     /// broke a selected module's (or a conftest's) import — from `reported`, or
     /// [`Self::probe_collection_failure`] without it. pytest then reports a
     /// usage error (node ids can't resolve) rather than exit 2, and that is a
-    /// kill, not an anomaly.
+    /// kill, not an anomaly. Likewise an exit-3 run where a `-p` plugin
+    /// imported the broken package (pytest 9.2+).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn classify_run(
         &self,
@@ -500,7 +505,9 @@ impl PytestRunner {
                 }
                 // The mutant broke a selected module's import: no killer test
                 // to record (collection failed before any test ran).
-                ExitVerdict::Anomaly(PYTEST_USAGE_ERROR) if import_broke => {
+                ExitVerdict::Anomaly(PYTEST_USAGE_ERROR | PYTEST_INTERNAL_ERROR)
+                    if import_broke =>
+                {
                     MutantOutcome::killed(mutant.clone())
                 }
                 // Not a verdict — surface as Error, excluded from the score
@@ -881,11 +888,21 @@ impl Runner for PytestRunner {
                 // applied here, so re-collect once to tell a broken import (kill)
                 // from a stale node id (anomaly). Rare path: the common exits never
                 // pay for it.
-                let import_broke = matches!(&waited, (Some(s), _) if s.code() == Some(PYTEST_USAGE_ERROR))
-                    && match &reported {
+                // Exit 3 is the same story on pytest 9.2+ when a `-p` plugin
+                // imports the broken package: it fails before the reporter
+                // loads, so only the probe can tell (see `is_project_config_error`).
+                let code = waited.0.and_then(|s| s.code());
+                let import_broke = match code {
+                    Some(PYTEST_USAGE_ERROR) => match &reported {
                         Some(r) => r.import_broke(),
                         None => self.probe_collection_failure(mirror, mutant, &key_file, key_op),
-                    };
+                    },
+                    Some(PYTEST_INTERNAL_ERROR) => {
+                        reported.as_ref().is_some_and(RunResult::import_broke)
+                            || self.probe_collection_failure(mirror, mutant, &key_file, key_op)
+                    }
+                    _ => false,
+                };
                 if self.record_kill_sets {
                     self.record_kill_set(
                         mutant,
@@ -2014,6 +2031,18 @@ mod tests {
         assert_eq!(o.killer(), None, "collection failed before any test ran");
         let (o, _) = classify_reported(false, 4, None, None, false, None);
         assert!(matches!(o, MutantOutcome::Error { .. }));
+    }
+
+    /// pytest 9.2: a `-p` plugin importing the broken package exits 3.
+    #[test]
+    fn exit_3_is_a_kill_only_when_import_broke() {
+        let (o, _) = classify_reported(false, 3, None, None, true, None);
+        assert!(matches!(o, MutantOutcome::Killed { .. }));
+        let (o, _) = classify_reported(false, 3, None, None, false, None);
+        assert!(
+            matches!(o, MutantOutcome::Error { .. }),
+            "a real internal error"
+        );
     }
 
     #[test]

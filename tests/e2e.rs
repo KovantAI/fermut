@@ -821,6 +821,80 @@ fn assert_cached_run_skips_a_red_baseline(extra: &[&str]) {
 
 #[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn a_plugin_importing_the_broken_package_is_a_kill() {
+    // #59: a `-p` plugin that imports the package under test (trio's
+    // `-p trio._tests.pytest_plugin`). A mutant breaking that import makes
+    // pytest 9.2 exit 3 ("Error while loading plugin"), which scored `error`;
+    // pytest 9.1 crashed with exit 1. Either way it must be a kill.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\", \".\"]\n",
+    );
+    write(
+        "src/pkg/__init__.py",
+        "from pkg.m import LIMIT  # noqa: F401\n",
+    );
+    write(
+        "src/pkg/m.py",
+        "LIMIT = int(\"3\")\n\n\ndef double(x):\n    return x * 2\n",
+    );
+    write("plug.py", "import pkg  # noqa: F401\n");
+    write(
+        "tests/test_m.py",
+        "from pkg.m import double\n\n\ndef test_double():\n    assert double(2) == 4\n",
+    );
+    let report = proj.join("report.json");
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("run")
+        .arg(proj.join("src"))
+        .arg("--tests")
+        .arg(proj.join("tests"))
+        .args([
+            "--no-coverage",
+            "--no-ty-filter",
+            "--no-cache",
+            "--no-history",
+        ])
+        .args([
+            "--pytest-arg=-p",
+            "--pytest-arg=plug",
+            "--fail-under",
+            "0",
+            "--json",
+        ])
+        .arg(&report)
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    let line1: Vec<&serde_json::Value> = json["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|o| o["mutant"]["line"] == 1 && o["status"] != "skipped")
+        .collect();
+    let breaks_import = line1
+        .iter()
+        .find(|o| o["mutant"]["replacement"] == "\"\"")
+        .expect("int(\"3\") → int(\"\") mutant");
+    assert_eq!(breaks_import["status"], "killed", "{breaks_import:#?}");
+    assert!(
+        line1.iter().all(|o| o["status"] != "error"),
+        "no exit-3 errors: {line1:#?}"
+    );
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn tests_writing_under_home_neither_race_nor_touch_the_real_home() {
     // #57: tests that create and remove a fixed dir under `~` (typer's
     // `get_app_dir`) failed each other across parallel workers, each failure

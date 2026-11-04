@@ -28,7 +28,7 @@
 //!
 //! [exit codes]: https://docs.pytest.org/en/stable/reference/exit-codes.html
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 /// Which framework produced the exit status — selects the code→verdict table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +76,11 @@ pub(crate) fn classify_exit(tool: TestTool, code: Option<i32>) -> ExitVerdict {
 /// the module docs and [`is_collection_failure`].
 pub(crate) const PYTEST_USAGE_ERROR: i32 = 4;
 
+/// pytest exit code for an internal error. pytest 9.2 also exits 3 when a `-p`
+/// plugin fails to import; if the plugin imports the package under test, a
+/// mutant that breaks that import lands here ([`is_project_config_error`]).
+pub(crate) const PYTEST_INTERNAL_ERROR: i32 = 3;
+
 /// Whether combined pytest stdout+stderr from a node-id-selected run shows that
 /// a selected test module failed to *collect* (an import-time error), as
 /// opposed to a node id that simply doesn't exist.
@@ -111,30 +116,62 @@ pub(crate) fn is_collection_failure(output: &str) -> bool {
 }
 
 /// Whether pytest output shows configuring pytest failed because project code
-/// under `root` raised: a `filterwarnings` entry (ini or `-W`) naming a warning
-/// class in the package under test imports it, and the mutated module raises.
+/// under `root` raised, i.e. the mutant broke an import pytest needed:
 ///
-/// The reporter plugin reports this itself on pytest < 9.2. pytest 9.2 applies
-/// the filters before it imports `-p` plugins, so the run dies before the
-/// reporter exists and only this output remains. pytest 7–9.2 print `ERROR:
-/// while parsing the following warning configuration:` followed by the full
-/// traceback. A traceback frame (or a `SyntaxError`'s file line, same format)
-/// under `root` and outside `site-packages` is project code; a bad filter that
-/// only fails inside pytest (`ignore::NoSuchClass`) is a usage error, not this.
+/// - a `filterwarnings` entry (ini or `-W`) naming a warning class in the
+///   package under test imports it. pytest 7–9.2 print `ERROR: while parsing
+///   the following warning configuration:` and the full traceback (exit 4).
+/// - a `-p` plugin imports it (trio's `-p trio._tests.pytest_plugin`). pytest
+///   9.2 prints `Error while loading plugin "<name>".` and a short traceback
+///   (`src/trio/_util.py:23: in <module>`, relative to the working directory,
+///   which is `root`), and exits 3. pytest 9.1 crashed with a full traceback
+///   and exit 1, already a kill.
+///
+/// Both happen before the reporter plugin loads, so only this output remains.
+/// A traceback frame (or a `SyntaxError`'s file line) under `root` and outside
+/// `site-packages` is project code; a bad filter or a broken third-party
+/// plugin that only fails outside the project is a usage error, not this.
 pub(crate) fn is_project_config_error(output: &str, root: &Path) -> bool {
-    if !output.contains("while parsing the following warning configuration") {
+    if !output.contains("while parsing the following warning configuration")
+        && !output.contains("Error while loading plugin")
+    {
         return false;
     }
     // Tracebacks may name either spelling of a symlinked root (/var vs /private/var).
     let real = root.canonicalize().ok();
-    output
-        .lines()
-        .filter_map(|l| l.trim_start().strip_prefix("File \"")?.split_once('"'))
-        .map(|(path, _)| Path::new(path))
-        .any(|p| {
-            (p.starts_with(root) || real.as_deref().is_some_and(|r| p.starts_with(r)))
-                && !p.components().any(|c| c.as_os_str() == "site-packages")
-        })
+    output.lines().filter_map(|l| frame_path(l, root)).any(|p| {
+        (p.starts_with(root) || real.as_deref().is_some_and(|r| p.starts_with(r)))
+            && !p.components().any(|c| c.as_os_str() == "site-packages")
+    })
+}
+
+/// The file a traceback line names: Python's `File "<path>", line N` as given
+/// (absolute, or a pseudo-path like `<frozen importlib._bootstrap>`), or
+/// pytest's short `<path>:<N>: in <name>`, which is relative to the working
+/// directory (`root`) unless absolute and is made absolute here.
+fn frame_path(line: &str, root: &Path) -> Option<PathBuf> {
+    let line = line.trim_start();
+    if let Some(rest) = line.strip_prefix("File \"") {
+        return Some(PathBuf::from(rest.split_once('"')?.0));
+    }
+    let (path, lineno) = line.split_once(": in ")?.0.rsplit_once(':')?;
+    lineno.parse::<u32>().ok()?;
+    let path = Path::new(path);
+    let mut abs = if path.is_absolute() {
+        PathBuf::new()
+    } else {
+        root.to_path_buf()
+    };
+    for c in path.components() {
+        match c {
+            Component::ParentDir => {
+                abs.pop();
+            }
+            Component::CurDir => {}
+            c => abs.push(c),
+        }
+    }
+    Some(abs)
 }
 
 /// Human-readable label for an anomaly exit code, used to describe the
@@ -329,5 +366,42 @@ SyntaxError: invalid syntax
             root
         ));
         assert!(!is_collection_failure(CONFIG_ERROR_PROJECT));
+    }
+
+    /// pytest 9.2, `-p plug` where `plug.py` imports the broken package
+    /// (exit 3). Short frames, relative to the working directory.
+    const PLUGIN_LOAD_PROJECT: &str = r#"Error while loading plugin "plug".
+plug.py:1: in <module>
+    import pkg  # noqa
+    ^^^^^^^^^^
+pkg/__init__.py:2: in <module>
+    T = TypeVar(None)
+        ^^^^^^^^^^^^^
+E   TypeError: typevar() argument 'name' must be str, not None
+"#;
+
+    #[test]
+    fn plugin_load_through_project_code_is_detected() {
+        let root = Path::new("/proj");
+        assert!(is_project_config_error(PLUGIN_LOAD_PROJECT, root));
+        // A broken third-party plugin: frames in a venv outside, or inside,
+        // the project.
+        let third_party = "Error while loading plugin \"x\".\n\
+             ../venv/lib/python3.13/site-packages/x/__init__.py:3: in <module>\n";
+        assert!(!is_project_config_error(third_party, root));
+        let in_venv = "Error while loading plugin \"x\".\n\
+             .venv/lib/python3.13/site-packages/x/__init__.py:3: in <module>\n";
+        assert!(!is_project_config_error(in_venv, root));
+        // `..` leaving the root isn't project code; absolute frames work too.
+        let outside =
+            "Error while loading plugin \"x\".\nsub/../../elsewhere/m.py:1: in <module>\n";
+        assert!(!is_project_config_error(outside, root));
+        let absolute = "Error while loading plugin \"x\".\n/proj/src/m.py:1: in <module>\n";
+        assert!(is_project_config_error(absolute, root));
+        // Frames without either header don't count.
+        assert!(!is_project_config_error(
+            "pkg/__init__.py:2: in <module>\n",
+            root
+        ));
     }
 }

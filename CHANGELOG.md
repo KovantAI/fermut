@@ -89,6 +89,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   be removed in a later release.
 
 ### Fixed
+- On pytest 9.2, a mutant that breaks the import of a package a `-p` plugin
+  loads (trio's `-p trio._tests.pytest_plugin`) scored `error` (`pytest exit
+  3: internal error`): pytest 9.2 reports the failed plugin load and exits 3
+  before fermut's reporter starts. fermut now re-collects once on exit 3 and
+  scores it killed when the traceback runs through project code. On trio, 75
+  of 76 such errors became kills.
 - Tests that write under `~` no longer cause false kills. typer's app-dir
   tests create and remove a directory under the real `HOME`; parallel workers
   failed each other's runs, and each failure counted as a kill. fermut now

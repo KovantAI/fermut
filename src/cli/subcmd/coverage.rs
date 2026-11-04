@@ -527,7 +527,7 @@ fn fingerprint_tree(dir: &Path, base_dir: &Path) -> BTreeMap<String, String> {
             }
             let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
             let name = entry.file_name().to_str();
-            !(is_dir && name.is_some_and(|n| n.starts_with('.') || n == "__pycache__"))
+            !(is_dir && name.is_some_and(crate::util::is_pruned_dir_name))
         })
         .build();
     for entry in walker.flatten() {

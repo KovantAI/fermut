@@ -49,7 +49,7 @@ impl TestTree {
     /// Walk and hash the tree at `tests_path`.
     ///
     /// Walks the tree the same way the worker mirror does — `.gitignore`
-    /// honored, hidden directories and `__pycache__` pruned, compiled bytecode
+    /// honored, junk directories (`util::is_pruned_dir_name`) pruned, compiled bytecode
     /// skipped. A missing or empty tree hashes to a constant (the empty
     /// digest), which is fine: it still differs from any populated tree.
     pub(crate) fn walk(tests_path: &Path) -> Self {
@@ -69,7 +69,7 @@ impl TestTree {
                 }
                 let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
                 let name = entry.file_name().to_str();
-                !(is_dir && name.is_some_and(|n| n.starts_with('.') || n == "__pycache__"))
+                !(is_dir && name.is_some_and(crate::util::is_pruned_dir_name))
             })
             .build();
         for entry in walker.flatten() {
@@ -226,6 +226,18 @@ mod tests {
         write(tmp.path(), "a/__pycache__/test_a.cpython-312.pyc", "junk");
         write(tmp.path(), "a/stale.pyc", "junk");
         assert_eq!(baseline, TestTree::walk(tmp.path()).whole());
+    }
+
+    #[test]
+    fn whole_tracks_non_junk_hidden_dirs_only() {
+        // Same prune as the mirror: a `.data` fixture the tests read is part of
+        // the run; `.pytest_cache` is not.
+        let tmp = fixture();
+        let baseline = TestTree::walk(tmp.path()).whole().to_string();
+        write(tmp.path(), ".pytest_cache/v/cache", "junk");
+        assert_eq!(baseline, TestTree::walk(tmp.path()).whole());
+        write(tmp.path(), ".data/x.json", "{}");
+        assert_ne!(baseline, TestTree::walk(tmp.path()).whole());
     }
 
     #[test]

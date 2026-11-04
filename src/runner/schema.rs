@@ -98,6 +98,8 @@ struct Schema {
     python: PathBuf,
     /// Per-mutant memory cap each forked child sets on itself.
     mem_cap: Option<u64>,
+    /// The template runs with a private `HOME` and gives each fork its own.
+    private_home: bool,
     /// How long a template may take to import and collect the suite; also
     /// bounds the verification run.
     ready_timeout: Duration,
@@ -197,7 +199,7 @@ impl SchemaRunner {
         let python = pytest_interpreter(self.inner.python.as_deref());
         let mut cmd = Command::new(&python);
         cmd.arg(&script).arg("schematize").arg(&mirror.root);
-        configure_mirror_cmd(&mut cmd, &mirror)?;
+        configure_mirror_cmd(&mut cmd, &mirror, self.inner.private_home)?;
         let out = run_with_stdin(cmd, &serde_json::to_vec(&input)?)?;
         let parsed: SchematizeOutput =
             serde_json::from_slice(&out).context("parsing the schematize output")?;
@@ -256,6 +258,7 @@ impl SchemaRunner {
             serve_args,
             python,
             mem_cap: self.inner.mem_cap,
+            private_home: self.inner.private_home,
             ready_timeout: self.inner.baseline_timeout,
             // One slice per worker: built inside the run's rayon pool.
             verified: Chunks::new(rayon::current_num_threads()),
@@ -632,6 +635,10 @@ impl Runner for SchemaRunner {
         self.inner.baseline()
     }
 
+    fn baseline_deselection(&self) -> Option<super::Deselection> {
+        self.inner.baseline_deselection()
+    }
+
     fn take_kill_records(&self) -> Vec<crate::kill_order::KillRecord> {
         self.inner.take_kill_records()
     }
@@ -692,6 +699,9 @@ struct Ready {
     unsafe_ranges: Vec<(u64, u64)>,
     #[serde(default)]
     error: Option<String>,
+    /// Third-party daemon threads the template allowed (name and code).
+    #[serde(default)]
+    threads: Vec<String>,
 }
 
 /// Read only to keep replies in step: the template does any killing.
@@ -741,8 +751,15 @@ impl Template {
     fn start(schema: &Schema) -> Result<Self> {
         let mut cmd = Command::new(&schema.python);
         cmd.args(&schema.serve_args);
-        configure_mirror_cmd(&mut cmd, &schema.mirror)?;
+        configure_mirror_cmd(&mut cmd, &schema.mirror, schema.private_home)?;
         cmd.env_remove("FM_ACTIVE");
+        // macOS unified logging isn't fork-safe: a forked child that reads a
+        // system preference (PDFium's CoreGraphics, psycopg's Kerberos) dies
+        // in `_os_log_preferences_refresh`. Off from the template's start, the
+        // children never reach it. A value the user exports wins.
+        if cfg!(target_os = "macos") && std::env::var_os("OS_ACTIVITY_MODE").is_none() {
+            cmd.env("OS_ACTIVITY_MODE", "disable");
+        }
         // The template stays uncapped; each forked child caps itself.
         match schema.mem_cap {
             Some(bytes) => cmd.env(super::memory::CAP_ENV, bytes.to_string()),
@@ -788,6 +805,12 @@ impl Template {
             serde_json::from_str(&line).context("parsing the template's ready line")?;
         if !ready.ready {
             bail!("template refused: {}", ready.error.unwrap_or_default());
+        }
+        if !ready.threads.is_empty() {
+            info!(
+                "schemata: forking beside third-party daemon thread(s): {}",
+                ready.threads.join(", ")
+            );
         }
         debug!(unsafe_ranges = ?ready.unsafe_ranges, "template ready");
         Ok(Self {
@@ -1034,6 +1057,7 @@ mod tests {
             serve_args: vec!["-c".into(), format!("{FAKE}{script}").into()],
             python: "/bin/sh".into(),
             mem_cap: None,
+            private_home: true,
             ready_timeout: Duration::from_secs(10),
             verified: Chunks::new(1),
             template: OnceLock::new(),
@@ -1092,6 +1116,7 @@ done"#,
             tests: dir.join("tests"),
             timeout: Duration::from_secs(30),
             baseline_timeout: Duration::from_secs(30),
+            private_home: true,
             hypothesis_seed: None,
             extra_args: Vec::new(),
             isolation: crate::config::IsolationMode::Copy,

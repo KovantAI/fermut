@@ -9,7 +9,7 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Added
-- **Per-mutant memory cap on Linux and macOS** (`--max-memory`, on by default). A
+- **Per-mutant memory cap on Linux, macOS and Windows** (`--max-memory`, on by default). A
   runaway mutant (an endless append) used to grow until its timeout — 4–8 GB
   per process, 10–18 GB per run on markupsafe, more-itertools and trio. Each
   mutant now gets `RLIMIT_DATA` of 4 × the baseline's peak memory (at least
@@ -17,7 +17,9 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   Schemata children cap themselves after the fork. `--max-memory 4G` sets it,
   `--no-max-memory` / `max_memory = "0"` turn it off. macOS ignores the
   limit, so there a watchdog samples each mutant's test process every 50 ms
-  and kills it past the cap. Not yet on Windows.
+  and kills it past the cap. On Windows each run joins a Job Object with a
+  per-process memory limit (subprocesses included), and the baseline's job
+  measures the peak the default is sized from.
 - **Schemata mode, on by default** with the pytest runner on Unix: every
   function-body mutant is built into one schema, and each mutant runs in a
   fork of a single pytest process that imported and collected the suite
@@ -32,7 +34,9 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   way as an audit; a disagreement is logged and the normal verdict used. `--no-schemata` / `schemata = false` turn it
   off; `--schemata` / `schemata = true` make an unsupported runner or
   platform an error instead of a silent normal run. Cached verdicts are
-  shared with normal runs.
+  shared with normal runs. The schema holds only mutants that will run:
+  cache hits and remembered ty rejects stay out, so a warm run after a
+  small edit spawns its few misses instead of starting a template.
 - `--timeout-factor F` (config `timeout_factor`): size each mutant's timeout
   from the baseline run, `min(--timeout, F × baseline wall + 5 s)`, so hung
   mutants stop in seconds instead of at the flat 30 s. On by default
@@ -85,6 +89,51 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   be removed in a later release.
 
 ### Fixed
+- A mutant that makes importing the package raise `SystemExit` (flipping an
+  `if __name__ == "__main__": main()` guard) scored `error` on pytest 8+:
+  collection doesn't catch it, so pytest reports an internal error and exits
+  3. fermut's reporter now records internal errors and whether they ran
+  through project code; those (with a green baseline, the mutant's doing)
+  score killed, with or without the reporter. A crash in pytest or a
+  third-party plugin stays an error. trio: last exit-3 error gone.
+- On pytest 9.2, a mutant that breaks the import of a package a `-p` plugin
+  loads (trio's `-p trio._tests.pytest_plugin`) scored `error` (`pytest exit
+  3: internal error`): pytest 9.2 reports the failed plugin load and exits 3
+  before fermut's reporter starts. fermut now re-collects once on exit 3 and
+  scores it killed when the traceback runs through project code. On trio, 75
+  of 76 such errors became kills.
+- Tests that write under `~` no longer cause false kills. typer's app-dir
+  tests create and remove a directory under the real `HOME`; parallel workers
+  failed each other's runs, and each failure counted as a kill. fermut now
+  gives every worker, and every schemata fork, a private, empty `HOME` (and
+  `XDG_*` dirs), which also keeps tests out of your real home.
+  `--no-private-home` / `private_home = false` keeps the real home for suites
+  that need it (a red baseline says so). Cached verdicts from shared-home
+  runs are not reused; history hashes are unchanged.
+- Verdicts no longer depend on Python's random string hash seed. fermut now
+  pins `PYTHONHASHSEED` (a fixed value, or the one you export) for the
+  baseline, every mutant run and the schemata template, so a mutant whose
+  effect depends on set or dict iteration order (starlette `schemas.py:77`)
+  gets the same verdict every run, in a fork or not. `PYTHONHASHSEED=random`
+  opts out. Cached verdicts from random-seed runs are not reused; history
+  hashes are unchanged.
+- The verdict cache keyed the interpreter by how its path was spelled, so
+  the same venv reached through an activated `VIRTUAL_ENV`, through `PATH`
+  only, or as `x/../.venv` used three separate caches that evicted each
+  other, and every run after a switch re-ran everything (typer: ~150 s
+  instead of ~60 s). The key now names the interpreter actually used (pytest's
+  shebang when `--python` isn't set), by its canonical directory and target.
+  Existing cache entries are invalidated once.
+- Schemata no longer refuses the template over a third-party daemon thread
+  started at import (sqlmesh's analytics flusher made every apb-mutation
+  mutant run the normal way: 790 s instead of 233 s). Threads running project
+  code, non-daemon threads and threads whose code can't be found still refuse
+  it, and the message now names each thread's code.
+- Mutants covered only by tests pytest deselects (`--deselect`, `-k`, `-m`
+  in `--pytest-arg` or `addopts`) ran with no tests and scored `error`
+  (pytest exit 5). The baseline now reports what pytest deselected, and those
+  mutants are skipped as `selection`, like `--select-tests`. On werkzeug with
+  `--deselect=tests/test_serving.py`, 32 errored mutants are now skipped.
 - Mutants whose selected tests are parametrized with an absolute path
   (e.g. werkzeug's `test_from_directory[/repo/tests/res/test.txt]`) were
   scored `error` (pytest exit 4): fermut runs in a copy of the project, where

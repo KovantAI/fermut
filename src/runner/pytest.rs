@@ -20,11 +20,11 @@ use anyhow::{Context, Result};
 use wait_timeout::ChildExt;
 
 use super::exit::{
-    anomaly_message, classify_exit, is_collection_failure, ExitVerdict, TestTool,
-    PYTEST_USAGE_ERROR,
+    anomaly_message, classify_exit, is_collection_failure, is_project_config_error, ExitVerdict,
+    TestTool, PYTEST_INTERNAL_ERROR, PYTEST_USAGE_ERROR,
 };
 use super::process_group::kill_group;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use super::process_group::with_new_process_group;
 use super::pytest_result::{RunResult, REPORTER_MODULE, RESULT_ENV};
 use super::{
@@ -82,6 +82,10 @@ pub struct PytestRunner {
     /// `--select-tests`: the baseline runs only these node ids (the tests
     /// mutants will be run against), not the whole suite. `None` → full suite.
     baseline_ids: Option<Vec<String>>,
+    /// What the last green baseline deselected (needs the plugin).
+    deselection: Mutex<Option<super::Deselection>>,
+    /// A private `HOME` per mirror (and per schemata fork).
+    pub(super) private_home: bool,
 }
 
 /// Construction parameters for [`PytestRunner`], bundled so the runner is
@@ -93,6 +97,7 @@ pub struct PytestConfig {
     pub baseline_timeout: Duration,
     pub hypothesis_seed: Option<u64>,
     pub extra_args: Vec<String>,
+    pub private_home: bool,
     pub isolation: IsolationMode,
     pub coverage: Option<Arc<CoverageContexts>>,
     pub python: Option<PathBuf>,
@@ -116,6 +121,7 @@ impl PytestRunner {
             baseline_timeout,
             hypothesis_seed,
             extra_args,
+            private_home,
             isolation,
             coverage,
             python,
@@ -147,6 +153,7 @@ impl PytestRunner {
             baseline_timeout,
             hypothesis_seed,
             extra_args,
+            private_home,
             isolation,
             coverage,
             python,
@@ -160,6 +167,7 @@ impl PytestRunner {
             key_base,
             plugin,
             baseline_ids,
+            deselection: Mutex::new(None),
         }
     }
 
@@ -331,7 +339,7 @@ impl PytestRunner {
                 }
             }
         };
-        configure_mirror_cmd(&mut cmd, mirror)?;
+        configure_mirror_cmd(&mut cmd, mirror, self.private_home)?;
         if let Some(bytes) = self.mem_cap {
             super::memory::cap_memory(&mut cmd, bytes);
         }
@@ -391,7 +399,11 @@ impl PytestRunner {
                 }
                 // Broken import: collection failed before any test ran, so
                 // there is no failing node id to record.
-                ExitVerdict::Anomaly(PYTEST_USAGE_ERROR) if import_broke => ("killed", Vec::new()),
+                ExitVerdict::Anomaly(PYTEST_USAGE_ERROR | PYTEST_INTERNAL_ERROR)
+                    if import_broke =>
+                {
+                    ("killed", Vec::new())
+                }
                 ExitVerdict::Anomaly(_) => ("error", Vec::new()),
             },
             None => ("timed_out", Vec::new()),
@@ -408,8 +420,10 @@ impl PytestRunner {
 
     /// Re-run the mutant's exact selection with `--collect-only`, capturing
     /// stdout and stderr together, and report whether a selected module failed
-    /// to collect ([`is_collection_failure`]). Called only after an exit-4 run,
-    /// with the mutant still applied in `mirror`.
+    /// to collect ([`is_collection_failure`]) or project code raised while
+    /// pytest configured itself ([`is_project_config_error`]; on pytest 9.2+
+    /// that happens before the reporter plugin loads). Called only after an
+    /// exit-3 or exit-4 run, with the mutant still applied in `mirror`.
     ///
     /// Output goes to a temp file rather than a pipe: both streams
     /// share one file description (so their writes interleave instead of
@@ -439,7 +453,8 @@ impl PytestRunner {
                 return Ok(false); // timed out — no evidence either way
             }
             let out = std::fs::read(log.path()).context("reading collection probe log")?;
-            Ok(is_collection_failure(&String::from_utf8_lossy(&out)))
+            let out = String::from_utf8_lossy(&out);
+            Ok(is_collection_failure(&out) || is_project_config_error(&out, &mirror.root))
         };
         probe().unwrap_or(false)
     }
@@ -457,7 +472,8 @@ impl PytestRunner {
     /// broke a selected module's (or a conftest's) import — from `reported`, or
     /// [`Self::probe_collection_failure`] without it. pytest then reports a
     /// usage error (node ids can't resolve) rather than exit 2, and that is a
-    /// kill, not an anomaly.
+    /// kill, not an anomaly. Likewise an exit-3 run where a `-p` plugin
+    /// imported the broken package (pytest 9.2+).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn classify_run(
         &self,
@@ -489,7 +505,9 @@ impl PytestRunner {
                 }
                 // The mutant broke a selected module's import: no killer test
                 // to record (collection failed before any test ran).
-                ExitVerdict::Anomaly(PYTEST_USAGE_ERROR) if import_broke => {
+                ExitVerdict::Anomaly(PYTEST_USAGE_ERROR | PYTEST_INTERNAL_ERROR)
+                    if import_broke =>
+                {
                     MutantOutcome::killed(mutant.clone())
                 }
                 // Not a verdict — surface as Error, excluded from the score
@@ -538,6 +556,8 @@ impl ResultFile {
         r.collect_errors.iter_mut().for_each(map);
         r.failures.iter_mut().for_each(map);
         r.unfinished.iter_mut().for_each(map);
+        r.began.iter_mut().for_each(map);
+        r.deselected.iter_mut().for_each(map);
         Some(r)
     }
 }
@@ -629,11 +649,11 @@ fn select_args(
 ) -> Selection {
     match ids {
         Some(ids) if !ids.is_empty() => {
-            let ordered = if smart_order {
+            let ordered = modules_last(if smart_order {
                 kill_order.order(ids, key_file, key_op)
             } else {
                 ids.to_vec()
-            };
+            });
             let capture = should_capture(capture_killer, ordered.len());
             let mut args = ordered;
             if capture {
@@ -646,6 +666,26 @@ fn select_args(
         }
         _ => Selection::Sweep,
     }
+}
+
+/// Put whole test modules (import-time coverage ids, no `::`) after every node
+/// id, and drop node ids inside a module that is selected whole. pytest 8.4
+/// collects a module twice when its node ids straddle another module's path
+/// argument; a one-shot parametrize iterator (click's `chain(...)`) is empty the
+/// second time, so those ids are "not found" and the run exits 4. Modules first
+/// is no better: pytest then silently drops some of the node ids that follow.
+fn modules_last(ids: Vec<String>) -> Vec<String> {
+    let (modules, nodes): (Vec<String>, Vec<String>) =
+        ids.into_iter().partition(|id| !id.contains("::"));
+    let mut out: Vec<String> = nodes
+        .into_iter()
+        .filter(|id| {
+            id.split_once("::")
+                .is_none_or(|(file, _)| !modules.iter().any(|m| m == file))
+        })
+        .collect();
+    out.extend(modules);
+    out
 }
 
 /// How long to wait for the stdout drain to *settle* once the direct child has
@@ -800,6 +840,10 @@ fn wait_draining_stdout_with_grace(
 }
 
 impl Runner for PytestRunner {
+    fn baseline_deselection(&self) -> Option<super::Deselection> {
+        lock_recover(&self.deselection).clone()
+    }
+
     fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
     }
@@ -844,11 +888,21 @@ impl Runner for PytestRunner {
                 // applied here, so re-collect once to tell a broken import (kill)
                 // from a stale node id (anomaly). Rare path: the common exits never
                 // pay for it.
-                let import_broke = matches!(&waited, (Some(s), _) if s.code() == Some(PYTEST_USAGE_ERROR))
-                    && match &reported {
+                // Exit 3 is the same story on pytest 9.2+ when a `-p` plugin
+                // imports the broken package: it fails before the reporter
+                // loads, so only the probe can tell (see `is_project_config_error`).
+                let code = waited.0.and_then(|s| s.code());
+                let import_broke = match code {
+                    Some(PYTEST_USAGE_ERROR) => match &reported {
                         Some(r) => r.import_broke(),
                         None => self.probe_collection_failure(mirror, mutant, &key_file, key_op),
-                    };
+                    },
+                    Some(PYTEST_INTERNAL_ERROR) => {
+                        reported.as_ref().is_some_and(RunResult::import_broke)
+                            || self.probe_collection_failure(mirror, mutant, &key_file, key_op)
+                    }
+                    _ => false,
+                };
                 if self.record_kill_sets {
                     self.record_kill_set(
                         mutant,
@@ -948,8 +1002,29 @@ impl Runner for PytestRunner {
         // Same environment as a mutant run (incl. the mirror's pytest temp
         // root): a baseline that's only green under the global root would
         // vouch for a suite the mutant runs then fail (typer wraps tmp paths).
-        configure_mirror_cmd(&mut cmd, &mirror)?;
-        run_baseline_with_timeout(cmd, self.baseline_timeout)
+        configure_mirror_cmd(&mut cmd, &mirror, self.private_home)?;
+        // The reporter lists what pytest deselected and ran, so mutants only
+        // covered by deselected tests can skip as `selection` instead of
+        // exiting 5 ("no tests collected").
+        let result = self
+            .plugin
+            .then(|| ResultFile(next_result_path(&mirror.plugin_dir)));
+        if let Some(file) = &result {
+            cmd.arg("-p").arg(REPORTER_MODULE);
+            cmd.env("PYTHONPATH", plugin_pythonpath(&mirror)?);
+            cmd.env(RESULT_ENV, &file.0);
+        }
+        let status = run_baseline_with_timeout(cmd, self.baseline_timeout)?;
+        if matches!(status, BaselineStatus::Passed { .. }) {
+            *lock_recover(&self.deselection) =
+                result
+                    .and_then(|f| f.read(&mirror))
+                    .map(|r| super::Deselection {
+                        deselected: r.deselected.into_iter().collect(),
+                        ran: r.began.into_iter().collect(),
+                    });
+        }
+        Ok(status)
     }
 }
 
@@ -1044,6 +1119,39 @@ mod tests {
                 args
             }
             Selection::Sweep => panic!("expected Ids, got Sweep"),
+        }
+    }
+
+    #[test]
+    fn select_args_puts_whole_modules_last_and_drops_their_node_ids() {
+        // click: an import-time module id between two `test_basic.py` ids made
+        // pytest re-collect test_basic.py and exit 4.
+        let ko = KillOrder::default();
+        for smart in [true, false] {
+            let sel = select_args(
+                Some(&sids(&[
+                    "tests/a.py::x",
+                    "tests/m.py",
+                    "tests/m.py::inside",
+                    "tests/a.py::y[1-2]",
+                    "tests/n.py",
+                ])),
+                smart,
+                false,
+                &ko,
+                "src/f.py",
+                "op",
+            );
+            assert_ids(
+                sel,
+                &[
+                    "tests/a.py::x",
+                    "tests/a.py::y[1-2]",
+                    "tests/m.py",
+                    "tests/n.py",
+                ],
+                false,
+            );
         }
     }
 
@@ -1430,6 +1538,7 @@ mod tests {
             timeout: Duration::from_secs(30),
             baseline_timeout: Duration::from_secs(300),
             hypothesis_seed: None,
+            private_home: true,
             extra_args: Vec::new(),
             isolation: IsolationMode::Auto,
             coverage: Some(coverage),
@@ -1922,6 +2031,19 @@ mod tests {
         assert_eq!(o.killer(), None, "collection failed before any test ran");
         let (o, _) = classify_reported(false, 4, None, None, false, None);
         assert!(matches!(o, MutantOutcome::Error { .. }));
+    }
+
+    /// pytest 9.2: a `-p` plugin importing the broken package exits 3.
+    #[cfg(unix)]
+    #[test]
+    fn exit_3_is_a_kill_only_when_import_broke() {
+        let (o, _) = classify_reported(false, 3, None, None, true, None);
+        assert!(matches!(o, MutantOutcome::Killed { .. }));
+        let (o, _) = classify_reported(false, 3, None, None, false, None);
+        assert!(
+            matches!(o, MutantOutcome::Error { .. }),
+            "a real internal error"
+        );
     }
 
     #[test]

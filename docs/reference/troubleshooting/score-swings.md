@@ -3,10 +3,12 @@
 **Symptom.** Same commit, same source, different scores.
 
 **Cause.** Hypothesis seed isn't pinned, OR the cache was cleared
-between runs and something flaky surfaced. A test that depends on set or
-dict order (string hash randomization) flips too: under
-[schemata](../cli/run.md#schemata) every mutant's fork shares one hash seed
-per run, so such a test flips per run rather than per mutant.
+between runs and something flaky surfaced. Set and dict order (string hash
+randomization) isn't a cause: fermut pins `PYTHONHASHSEED` for every process
+it starts, so each run iterates in the same order. If you export
+`PYTHONHASHSEED` yourself, fermut uses yours (`random` brings the swings
+back). Tests that only pass in one iteration order are for your test tool to
+find, not mutation testing.
 
 ## Fix
 

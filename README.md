@@ -88,18 +88,19 @@ checkout with that base available — see
 
 ## Why fermut
 
-On **typer** (~2,200 mutants, cold run, same machine):
+On **typer** (cold run, same machine, 2026-11-03):
 
 | Tool   | Time  | Mutation score |
 |--------|-------|----------------|
-| fermut | 164s  | 71.5%          |
-| mutmut | 298s  | 70.5%          |
+| fermut | 211s  | 69.2%          |
+| mutmut | 289s  | 70.4%          |
 
-fermut is **faster and higher-scoring** here — its `ty` pre-filter
-and per-test coverage selection cut wall-clock without dropping
-rigor. The win is suite-shaped: on tiny pure-Python libraries with
-fast full suites (e.g. more-itertools) mutmut's simpler model still
-wins. Full numbers, the repos where mutmut wins, and methodology:
+fermut is **faster at a similar score** here: per-test coverage selection
+and a fork server that collects the suite once (schemata) cut wall-clock
+without dropping rigor. The win is suite-shaped: on more-itertools the two
+tie (~123s vs ~119s), and on a tiny suite like markupsafe mutmut's simpler
+model still wins (~9s vs ~15s). On the larger suites fermut finishes
+werkzeug (41k generated mutants, 8k run) in under 3 minutes. Full numbers and methodology:
 **[benchmarks](docs/reference/benchmarks.md)**.
 
 ## Documentation

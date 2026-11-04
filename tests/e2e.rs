@@ -724,6 +724,398 @@ fn select_tests_skips_mutants_outside_the_selection() {
 
 #[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn fully_cached_run_skips_the_baseline() {
+    assert_cached_run_skips_a_red_baseline(&[]);
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn fully_cached_run_skips_the_baseline_with_a_deselection() {
+    // test_b also covers fa, so fa's cached scopes were narrowed: only the
+    // saved deselection reproduces them without a baseline.
+    assert_cached_run_skips_a_red_baseline(&["--pytest-arg=--deselect=tests/test_b.py::test_fb"]);
+}
+
+/// #54: when every mutant is a cache hit nothing runs, so the baseline suite
+/// isn't run either. A suite made red from the environment (no source or test
+/// edit, so the cache still holds) proves it: the warm run succeeds with the
+/// cold run's verdicts instead of aborting.
+fn assert_cached_run_skips_a_red_baseline(extra: &[&str]) {
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n",
+    );
+    write("src/pkg/__init__.py", "");
+    // The guard's boundary mutants survive: their cached verdicts are keyed
+    // by every covering test, which a deselection narrows. (Kills are keyed
+    // by their killer alone and would hit either way.)
+    write(
+        "src/pkg/m.py",
+        "def fa(x):\n    if x > 100:\n        return 0\n    return x + 1\n",
+    );
+    write(
+        "tests/test_a.py",
+        "import os\n\nfrom pkg.m import fa\n\n\ndef test_fa():\n    \
+         assert not os.environ.get(\"FERMUT_E2E_RED\")\n    assert fa(1) == 2\n",
+    );
+    write(
+        "tests/test_b.py",
+        "import os\n\nfrom pkg.m import fa\n\n\ndef test_fb():\n    \
+         assert not os.environ.get(\"FERMUT_E2E_RED\")\n    assert fa(2) == 3\n",
+    );
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(proj)
+        .assert()
+        .success();
+    let run = |red: bool| {
+        let report = proj.join("report.json");
+        let mut cmd = Command::cargo_bin("fermut").unwrap();
+        cmd.arg("run")
+            .arg(proj.join("src"))
+            .arg("--tests")
+            .arg(proj.join("tests"))
+            .arg("--coverage")
+            .arg(proj.join(".coverage"))
+            .arg("--no-ty-filter")
+            .arg("--no-history")
+            .arg("--fail-under")
+            .arg("0")
+            .arg("--json")
+            .arg(&report)
+            .args(extra);
+        if red {
+            cmd.env("FERMUT_E2E_RED", "1");
+        }
+        cmd.assert().success();
+        let raw = std::fs::read_to_string(&report).expect("report written");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("report is JSON");
+        let mut verdicts: Vec<(String, String)> = json["outcomes"]
+            .as_array()
+            .expect("outcomes array")
+            .iter()
+            .map(|o| {
+                (
+                    o["mutant"]["id"].as_str().unwrap().to_string(),
+                    o["status"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        verdicts.sort();
+        verdicts
+    };
+    let cold = run(false);
+    assert!(cold.iter().any(|(_, s)| s == "killed"), "{cold:#?}");
+    assert!(cold.iter().any(|(_, s)| s == "survived"), "{cold:#?}");
+    assert_eq!(run(true), cold, "warm run must skip the red baseline");
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn systemexit_while_importing_the_package_is_a_kill() {
+    // #60: flipping `if __name__ == "__main__"` runs `main()` when a test
+    // module imports the package; its `sys.exit(2)` escapes collection (which
+    // only catches Exception) and pytest 8+ exits 3 with INTERNALERROR, which
+    // scored `error`. Through the reporter and through the `--collect-only`
+    // probe (plugin off) alike, it must be a kill.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n",
+    );
+    write("src/pkg/__init__.py", "");
+    write(
+        "src/pkg/cli.py",
+        "import sys\n\n\ndef double(x):\n    return x * 2\n\n\ndef main():\n    sys.exit(2)\n\n\n\
+         if __name__ == \"__main__\":\n    main()\n",
+    );
+    write(
+        "tests/test_cli.py",
+        "from pkg.cli import double\n\n\ndef test_double():\n    assert double(2) == 4\n",
+    );
+    for extra in [&[][..], &["--no-pytest-plugin"][..]] {
+        let report = proj.join("report.json");
+        Command::cargo_bin("fermut")
+            .unwrap()
+            .arg("run")
+            .arg(proj.join("src"))
+            .arg("--tests")
+            .arg(proj.join("tests"))
+            .args([
+                "--no-coverage",
+                "--no-ty-filter",
+                "--no-cache",
+                "--no-history",
+            ])
+            .args(["--fail-under", "0", "--json"])
+            .arg(&report)
+            .args(extra)
+            .assert()
+            .success();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+        let outcomes = json["outcomes"].as_array().unwrap();
+        let guard = outcomes
+            .iter()
+            .find(|o| {
+                o["mutant"]["line"] == 12
+                    && o["mutant"]["replacement"]
+                        .as_str()
+                        .is_some_and(|r| r.starts_with("not ("))
+            })
+            .expect("the `not (__name__ == ...)` mutant");
+        assert_eq!(guard["status"], "killed", "{extra:?}: {guard:#?}");
+        assert!(
+            outcomes.iter().all(|o| o["status"] != "error"),
+            "{extra:?}: no exit-3 errors"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn a_plugin_importing_the_broken_package_is_a_kill() {
+    // #59: a `-p` plugin that imports the package under test (trio's
+    // `-p trio._tests.pytest_plugin`). A mutant breaking that import makes
+    // pytest 9.2 exit 3 ("Error while loading plugin"), which scored `error`;
+    // pytest 9.1 crashed with exit 1. Either way it must be a kill.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\", \".\"]\n",
+    );
+    write(
+        "src/pkg/__init__.py",
+        "from pkg.m import LIMIT  # noqa: F401\n",
+    );
+    write(
+        "src/pkg/m.py",
+        "LIMIT = int(\"3\")\n\n\ndef double(x):\n    return x * 2\n",
+    );
+    write("plug.py", "import pkg  # noqa: F401\n");
+    write(
+        "tests/test_m.py",
+        "from pkg.m import double\n\n\ndef test_double():\n    assert double(2) == 4\n",
+    );
+    let report = proj.join("report.json");
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("run")
+        .arg(proj.join("src"))
+        .arg("--tests")
+        .arg(proj.join("tests"))
+        .args([
+            "--no-coverage",
+            "--no-ty-filter",
+            "--no-cache",
+            "--no-history",
+        ])
+        .args([
+            "--pytest-arg=-p",
+            "--pytest-arg=plug",
+            "--fail-under",
+            "0",
+            "--json",
+        ])
+        .arg(&report)
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    let line1: Vec<&serde_json::Value> = json["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|o| o["mutant"]["line"] == 1 && o["status"] != "skipped")
+        .collect();
+    let breaks_import = line1
+        .iter()
+        .find(|o| o["mutant"]["replacement"] == "\"\"")
+        .expect("int(\"3\") → int(\"\") mutant");
+    assert_eq!(breaks_import["status"], "killed", "{breaks_import:#?}");
+    assert!(
+        line1.iter().all(|o| o["status"] != "error"),
+        "no exit-3 errors: {line1:#?}"
+    );
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn tests_writing_under_home_neither_race_nor_touch_the_real_home() {
+    // #57: tests that create and remove a fixed dir under `~` (typer's
+    // `get_app_dir`) failed each other across parallel workers, each failure
+    // a false kill, and wrote into the user's home. They never check `f`, so
+    // every mutant must survive, and the "real" HOME given to fermut must
+    // stay empty.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path().join("proj");
+    let real_home = tmp.path().join("real-home");
+    std::fs::create_dir_all(&real_home).unwrap();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n",
+    );
+    write("src/pkg/__init__.py", "");
+    write(
+        "src/pkg/m.py",
+        "def f(x):\n    y = x + 1\n    z = y * 2\n    if z > 3:\n        return z - 1\n    return z\n",
+    );
+    let race = "import pathlib, time\nfrom pkg.m import f\n\n\n\
+                def test_app_dir():\n    try:\n        f(3)\n    except Exception:\n        pass\n    d = pathlib.Path.home() / \".fermut-e2e-appdir\"\n    \
+                assert not d.exists()\n    d.mkdir()\n    time.sleep(0.3)\n    d.rmdir()\n";
+    for i in 0..4 {
+        write(&format!("tests/test_race_{i}.py"), race);
+    }
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(&proj)
+        .env("HOME", &real_home)
+        .assert()
+        .success();
+    let report = proj.join("report.json");
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("run")
+        .arg(proj.join("src"))
+        .arg("--tests")
+        .arg(proj.join("tests"))
+        .arg("--coverage")
+        .arg(proj.join(".coverage"))
+        .args([
+            "--no-ty-filter",
+            "--no-cache",
+            "--no-history",
+            "--jobs",
+            "4",
+        ])
+        .args(["--fail-under", "0", "--json"])
+        .arg(&report)
+        .env("HOME", &real_home)
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    let ran: Vec<&serde_json::Value> = json["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|o| o["status"] != "skipped")
+        .collect();
+    assert!(ran.len() >= 4, "{ran:#?}");
+    assert!(
+        ran.iter().all(|o| o["status"] == "survived"),
+        "no test checks f, so a kill here is the race: {ran:#?}"
+    );
+    let left: Vec<_> = std::fs::read_dir(&real_home).unwrap().collect();
+    assert!(left.is_empty(), "wrote into the real home: {left:?}");
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn deselected_tests_skip_their_mutants_as_selection() {
+    // #47: a mutant only a deselected test covers used to run with every one
+    // of its tests deselected, so pytest exited 5 and it scored `error`. The
+    // baseline reports what pytest deselected and those mutants skip as
+    // `selection`, whether deselected from the pytest args or `addopts`.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    let pyproject = |addopts: &str| {
+        format!(
+            "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+             [tool.pytest.ini_options]\npythonpath = [\"src\"]\naddopts = \"{addopts}\"\n"
+        )
+    };
+    write("pyproject.toml", &pyproject(""));
+    write("src/pkg/__init__.py", "");
+    write(
+        "src/pkg/m.py",
+        "def fa(x):\n    return x + 1\n\n\ndef fb(x):\n    return x * 3\n",
+    );
+    write(
+        "tests/test_a.py",
+        "from pkg.m import fa\n\n\ndef test_fa():\n    assert fa(1) == 2\n",
+    );
+    write(
+        "tests/test_b.py",
+        "from pkg.m import fb\n\n\ndef test_fb():\n    assert fb(2) == 6\n",
+    );
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(proj)
+        .assert()
+        .success();
+
+    let check = |outcomes: Vec<serde_json::Value>| {
+        let at_line = |line: u32| -> Vec<&serde_json::Value> {
+            outcomes
+                .iter()
+                .filter(|o| o["mutant"]["line"] == line)
+                .collect()
+        };
+        assert!(
+            outcomes.iter().all(|o| o["status"] != "error"),
+            "no mutant may error: {outcomes:#?}"
+        );
+        let fa = at_line(2);
+        assert!(
+            !fa.is_empty() && fa.iter().all(|o| o["status"] == "killed"),
+            "{fa:#?}"
+        );
+        let fb = at_line(6);
+        assert!(
+            !fb.is_empty()
+                && fb
+                    .iter()
+                    .all(|o| o["status"] == "skipped" && o["filter"] == "selection"),
+            "fb is covered only by deselected test_b: {fb:#?}"
+        );
+    };
+    check(run_outcomes(
+        proj,
+        &["--pytest-arg=-k", "--pytest-arg=not test_fb"],
+    ));
+    write("pyproject.toml", &pyproject("--deselect tests/test_b.py"));
+    check(run_outcomes(proj, &[]));
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn conftest_import_break_is_killed_and_plugin_matches_fallback() {
     // A conftest that imports the mutated module fails before pytest starts a
     // session (exit 4, no node-id error). That must be a kill, both through
@@ -795,6 +1187,74 @@ fn conftest_import_break_is_killed_and_plugin_matches_fallback() {
         assert!(
             double_killer.is_some_and(|k| k.starts_with("tests/test_registry.py::test_double")),
             "{label}: a killed `double` mutant names its killing test"
+        );
+    }
+    assert_eq!(
+        verdicts(&with_plugin),
+        verdicts(&fallback),
+        "the reporter plugin must not change any verdict"
+    );
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn warning_filter_import_break_is_killed_with_and_without_plugin() {
+    // A `filterwarnings` entry naming a warning class in the mutated module
+    // imports it while pytest configures (exit 4, no session). pytest < 9.2
+    // reports it through the reporter's `config_error` event; 9.2 applies the
+    // filters before loading `-p` plugins, so there only the `--collect-only`
+    // probe sees it. Either way it is a kill, and both paths agree.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n\
+         filterwarnings = [\"ignore::pkg.warn.W\"]\n",
+    );
+    write("src/pkg/__init__.py", "");
+    write(
+        "src/pkg/warn.py",
+        "def check(name):\n    if not name:\n        raise ValueError(\"empty name\")\n    \
+         return name\n\n\nclass W(Warning):\n    pass\n\n\nDEFAULT = check(\"default\")\n",
+    );
+    write(
+        "tests/test_warn.py",
+        "from pkg.warn import check\n\n\ndef test_check():\n    assert check(\"a\") == \"a\"\n",
+    );
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("coverage")
+        .arg(proj)
+        .assert()
+        .success();
+
+    let verdicts = |outcomes: &[serde_json::Value]| -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = outcomes
+            .iter()
+            .map(|o| (o["mutant"]["id"].to_string(), o["status"].to_string()))
+            .collect();
+        v.sort();
+        v
+    };
+    let with_plugin = run_outcomes(proj, &[]);
+    let fallback = run_outcomes(proj, &["--no-pytest-plugin"]);
+    for (label, outcomes) in [("plugin", &with_plugin), ("fallback", &fallback)] {
+        let errored: Vec<_> = outcomes.iter().filter(|o| o["status"] == "error").collect();
+        assert!(
+            errored.is_empty(),
+            "{label}: warning-filter import breaks must not be errors: {errored:#?}"
+        );
+        assert!(
+            outcomes
+                .iter()
+                .any(|o| o["status"] == "killed" && o["mutant"]["line"] == 2),
+            "{label}: guard mutant on line 2 must be killed"
         );
     }
     assert_eq!(

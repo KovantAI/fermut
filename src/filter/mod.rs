@@ -63,6 +63,11 @@ pub trait Filter: Send + Sync {
     fn costly(&self) -> bool {
         false
     }
+    /// A costly filter's remembered verdict for `mutant`, without running it.
+    /// `None` when it would have to run.
+    fn cached_verdict(&self, _mutant: &Mutant) -> Option<bool> {
+        None
+    }
 }
 
 /// Write `patched` to a temp `.py` file for a subprocess linter/type-checker.
@@ -375,6 +380,7 @@ mod chain_order_tests {
             fail_under: None,
             exclude: Vec::new(),
             verify_baseline: false,
+            private_home: true,
             baseline_timeout_secs: 300,
             max_time_secs: None,
             timeout_factor: None,

@@ -56,6 +56,8 @@ pub struct UnittestRunner {
     mem_cap: Option<u64>,
     baseline_timeout: Duration,
     isolation: IsolationMode,
+    /// A private `HOME` per mirror (see [`super::configure_mirror_cmd`]).
+    private_home: bool,
     /// Interpreter to run `-m unittest` with (resolved venv / `--python`, else
     /// a PATH-probed `python3`/`python`). Never a bare hardcoded `python`.
     python: PathBuf,
@@ -69,6 +71,7 @@ impl UnittestRunner {
         timeout: Duration,
         baseline_timeout: Duration,
         isolation: IsolationMode,
+        private_home: bool,
         python: PathBuf,
         pattern: Option<String>,
     ) -> Self {
@@ -78,6 +81,7 @@ impl UnittestRunner {
             mem_cap: None,
             baseline_timeout,
             isolation,
+            private_home,
             python,
             pattern: pattern.unwrap_or_else(|| DEFAULT_PATTERN.to_string()),
         }
@@ -95,7 +99,7 @@ impl UnittestRunner {
             .arg(&mirror.tests)
             .arg("-p")
             .arg(&self.pattern);
-        configure_mirror_cmd(&mut cmd, mirror)?;
+        configure_mirror_cmd(&mut cmd, mirror, self.private_home)?;
         // `None` until the baseline (which shares this command) has run.
         if let Some(bytes) = self.mem_cap {
             super::memory::cap_memory(&mut cmd, bytes);
@@ -368,6 +372,7 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(60),
             IsolationMode::Auto,
+            true,
             py,
             pattern,
         )
@@ -420,6 +425,7 @@ mod tests {
             timeout,
             Duration::from_secs(60),
             IsolationMode::Copy,
+            true,
             py,
             None,
         )

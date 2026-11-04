@@ -89,6 +89,24 @@ import warnings
 from collections import defaultdict
 
 ACTIVE = "_fm_active"  # attribute on the builtins module
+# Set by fermut (`runner::PRIVATE_HOME_ENV`) when tests run with a private home;
+# then each fork gets its own. XDG dirs as in `runner::XDG_DIRS`.
+PRIVATE_HOME_ENV = "FERMUT_PRIVATE_HOME"
+XDG_DIRS = (
+    ("XDG_CONFIG_HOME", ".config"),
+    ("XDG_CACHE_HOME", ".cache"),
+    ("XDG_DATA_HOME", ".local/share"),
+    ("XDG_STATE_HOME", ".local/state"),
+)
+
+
+def active_dir(mirror_root):
+    """Beside the mirror (out of the project): one file per template child,
+    named by its process group, holding its index. Python subprocesses that
+    lost FM_ACTIVE (`env={...}`) look themselves up there."""
+    return os.path.join(os.path.dirname(os.path.realpath(mirror_root)), "fermut-active")
+
+
 SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
 # --- schematize ------------------------------------------------------------------
@@ -251,7 +269,7 @@ def mutated_function(src, starts, fn, m):
     return mut_fn, problem
 
 
-def schematize_file(src, mutants, next_idx):
+def schematize_file(src, mutants, next_idx, active_dir=os.devnull):
     """(new source | None, {id: entry}, [(co_firstlineno, lo, hi)])."""
     tree, starts = ast.parse(src), line_starts(src)
     entries, by_fn = {}, defaultdict(list)
@@ -324,7 +342,8 @@ def schematize_file(src, mutants, next_idx):
     #   _fm_b = __import__('builtins')   (no import statement: click's
     #   test_light_imports audits the imports its modules make)
     #   if not hasattr(_fm_b, '_fm_active'): _fm_b._fm_active = int(os.environ...)
-    # The env default lets Python subprocesses a test spawns see the mutant.
+    # The env default lets Python subprocesses a test spawns see the mutant;
+    # without FM_ACTIVE, the file for their process group (see `active_dir`).
     at = 1 if docstring(tree.body) else 0
     while (
         at < len(tree.body)
@@ -336,6 +355,13 @@ def schematize_file(src, mutants, next_idx):
         "_fm_b = __import__('builtins')\n"
         f"if not hasattr(_fm_b, {ACTIVE!r}):\n"
         f"    _fm_b.{ACTIVE} = int(__import__('os').environ.get('FM_ACTIVE', 0))\n"
+        "    if 'FM_ACTIVE' not in __import__('os').environ:\n"
+        "        try:\n"
+        f"            with open({active_dir!r} + '/' + str(__import__('os').getpgrp())) as _fm_f:\n"
+        f"                _fm_b.{ACTIVE} = int(_fm_f.read())\n"
+        "            del _fm_f\n"
+        "        except (OSError, ValueError, AttributeError):\n"
+        "            pass\n"
     ).body
     tree.body[at:at] = prelude
     out = ast.unparse(ast.fix_missing_locations(tree))
@@ -379,12 +405,13 @@ def schematize(mirror_root, mutants):
         by_file[m["file"]].append(m)
     counter = iter(range(1, 1 << 62))
     entries, functions = {}, {}
+    files = active_dir(mirror_root)
     for rel, ms in sorted(by_file.items()):
         path = os.path.join(mirror_root, rel)
         try:
             with open(path, "rb") as f:
                 out, file_entries, fns = schematize_file(
-                    f.read(), ms, lambda: next(counter)
+                    f.read(), ms, lambda: next(counter), files
                 )
         except (OSError, SyntaxError, ValueError, RecursionError) as e:
             file_entries, out = (
@@ -404,6 +431,8 @@ def schematize(mirror_root, mutants):
 class Template:
     def __init__(self, mirror_root, schema_path, pytest_args):
         self.mirror_root = mirror_root
+        self.active_dir = active_dir(mirror_root)
+        os.makedirs(self.active_dir, exist_ok=True)
         self.pytest_args = pytest_args
         with open(schema_path) as f:
             functions = json.load(f)["functions"]
@@ -413,6 +442,7 @@ class Template:
         }
         self.by_filename = {}  # co_filename -> switched map (realpath memo)
         self.ran = set()
+        self.allowed_threads = []
         # Protocol on the original stdin/stdout; pytest's stdout goes to
         # /dev/null. stderr stays: fermut shows its tail if the template
         # never becomes ready.
@@ -486,6 +516,30 @@ class Template:
             sys.setprofile(None)
             threading.setprofile(None)
 
+    def threads(self):
+        """The template's other threads, described, as (allowed, refused).
+
+        A daemon thread running third-party code (sqlmesh's analytics
+        flusher) is allowed: such threads rarely call back into the code under
+        test (the survivor audit is the net if one does), and a lock one holds
+        at fork time only hangs or crashes a child, which goes to the spawn
+        path like any served timeout or crash. A thread running project
+        code, a non-daemon thread, or one whose code can't be found is refused.
+        """
+        root = os.path.realpath(self.mirror_root) + os.sep
+        allowed, refused = [], []
+        for t in threading.enumerate():
+            if t is threading.main_thread():
+                continue
+            origin, path = thread_code(t)
+            third_party = path is not None and (
+                not os.path.realpath(path).startswith(root)
+                or "site-packages" in path.split(os.sep)
+            )
+            desc = f"{t.name} ({origin})" if origin else t.name
+            (allowed if t.daemon and third_party else refused).append(desc)
+        return allowed, refused
+
     def run(self):
         os.chdir(self.mirror_root)
         setattr(builtins, ACTIVE, 0)
@@ -498,22 +552,20 @@ class Template:
             @pytest.hookimpl(tryfirst=True)
             def pytest_runtestloop(self, session):
                 template.untrace()
-                others = [
-                    t.name
-                    for t in threading.enumerate()
-                    if t is not threading.main_thread()
-                ]
-                if others:
-                    # A thread started at import or collection can hold a lock
-                    # at fork time (a child deadlocks on it), and keeps calling
-                    # switched functions in the template after `unsafe` was sent.
+                allowed, refused = template.threads()
+                if refused:
+                    # A thread running project code keeps calling switched
+                    # functions in the template after `unsafe` was sent, and a
+                    # non-daemon one is something the suite waits on.
                     template.send(
                         {
                             "ready": False,
-                            "error": f"threads running in the template: {', '.join(others)}",
+                            "error": "threads running in the template: "
+                            + ", ".join(refused),
                         }
                     )
                     os._exit(0)
+                template.allowed_threads = allowed
                 if session.testsfailed:
                     # Collection errors: a cold run would stop here too.
                     template.send(
@@ -541,7 +593,9 @@ class Template:
         # Children gc-collect at session end (see `child`); frozen, the
         # collected suite isn't rescanned on every one of those passes.
         gc.freeze()
-        self.send({"ready": True, "unsafe": sorted(self.ran)})
+        self.send(
+            {"ready": True, "unsafe": sorted(self.ran), "threads": self.allowed_threads}
+        )
         # One template serves every worker: each request forks at once and its
         # result goes back, tagged with the request's id, when its child ends.
         sel = selectors.DefaultSelector()
@@ -623,6 +677,17 @@ class Template:
             {"id": c.id, "status": status, "timed_out": timed_out, **summarize(c.buf)}
         )
         shutil.rmtree(self.child_temp(c.pid), ignore_errors=True)
+        shutil.rmtree(self.child_home(c.pid), ignore_errors=True)
+        try:
+            os.unlink(self.active_file(c.pid))  # before a later fork reuses the pid
+        except FileNotFoundError:
+            pass  # the child died before writing it
+
+    def child_home(self, pid):
+        return os.path.join(self.temproot, f"h-{pid}")
+
+    def active_file(self, pid):
+        return os.path.join(self.active_dir, str(pid))
 
     def fork(self, session, by_id, req):
         """Fork a child for `req`; returns its event pipe's read end and pid."""
@@ -677,8 +742,20 @@ class Template:
                 exist_ok=True,
             )
             os.environ["USER"] = os.environ["LOGNAME"] = user
+            if os.environ.get(PRIVATE_HOME_ENV) == "1":
+                # Siblings run at once: one shared private home would race
+                # like the real one (an app dir one test removes under
+                # another). HOME is read at call time, so tests see this one.
+                home = self.child_home(os.getpid())
+                os.makedirs(home, exist_ok=True)
+                os.environ["HOME"] = home
+                for var, rel in XDG_DIRS:
+                    os.environ[var] = os.path.join(home, rel)
             setattr(builtins, ACTIVE, req["idx"])
             os.environ["FM_ACTIVE"] = str(req["idx"])  # Python subprocesses
+            # ...and those that drop the environment: they stay in this group.
+            with open(self.active_file(os.getpid()), "w") as f:
+                f.write(str(req["idx"]))
             try:
                 code = self.run_items(session, by_id, req, emit)
             except KeyboardInterrupt:
@@ -812,6 +889,23 @@ def teardown_all(session):
             state.teardown_all()
     except Exception:  # noqa: BLE001, S110 - a cold run reports it outside the verdict
         pass
+
+
+def thread_code(t):
+    """`module.qualname` of the function thread `t` runs, and its source file;
+    (None, None) when unknown (a builtin target such as `time.sleep`)."""
+    if type(t).run is not threading.Thread.run:
+        fn = type(t).run
+    else:
+        fn = getattr(t, "_target", None)  # CPython; deleted once run() ends
+    fn = getattr(fn, "__func__", fn)  # a bound method
+    code = getattr(fn, "__code__", None)
+    if code is None:
+        return None, None
+    origin = (
+        f"{getattr(fn, '__module__', '?')}.{getattr(fn, '__qualname__', code.co_name)}"
+    )
+    return origin, code.co_filename
 
 
 def freeze_macos_proxies():

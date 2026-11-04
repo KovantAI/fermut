@@ -331,6 +331,14 @@ PROJECT = {
             assert (tmp_path / "f").read_text() == "x"
 
 
+        def test_home():
+            home = os.environ["HOME"]
+            assert os.path.basename(home) == f"h-{os.getpid()}"
+            assert os.path.isdir(home)
+            assert os.environ["XDG_CONFIG_HOME"] == os.path.join(home, ".config")
+            os.makedirs(os.path.join(home, ".config", "app"))
+
+
         def test_add_with_marker(marker):
             assert add(1, 1) == 2
 
@@ -381,6 +389,15 @@ PROJECT = {
 
         def test_guard():
             assert guard(1) == 1
+
+
+        def test_add_in_a_scrubbed_subprocess():
+            import subprocess
+            import sys
+
+            check = "from pkg.core import add; assert add(2, 3) == 5"
+            env = {"PYTHONPATH": os.getcwd()}  # no FM_ACTIVE
+            subprocess.run([sys.executable, "-c", check], env=env, check=True)
         """
     ),
 }
@@ -400,6 +417,7 @@ def project_mutant(id_, file, needle, replacement, root):
 
 class Server:
     def __init__(self, root, schema_path, occupy_profiler=False):
+        self.root = root
         # As fermut runs it: pytest's temp root inside the mirror's workdir.
         self.temproot = root / "pytest-temproot"
         self.temproot.mkdir(exist_ok=True)
@@ -408,6 +426,10 @@ class Server:
             "PYTHONPATH": str(root),
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTEST_DEBUG_TEMPROOT": str(self.temproot),
+            # As fermut runs it by default: a private home per mirror, and a
+            # marker telling the template to give each fork its own.
+            "HOME": str(root / "mirror-home"),
+            "FERMUT_PRIVATE_HOME": "1",
         }
         env.pop("FM_ACTIVE", None)
         # Another tool holding sys.monitoring's profiler slot pushes the
@@ -544,10 +566,15 @@ def test_serve_kills_survives_and_flags_pre_fork_functions(served):
     unknown = server.run(idx["add"], ["tests/test_core.py::nope"])
     assert unknown["exit"] == 4
 
+    scrubbed = ["tests/test_core.py::test_add_in_a_scrubbed_subprocess"]
+    assert server.run(idx["add"], scrubbed)["exit"] == 1
+    assert server.run(idx["spin"], scrubbed)["exit"] == 0
+
     swept = server.run(0, None)
     assert swept["exit"] == 0
 
     server.close()
+    assert not os.listdir(schema.active_dir(server.root))  # each child's file reaped
 
 
 def test_serve_checks_one_slice_of_the_suite_per_chunk(served):
@@ -708,6 +735,16 @@ def test_children_get_private_tmp_roots_of_cold_length(served, tmp_path):
     assert leftovers == []
 
 
+def test_each_child_gets_a_private_home_removed_after(served):
+    server, _ = served
+    assert server.recv()["ready"] is True
+    # Twice: a second fork must not see the first one's app dir.
+    assert server.run(0, ["tests/test_core.py::test_home"])["exit"] == 0
+    assert server.run(0, ["tests/test_core.py::test_home"])["exit"] == 0
+    server.close()
+    assert [d for d in os.listdir(server.temproot) if d.startswith("h-")] == []
+
+
 def test_fake_user_matches_real_user_length():
     t = object.__new__(schema.Template)
     t.user = "drorasaf"
@@ -718,18 +755,45 @@ def test_fake_user_matches_real_user_length():
     assert t.fake_user(654321) == "f654321", "a longer pid still fits"
 
 
-def test_serve_refuses_with_threads_running(tmp_path):
+def serve_with_thread(tmp_path, start):
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests/test_bg.py").write_text(
-        "import threading, time\n"
-        "threading.Thread(target=time.sleep, args=(30,), name='poller', daemon=True).start()\n"
+        "import threading, time, queue\n"
+        "def loop():\n    time.sleep(30)\n"
+        f"{start}.start()\n"
         "def test_ok():\n    pass\n"
     )
     (tmp_path / "schema.json").write_text(json.dumps({"functions": {}}))
     server = Server(tmp_path, tmp_path / "schema.json")
     msg = server.recv()
-    assert msg["ready"] is False and "poller" in msg["error"]
     server.close()
+    return msg
+
+
+@pytest.mark.parametrize(
+    "start, why",
+    [
+        ("threading.Thread(target=loop, name='poller', daemon=True)", "project code"),
+        (
+            "threading.Thread(target=time.sleep, args=(30,), name='poller', daemon=True)",
+            "unknown",
+        ),
+        ("threading.Thread(target=queue.Queue().get, name='poller')", "non-daemon"),
+    ],
+)
+def test_serve_refuses_risky_threads(tmp_path, start, why):
+    msg = serve_with_thread(tmp_path, start)
+    assert msg["ready"] is False and "poller" in msg["error"], why
+
+
+def test_serve_allows_third_party_daemon_threads(tmp_path):
+    # Like sqlmesh's analytics flusher: a daemon thread in library code.
+    msg = serve_with_thread(
+        tmp_path,
+        "threading.Thread(target=queue.Queue().get, name='poller', daemon=True)",
+    )
+    assert msg["ready"] is True
+    assert msg["threads"] == ["poller (queue.Queue.get)"]
 
 
 def test_serve_refuses_on_collection_errors(tmp_path):

@@ -111,6 +111,7 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
     // Everything read-only for the testing phase: filter chain, runner, cache,
     // per-file artifacts, equiv pipeline, deadline — plus the baseline check.
     let state = prepare(cfg, &mutants)?;
+    let cfg = state.narrowed.as_ref().unwrap_or(cfg);
 
     let ctx = EvalCtx {
         cfg,
@@ -318,6 +319,10 @@ struct RunState {
     deadline: Option<Instant>,
     stats: CacheStats,
     killer_hits: Mutex<Vec<KillerHit>>,
+    /// The run's config narrowed to the tests the baseline's pytest kept
+    /// ([`narrow_to_baseline`]); the rest of the run reads it in place of the
+    /// caller's.
+    narrowed: Option<Config>,
 }
 
 /// Per-run cache counters, reported in the post-run summary. Atomics so the
@@ -347,10 +352,87 @@ struct KillerHit {
 /// derive the per-file artifacts, cache, equiv pipeline, and testing-phase
 /// deadline. Everything the per-mutant loop reads, in one place.
 fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
-    let filters = filter::build_chain(cfg)?;
+    let mut filters = filter::build_chain(cfg)?;
     let mut runner = runner::build(cfg);
 
-    let own_baseline = preflight_baseline(cfg, runner.as_ref(), mutants)?;
+    // One read + at most one parse per unique file, deriving the cache-key
+    // hash (always), the scope map (only in `scope` cache mode), and the source
+    // for the equiv detector (only when it's on). Narrowing (below) changes
+    // none of these, nor the scope prefix.
+    let FileArtifacts {
+        hashes: file_hashes,
+        scope_maps,
+        sources: file_sources,
+    } = analyze_unique_files(
+        mutants,
+        matches!(cfg.cache_scope, CacheScope::Scope),
+        cfg.equiv_detect,
+    );
+    let scope_prefix = compute_scope_prefix(cfg);
+    // Walked and hashed once; each mutant's test fingerprint folds from it.
+    let test_tree = TestTree::walk(&cfg.tests_path());
+    let cache = if cfg.cache {
+        Mutex::new(Cache::load(&cfg.cache_path))
+    } else {
+        Mutex::new(Cache::default())
+    };
+    // Only the mutants that will actually run: a warm watch iteration with a
+    // handful of misses then spawns them instead of starting a template.
+    let uncached = |cfg: &Config, filters: &[Box<dyn Filter>]| -> Vec<Arc<Mutant>> {
+        let cache = lock_recover(&cache);
+        prepare_candidates(filters, mutants)
+            .into_iter()
+            .filter(|m| {
+                !is_cached(
+                    cfg,
+                    &cache,
+                    &file_hashes,
+                    &scope_maps,
+                    &scope_prefix,
+                    &test_tree,
+                    m,
+                )
+            })
+            .collect()
+    };
+    // The last baseline's deselection, when nothing that decides it changed:
+    // the narrowing the baseline would reproduce, without running it.
+    let dkey = deselection_key(cfg, &scope_prefix, &test_tree);
+    let saved = lock_recover(&cache)
+        .deselection(&dkey)
+        .and_then(|d| narrow_to_baseline(cfg, d));
+    let mut to_run = match &saved {
+        Some(n) => uncached(n, &filter::build_chain(n)?),
+        None => uncached(cfg, &filters),
+    };
+
+    // Nothing will run: the baseline would only guard runs that don't happen.
+    let own_baseline = if to_run.is_empty() {
+        if cfg.verify_baseline && !mutants.is_empty() {
+            info!("every mutant is cached or filtered: skipping the baseline");
+        }
+        None
+    } else {
+        preflight_baseline(cfg, runner.as_ref(), mutants)?
+    };
+    let narrowed = if own_baseline.is_some() {
+        let d = runner.baseline_deselection();
+        if let Some(d) = d.as_ref().filter(|d| cfg.cache && !d.deselected.is_empty()) {
+            lock_recover(&cache).remember_deselection(dkey, d.clone());
+        }
+        let narrowed = d.and_then(|d| narrow_to_baseline(cfg, &d));
+        if let Some(n) = &narrowed {
+            to_run = uncached(n, &filter::build_chain(n)?);
+        }
+        narrowed
+    } else {
+        saved
+    };
+    if let Some(n) = &narrowed {
+        filters = filter::build_chain(n)?;
+        runner = runner::build(n);
+    }
+    let cfg = narrowed.as_ref().unwrap_or(cfg);
     if let Some(bytes) = memory_cap_bytes(
         cfg.max_memory,
         own_baseline.and_then(|_| runner::memory::children_peak_rss()),
@@ -368,32 +450,11 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     if let Some(secs) = budgeted_timeout_secs(cfg, baseline_wall) {
         runner.set_timeout(Duration::from_secs(secs));
     }
-    runner.prepare(&prepare_candidates(&filters, mutants))?;
-
-    // One read + at most one parse per unique file, deriving the cache-key
-    // hash (always), the scope map (only in `scope` cache mode), and the source
-    // for the equiv detector (only when it's on).
-    let FileArtifacts {
-        hashes: file_hashes,
-        scope_maps,
-        sources: file_sources,
-    } = analyze_unique_files(
-        mutants,
-        matches!(cfg.cache_scope, CacheScope::Scope),
-        cfg.equiv_detect,
-    );
+    runner.prepare(&to_run)?;
     let equiv = if cfg.equiv_detect {
         Some(EquivPipeline::default_pipeline())
     } else {
         None
-    };
-    let scope_prefix = compute_scope_prefix(cfg);
-    // Walked and hashed once; each mutant's test fingerprint folds from it.
-    let test_tree = TestTree::walk(&cfg.tests_path());
-    let cache = if cfg.cache {
-        Mutex::new(Cache::load(&cfg.cache_path))
-    } else {
-        Mutex::new(Cache::default())
     };
 
     // Testing-phase wall-clock ceiling. Computed here — after baseline
@@ -414,25 +475,115 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
         deadline,
         stats: CacheStats::default(),
         killer_hits: Mutex::new(Vec::new()),
+        narrowed,
+    })
+}
+
+/// Fingerprint of what decides the baseline's deselection: the pytest args
+/// and run shape (`scope_prefix`), the tests tree, `PYTEST_ADDOPTS`, and every
+/// pytest config file and `conftest.py` in the tests root's ancestors (where
+/// pytest looks for `addopts` and root conftests).
+fn deselection_key(cfg: &Config, scope_prefix: &str, test_tree: &TestTree) -> String {
+    const CONFIGS: &[&str] = &[
+        "pyproject.toml",
+        "pytest.ini",
+        ".pytest.ini",
+        "setup.cfg",
+        "tox.ini",
+        "conftest.py",
+    ];
+    let mut h = Sha256::new();
+    h.update(scope_prefix.as_bytes());
+    h.update(b"|tests=");
+    h.update(test_tree.whole().as_bytes());
+    h.update(b"|addopts=");
+    h.update(
+        std::env::var("PYTEST_ADDOPTS")
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    let tests = cfg.tests_path();
+    let tests = tests.canonicalize().unwrap_or(tests);
+    for dir in tests.ancestors().skip(1) {
+        for name in CONFIGS {
+            let path = dir.join(name);
+            if let Ok(body) = std::fs::read(&path) {
+                h.update(b"|");
+                h.update(path.as_os_str().as_encoded_bytes());
+                h.update(b"=");
+                h.update(Sha256::digest(&body));
+            }
+        }
+    }
+    hex::encode(h.finalize())
+}
+
+/// `cfg` narrowed the way `--select-tests` narrows it, to the tests a green
+/// baseline ran, when its pytest deselected some (`--deselect`, `-k`, `-m` in
+/// the pytest args or `addopts`). A mutant only deselected tests cover then
+/// skips as `selection` instead of exiting 5 ("no tests collected"). `None`
+/// when nothing was deselected, there's no coverage to narrow, or
+/// `--select-tests` already narrowed it.
+fn narrow_to_baseline(cfg: &Config, d: &runner::Deselection) -> Option<Config> {
+    if d.deselected.is_empty() || cfg.coverage_unselected.is_some() {
+        return None;
+    }
+    let full = cfg.coverage.clone()?;
+    info!(
+        deselected = d.deselected.len(),
+        "pytest deselected tests in the baseline; mutants only they cover are skipped \
+         as `selection`"
+    );
+    Some(Config {
+        coverage: Some(full.deselect(&d.deselected, &d.ran)),
+        coverage_unselected: Some(full),
+        ..cfg.clone()
     })
 }
 
 /// The mutants worth handing `Runner::prepare`: those the cheap filters
-/// admit (sample, coverage, …). `--schemata` builds every prepared mutant into
-/// its schema, and most never run. The costly filters and the cache drop a few
-/// more later; those just sit in the schema unused. A filter error admits, as
-/// in [`precheck`].
+/// admit (sample, coverage, …) and no costly filter already remembers
+/// rejecting. `--schemata` builds every prepared mutant into its schema, and
+/// most never run. [`prepare`] also drops cache hits; the costly filters drop
+/// a few more later, and those just sit in the schema unused. A filter error
+/// admits, as in [`precheck`].
 fn prepare_candidates(filters: &[Box<dyn Filter>], mutants: &[Arc<Mutant>]) -> Vec<Arc<Mutant>> {
     mutants
         .iter()
         .filter(|m| {
-            filters
-                .iter()
-                .filter(|f| !f.costly())
-                .all(|f| f.admits(m).unwrap_or(true))
+            filters.iter().all(|f| {
+                if f.costly() {
+                    f.cached_verdict(m) != Some(false)
+                } else {
+                    f.admits(m).unwrap_or(true)
+                }
+            })
         })
         .cloned()
         .collect()
+}
+
+/// Whether [`evaluate_admitted`] would serve `mutant` from the cache (a full
+/// or killer hit) without running it.
+fn is_cached(
+    cfg: &Config,
+    cache: &Cache,
+    file_hashes: &HashMap<PathBuf, String>,
+    scope_maps: &HashMap<PathBuf, ScopeMap>,
+    scope_prefix: &str,
+    test_tree: &TestTree,
+    mutant: &Mutant,
+) -> bool {
+    let Some(hash) = mutant_identity_hash(cfg, mutant, file_hashes, scope_maps) else {
+        return false;
+    };
+    let scope = compute_mutant_scope(scope_prefix, cfg, test_tree, mutant);
+    cache.lookup_entry(&mutant.id, &hash, &scope).is_some()
+        || cache
+            .lookup_killer(&mutant.id, &hash, |t| {
+                compute_killer_scope(scope_prefix, cfg, test_tree, mutant, t)
+            })
+            .is_some()
 }
 
 /// Post-testing wrap-up: warn on a budget-truncated run, report cache
@@ -574,9 +725,17 @@ fn preflight_baseline(
              until they pass) or, if you accept the risk, re-run with \
              --no-verify-baseline.\n\n\
              If the same tests pass when you run them yourself, fermut's \
-             copy of the project broke them: please report it at {}\n\n\
+             copy of the project broke them: please report it at {}{}\n\n\
              --- test output (tail) ---\n{output}",
-            crate::ISSUES_URL
+            crate::ISSUES_URL,
+            if cfg.private_home {
+                "\n\nfermut runs tests with a private, empty HOME, so a suite \
+                 that reads ~/.gitconfig, credentials or caches under your \
+                 home fails here; --no-private-home (private_home = false) \
+                 keeps your real home."
+            } else {
+                ""
+            }
         )),
     }
 }
@@ -1055,6 +1214,15 @@ fn remap_cached_outcome(
 /// Mixed into every cached entry's scope so cache hits require the same shape.
 fn compute_scope_prefix(cfg: &Config) -> String {
     let mut h = Sha256::new();
+    // v8 also folds in the private-home setting (backlog #57) and the pinned
+    // `PYTHONHASHSEED` (`runner::hash_seed`):
+    // entries from random-seed runs carry order-dependent verdicts.
+    //
+    // v8: `|python=` hashes the interpreter actually used, by identity
+    // (`interpreter_identity`), not the configured path's spelling — the same
+    // venv reached via `$VIRTUAL_ENV`, `PATH` or `x/../.venv` keyed three
+    // different caches that evicted each other.
+    //
     // v7: `Killed` entries also carry a killer scope (see
     // `compute_killer_scope`) and the runner names the killing test.
     //
@@ -1071,7 +1239,7 @@ fn compute_scope_prefix(cfg: &Config) -> String {
     // computed. Mix the mode into the scope prefix so a `file`-mode entry
     // can't satisfy a `scope`-mode lookup (and vice versa) — the two modes
     // produce different identity hashes for the same source.
-    h.update(b"v7");
+    h.update(b"v8");
     h.update(b"|cache_scope=");
     h.update(format!("{:?}", cfg.cache_scope).as_bytes());
     h.update(b"|runner=");
@@ -1079,10 +1247,13 @@ fn compute_scope_prefix(cfg: &Config) -> String {
     // a cache built either way serves the other.
     h.update(runner_cache_tag(cfg.runner).as_bytes());
     h.update(b"|python=");
-    match &cfg.python {
-        Some(p) => h.update(p.as_os_str().as_encoded_bytes()),
-        None => h.update(b"none"),
-    }
+    let used = match cfg.runner {
+        RunnerKind::Pytest | RunnerKind::Rstest => {
+            crate::runner::python::pytest_interpreter(cfg.python.as_deref())
+        }
+        RunnerKind::Unittest => crate::runner::python::interpreter(cfg.python.as_deref()),
+    };
+    h.update(crate::runner::python::interpreter_identity(&used).as_bytes());
     h.update(b"|timeout=");
     h.update(cfg.timeout_secs.to_le_bytes());
     // A budgeted timeout can turn a slow survivor into a timeout, so the
@@ -1104,6 +1275,14 @@ fn compute_scope_prefix(cfg: &Config) -> String {
     } else {
         h.update(b"none");
     }
+    h.update(b"|pyhashseed=");
+    h.update(crate::runner::hash_seed().as_bytes());
+    // A shared real home let tests race across workers (false kills).
+    h.update(if cfg.private_home {
+        &b"|home=private"[..]
+    } else {
+        &b"|home=real"[..]
+    });
     h.update(b"|args=");
     for a in &cfg.pytest_args {
         h.update(b"|");
@@ -1685,8 +1864,12 @@ mod tests {
             fn costly(&self) -> bool {
                 self.1
             }
+            // The costly filter remembers rejecting line 4, nothing else.
+            fn cached_verdict(&self, m: &Mutant) -> Option<bool> {
+                (self.1 && m.line == 4).then_some(false)
+            }
         }
-        let mutants: Vec<Arc<Mutant>> = (1..=3)
+        let mutants: Vec<Arc<Mutant>> = (1..=4)
             .map(|line| {
                 let mut m = arith_mutant("x = 1 + 1", "+", "-");
                 m.line = line;
@@ -1709,7 +1892,8 @@ mod tests {
             .map(|m| m.line)
             .collect();
         // Line 2: cheap reject. Line 3: an error admits. The costly filter
-        // (which rejects everything) isn't consulted.
+        // (which rejects everything) isn't run, only its cached reject of
+        // line 4 counts.
         assert_eq!(lines, [1, 3]);
     }
 
@@ -1722,6 +1906,36 @@ mod tests {
         let before = compute_scope_prefix(&cfg);
         fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
         assert_eq!(before, compute_scope_prefix(&cfg));
+    }
+
+    #[test]
+    fn scope_prefix_tracks_the_private_home() {
+        let on = base_test_config();
+        let off = Config {
+            private_home: false,
+            ..base_test_config()
+        };
+        assert_ne!(compute_scope_prefix(&on), compute_scope_prefix(&off));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scope_prefix_keys_the_interpreter_not_its_spelling() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("python3.13"), "").unwrap();
+        for venv in ["a", "b"] {
+            let bin = d.path().join(venv).join("bin");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::os::unix::fs::symlink(d.path().join("python3.13"), bin.join("python")).unwrap();
+        }
+        let with = |p: &str| {
+            compute_scope_prefix(&Config {
+                python: Some(d.path().join(p)),
+                ..base_test_config()
+            })
+        };
+        assert_eq!(with("a/bin/python"), with("b/../a/bin/python"));
+        assert_ne!(with("a/bin/python"), with("b/bin/python"));
     }
 
     #[test]
@@ -1934,6 +2148,7 @@ mod tests {
             fail_under: None,
             exclude: Vec::new(),
             verify_baseline: false,
+            private_home: true,
             baseline_timeout_secs: 300,
             max_time_secs: None,
             timeout_factor: None,
@@ -2262,6 +2477,39 @@ mod tests {
     }
 
     #[test]
+    fn is_cached_agrees_with_evaluate() {
+        let fx = two_covering();
+        let cfg = fx.config(RunnerKind::Pytest, true);
+        let cache = Mutex::new(Cache::default());
+        let cached = |fx: &ScopeFixture| {
+            let mut hashes = HashMap::new();
+            hashes.insert(fx.mutant(1).file, "src-1".to_string());
+            is_cached(
+                &cfg,
+                &lock_recover(&cache),
+                &hashes,
+                &HashMap::new(),
+                &compute_scope_prefix(&cfg),
+                &TestTree::walk(&cfg.tests_path()),
+                &fx.mutant(1),
+            )
+        };
+        assert!(!cached(&fx), "empty cache");
+        eval_cached(
+            &fx,
+            &ScriptRunner::killing(Some(TEST_A)),
+            &cache,
+            "src-1",
+            None,
+        );
+        assert!(cached(&fx), "full hit");
+        fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
+        assert!(cached(&fx), "killer hit");
+        fx.write("tests/a/test_a.py", "def test_a(): assert 2\n");
+        assert!(!cached(&fx), "killer edited");
+    }
+
+    #[test]
     fn killer_hit_survives_edit_to_other_covering_file() {
         let (runner, stats) = killed_then(|fx| {
             fx.write("tests/b/test_b.py", "def test_b(): assert 1\n");
@@ -2385,6 +2633,35 @@ mod tests {
         assert_eq!(
             preflight_baseline(&cfg, &RedBaselineRunner, &ms).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn narrow_to_baseline_needs_a_deselection_and_no_select_tests() {
+        let fx = two_covering();
+        let cfg = fx.config(RunnerKind::Pytest, true);
+        let set = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect();
+        let d = runner::Deselection {
+            deselected: set(&[TEST_A]),
+            ran: set(&[TEST_B]),
+        };
+        assert!(narrow_to_baseline(&cfg, &runner::Deselection::default()).is_none());
+        let n = narrow_to_baseline(&cfg, &d).expect("narrowed");
+        let line1 = |c: &Config| {
+            c.coverage
+                .as_ref()
+                .unwrap()
+                .tests_for_mutant(&fx.mutant(1))
+                .map(<[String]>::to_vec)
+        };
+        assert_eq!(line1(&n), Some(vec![TEST_B.to_string()]));
+        assert!(
+            n.coverage_unselected.is_some(),
+            "full contexts kept for the filter"
+        );
+        assert!(
+            narrow_to_baseline(&n, &d).is_none(),
+            "--select-tests already narrowed"
         );
     }
 

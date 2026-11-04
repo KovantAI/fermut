@@ -141,6 +141,11 @@ pub struct Config {
     /// be counted "killed", inflating the score toward 100%. Default on;
     /// disable with `--no-verify-baseline` or `verify_baseline = false`.
     pub verify_baseline: bool,
+    /// Run every test process with a private, empty `HOME` (and `XDG_*`
+    /// dirs) per worker and per schemata child, so tests writing under `~`
+    /// can't race across workers or touch the user's real home. Default on;
+    /// `--no-private-home` / `private_home = false` keeps the real home.
+    pub private_home: bool,
     /// Wall-clock cap (seconds) for the [`Self::verify_baseline`] run. Separate from
     /// `timeout_secs` (which bounds a single mutant's coverage-selected subset)
     /// because the baseline runs the entire suite. A hung suite is killed past

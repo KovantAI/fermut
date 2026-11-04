@@ -14,8 +14,16 @@ several pytest sessions that append to the same file):
 - ``{"ev":"config_error","exc":...,"project":bool}`` -- configuring pytest
   failed some other way, e.g. a ``filterwarnings`` entry that imports the
   package under test; ``project`` says whether the exception chain passed
-  through project code (under the rootdir, outside site-packages)
+  through project code (under the rootdir, outside site-packages). pytest
+  9.2+ applies ``filterwarnings`` before importing ``-p`` plugins, so there a
+  filter that imports broken project code ends the run before this plugin
+  loads; fermut's ``--collect-only`` probe reads it from pytest's output.
 - ``{"ev":"collect","nodeid":...}`` -- a collector failed (import error)
+- ``{"ev":"internal_error","exc":...,"project":bool}`` -- pytest hit an
+  internal error (exit 3), e.g. ``SystemExit`` raised while a test module
+  imports the package under test; ``project`` as for ``config_error``
+- ``{"ev":"deselect","nodeid":...}`` -- a test was deselected (``--deselect``,
+  ``-k``, ``-m``, or a plugin calling ``pytest_deselected``)
 - ``{"ev":"begin","nodeid":...}`` -- a test started
 - ``{"ev":"test","nodeid":...,"when":...,"dur":...}`` -- a test phase failed
 - ``{"ev":"dur","nodeid":...,"dur":...}`` -- a passing test's call duration
@@ -42,6 +50,8 @@ SCHEMA_VERSION = 1
 _path = os.environ.get("FERMUT_RESULT")
 _collect_context = bool(os.environ.get("FERMUT_COLLECT_CONTEXT"))
 _fh = None
+# The session's rootdir, for ``internal_error`` (that hook gets no config).
+_root = None
 
 
 def _emit(event):
@@ -137,13 +147,33 @@ def pytest_make_collect_report(collector):
         _switch_context("")
 
 
+def pytest_internalerror(excrepr, excinfo):
+    # Collection only catches ``Exception``: a ``SystemExit`` raised while a
+    # test module imports the code under test reaches pytest's internal-error
+    # path. Through project code (with a green baseline) that is the mutant.
+    _emit(
+        {
+            "ev": "internal_error",
+            "exc": type(excinfo.value).__name__,
+            "project": _raised_in_project(excinfo.value, _root or os.getcwd()),
+        }
+    )
+
+
 def pytest_sessionstart(session):
+    global _root
+    _root = str(session.config.rootpath)
     _emit({"v": SCHEMA_VERSION, "ev": "start", "pytest": pytest.__version__})
 
 
 def pytest_collectreport(report):
     if report.failed:
         _emit({"ev": "collect", "nodeid": report.nodeid})
+
+
+def pytest_deselected(items):
+    for item in items:
+        _emit({"ev": "deselect", "nodeid": item.nodeid})
 
 
 def pytest_runtest_logstart(nodeid, location):
@@ -165,6 +195,8 @@ def pytest_runtest_logreport(report):
 
 
 def pytest_sessionfinish(session, exitstatus):
+    global _fh
     _emit({"ev": "finish", "exit": int(exitstatus)})
     if _fh is not None:
-        _fh.flush()
+        _fh.close()
+        _fh = None

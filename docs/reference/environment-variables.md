@@ -22,7 +22,7 @@ Precedence is the standard **CLI flag > env var > config file > built-in default
 
 | Variable     | Effect |
 |--------------|--------|
-| `FM_ACTIVE`  | Under [schemata](cli/run.md#schemata), the active mutant's number in the schema. Exported so a Python subprocess a test starts runs the same mutant; `0` (or unset) means none. Don't set it yourself. |
+| `FM_ACTIVE`  | Under [schemata](cli/run.md#schemata), the active mutant's number in the schema. Exported so a Python subprocess a test starts runs the same mutant; `0` means none. A subprocess started without it (`env={...}`) finds the mutant by its process group instead, unless it starts a new session. Don't set it yourself. |
 
 ## Inherited from the ecosystem
 

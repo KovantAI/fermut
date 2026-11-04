@@ -53,6 +53,7 @@ fermut run [PATH] [flags...]
 | `--cache-scope file\|scope` | `file`                           | Cache-key granularity. `file` hashes the whole file's AST; `scope` hashes the enclosing top-level def/class only, so sibling-function edits keep cache hits. `scope` can return stale verdicts when one test indirectly exercises another function. |
 | `--fail-under <SCORE>`      | none (any survivor fails)        | Pass when mutation score is at least `SCORE` (0.0–100.0). Equal to threshold passes. |
 | `--no-verify-baseline`      | baseline check on                | Skip the pre-flight run of the unmutated suite. By default fermut runs your full suite once and aborts if it isn't green (a red suite would inflate the score toward 100%). Skip only when you've already confirmed green (e.g. CI ran it). |
+| `--no-private-home`         | private home on                  | Run tests with your real `HOME`. By default every worker, and every schemata fork, gets a private, empty `HOME` (and `XDG_*` dirs), so tests that create files under `~` can't fail each other across workers (a false kill) or write into your home. Use this when the suite needs real home state: `~/.gitconfig`, credentials, caches under `~`. Such a suite fails the baseline check otherwise, with a hint naming this flag. |
 | `--baseline-timeout <SECS>` | `300`                            | Wall-clock cap for the baseline run. Separate from `--timeout` (which bounds a single mutant) because the baseline runs the whole suite. A suite that exceeds it is killed and the run aborts. Raise for large suites. |
 | `--no-smart-order`          | on                               | Disable smart test ordering. On by default, timeout or not — ordering only permutes the selected set, so the score and `--fail-on-regression` gate stay order-invariant. See [Smart test ordering](#smart-test-ordering). |
 | `--smart-order`             | off                              | Force smart test ordering on over `smart_order = false` in config. Conflicts with `--no-smart-order`. |
@@ -62,7 +63,7 @@ fermut run [PATH] [flags...]
 | `--max-time <SECS>`         | off (whole catalogue)            | Wall-clock ceiling on the testing phase. Evaluates highest-value mutants first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` (excluded from the score) instead of run — in-flight mutants finish. A predictable time ceiling for PR gates. See [Time-boxed runs](#time-boxed-runs-max-time). |
 | `--timeout-factor <F>`      | `3` (`0` = flat `--timeout`)     | Size each mutant's timeout from the baseline run: `min(--timeout, F × baseline wall + 5 s)`, so hung mutants stop in seconds. Needs the baseline; without one, the flat `--timeout` applies. See [Timeout budgets](#timeout-budgets). |
 | `--no-timeout-factor`       | off                              | Use the flat `--timeout` for every mutant. Same as `--timeout-factor 0` / `timeout_factor = 0`. |
-| `--max-memory <SIZE>`       | auto on Linux/macOS              | Cap each mutant's memory, e.g. `512M`, `4G`; `0` for off. A mutant past it fails with `MemoryError` and counts as killed. See [Memory cap](#memory-cap). |
+| `--max-memory <SIZE>`       | auto                             | Cap each mutant's memory, e.g. `512M`, `4G`; `0` for off. A mutant past it fails with `MemoryError` and counts as killed. See [Memory cap](#memory-cap). |
 | `--no-max-memory`           | off                              | Don't cap mutant memory. Same as `max_memory = "0"`. |
 | `--baseline-secs <SECS>`    | none                             | Wall time of a green whole-suite run you already did. When fermut's baseline is skipped it sizes `--timeout-factor` timeouts in its place (fermut's own baseline wins when it runs). Ignored without `--timeout-factor`. A whole-suite `pytest --fermut` session passes its session time in `FERMUT_BASELINE_SECS`. |
 | `--record-kill-sets <PATH>` | off                              | [experimental] Write each mutant's full kill-set (every covering test that fails) to `PATH` as JSONL, the input to [`subsume`](subsume.md) and [`hom`](hom.md). Drops pytest's `-x`, so it is much slower. Pytest/rstest only. Pair with `--no-cache`: a cache hit runs nothing and records nothing. |
@@ -215,10 +216,10 @@ Set it in config as `timeout_factor` under `[tool.fermut]`.
 
 A mutant that turns a loop into an endless append grows until its timeout:
 single processes reached 4–8 GB, and with several workers a whole run
-10–18 GB, enough to swap or get a CI runner killed. On Linux and macOS
-fermut caps each mutant's memory. Past the cap the mutant's run fails
-(`MemoryError` on Linux, a kill on macOS) and the mutant counts as killed —
-usually long before its timeout.
+10–18 GB, enough to swap or get a CI runner killed. fermut caps each
+mutant's memory on Linux, macOS and Windows. Past the cap the mutant's run
+fails (`MemoryError` on Linux and Windows, a kill on macOS) and the mutant
+counts as killed — usually long before its timeout.
 
 - **Default.** 4 × the baseline run's peak memory, at least 2 GiB, so a clean
   mutant has the room the clean suite had and more. Without fermut's own
@@ -232,9 +233,11 @@ usually long before its timeout.
   so fermut samples each mutant's test process every 50 ms and kills it past
   the cap (also scored killed); a fast-growing mutant can overshoot by one
   sample, and memory in xdist workers or the test's own subprocesses isn't
-  counted. On Windows mutants run uncapped for now (fermut warns on an
-  explicit `--max-memory`); a Job Object memory limit would add it — open an
-  issue if you need it.
+  counted. On Windows each mutant's run joins a Job Object that caps every
+  process in it, the test's own subprocesses included, at that much committed
+  memory; the baseline's job measures its peak for the default. If Windows
+  refuses the job (fermut itself runs in a job that forbids nesting), fermut
+  warns once and runs uncapped.
 
 Set it in config as `max_memory` under `[tool.fermut]`.
 
@@ -326,11 +329,13 @@ silent normal run. It needs:
   `python` when pytest runs under an interpreter other than the one behind
   `pytest` on `PATH`.
 
-Two things behave differently in a fork, by nature: every child shares the
-template's hash seed (a cold run gets a fresh one per mutant, so a test that
-depends on set or dict order flakes per mutant rather than per run), and test
-parameters computed during collection (`datetime.now()`) are as old as the
-template.
+One thing behaves differently in a fork, by nature: test parameters computed
+during collection (`datetime.now()`) are as old as the template. Hash order
+doesn't: fermut pins `PYTHONHASHSEED` for the template and every normal run
+alike (your own exported value wins), so set and dict iteration order is the
+same in a fork, a normal run, and the next run. Each fork also gets its own private `HOME`
+(see `--no-private-home`), removed when it exits, as each worker does in a
+normal run.
 
 ## Time-boxed runs (`--max-time`) { #time-boxed-runs-max-time }
 
@@ -469,6 +474,14 @@ root are dropped with a warning.
   mutant would be skipped and the run would pass while testing nothing.
 - It needs coverage data. Without it fermut warns, ignores the file and runs
   every mutant against the whole suite.
+
+Tests pytest deselects on its own (`--deselect`, `-k`, `-m`, from
+`--pytest-arg` or `addopts`) narrow the run the same way, with no file: the
+baseline reports what pytest deselected, and a mutant only those tests cover
+is skipped as `selection` instead of running with no tests (pytest exit 5,
+scored `error`). Unlike `--select-tests`, the run is still recorded in history.
+It needs the baseline (`verify_baseline`) and fermut's pytest plugin
+(`--no-pytest-plugin` turns it off).
 
 ## Incremental runs (`--since`)
 

@@ -127,7 +127,7 @@ class Adapter(ABC):
         """One-time, un-mutated setup whose cost is NOT the mutation phase.
 
         Default no-op. fermut overrides this to generate the per-test
-        coverage.json (and install pytest-cov) so that work lands in the
+        coverage DB (and install pytest-cov) so that work lands in the
         cold scenario's `coverage_prep` phase instead of inflating the
         timed `mutation_run`. Idempotent — re-runs are cheap no-ops.
         """

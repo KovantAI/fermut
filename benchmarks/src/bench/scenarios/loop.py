@@ -71,4 +71,5 @@ def loop(
         "min_seconds": round(min(seconds), 3) if seconds else 0.0,
         "max_seconds": round(max(seconds), 3) if seconds else 0.0,
         "mutants": last_mutants,
+        "score": iteration_results[-1]["score"] if iteration_results else None,
     }

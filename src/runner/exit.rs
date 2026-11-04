@@ -28,6 +28,8 @@
 //!
 //! [exit codes]: https://docs.pytest.org/en/stable/reference/exit-codes.html
 
+use std::path::{Component, Path, PathBuf};
+
 /// Which framework produced the exit status — selects the code→verdict table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TestTool {
@@ -74,6 +76,11 @@ pub(crate) fn classify_exit(tool: TestTool, code: Option<i32>) -> ExitVerdict {
 /// the module docs and [`is_collection_failure`].
 pub(crate) const PYTEST_USAGE_ERROR: i32 = 4;
 
+/// pytest exit code for an internal error. pytest 9.2 also exits 3 when a `-p`
+/// plugin fails to import; if the plugin imports the package under test, a
+/// mutant that breaks that import lands here ([`is_project_config_error`]).
+pub(crate) const PYTEST_INTERNAL_ERROR: i32 = 3;
+
 /// Whether combined pytest stdout+stderr from a node-id-selected run shows that
 /// a selected test module failed to *collect* (an import-time error), as
 /// opposed to a node id that simply doesn't exist.
@@ -106,6 +113,74 @@ pub(crate) fn is_collection_failure(output: &str) -> bool {
             || l.contains(" errors in ")
     });
     unresolved && collect_errored
+}
+
+/// Whether pytest output shows configuring pytest failed because project code
+/// under `root` raised, i.e. the mutant broke an import pytest needed:
+///
+/// - a `filterwarnings` entry (ini or `-W`) naming a warning class in the
+///   package under test imports it. pytest 7–9.2 print `ERROR: while parsing
+///   the following warning configuration:` and the full traceback (exit 4).
+/// - a `-p` plugin imports it (trio's `-p trio._tests.pytest_plugin`). pytest
+///   9.2 prints `Error while loading plugin "<name>".` and a short traceback
+///   (`src/trio/_util.py:23: in <module>`, relative to the working directory,
+///   which is `root`), and exits 3. pytest 9.1 crashed with a full traceback
+///   and exit 1, already a kill.
+/// - a test module's import raises what collection doesn't catch (a
+///   `SystemExit`): pytest 8–9 print `INTERNALERROR>`-prefixed full frames and
+///   exit 3.
+///
+/// Both happen before the reporter plugin loads, so only this output remains.
+/// A traceback frame (or a `SyntaxError`'s file line) under `root` and outside
+/// `site-packages` is project code; a bad filter or a broken third-party
+/// plugin that only fails outside the project is a usage error, not this.
+pub(crate) fn is_project_config_error(output: &str, root: &Path) -> bool {
+    if !output.contains("while parsing the following warning configuration")
+        && !output.contains("Error while loading plugin")
+        && !output.contains("INTERNALERROR>")
+    {
+        return false;
+    }
+    // Tracebacks may name either spelling of a symlinked root (/var vs /private/var).
+    let real = root.canonicalize().ok();
+    output.lines().filter_map(|l| frame_path(l, root)).any(|p| {
+        (p.starts_with(root) || real.as_deref().is_some_and(|r| p.starts_with(r)))
+            && !p.components().any(|c| c.as_os_str() == "site-packages")
+    })
+}
+
+/// The file a traceback line names: Python's `File "<path>", line N` as given
+/// (absolute, or a pseudo-path like `<frozen importlib._bootstrap>`), or
+/// pytest's short `<path>:<N>: in <name>`, which is relative to the working
+/// directory (`root`) unless absolute and is made absolute here.
+fn frame_path(line: &str, root: &Path) -> Option<PathBuf> {
+    // pytest prefixes every line of an internal error's traceback.
+    let line = line.trim_start();
+    let line = line
+        .strip_prefix("INTERNALERROR>")
+        .unwrap_or(line)
+        .trim_start();
+    if let Some(rest) = line.strip_prefix("File \"") {
+        return Some(PathBuf::from(rest.split_once('"')?.0));
+    }
+    let (path, lineno) = line.split_once(": in ")?.0.rsplit_once(':')?;
+    lineno.parse::<u32>().ok()?;
+    let path = Path::new(path);
+    let mut abs = if path.is_absolute() {
+        PathBuf::new()
+    } else {
+        root.to_path_buf()
+    };
+    for c in path.components() {
+        match c {
+            Component::ParentDir => {
+                abs.pop();
+            }
+            Component::CurDir => {}
+            c => abs.push(c),
+        }
+    }
+    Some(abs)
 }
 
 /// Human-readable label for an anomaly exit code, used to describe the
@@ -242,5 +317,121 @@ E   ZeroDivisionError: division by zero
             anomaly_message(TestTool::Unittest, 2),
             "unittest exit 2: usage error (not a kill)"
         );
+    }
+
+    // pytest 9.2.0, `--collect-only -x --tb=no -q`, with `filterwarnings =
+    // ignore::proj.W` and `proj.py` raising at import (abridged; 9.1 prints
+    // the same). The reporter plugin never loads on 9.2, so this is all there is.
+    const CONFIG_ERROR_PROJECT: &str = r#"ERROR: while parsing the following warning configuration:
+
+  ignore::proj.W
+
+This error occurred:
+
+Traceback (most recent call last):
+  File "/venv/lib/python3.13/site-packages/_pytest/config/__init__.py", line 2472, in _resolve_warning_category
+    m = importlib.import_module(module)
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/proj/proj.py", line 1, in <module>
+    raise ValueError('broken')
+ValueError: broken
+"#;
+    // `-W ignore::NoSuch`: the filter fails inside pytest only.
+    const CONFIG_ERROR_PYTEST: &str = r#"ERROR: while parsing the following warning configuration:
+
+  ignore::NoSuch
+
+This error occurred:
+
+Traceback (most recent call last):
+  File "/proj/.venv/lib/python3.13/site-packages/_pytest/config/__init__.py", line 2473, in _resolve_warning_category
+    cat = getattr(m, klass)
+AttributeError: module 'builtins' has no attribute 'NoSuch'
+"#;
+    // A mutant that makes `proj.py` unparsable: the file line has no `in`.
+    const CONFIG_ERROR_SYNTAX: &str = r#"ERROR: while parsing the following warning configuration:
+Traceback (most recent call last):
+  File "<frozen importlib._bootstrap_external>", line 1087, in source_to_code
+  File "/proj/proj.py", line 1
+    def f(:
+          ^
+SyntaxError: invalid syntax
+"#;
+
+    #[test]
+    fn config_error_through_project_code_is_detected() {
+        let root = Path::new("/proj");
+        assert!(is_project_config_error(CONFIG_ERROR_PROJECT, root));
+        assert!(is_project_config_error(CONFIG_ERROR_SYNTAX, root));
+        // A project venv's site-packages is not project code.
+        assert!(!is_project_config_error(CONFIG_ERROR_PYTEST, root));
+        // Another root, or no warning-config header, is not this error.
+        assert!(!is_project_config_error(
+            CONFIG_ERROR_PROJECT,
+            Path::new("/other")
+        ));
+        assert!(!is_project_config_error(
+            "  File \"/proj/proj.py\", line 1, in <module>\n",
+            root
+        ));
+        assert!(!is_collection_failure(CONFIG_ERROR_PROJECT));
+    }
+
+    /// pytest 9.2, `-p plug` where `plug.py` imports the broken package
+    /// (exit 3). Short frames, relative to the working directory.
+    const PLUGIN_LOAD_PROJECT: &str = r#"Error while loading plugin "plug".
+plug.py:1: in <module>
+    import pkg  # noqa
+    ^^^^^^^^^^
+pkg/__init__.py:2: in <module>
+    T = TypeVar(None)
+        ^^^^^^^^^^^^^
+E   TypeError: typevar() argument 'name' must be str, not None
+"#;
+
+    /// pytest 8–9: `sys.exit(2)` while a test module imports the package.
+    const INTERNAL_ERROR_PROJECT: &str = r#"INTERNALERROR> Traceback (most recent call last):
+INTERNALERROR>   File "/venv/lib/python3.13/site-packages/_pytest/main.py", line 333, in wrap_session
+INTERNALERROR>     session.exitstatus = doit(config, session) or 0
+INTERNALERROR>   File "/proj/tests/test_import.py", line 1, in <module>
+INTERNALERROR>   File "/proj/pkg/__init__.py", line 2, in <module>
+INTERNALERROR> SystemExit: 2
+"#;
+
+    #[test]
+    fn internal_error_through_project_code_is_detected() {
+        let root = Path::new("/proj");
+        assert!(is_project_config_error(INTERNAL_ERROR_PROJECT, root));
+        // A plugin bug: every frame in site-packages or outside the project.
+        let plugin_bug = "INTERNALERROR> Traceback (most recent call last):\n\
+             INTERNALERROR>   File \"/venv/lib/python3.13/site-packages/_pytest/main.py\", line 333, in wrap_session\n\
+             INTERNALERROR>   File \"/elsewhere/badplug.py\", line 2, in pytest_collection_modifyitems\n\
+             INTERNALERROR> RuntimeError: plugin bug\n";
+        assert!(!is_project_config_error(plugin_bug, root));
+    }
+
+    #[test]
+    fn plugin_load_through_project_code_is_detected() {
+        let root = Path::new("/proj");
+        assert!(is_project_config_error(PLUGIN_LOAD_PROJECT, root));
+        // A broken third-party plugin: frames in a venv outside, or inside,
+        // the project.
+        let third_party = "Error while loading plugin \"x\".\n\
+             ../venv/lib/python3.13/site-packages/x/__init__.py:3: in <module>\n";
+        assert!(!is_project_config_error(third_party, root));
+        let in_venv = "Error while loading plugin \"x\".\n\
+             .venv/lib/python3.13/site-packages/x/__init__.py:3: in <module>\n";
+        assert!(!is_project_config_error(in_venv, root));
+        // `..` leaving the root isn't project code; absolute frames work too.
+        let outside =
+            "Error while loading plugin \"x\".\nsub/../../elsewhere/m.py:1: in <module>\n";
+        assert!(!is_project_config_error(outside, root));
+        let absolute = "Error while loading plugin \"x\".\n/proj/src/m.py:1: in <module>\n";
+        assert!(is_project_config_error(absolute, root));
+        // Frames without either header don't count.
+        assert!(!is_project_config_error(
+            "pkg/__init__.py:2: in <module>\n",
+            root
+        ));
     }
 }

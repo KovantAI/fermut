@@ -1185,7 +1185,13 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
             // mirroring the dict-item-drop bound).
             Expr::List(l) if l.elts.len() >= 2 => self.emit_seq_drop(&l.elts, l.into()),
             Expr::Set(s) if s.elts.len() >= 2 => self.emit_seq_drop(&s.elts, s.into()),
-            Expr::Tuple(t) if t.elts.len() >= 2 => self.emit_seq_drop(&t.elts, t.into()),
+            // `(a, *d)` minus `a` is a bare `*d` — not valid Python.
+            Expr::Tuple(t)
+                if t.elts.len() > 2
+                    || (t.elts.len() == 2 && !t.elts.iter().any(Expr::is_starred_expr)) =>
+            {
+                self.emit_seq_drop(&t.elts, t.into())
+            }
             Expr::Dict(d) if d.items.len() >= 2 => self.emit_dict(d),
             Expr::Slice(s) => self.emit_slice(s),
             _ => {}
@@ -1742,6 +1748,13 @@ def f(brand, color, origin, a, b, c, xs, n, d):
         assert!(contains("f(a, b)\n", Operator::PositionalDrop));
         assert!(contains("x = [1, 2, 3]\n", Operator::PositionalDrop));
         assert!(contains("x = (1, 2)\n", Operator::PositionalDrop));
+    }
+
+    #[test]
+    fn positional_drop_skips_pair_tuple_with_starred() {
+        // `(a, *d)` → `(*d)` doesn't parse (fuzz crash, cmpcap.py).
+        assert!(!contains("x = (a, *d)\n", Operator::PositionalDrop));
+        assert!(contains("x = (a, b, *d)\n", Operator::PositionalDrop));
     }
 
     #[test]

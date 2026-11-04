@@ -120,6 +120,37 @@ impl CoverageContexts {
     /// deselected tests too. Lines left with no test are dropped, so
     /// [`tests_for_mutant`](Self::tests_for_mutant) returns `None` for them.
     pub fn select(&self, selected: &BTreeSet<String>) -> Arc<Self> {
+        self.rewrite_ids(|id| {
+            if id.contains("::") {
+                selected.get(id).into_iter().collect()
+            } else {
+                in_module(id, selected)
+            }
+        })
+    }
+
+    /// A copy without the tests pytest `deselected` (`--deselect`, `-k`, `-m`
+    /// in the user's pytest args), as a green baseline reported them. Like
+    /// [`select`](Self::select), a module id whose module lost tests is
+    /// replaced by the tests of it that `ran`; an untouched one is kept.
+    pub fn deselect(&self, deselected: &BTreeSet<String>, ran: &BTreeSet<String>) -> Arc<Self> {
+        self.rewrite_ids(|id| {
+            if id.contains("::") {
+                (!deselected.contains(id))
+                    .then_some(id)
+                    .into_iter()
+                    .collect()
+            } else if in_module(id, deselected).is_empty() {
+                vec![id]
+            } else {
+                in_module(id, ran)
+            }
+        })
+    }
+
+    /// A copy with each context id replaced by `ids_for(id)`. Lines left with
+    /// no test are dropped.
+    fn rewrite_ids<'a>(&'a self, ids_for: impl Fn(&'a String) -> Vec<&'a String>) -> Arc<Self> {
         let map = self
             .map
             .iter()
@@ -127,10 +158,7 @@ impl CoverageContexts {
                 let per_line: HashMap<u32, Vec<String>> = per_line
                     .iter()
                     .filter_map(|(&line, ids)| {
-                        let kept: BTreeSet<&String> = ids
-                            .iter()
-                            .flat_map(|id| selected_for(id, selected))
-                            .collect();
+                        let kept: BTreeSet<&String> = ids.iter().flat_map(&ids_for).collect();
                         (!kept.is_empty()).then(|| (line, kept.into_iter().cloned().collect()))
                     })
                     .collect();
@@ -141,15 +169,10 @@ impl CoverageContexts {
     }
 }
 
-/// The selected ids a coverage context id stands for: itself when it's a
-/// selected test id, the selected tests of the module when it's a module id.
-fn selected_for<'a>(id: &str, selected: &'a BTreeSet<String>) -> Vec<&'a String> {
-    if id.contains("::") {
-        return selected.get(id).into_iter().collect();
-    }
-    let prefix = format!("{id}::");
-    selected
-        .range(prefix.clone()..)
+/// The ids in `set` naming a test in module `module`.
+fn in_module<'a>(module: &str, set: &'a BTreeSet<String>) -> Vec<&'a String> {
+    let prefix = format!("{module}::");
+    set.range(prefix.clone()..)
         .take_while(|s| s.starts_with(&prefix))
         .collect()
 }
@@ -270,6 +293,24 @@ mod tests {
             relative_node_path(&root.join("sub/../tests/test_link.py"), &root).as_deref(),
             Some("tests/test_link.py")
         );
+    }
+
+    #[test]
+    fn deselect_drops_deselected_tests_and_rewrites_touched_modules() {
+        let full = ctx(&[
+            (1, &["t/a.py::x", "t/a.py::y[1-2]", "t/b.py::z"]),
+            (2, &["t/a.py::x"]),
+            // Import-time contexts: t/a.py lost a test, t/b.py didn't, t/c.py
+            // lost all of its tests (`--deselect t/c.py`).
+            (3, &["t/a.py", "t/b.py"]),
+            (4, &["t/c.py"]),
+        ]);
+        let ran = set(&["t/a.py::y[1-2]", "t/b.py::z", "t/b.py::w"]);
+        let n = full.deselect(&set(&["t/a.py::x", "t/c.py::q"]), &ran);
+        assert_eq!(ids(&n, 1), Some(vec!["t/a.py::y[1-2]", "t/b.py::z"]));
+        assert_eq!(ids(&n, 2), None, "only deselected tests covered it");
+        assert_eq!(ids(&n, 3), Some(vec!["t/a.py::y[1-2]", "t/b.py"]));
+        assert_eq!(ids(&n, 4), None);
     }
 
     #[test]

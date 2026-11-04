@@ -46,6 +46,7 @@ use subtle::ConstantTimeEq;
 use tracing::warn;
 
 use crate::report::MutantOutcome;
+use crate::runner::Deselection;
 
 /// Env var that activates HMAC-signed cache entries. When set, every cache
 /// entry is signed on insert and verified on load; entries that fail to
@@ -165,6 +166,28 @@ pub struct Cache {
     /// the per-event `warn!` stream.
     #[serde(skip)]
     dropped_on_load: usize,
+    /// What the last baseline's pytest deselected, so a run whose mutants
+    /// are all cached can narrow without running the baseline (#54).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deselection: Option<SavedDeselection>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SavedDeselection {
+    /// Fingerprint of everything that decides the deselection (see
+    /// `engine::deselection_key`); a different key ignores the entry.
+    key: String,
+    deselection: Deselection,
+    /// HMAC under `FERMUT_CACHE_KEY`, as for entries: a forged deselection
+    /// would narrow scopes and skip the baseline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mac: Option<String>,
+}
+
+fn deselection_mac(key: &[u8], fingerprint: &str, d: &Deselection) -> Result<String> {
+    let json = serde_json::to_string(d).context("serializing deselection")?;
+    let msg = format!("deselection\0{fingerprint}\0{json}");
+    Ok(hex::encode(hmac_sha256(key, msg.as_bytes())?))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -303,8 +326,39 @@ impl Cache {
                 );
             }
         }
+        if let (Some(k), Some(saved)) = (&key, &cache.deselection) {
+            let verified = saved.mac.as_deref().is_some_and(|stored| {
+                deselection_mac(k, &saved.key, &saved.deselection)
+                    .is_ok_and(|expected| stored.as_bytes().ct_eq(expected.as_bytes()).into())
+            });
+            if !verified {
+                warn!(path = %path.display(), "cache: dropped a saved deselection that failed HMAC verification");
+                cache.deselection = None;
+            }
+        }
         cache.key = key;
         cache
+    }
+
+    /// The saved baseline deselection, if it was saved under `key`.
+    pub fn deselection(&self, key: &str) -> Option<&Deselection> {
+        self.deselection
+            .as_ref()
+            .filter(|s| s.key == key)
+            .map(|s| &s.deselection)
+    }
+
+    /// Save a baseline's deselection under `key`, replacing any other.
+    pub fn remember_deselection(&mut self, key: String, deselection: Deselection) {
+        let mac = self
+            .key
+            .as_ref()
+            .and_then(|k| deselection_mac(k, &key, &deselection).ok());
+        self.deselection = Some(SavedDeselection {
+            key,
+            deselection,
+            mac,
+        });
     }
 
     /// Number of entries discarded at load time because their MAC did not
@@ -741,6 +795,31 @@ mod tests {
             loaded.lookup("id-1", "hashA", "scope-x").is_some(),
             "signed entry should verify and stay loadable"
         );
+    }
+
+    #[test]
+    fn saved_deselection_round_trips_by_key_and_drops_when_tampered() {
+        let key = b"test-cache-key".to_vec();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+        let d = Deselection {
+            deselected: ["t::b".to_string()].into(),
+            ran: ["t::a".to_string()].into(),
+        };
+
+        let mut c = keyed_cache(&key);
+        c.remember_deselection("k1".into(), d.clone());
+        c.save(&path).unwrap();
+        let loaded = Cache::load_with_key(&path, Some(key.clone()));
+        assert_eq!(loaded.deselection("k1"), Some(&d));
+        assert_eq!(loaded.deselection("k2"), None, "another key ignores it");
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let tampered = raw.replace("t::b", "t::a");
+        assert_ne!(raw, tampered, "fixture should differ post-tamper");
+        std::fs::write(&path, tampered).unwrap();
+        let loaded = Cache::load_with_key(&path, Some(key));
+        assert_eq!(loaded.deselection("k1"), None, "forged deselection dropped");
     }
 
     #[test]

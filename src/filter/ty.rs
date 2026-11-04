@@ -354,12 +354,17 @@ impl Filter for TyFilter {
         true
     }
 
+    fn cached_verdict(&self, mutant: &Mutant) -> Option<bool> {
+        let key = self.cache_key(&self.ast_hash_for(&mutant.file)?, mutant);
+        lock_recover(&self.cache).entries.get(&key).copied()
+    }
+
     fn admits(&self, mutant: &Mutant) -> Result<bool> {
         if let Some(file_hash) = self.ast_hash_for(&mutant.file) {
-            let key = self.cache_key(&file_hash, mutant);
-            if let Some(&hit) = lock_recover(&self.cache).entries.get(&key) {
+            if let Some(hit) = self.cached_verdict(mutant) {
                 return Ok(hit);
             }
+            let key = self.cache_key(&file_hash, mutant);
             // A timeout bypass (None) is deliberately *not* cached — the hang is
             // transient, so a later run should get a real chance to type-check.
             match self.check(mutant)? {

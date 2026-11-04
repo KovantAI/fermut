@@ -32,89 +32,98 @@ per-phase timing, mutant total, score, and return code.
 
 ## Cold runs (pinned OSS repos)
 
-The numbers below are `cold`-scenario runs of fermut 0.6.1 vs
-mutmut 3.6.0, **both re-run back-to-back on the same machine
-(2026-06-12)**, excluding clone / install. fermut runs **with its
-coverage filter on** (the designed configuration — see below);
-mutmut runs its default.
+The numbers below are `cold`-scenario runs of fermut 0.6.1 (unreleased
+`main`, 2026-11-03) vs mutmut 3.8.1, **both re-run back-to-back on the same
+machine (2026-11-03)**, excluding clone / install. fermut runs its
+defaults: coverage filter on, [schemata](cli/run.md#schemata) on,
+`--timeout-factor 3`, the `minimal` operator profile. mutmut runs its
+default.
 
 > **This table is canonical.** It's the most recent same-session
 > re-measurement, so trust it for head-to-head scores and timings.
 > Other figures further down (the coverage-filter before/after
-> illustration, the `score_3pct` agent-loop baselines) come from
-> *earlier* measurement sessions and can differ by ~0.3 pts or a few
-> seconds — they're kept for their before/after *deltas*, not as
-> absolute head-to-head numbers.
+> illustration, cosmic-ray, the `score_3pct` agent-loop baselines) come
+> from *earlier* measurement sessions (June 2026, before schemata and the
+> current operator catalogue) and are kept for their before/after
+> *deltas*, not as absolute numbers.
 
-fermut's cold cost splits into two phases the harness now times
-separately: **`coverage_prep`** (the one-time baseline coverage run +
-`pytest-cov` install — reused by every later run) and
-**`mutation_run`** (the mutation work itself). The comparable
-cold total a user waits on first contact is the sum. mutmut has no
-coverage phase, so its number is the whole run.
+fermut's cold cost splits into two phases the harness times separately:
+**`coverage_prep`** (the one-time baseline coverage run, writing
+coverage.py's `.coverage` DB, reused by every later run) and
+**`mutation_run`** (the mutation work itself). The comparable cold total
+a user waits on first contact is the sum. mutmut has no coverage phase,
+so its number is the whole run.
 
-| Repo (ref)            | Tool   | Mutants | Score  | cov_prep | mutation | Cold total |
-|-----------------------|--------|---------|--------|----------|----------|------------|
-| typer 0.26.7          | fermut | 2173    | 71.5   | ~90s     | ~74s     | **~164s**  |
-|                       | mutmut | 2096    | 70.5   | —        | —        | ~298s      |
-| pyjwt 2.13.0          | fermut | 2491    | 82.2   | ~9s      | ~34s     | **~42s**   |
-|                       | mutmut | 1617    | 75.4   | —        | —        | ~45s       |
-| more-itertools v10.5.0| fermut | 3976    | 87.0   | ~11s     | ~293s    | ~304s      |
-|                       | mutmut | 3579    | 90.2   | —        | —        | ~118s      |
+`Scored` is killed + survived + timed out (what the score is computed
+over); fermut generates more mutants than it scores, because the coverage
+filter and `ty` skip the rest.
 
-The picture is **mixed but competitive**:
+| Repo (ref)             | Tool   | Scored | Score | cov_prep | mutation | Cold total |
+|------------------------|--------|--------|-------|----------|----------|------------|
+| typer 0.26.7           | fermut | 1597   | 69.2  | ~60s     | ~147s    | **~211s**  |
+|                        | mutmut | 2118   | 70.4  | —        | —        | ~289s      |
+| pyjwt 2.13.0           | fermut | 1730   | 78.8  | ~7s      | ~43s     | ~53s       |
+|                        | mutmut | 1621   | 75.4  | —        | —        | **~46s**   |
+| more-itertools v10.5.0 | fermut | 3326   | 85.6  | ~5s      | ~115s    | ~123s      |
+|                        | mutmut | 3651   | 90.2  | —        | —        | **~119s**  |
+| markupsafe 3.0.3       | fermut | 217    | 66.8  | ~2s      | ~8s      | ~15s       |
+|                        | mutmut | 249    | 70.7  | —        | —        | **~9s**    |
 
-- **typer:** fermut wins on both — faster (~164s vs ~298s) and
-  higher-scoring (71.5 vs 70.5).
-- **pyjwt:** fermut scores higher (82.2 vs 75.4) at roughly the same
-  wall-clock (~42s vs ~45s).
-- **more-itertools:** mutmut is faster (~118s vs ~304s) and slightly
-  higher-scoring (90.2 vs 87.0) — a small pure-Python library with
-  fast tests, where fermut's ty + coverage overhead doesn't pay for
-  itself as it does on the heavier suites.
+The picture is **suite-shaped**:
 
-Because `coverage_prep` is a **one-time** cost (the `.coverage` DB is
-reused on every subsequent run), the *steady-state* mutation cost is
-the `mutation` column alone — e.g. typer ~74s vs mutmut ~298s (~4×).
-The cold totals above are the conservative first-contact figure.
+- **typer:** fermut is faster (~211s vs ~289s; ~2× on the mutation phase
+  alone, ~147s vs ~289s) at a similar score (69.2 vs 70.4).
+- **pyjwt:** about even (~53s vs ~46s), fermut scoring higher (78.8 vs
+  75.4).
+- **more-itertools:** a tie on time (~123s vs ~119s); mutmut scores
+  higher (90.2 vs 85.6). In June mutmut was ~2.6× faster here (~118s vs
+  ~304s); schemata closed that gap.
+- **markupsafe:** a tiny suite, where mutmut's simpler model still wins
+  (~9s vs ~15s).
+
+Because `coverage_prep` is a **one-time** cost, the *steady-state* cost is
+the `mutation` column; the cold totals are the conservative first-contact
+figure.
 
 ### Full fermut sweep (coverage-on cold)
 
-All ten suite repos, `cold`, coverage-on, sorted by mutant count.
-mutmut pairs exist only where mutmut runs (see below); the rest are
-fermut-only.
+All ten suite repos, `cold`, same session (2026-11-03), sorted by mutant
+count. `Generated` counts every mutant fermut produced; `Scored` the ones
+it ran. `Cold total` runs ~2–3 s above the sum of the two phases (time
+spent outside them). `June total` is the June 2026 cold total, before
+schemata (different operator catalogue, so mutant counts and scores
+aren't comparable; wall-clock is).
 
-All ten re-measured same-session on one machine (2026-06-12) with the
-`coverage_prep` / `mutation_run` split. `cov_prep` is the one-time
-coverage-gen cost; `mutation` is the mutation work; `Cold total` is the
-measured first-contact wall-clock, which runs ~3–5 s above the sum of
-the two phases (time spent outside them).
+| Repo (ref)             | Generated | Scored | Score | cov_prep | mutation | Cold total | June total |
+|------------------------|-----------|--------|-------|----------|----------|------------|------------|
+| markupsafe 3.0.3       | 1069      | 217    | 66.8  | ~2s      | ~8s      | ~15s       | ~9s        |
+| typer 0.26.7           | 6414      | 1597   | 69.2  | ~60s     | ~147s    | ~211s      | ~164s      |
+| pyjwt 2.13.0           | 6475      | 1730   | 78.8  | ~7s      | ~43s     | ~53s       | ~42s       |
+| more-itertools v10.5.0 | 9451      | 3326   | 85.6  | ~5s      | ~115s    | ~123s      | ~304s      |
+| flask 3.1.3            | 12541     | 2665   | 73.3  | ~4s      | ~50s     | ~58s       | ~155s      |
+| starlette 0.52.1       | 20173     | 5962   | 79.5  | ~13s     | ~245s    | ~263s      | ~340s      |
+| click 8.1.7            | 20651     | 6787   | 81.2  | ~4s      | ~116s    | ~124s      | ~235s      |
+| jinja2 3.1.6           | 32420     | 6360   | 75.4  | ~6s      | ~150s    | ~159s      | ~296s      |
+| trio v0.33.0           | 37004     | 7275   | ~53†  | ~8s      | ~684s    | ~696s      | ~1255s     |
+| werkzeug 3.1.8         | 41146     | 7982   | 71.9  | ~7s      | ~155s    | ~165s      | ~338s      |
 
-| Repo (ref)             | Mutants | Score   | cov_prep | mutation | Cold total |
-|------------------------|---------|---------|----------|----------|------------|
-| markupsafe 3.0.3       | 266     | 100.0†  | ~2s      | ~3s      | ~9s        |
-| typer 0.26.7           | 2173    | 71.5    | ~90s     | ~74s     | ~164s      |
-| pyjwt 2.13.0           | 2491    | 82.2    | ~9s      | ~34s     | ~42s       |
-| more-itertools v10.5.0 | 3976    | 87.0    | ~11s     | ~293s    | ~304s      |
-| flask 3.1.3            | 4114    | 77.5    | ~8s      | ~144s    | ~155s      |
-| click 8.1.7            | 7052    | 82.9    | ~20s     | ~211s    | ~235s      |
-| starlette 0.52.1       | 8061    | 81.3    | ~18s     | ~317s    | ~340s      |
-| jinja2 3.1.6           | 10087   | 78.7    | ~49s     | ~243s    | ~296s      |
-| trio v0.33.0           | 12375   | ~54‡    | ~31s     | ~1220s   | ~1255s     |
-| werkzeug 3.1.8         | 15354   | 73.5    | ~17s     | ~316s    | ~338s      |
+The large suites run **1.3–2.7× faster than in June** on schemata (flask,
+click, jinja2, werkzeug, trio roughly halved; more-itertools 2.5×). The
+small ones (markupsafe, pyjwt, typer) got a little slower: the default
+operator catalogue now generates ~3× more mutants on them, and their
+suites are too short for the fork server to pay off as much. markupsafe's
+June `100.0` was a smaller catalogue; the current one finds survivors.
 
-† markupsafe's `100.0` is **real** (killed 155 / skipped 111 /
-survived 0 / errored 0) — a tiny, exhaustively-tested library, not
-the misconfigured-venv false 100 described in the caveats. Even
-werkzeug (~15k mutants) finishes in ~6 min — the coverage filter
-keeps whole-repo runs tractable.
+† trio's score is **volatile** (53.4–53.5 in two runs today; June saw
+53.9 and 63.7). trio's async/timing-sensitive suite has tests that pass or
+fail nondeterministically, so per-mutant verdicts swing between runs.
 
-‡ trio's score is **volatile** — this run scored 53.9, an earlier run
-63.7 (~10 pts apart). trio's async/timing-sensitive suite has tests
-that pass or fail nondeterministically, so per-mutant verdicts (and
-thus the aggregate) swing between runs. Read trio as "low-50s to
-low-60s, unstable," not a point estimate. The other nine are stable
-within ~1.3 pts run-to-run.
+Fixture notes for this session (`benchmarks/configs/repos.toml`): flask and
+click pin `pytest<9` (pytest 9.2 removed an internal flask's tests import
+and deprecates click's parametrize iterator, which click runs as an error);
+starlette, typer, flask, trio and werkzeug deselect the tests that fail
+their own baseline in this environment or hang (werkzeug's
+`tests/test_serving.py`), the same set the schemata parity runs use.
 
 ### The coverage filter is what makes fermut fast
 
@@ -142,11 +151,10 @@ Neither tool has a coverage filter, so both run the full suite per
 mutant. mutmut copies the tree to `mutants/` and caches verdicts;
 cosmic-ray drives a sqlite session.
 
-The mutmut cold figures here are from this scenario's own (earlier)
-session, so they sit a few seconds / ~0.2 pt off the canonical cold
-table above (e.g. typer ~308s/70.3 here vs ~298s/70.5 there). Read this
-table for the **cold-vs-warm shape** and the tool-failure notes; trust
-the cold table above for absolute head-to-head numbers.
+This table is from the June 2026 session (mutmut 3.6; cosmic-ray wasn't
+re-run). Read it for the **tool-failure notes** and cosmic-ray's scaling;
+trust the cold and warm tables for current mutmut numbers (mutmut 3.8.1
+today: typer ~289s cold / ~64s warm, pyjwt ~46s / ~5s).
 
 | Repo | mutmut cold | mutmut warm | cosmic-ray cold |
 |------|-------------|-------------|-----------------|
@@ -166,7 +174,7 @@ the cold table above for absolute head-to-head numbers.
   for 812 mutants). Every real-world suite **does not finish inside a
   15-minute cap** — process-per-mutant over the full suite with no
   coverage filter doesn't scale. For comparison, fermut does pyjwt in
-  ~42s and typer in ~164s (cold total). cosmic-ray's *warm* re-run, when the
+  ~53s and typer in ~211s (cold total, 2026-11-03). cosmic-ray's *warm* re-run, when the
   session is already complete, is near-instant (~0.4s on markupsafe)
   — but you have to survive the cold run first.
 
@@ -177,37 +185,30 @@ is the full suite times every mutant.
 
 ### Warm and loop runs — the incremental story
 
-This is where fermut's cache earns its keep. `warm` = an immediate
-re-run, no edits. `loop` = 5 iterations of (touch source → re-run →
-revert), averaged.
+`warm` = an immediate re-run, no edits. `loop` = 5 iterations of (touch
+source → re-run → revert), averaged. Both reuse the populated cache and
+the existing `.coverage` DB. Same session as the cold table (2026-11-03).
 
-`Cold total` = coverage_prep + mutation_run (first-contact cost).
-`Warm` / `Loop` reuse the populated cache + existing `.coverage` DB,
-so the coverage_prep split doesn't apply to them.
+| Repo                   | fermut cold | fermut warm | fermut loop (avg/iter) | mutmut warm |
+|------------------------|-------------|-------------|------------------------|-------------|
+| typer 0.26.7           | ~211s       | ~61s        | ~60s                   | ~64s        |
+| pyjwt 2.13.0           | ~53s        | ~6s         | ~6s                    | ~5s         |
+| more-itertools v10.5.0 | ~123s       | ~2s         | ~2s                    | ~3s         |
+| markupsafe 3.0.3       | ~15s        | —           | —                      | ~1s         |
 
-| Repo (fermut)          | Cold total | Warm   | Loop (avg/iter) |
-|------------------------|------------|--------|-----------------|
-| typer 0.26.7           | ~164s      | ~8s    | ~8s             |
-| pyjwt 2.13.0           | ~42s       | ~5.5s  | ~6s             |
-| more-itertools v10.5.0 | ~304s      | ~11s   | ~11s            |
+- **A warm re-run is almost all baseline check.** Every verdict comes from
+  the cache, but fermut still runs the unmutated suite once first
+  (`verify_baseline`), to refuse a red suite before trusting anything.
+  That's ~57s of typer's ~61s (its suite is slow), ~3s of pyjwt's. June's
+  ~8s typer warm predates the baseline check; `--no-verify-baseline`
+  skips it at your own risk.
+- **Loop ≈ warm.** The loop edit appends a comment, which leaves the AST
+  untouched, so fermut's *structural* cache key (scope AST hash, not byte
+  hash) stays valid and nothing re-runs. This is a best case; a real edit
+  to a function body re-runs just that function's mutants.
 
-- **Warm is ~8–28× faster than cold** — the per-mutant result cache
-  short-circuits every unchanged mutant. (Earlier docs claimed the
-  cache gave *no* speedup; that was a harness artifact — the `warm`
-  scenario ran one pass without guaranteeing a hot cache, and a
-  shared worktree let mutmut's pass invalidate fermut's. Both are
-  now fixed: per-tool worktrees, and `warm` primes the cache before
-  the timed pass.)
-- **Loop ≈ warm.** The loop edit appends a comment, which leaves the
-  AST untouched — so fermut's *structural* cache key (scope AST hash,
-  not byte hash) stays valid and almost nothing re-evaluates. A
-  behavior-preserving edit costs ~nothing; this is a best case. A
-  real edit to a function body would invalidate that function's
-  mutants and re-run just those.
-
-Net: after the first cold run, a PR-time re-check lands in
-**single-digit seconds** — which is the configuration fermut is
-actually designed for.
+Net: after the first cold run, a PR-time re-check costs about one run of
+the test suite plus the mutants the change touched.
 
 ### Closing the loop with an agent (`score_3pct`)
 
@@ -217,8 +218,8 @@ until the score climbs ≥ 3 points. It measures the *full* assisted
 workflow, split into Claude's writing time (LLM-bound, tool-agnostic)
 and the mutation re-run (the tool's cost).
 
-The `Base` scores below are from this scenario's own (earlier) session,
-so they can sit ~0.3 pt off the canonical cold table above — read the
+The `Base` scores below are from the June 2026 session, under the older
+operator catalogue, so they don't match the cold table above — read the
 **Δ** here, not the absolute baseline.
 
 | Repo | Tool | Base → Final (Δ) | Claude / iter | Re-run / iter |
@@ -284,7 +285,8 @@ and `benchmarks/configs/tools.toml`. Results land in
 ## Caveats — read before trusting the numbers
 
 - **Preliminary data.** This is a small, in-progress sample, not a
-  finished benchmark. fermut is at 0.6.1, pre-optimization.
+  finished benchmark. fermut is unreleased `main` after 0.6.1
+  (2026-11-03), with schemata on by default.
 - **Score parity.** The tools find different mutants because
   operator catalogues differ. Scores are **not** directly
   comparable. A fermut `100.0` on a well-tested repo is a red flag,
@@ -308,6 +310,9 @@ and `benchmarks/configs/tools.toml`. Results land in
   directly — it is far smaller (typer's is a fraction of the JSON, no
   denormalized text blob) and needs no export step. Scoping coverage to
   the package (excluding test files / big fixtures) shrinks it further.
+  The harness itself exported JSON until 2026-11-03; it now hands fermut
+  the `.coverage` DB (pinning `COVERAGE_FILE`, since typer's own config
+  writes it to `coverage/.coverage`).
 - **Comparison coverage.** fermut is measured coverage-on across all
   ten repos. mutmut cold+warm covers markupsafe, pyjwt, typer,
   more-itertools (click/starlette fail, trio bails after ~3.8h).
@@ -320,9 +325,10 @@ and `benchmarks/configs/tools.toml`. Results land in
   `cr-report`, so it never produced a number. Now fixed (uses
   cr-report, converts survival→kill %, reuses the session on warm).
 - **`warm`** is measured for fermut (3 repos) and mutmut (4 repos);
-  cosmic-ray warm only where the cold session completed (markupsafe).
+  cosmic-ray warm only where the cold session completed (markupsafe, June).
   **`loop`** is fermut-only so far. **`score_3pct`** covers both
-  fermut and mutmut on three repos (see *Closing the loop*).
+  fermut and mutmut on three repos (see *Closing the loop*), June only:
+  it drives a Claude Code subprocess and wasn't re-run.
 - **Loop is a best case.** Its edit is a comment (AST-stable), so it
   measures the cache-friendly path, not a logic change.
 - **First-time setup cost** (cosmic-ray's sqlite session, mutmut's

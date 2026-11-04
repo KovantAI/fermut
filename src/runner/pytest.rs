@@ -24,7 +24,7 @@ use super::exit::{
     TestTool, PYTEST_INTERNAL_ERROR, PYTEST_USAGE_ERROR,
 };
 use super::process_group::kill_group;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use super::process_group::with_new_process_group;
 use super::pytest_result::{RunResult, REPORTER_MODULE, RESULT_ENV};
 use super::{
@@ -2034,6 +2034,7 @@ mod tests {
     }
 
     /// pytest 9.2: a `-p` plugin importing the broken package exits 3.
+    #[cfg(unix)]
     #[test]
     fn exit_3_is_a_kill_only_when_import_broke() {
         let (o, _) = classify_reported(false, 3, None, None, true, None);

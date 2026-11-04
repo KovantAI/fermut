@@ -68,20 +68,24 @@ pub struct SchemaRunner {
     /// summary.
     served: AtomicU64,
     spawned: AtomicU64,
-    /// Survivor audit (see [`SURVIVOR_AUDIT_RATE`]): how many were re-run the
-    /// normal way, and how many of those the normal run killed.
+    /// Of `served`, the timeouts: hangs the no-mutant confirmation pinned on
+    /// the mutant, which no longer pay their timeout again on the spawn path.
+    hangs: AtomicU64,
+    /// Audit (see [`AUDIT_RATE`]): how many survivors and timeouts were re-run
+    /// the normal way, and how many of those the normal run disagreed with.
     audited: AtomicU64,
     disagreed: AtomicU64,
-    first_survivor: AtomicBool,
+    first_audited: AtomicBool,
 }
 
-/// Fraction of survivors from the schema re-run the normal way. Kill
-/// confirmation catches a fork-only failure; this samples for the other
-/// direction — something in a fork making a test pass that a fresh process
-/// fails. Picked by mutant id, so the same ones every run, plus the first
-/// survivor so even a small run checks one.
-const SURVIVOR_AUDIT_RATE: f64 = 0.05;
-const SURVIVOR_AUDIT_SEED: u64 = 0x5c4e_a0d1;
+/// Fraction of survivors and timeouts from the schema re-run the normal way.
+/// Confirmation catches a fork-only failure or hang in tests that also fail
+/// or hang with no mutant active; this samples for what it can't see —
+/// something in a fork making a test pass that a fresh process fails, or
+/// hanging only on a path the mutant takes. Picked by mutant id, so the same
+/// ones every run, plus the first so even a small run checks one.
+const AUDIT_RATE: f64 = 0.05;
+const AUDIT_SEED: u64 = 0x5c4e_a0d1;
 
 /// The built schema: one read-only mirror shared by every template.
 struct Schema {
@@ -129,9 +133,10 @@ impl SchemaRunner {
             confirmed: Mutex::new(HashMap::new()),
             served: AtomicU64::new(0),
             spawned: AtomicU64::new(0),
+            hangs: AtomicU64::new(0),
             audited: AtomicU64::new(0),
             disagreed: AtomicU64::new(0),
-            first_survivor: AtomicBool::new(false),
+            first_audited: AtomicBool::new(false),
         }
     }
 
@@ -296,17 +301,22 @@ impl SchemaRunner {
                 return Ok(None);
             }
             let mut served = template.request(idx, ids.as_deref(), all, self.inner.timeout)?;
-            // A kill must be the mutant's doing (timeouts go to the spawn path):
-            // a failing test (1) or one interrupting the run (2).
-            if matches!(served.status.and_then(|s| s.code()), Some(1 | 2)) {
+            // A kill or a hang must be the mutant's doing: a failing test (1),
+            // one interrupting the run (2), or a timeout inside a test.
+            if matches!(served.status.and_then(|s| s.code()), Some(1 | 2))
+                || hung_in_a_test(&served)
+            {
                 served.unconfirmed = !self.confirm(template, &served.ran);
             }
             Ok(Some(served))
         })
     }
 
-    /// Whether a kill is the mutant's: the same tests, in the same order, pass
-    /// in a fork with no mutant active. A test can fail in a fork alone, from
+    /// Whether a kill or a hang is the mutant's: the same tests, in the same
+    /// order, pass in a fork with no mutant active. For a hang, that is what
+    /// spares it a second full timeout on the spawn path: a fork has already
+    /// imported and collected, so where it ran out of time a cold run, given
+    /// the same budget, would too. A test can fail or hang in a fork alone, from
     /// state another test module left behind while the template collected the
     /// suite (agent-library: a manifest scan at import emptied a registry that
     /// only a test's teardown restores) — a cold run never imports that
@@ -328,24 +338,35 @@ impl SchemaRunner {
     }
 
     fn audit_pick(&self, id: &str) -> bool {
-        !self.first_survivor.swap(true, Ordering::Relaxed)
-            || crate::filter::sample::score(SURVIVOR_AUDIT_SEED, id) < SURVIVOR_AUDIT_RATE
+        !self.first_audited.swap(true, Ordering::Relaxed)
+            || crate::filter::sample::score(AUDIT_SEED, id) < AUDIT_RATE
     }
 
-    /// Re-run a survivor from the schema the normal way; that run's verdict
-    /// stands. A kill there means a fork made a test pass that a fresh
-    /// process fails — worth a report.
-    fn audit_survivor(&self, mutant: &Arc<Mutant>, served: Served) -> Result<MutantOutcome> {
+    /// Re-run a survivor or a timeout from the schema the normal way; that
+    /// run's verdict stands. A survivor the normal run detects, or a timeout
+    /// it lets survive, means a fork made a test pass that a fresh process
+    /// fails, or hung where a fresh process passes — worth a report. A
+    /// timeout the normal run kills isn't: a mutant that dies near the budget
+    /// (a runaway allocation hitting the memory cap) lands on either side
+    /// run to run, and both count as detected.
+    fn audit_normal(&self, mutant: &Arc<Mutant>, served: Served) -> Result<MutantOutcome> {
         self.audited.fetch_add(1, Ordering::Relaxed);
+        let fork = if served.status.is_none() {
+            "timeout"
+        } else {
+            "survived"
+        };
         drop(served);
         let normal = self.inner.run(mutant)?;
-        if matches!(
+        let detected = matches!(
             normal,
             MutantOutcome::Killed { .. } | MutantOutcome::TimedOut { .. }
-        ) {
+        );
+        let survived = matches!(normal, MutantOutcome::Survived { .. });
+        if (fork == "survived" && detected) || (fork == "timeout" && survived) {
             self.disagreed.fetch_add(1, Ordering::Relaxed);
             warn!(
-                "--schemata: {} survived in a fork but is {} in a normal run; using the normal run. \
+                "--schemata: {} is {fork} in a fork but {} in a normal run; using the normal run. \
                  Please report this (and compare with --no-schemata).",
                 mutant.id,
                 normal.status_label()
@@ -386,12 +407,15 @@ impl Drop for SchemaRunner {
     fn drop(&mut self) {
         let (served, spawned) = (*self.served.get_mut(), *self.spawned.get_mut());
         if served + spawned > 0 {
-            info!("schemata: {served} mutants run from the schema, {spawned} run normally");
+            let hangs = *self.hangs.get_mut();
+            info!(
+                "schemata: {served} mutants run from the schema ({hangs} timed out), {spawned} run normally"
+            );
         }
         let (audited, disagreed) = (*self.audited.get_mut(), *self.disagreed.get_mut());
         if audited > 0 {
             info!(
-                "schemata: survivor audit re-ran {audited} survivor(s) the normal way; \
+                "schemata: audit re-ran {audited} survivor(s)/timeout(s) the normal way; \
                  {} agreed, {disagreed} didn't",
                 audited - disagreed
             );
@@ -403,7 +427,7 @@ impl Drop for SchemaRunner {
 /// active (every slice, across the workers, covers the suite), every test even
 /// past a failure. Tests that fail, crash or hang here don't turn schemata
 /// off: a kill from the schema only stands once the same tests pass with no
-/// mutant active ([`SchemaRunner::confirm`]), and a timeout never does, so
+/// mutant active ([`SchemaRunner::confirm`]), and neither does a timeout, so
 /// they just cost those mutants a normal run. This reports them, and resumes a slice past a test
 /// that took its child down (a crash: macOS DNS, proxy and Kerberos frameworks
 /// aren't fork-safe; or a hang). Only a broken helper (a traceback) fails it.
@@ -521,20 +545,25 @@ fn usable(served: &Served) -> bool {
     }
     // A crashed child (a fork-unsafe system framework, macOS) isn't the
     // mutant's verdict either: pytest scores a signal death as a kill.
-    // A timeout isn't one either: a fork skips the import a cold run pays, so
-    // the budget means something else, and a fork-unsafe framework can hang
-    // it on a path only the mutant takes. Rare; the spawn path decides.
-    served.status.is_some()
+    // A timeout is one only inside a test whose run confirmation reproduced
+    // with no mutant active; a hang before any test began (collection, the
+    // helper) has nothing to confirm, so the spawn path decides.
+    (served.status.is_some() || hung_in_a_test(served))
         && !served.unconfirmed
         && !served.status.is_some_and(crash_signal)
         && served.status.and_then(|s| s.code()) != Some(4)
+}
+
+/// Timed out (the child was killed) while running a test.
+fn hung_in_a_test(served: &Served) -> bool {
+    served.status.is_none() && served.error.is_none() && served.result.unfinished.is_some()
 }
 
 fn warn_unconfirmed(ran: &[String]) {
     static WARNED: AtomicBool = AtomicBool::new(false);
     if !WARNED.swap(true, Ordering::Relaxed) {
         warn!(
-            "--schemata: {} fails in a forked run even with no mutant active; mutants it kills run normally",
+            "--schemata: {} fails or hangs in a forked run even with no mutant active; mutants it kills or hangs run normally",
             ran.join(", ")
         );
     }
@@ -575,9 +604,13 @@ impl Runner for SchemaRunner {
         match self.serve(mutant, None, all) {
             Some(served) if usable(&served) => {
                 self.served.fetch_add(1, Ordering::Relaxed);
+                let timed_out = served.status.is_none();
+                if timed_out {
+                    self.hangs.fetch_add(1, Ordering::Relaxed);
+                }
                 let survived = served.status.and_then(|s| s.code()) == Some(0);
-                if survived && self.audit_pick(&mutant.id) {
-                    return self.audit_survivor(mutant, served);
+                if (survived || timed_out) && self.audit_pick(&mutant.id) {
+                    return self.audit_normal(mutant, served);
                 }
                 Ok(self.outcome(mutant, served, true))
             }
@@ -647,8 +680,8 @@ struct Served {
     error: Option<String>,
     /// The tests the child ran, in order.
     ran: Vec<String>,
-    /// A kill that the same tests reproduce with no mutant active: not the
-    /// mutant's doing (see [`SchemaRunner::confirm`]).
+    /// A kill or hang that the same tests reproduce with no mutant active:
+    /// not the mutant's doing (see [`SchemaRunner::confirm`]).
     unconfirmed: bool,
 }
 
@@ -949,7 +982,15 @@ mod tests {
         assert!(usable(&served(Some(1), None)));
         assert!(
             !usable(&served(None, None)),
-            "a timeout: a forked run is faster (no import) and can hang where a cold one wouldn't"
+            "a timeout before any test began: nothing to confirm it against"
+        );
+        let mut hung = served(None, None);
+        hung.result.unfinished = Some("t.py::loops".into());
+        assert!(usable(&hung), "a confirmed hang in a test");
+        hung.unconfirmed = true;
+        assert!(
+            !usable(&hung),
+            "a hang the same tests reproduce with no mutant active"
         );
         assert!(
             !usable(&served(Some(3), Some("Traceback ..."))),
@@ -1295,6 +1336,64 @@ done"#
                 "the same tests, no mutant active: {requests}"
             );
         }
+    }
+
+    /// A schemata runner serving one mutant (index 5) from a fake template
+    /// that hangs it in `t.py::loops` and answers a no-mutant run with
+    /// `no_mutant`. The spawn path can't run anything (`python = /bin/false`).
+    fn hanging(dir: &std::path::Path, no_mutant: &str) -> (SchemaRunner, Arc<Mutant>) {
+        let script = format!(
+            r#"echo '{{"ready":true}}'
+while read req; do
+  idof "$req"; reply '{{"pid":0}}'
+  case "$req" in
+    *'"idx":5'*) sleep 1; reply '{{"status":9,"timed_out":true,"unfinished":"t.py::loops","ran":["t.py::a","t.py::loops"]}}' ;;
+    *) reply '{no_mutant}' ;;
+  esac
+done"#
+        );
+        let mut schema = fake_schema(dir, &script);
+        let mutant = Arc::new(Mutant {
+            id: "src/m.py@1:op:a->b".into(),
+            file: dir.join("m.py"),
+            operator: crate::mutator::Operator::ArithOpSwap,
+            range: ruff_text_size::TextRange::default(),
+            original: "+".into(),
+            replacement: "-".into(),
+            line: 1,
+            stmt_line: 1,
+            site: None,
+        });
+        schema.index.insert(mutant.id.clone(), 5);
+        let mut runner = fake_runner(&dir.canonicalize().unwrap());
+        runner.set_timeout(Duration::from_millis(200));
+        assert!(runner.schema.set(Some(schema)).is_ok());
+        // Not the always-audited first one; this id is outside the 5% sample.
+        runner.first_audited.store(true, Ordering::Relaxed);
+        assert!(!runner.audit_pick(&mutant.id));
+        (runner, mutant)
+    }
+
+    #[test]
+    fn a_hang_the_no_mutant_run_clears_is_a_timeout_without_a_second_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (runner, mutant) = hanging(tmp.path(), r#"{"status":0}"#);
+        let o = runner.run(&mutant).unwrap();
+        assert!(
+            matches!(&o, MutantOutcome::TimedOut { hung_in: Some(t), .. } if t == "t.py::loops"),
+            "{o:?}"
+        );
+        assert_eq!(runner.spawned.load(Ordering::Relaxed), 0, "no spawn re-run");
+        assert_eq!(runner.hangs.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_hang_the_no_mutant_run_reproduces_goes_to_the_spawn_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (runner, mutant) = hanging(tmp.path(), r#"{"status":256,"failed":["t.py::loops"]}"#);
+        let _ = runner.run(&mutant);
+        assert_eq!(runner.spawned.load(Ordering::Relaxed), 1);
+        assert_eq!(runner.hangs.load(Ordering::Relaxed), 0);
     }
 
     #[test]

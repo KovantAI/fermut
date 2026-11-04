@@ -123,11 +123,12 @@ both built from the same crate root. The module structure:
   pytest session that imported and collected the suite — which every worker
   shares. A mutant runs as a forked child of the template; requests carry an
   id so children run side by side. Before serving, the suite runs on the
-  schema with no mutant active, a slice per worker. A kill only stands once
-  the tests that child ran pass in a fork with no mutant active (cached per
-  test list); timeouts, crashed children and everything outside the schema
-  go to the wrapped `PytestRunner`. A stable ~5% sample of survivors is
-  re-run there too (`SURVIVOR_AUDIT_RATE`), and that verdict is reported.
+  schema with no mutant active, a slice per worker. A kill, or a timeout
+  inside a test, only stands once the tests that child ran pass in a fork
+  with no mutant active (cached per test list); unconfirmed ones, timeouts
+  before any test began, crashed children and everything outside the schema
+  go to the wrapped `PytestRunner`. A stable ~5% sample of survivors and
+  timeouts is re-run there too (`AUDIT_RATE`), and that verdict is reported.
 - `UnittestRunner` — invokes `<python> -m unittest discover -s
   <mirrored-tests> -p <unittest_pattern>` (default `test*.py`).
 

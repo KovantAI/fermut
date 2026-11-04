@@ -89,6 +89,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   be removed in a later release.
 
 ### Fixed
+- A mutant that makes importing the package raise `SystemExit` (flipping an
+  `if __name__ == "__main__": main()` guard) scored `error` on pytest 8+:
+  collection doesn't catch it, so pytest reports an internal error and exits
+  3. fermut's reporter now records internal errors and whether they ran
+  through project code; those (with a green baseline, the mutant's doing)
+  score killed, with or without the reporter. A crash in pytest or a
+  third-party plugin stays an error. trio: last exit-3 error gone.
 - On pytest 9.2, a mutant that breaks the import of a package a `-p` plugin
   loads (trio's `-p trio._tests.pytest_plugin`) scored `error` (`pytest exit
   3: internal error`): pytest 9.2 reports the failed plugin load and exits 3

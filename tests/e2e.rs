@@ -821,6 +821,75 @@ fn assert_cached_run_skips_a_red_baseline(extra: &[&str]) {
 
 #[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn systemexit_while_importing_the_package_is_a_kill() {
+    // #60: flipping `if __name__ == "__main__"` runs `main()` when a test
+    // module imports the package; its `sys.exit(2)` escapes collection (which
+    // only catches Exception) and pytest 8+ exits 3 with INTERNALERROR, which
+    // scored `error`. Through the reporter and through the `--collect-only`
+    // probe (plugin off) alike, it must be a kill.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write(
+        "pyproject.toml",
+        "[tool.fermut]\nsource_root = \"src\"\ntests = \"tests\"\n\n\
+         [tool.pytest.ini_options]\npythonpath = [\"src\"]\n",
+    );
+    write("src/pkg/__init__.py", "");
+    write(
+        "src/pkg/cli.py",
+        "import sys\n\n\ndef double(x):\n    return x * 2\n\n\ndef main():\n    sys.exit(2)\n\n\n\
+         if __name__ == \"__main__\":\n    main()\n",
+    );
+    write(
+        "tests/test_cli.py",
+        "from pkg.cli import double\n\n\ndef test_double():\n    assert double(2) == 4\n",
+    );
+    for extra in [&[][..], &["--no-pytest-plugin"][..]] {
+        let report = proj.join("report.json");
+        Command::cargo_bin("fermut")
+            .unwrap()
+            .arg("run")
+            .arg(proj.join("src"))
+            .arg("--tests")
+            .arg(proj.join("tests"))
+            .args([
+                "--no-coverage",
+                "--no-ty-filter",
+                "--no-cache",
+                "--no-history",
+            ])
+            .args(["--fail-under", "0", "--json"])
+            .arg(&report)
+            .args(extra)
+            .assert()
+            .success();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+        let outcomes = json["outcomes"].as_array().unwrap();
+        let guard = outcomes
+            .iter()
+            .find(|o| {
+                o["mutant"]["line"] == 12
+                    && o["mutant"]["replacement"]
+                        .as_str()
+                        .is_some_and(|r| r.starts_with("not ("))
+            })
+            .expect("the `not (__name__ == ...)` mutant");
+        assert_eq!(guard["status"], "killed", "{extra:?}: {guard:#?}");
+        assert!(
+            outcomes.iter().all(|o| o["status"] != "error"),
+            "{extra:?}: no exit-3 errors"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn a_plugin_importing_the_broken_package_is_a_kill() {
     // #59: a `-p` plugin that imports the package under test (trio's
     // `-p trio._tests.pytest_plugin`). A mutant breaking that import makes

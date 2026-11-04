@@ -126,6 +126,9 @@ pub(crate) fn is_collection_failure(output: &str) -> bool {
 ///   (`src/trio/_util.py:23: in <module>`, relative to the working directory,
 ///   which is `root`), and exits 3. pytest 9.1 crashed with a full traceback
 ///   and exit 1, already a kill.
+/// - a test module's import raises what collection doesn't catch (a
+///   `SystemExit`): pytest 8–9 print `INTERNALERROR>`-prefixed full frames and
+///   exit 3.
 ///
 /// Both happen before the reporter plugin loads, so only this output remains.
 /// A traceback frame (or a `SyntaxError`'s file line) under `root` and outside
@@ -134,6 +137,7 @@ pub(crate) fn is_collection_failure(output: &str) -> bool {
 pub(crate) fn is_project_config_error(output: &str, root: &Path) -> bool {
     if !output.contains("while parsing the following warning configuration")
         && !output.contains("Error while loading plugin")
+        && !output.contains("INTERNALERROR>")
     {
         return false;
     }
@@ -150,7 +154,12 @@ pub(crate) fn is_project_config_error(output: &str, root: &Path) -> bool {
 /// pytest's short `<path>:<N>: in <name>`, which is relative to the working
 /// directory (`root`) unless absolute and is made absolute here.
 fn frame_path(line: &str, root: &Path) -> Option<PathBuf> {
+    // pytest prefixes every line of an internal error's traceback.
     let line = line.trim_start();
+    let line = line
+        .strip_prefix("INTERNALERROR>")
+        .unwrap_or(line)
+        .trim_start();
     if let Some(rest) = line.strip_prefix("File \"") {
         return Some(PathBuf::from(rest.split_once('"')?.0));
     }
@@ -379,6 +388,27 @@ pkg/__init__.py:2: in <module>
         ^^^^^^^^^^^^^
 E   TypeError: typevar() argument 'name' must be str, not None
 "#;
+
+    /// pytest 8–9: `sys.exit(2)` while a test module imports the package.
+    const INTERNAL_ERROR_PROJECT: &str = r#"INTERNALERROR> Traceback (most recent call last):
+INTERNALERROR>   File "/venv/lib/python3.13/site-packages/_pytest/main.py", line 333, in wrap_session
+INTERNALERROR>     session.exitstatus = doit(config, session) or 0
+INTERNALERROR>   File "/proj/tests/test_import.py", line 1, in <module>
+INTERNALERROR>   File "/proj/pkg/__init__.py", line 2, in <module>
+INTERNALERROR> SystemExit: 2
+"#;
+
+    #[test]
+    fn internal_error_through_project_code_is_detected() {
+        let root = Path::new("/proj");
+        assert!(is_project_config_error(INTERNAL_ERROR_PROJECT, root));
+        // A plugin bug: every frame in site-packages or outside the project.
+        let plugin_bug = "INTERNALERROR> Traceback (most recent call last):\n\
+             INTERNALERROR>   File \"/venv/lib/python3.13/site-packages/_pytest/main.py\", line 333, in wrap_session\n\
+             INTERNALERROR>   File \"/elsewhere/badplug.py\", line 2, in pytest_collection_modifyitems\n\
+             INTERNALERROR> RuntimeError: plugin bug\n";
+        assert!(!is_project_config_error(plugin_bug, root));
+    }
 
     #[test]
     fn plugin_load_through_project_code_is_detected() {

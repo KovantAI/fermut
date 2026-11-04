@@ -19,6 +19,9 @@ several pytest sessions that append to the same file):
   filter that imports broken project code ends the run before this plugin
   loads; fermut's ``--collect-only`` probe reads it from pytest's output.
 - ``{"ev":"collect","nodeid":...}`` -- a collector failed (import error)
+- ``{"ev":"internal_error","exc":...,"project":bool}`` -- pytest hit an
+  internal error (exit 3), e.g. ``SystemExit`` raised while a test module
+  imports the package under test; ``project`` as for ``config_error``
 - ``{"ev":"deselect","nodeid":...}`` -- a test was deselected (``--deselect``,
   ``-k``, ``-m``, or a plugin calling ``pytest_deselected``)
 - ``{"ev":"begin","nodeid":...}`` -- a test started
@@ -47,6 +50,8 @@ SCHEMA_VERSION = 1
 _path = os.environ.get("FERMUT_RESULT")
 _collect_context = bool(os.environ.get("FERMUT_COLLECT_CONTEXT"))
 _fh = None
+# The session's rootdir, for ``internal_error`` (that hook gets no config).
+_root = None
 
 
 def _emit(event):
@@ -142,7 +147,22 @@ def pytest_make_collect_report(collector):
         _switch_context("")
 
 
+def pytest_internalerror(excrepr, excinfo):
+    # Collection only catches ``Exception``: a ``SystemExit`` raised while a
+    # test module imports the code under test reaches pytest's internal-error
+    # path. Through project code (with a green baseline) that is the mutant.
+    _emit(
+        {
+            "ev": "internal_error",
+            "exc": type(excinfo.value).__name__,
+            "project": _raised_in_project(excinfo.value, _root or os.getcwd()),
+        }
+    )
+
+
 def pytest_sessionstart(session):
+    global _root
+    _root = str(session.config.rootpath)
     _emit({"v": SCHEMA_VERSION, "ev": "start", "pytest": pytest.__version__})
 
 

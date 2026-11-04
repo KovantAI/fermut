@@ -54,6 +54,10 @@ pub(crate) struct RunResult {
     /// project code, i.e. the mutated package raised while being imported;
     /// `Some(false)` for a plain usage error.
     pub config_error: Option<bool>,
+    /// pytest hit an internal error (exit 3). `Some(true)` when the exception
+    /// was raised through project code: a `SystemExit` while a test module
+    /// imported the mutated package, which collection doesn't catch.
+    pub internal_error: Option<bool>,
     /// Node ids of failed test phases, in the order they were reported.
     pub failures: Vec<String>,
     /// The last test that began in a session that never finished. On a
@@ -109,6 +113,10 @@ impl RunResult {
                     let project = event.project.unwrap_or(false);
                     out.config_error = Some(out.config_error.unwrap_or(false) || project);
                 }
+                "internal_error" => {
+                    let project = event.project.unwrap_or(false);
+                    out.internal_error = Some(out.internal_error.unwrap_or(false) || project);
+                }
                 // The session root (`""`) also reports failed under `-x` once a
                 // module failed; only a named collector is evidence.
                 "collect" => {
@@ -141,10 +149,14 @@ impl RunResult {
 
     /// Whether the run failed because test code could not be imported: a
     /// test module failed to collect, a conftest failed to load, or project
-    /// code raised while pytest was configuring itself. (A green baseline
+    /// code raised while pytest was configuring itself or into its
+    /// internal-error path (a `SystemExit` at import). (A green baseline
     /// under the same configuration rules out a pre-existing breakage.)
     pub(crate) fn import_broke(&self) -> bool {
-        self.conftest_error || self.config_error == Some(true) || !self.collect_errors.is_empty()
+        self.conftest_error
+            || self.config_error == Some(true)
+            || self.internal_error == Some(true)
+            || !self.collect_errors.is_empty()
     }
 
     /// The killing test: the first failed test phase.
@@ -156,6 +168,23 @@ impl RunResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_error_through_project_code_is_a_broken_import() {
+        let parse = |project: bool| {
+            RunResult::parse(&format!(
+                r#"{{"v":1,"ev":"start","pytest":"9.2.0","pid":1}}
+{{"ev":"internal_error","exc":"SystemExit","project":{project},"pid":1}}
+{{"ev":"finish","exit":3,"pid":1}}
+"#
+            ))
+            .unwrap()
+        };
+        assert_eq!(parse(true).internal_error, Some(true));
+        assert!(parse(true).import_broke());
+        // A plugin or pytest bug outside the project is not the mutant's doing.
+        assert!(!parse(false).import_broke());
+    }
 
     #[test]
     fn deselected_and_began_tests_are_listed() {

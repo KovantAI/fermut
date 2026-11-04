@@ -126,96 +126,30 @@ Key invariants:
    the wrong tests run), shifting survivor counts with no error. Run
    `fermut coverage` at the top of any iteration that touched tests — it
    re-measures only the changed test files and writes a `.coverage`
-   database fermut reads directly (`--coverage .coverage`). Or, manually:
-   `pytest --cov … && coverage json …` for a `coverage.json` export. (The
-   coverage file is gitignored in the sample — never commit it.)
+   database fermut reads directly. Never commit the coverage file.
 
 ## Cache strategy
 
-The cache is what makes iterative use viable.
+The cache is what makes iterating cheap. Every verdict is stored under
+`(mutant.id, ast_hash(file), scope)`: the file hash is AST-structural, so
+reformatting and comment edits keep it, and `scope` covers the run
+settings plus the tests that run against the mutant. An agent editing one
+file pays only for that file's mutants, and adding a killing test re-runs
+only the mutants that test covers.
 
-### How it works
+For an agent that means:
 
-After every successful mutant evaluation, fermut writes
-`(mutant.id, ast_hash(source_file), scope) -> outcome` to
-`.fermut/cache.json`. The file hash is **AST-structural** —
-reformat / comment edits leave it untouched. `scope` is a hex digest
-of the run-shape inputs (runner, timeout, hypothesis seed, pytest
-args, coverage on/off) plus a fingerprint of the tests that run
-against the mutant, so a stale `survived` from a narrow `--coverage`
-run can't poison a later full-suite run, and adding a killing test
-re-evaluates the mutants it covers. With coverage contexts only the
-covering test files (plus their `conftest.py` chain and shared support
-files) are fingerprinted, so editing an unrelated test keeps the
-verdict; without coverage, any test edit invalidates everything — see
-[Test-suite invalidation](../concepts/caching.md#test-suite-invalidation).
-On the next `run`:
+- **Never pass `--no-cache` in the loop.** Re-running every mutant every
+  iteration is the dominant cost.
+- **Don't clear the cache as a habit.** `fermut clean` is for a fermut
+  upgrade or a survivor you can't reproduce by hand; it keeps
+  `history.jsonl`, so the trend survives.
+- **In CI, persist `.fermut/cache.json`** with `actions/cache`, keyed on the
+  lockfile and sources (the [GitHub Action](github-action.md) does this for
+  you), and give each shard its own `--cache-path`.
 
-- For each mutant, fermut computes the current AST hash and the
-  current run-shape `scope`.
-- If `(mutant.id, current_ast_hash, current_scope)` matches a cached
-  entry, the cached outcome is reused — no pytest invocation.
-- If either component mismatches, the cache entry is ignored and the
-  mutant re-runs.
-
-See **[Caching concept](../concepts/caching.md)** for the full key
-breakdown and the `cache_scope = "scope"` opt-in that narrows the
-hash to the enclosing top-level def/class.
-
-Result: an agent editing one file out of many only pays for mutants in
-*that* file. Everything else is reused from cache.
-
-### What's cached
-
-| Outcome    | Cached?         | Why                                                                                  |
-|------------|-----------------|--------------------------------------------------------------------------------------|
-| killed     | :material-check:{ .yes }               | Behavior didn't change; rerunning the same test against the same patched bytes wastes time. |
-| survived   | :material-check:{ .yes }               | Same.                                                                                |
-| timed_out  | :material-check:{ .yes }               | Same.                                                                                |
-| skipped    | :material-close:{ .no } (not cached)  | Skips come from the filter chain, which may change between runs (different `--ops`, `--coverage`, etc.). |
-| errored    | :material-close:{ .no } (not cached)  | Errors are often transient (environment issues, flaky import).                       |
-
-### When to clear it
-
-`fermut clean` evicts the cache but **preserves `history.jsonl`** — so
-agents lose iteration speed temporarily, but the trend log keeps its
-continuity.
-
-Clear it when:
-
-- The agent upgrades fermut and the cache schema changes (the loader is
-  forward-compatible — unknown fields are ignored — but stale entries
-  may not exercise the new behavior).
-- A flaky external dependency was fixed and you want survivors
-  re-evaluated against the new state.
-- You're debugging a "phantom survivor" that the agent can't reproduce
-  by hand.
-
-Don't clear it as a habit. The cache is the reason the inner loop is
-fast.
-
-### CI vs local cache
-
-| Use case        | Cache path                                              | Persistence pattern                                                                                                                                            |
-|-----------------|---------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Local agent loop | `.fermut/cache.json` (default)                           | Lives on the agent's working tree. Survives across iterations.                                                                                                  |
-| CI / GHA         | `.fermut/cache.json` or `--cache-path .fermut/cache-shard-${i}.json` for sharded runs | Save & restore with `actions/cache` keyed on the source-tree hash. PRs inherit the latest `main` cache.                                                          |
-| Distributed exec | One cache per shard, never shared                       | Shards are deterministic per `mutant.id`, but each shard's cache is independent.                                                                                |
-
-A reasonable GHA setup for the agent's CI hook:
-
-```yaml
-- uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
-  with:
-    path: .fermut/cache.json
-    key: fermut-cache-${{ runner.os }}-${{ hashFiles('uv.lock', 'src/**/*.py', 'tests/**/*.py') }}
-    restore-keys: |
-      fermut-cache-${{ runner.os }}-
-```
-
-The key includes lockfile + sources because a dep change can invalidate
-existing cache entries (different pytest version → different test
-behavior).
+The full key, what is and isn't cached, and when to clear it are in
+**[Caching](../concepts/caching.md)**.
 
 ## Trend tracking is the agent's feedback signal
 
@@ -291,35 +225,17 @@ and the rollback rule above fires on phantom regressions.
 
 ## Driving fermut programmatically
 
-The recommended invocation for an agent inner loop:
-
-```sh
-fermut run src/ \
-    --tests tests/ \
-    --diff-only HEAD \
-    --coverage .coverage \
-    --json .fermut/last.json \
-    --history-path .fermut/agent-history.jsonl \
-    --quiet
-```
-
-- `--diff-only HEAD`: only mutants on lines edited since the last commit.
-- `--coverage .coverage`: narrow tests per mutant (auto-discovered at the root if omitted).
-- `--json`: the report to parse.
-- `--history-path`: a scratch history, so `fermut score --history-path .fermut/agent-history.jsonl` sees each iteration without polluting the shared log.
-- `--quiet`: at most one progress line on stderr.
-
+The inner-loop invocation is the one in [One concrete cycle](#one-concrete-cycle).
 Once the agent decides to record progress (e.g. before committing), drop
-the scratch `--history-path` and add `--trend` to the run that will produce the PR
-report:
+the scratch `--history-path` and add `--trend` to the run that produces
+the PR report:
 
 ```sh
 fermut run src/ --tests tests/ \
     --diff-only origin/main \
-    --coverage .coverage \
     --markdown report.md \
     --trend \
-    --json    .fermut/last.json
+    --json .fermut/last.json
 ```
 
 ### JSON size and context budget
@@ -427,25 +343,6 @@ fermut next .fermut/last.json
     "sibling_ids": ["src/a.py@60:boundary-shift:<=-><"] } ]
 ```
 
-The raw equivalent — smallest operator first, no leverage weighting — if you
-need to stay in `jq`:
-
-```sh
-jq '[.outcomes[] | select(.status == "survived")]
-    | sort_by(.mutant.operator)
-    | first
-    | .mutant' .fermut/last.json
-```
-
-The agent then has enough context to:
-
-1. Open `src/auth.py:42`.
-2. Read the surrounding function.
-3. Write a test that exercises the boundary case (`age = 18` exactly).
-4. Re-run fermut. The cache means only `auth.py`'s mutants get
-   re-evaluated; the new test catches `age >= 18` → `age > 18`, the
-   mutant moves from `survived` to `killed`, the score climbs.
-
 ### Driving `explain` and `suggest` from agent loops
 
 `fermut explain` and `fermut suggest` are the two subcommands that
@@ -512,17 +409,11 @@ i-th survivor.
 - `--sample-count 0` cuts ~50% of prompt tokens at the cost of less
   style mimicry. Useful for very large test suites.
 
-**Dollar-cost anchor.** A typical `suggest` call against
-`claude-sonnet-4-6` runs ~3k input tokens (mutant + surrounding
-source + sample tests) and ~600 output tokens (generated pytest
-function). At current
-[Anthropic pricing](https://www.anthropic.com/pricing) that lands
-around **$0.01–$0.02 per call**. For a 50-survivor `--all-survivors`
-run, budget roughly $0.50–$1.00 cold; warm re-runs against unchanged
-source are **$0.00** (LLM cache hit). `--sample-count 0` halves the
-input-token side, dropping cold cost by ~30%. Verify against your
-own usage logs — Anthropic prices shift and your prompt shape may
-differ.
+**Cost.** Each `suggest` call sends the mutant, the surrounding source and
+a few sample tests to the Anthropic API, so cost scales with survivor
+count; warm re-runs on unchanged source hit the LLM cache and cost
+nothing. Check your own usage logs before running `--all-survivors` on a
+large report.
 
 ### `fermut doctor` as a preflight
 
@@ -543,6 +434,38 @@ Note the `hypothesis_seed` check is **conditional**: `doctor` only warns
 about an unpinned seed when the project actually depends on Hypothesis
 (pinning one otherwise is pointless), so a clean `doctor` on a non-Hypothesis
 repo is expected — it isn't skipping the check.
+
+## MCP server { #mcp-server }
+
+`fermut mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)
+server over stdio, so an agent calls fermut as native tools
+(`fermut_doctor`, `fermut_baseline`, `fermut_run`, `fermut_next`,
+`fermut_explain`, `fermut_score`, `fermut_list_survivors`) instead of
+shelling out and parsing JSON. See the
+**[`fermut mcp` reference](../reference/cli/mcp.md)** for the tool list
+and error model.
+
+The [Claude Code plugin](claude-code-skill.md#option-2-the-claude-code-plugin)
+registers the server for you, alongside the agent skill. To register it
+yourself in Claude Code:
+
+```sh
+claude mcp add fermut -- fermut mcp
+```
+
+Or in a client config that takes a server map:
+
+```json
+{
+  "mcpServers": {
+    "fermut": { "command": "fermut", "args": ["mcp"] }
+  }
+}
+```
+
+The server honors the project's `fermut.toml`, so run it from (or point
+the client's working directory at) the project root. No network access,
+no API key: the tools wrap the same local engine the CLI uses.
 
 ## Anti-patterns
 

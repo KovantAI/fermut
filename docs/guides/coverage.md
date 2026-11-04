@@ -272,12 +272,12 @@ fermut run src/ --tests tests/ \
   [Test-suite invalidation](../concepts/caching.md#test-suite-invalidation).
 
 This is what the `pr-gate` profile sets. See
-**[Integrations → GitHub Actions](integrations.md#github-actions)**
+**[CI recipes → GitHub Actions](integrations.md#github-actions)**
 for the full workflow.
 
 To stop CI rebuilding coverage full-suite every run, and to shrink the
 index to just the changed files, see
-**[Integrations → Shrinking the coverage index per PR](integrations.md#coverage-scoping)**
+**[CI recipes → Shrinking the coverage index per PR](integrations.md#coverage-scoping)**
 — cache the `.coverage` DB so the refresh stays incremental (Recipe A),
 scope `--cov` to the changed subtree (Recipe B), or build one
 authoritative baseline on `main` that every PR restores read-only
@@ -301,5 +301,5 @@ authoritative baseline on `main` that every PR restores read-only
 
 - **[Filters](filters.md)** — `--diff-only`, `--since`, `--ops`,
   `--sample`, inline ignore markers.
-- **[CLI → coverage integration](../reference/cli/run.md#coverage-integration)**
+- **[CLI → coverage integration](../reference/cli/run-test-selection.md)**
   — exact flag behavior.

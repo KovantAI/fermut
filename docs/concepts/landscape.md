@@ -35,7 +35,7 @@ years, and the existing tools weren't built for the new shape:
 fermut's bet: the mutator runs in native Rust on top of `ruff`'s
 parser, each mutant runs in a fork of one pytest that already
 collected the suite instead of a fresh process
-([schemata](../reference/cli/run.md#schemata): 1.5–3.9× faster end to
+([schemata](../reference/cli/run-schemata.md): 1.5–3.9× faster end to
 end on most suites tested), the filter chain is composable and cheap, the cache is
 content-hashed for reproducibility, and the JSON shape is treated as
 API. That gives the speed budget for PR gates and the determinism

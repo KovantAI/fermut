@@ -8,7 +8,11 @@
 //!
 //! **stdout is the protocol channel** — every byte fermut writes there must
 //! be a JSON-RPC message, so tool handlers return structured data that the
-//! server wraps; they never `println!`. Logs and progress go to stderr.
+//! server wraps; they never `println!`. Logs and progress go to stderr. The
+//! server doesn't rely on that alone: it writes JSON-RPC to a private copy of
+//! stdout and points the process's stdout at stderr (see
+//! [`take_protocol_stdout`]), so a stray print, or a child process such as
+//! pytest, can't corrupt the stream.
 //!
 //! The loop is synchronous: read a line, dispatch, write the response. No
 //! async runtime — requests are handled one at a time, which is all an
@@ -73,8 +77,7 @@ impl RpcError {
 /// Run the server loop until stdin closes (EOF / client disconnect).
 pub fn serve() -> Result<()> {
     let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
+    let mut out = take_protocol_stdout()?;
     for line in stdin.lock().lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -112,9 +115,58 @@ pub fn serve() -> Result<()> {
 }
 
 fn write_message(out: &mut impl Write, msg: &Value) -> Result<()> {
-    writeln!(out, "{}", serde_json::to_string(msg)?)?;
+    // One write per message: `out` is an unbuffered file.
+    let mut line = serde_json::to_string(msg)?;
+    line.push('\n');
+    out.write_all(line.as_bytes())?;
     out.flush()?;
     Ok(())
+}
+
+/// The JSON-RPC channel: the real stdout, detached from the process's stdout.
+///
+/// Tool handlers run fermut's own code (coverage builds, the engine) and child
+/// processes such as pytest, which inherit stdout. Anything they print would
+/// land between protocol messages and break the client — `fermut_baseline`
+/// once wrote pytest's whole session there. So the server keeps a private
+/// handle to the real stdout and points stdout at stderr: a stray print
+/// becomes log noise instead of a protocol error.
+#[allow(unsafe_code)] // sole FFI site: move stdout aside for the protocol
+fn take_protocol_stdout() -> std::io::Result<std::fs::File> {
+    std::io::stdout().flush()?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::FromRawFd;
+        // CLOEXEC, so child processes don't inherit the channel.
+        // SAFETY: plain fd syscalls; the duplicate is owned by `channel` alone.
+        let fd = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 0) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let channel = unsafe { std::fs::File::from_raw_fd(fd) };
+        if unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(channel)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Console::{
+            GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+        };
+        // SAFETY: std-handle queries/updates; after `SetStdHandle` nothing else
+        // refers to the original stdout handle, so `channel` may own it.
+        let out = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        if out.is_null() || out == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::other("no stdout handle to serve MCP on"));
+        }
+        if unsafe { SetStdHandle(STD_OUTPUT_HANDLE, GetStdHandle(STD_ERROR_HANDLE)) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(unsafe { std::fs::File::from_raw_handle(out) })
+    }
 }
 
 fn error_response(id: Value, e: RpcError) -> Value {

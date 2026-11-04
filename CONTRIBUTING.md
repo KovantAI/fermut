@@ -273,6 +273,19 @@ chore: bump dependabot weekly to monday
 Type tags we use: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`,
 `ci`, `chore`, `deps`. The CHANGELOG generator will pick these up.
 
+## Documentation
+
+The site at <https://fermut.readthedocs.io/> is built from `docs/` with
+[Zensical](https://zensical.org/), which reads `mkdocs.yml`. Strict mode is
+on, so a broken link or a link to a renamed heading fails the build. Every
+subcommand's flags must appear on its `docs/reference/cli/<cmd>.md` page;
+`scripts/check-cli-docs.sh` checks that in CI. Preview locally:
+
+```sh
+uv pip install -r docs/requirements.txt
+zensical serve
+```
+
 ## CHANGELOG
 
 User-visible changes go under `## [Unreleased]` in `CHANGELOG.md`. Internal

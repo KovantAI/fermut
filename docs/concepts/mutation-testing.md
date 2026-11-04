@@ -258,7 +258,7 @@ catalogue and the inline-ignore syntax, and the
   why it's the iteration-speed lever.
 - **[Landscape](landscape.md)** — how fermut compares to mutmut and
   cosmic-ray, and the motivation for a new tool.
-- **[Isolation modes](../reference/cli/run.md#isolation-modes)** — how
+- **[Isolation modes](../reference/cli/run-isolation.md#isolation-modes)** — how
   workers patch source without touching the original tree.
 
 ## What fermut doesn't do (yet)

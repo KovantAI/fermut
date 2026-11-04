@@ -13,9 +13,7 @@ per-test-context coverage database — run `pytest --cov=src
 --cov-context=test`, which writes coverage.py's native `.coverage`
 SQLite DB. fermut reads that DB directly (auto-discovering `.coverage`
 at the project root, or via `--coverage .coverage`), so it knows
-**which** tests reach each line — no `coverage json` export step is
-needed. (fermut also accepts a manual `coverage json -o coverage.json
---show-contexts` export; it sniffs the file format.) Without per-test
+**which** tests reach each line. Without per-test
 contexts, the filter still drops uncovered mutants but cannot pick a
 narrow test subset for the survivors. See [coverage
 guide](../guides/coverage.md).
@@ -97,7 +95,7 @@ How a worker thread keeps its mutated source files from contaminating
 the original tree. `reflink` (default on APFS/btrfs/xfs/zfs/ReFS) is
 cheap. `copy` is the safe fallback. `hardlink` is fastest but unsafe
 if your tests write into the tree. Switch with
-`--isolation`. See [isolation modes reference](../reference/cli/run.md#isolation-modes).
+`--isolation`. See [isolation modes reference](../reference/cli/run-isolation.md#isolation-modes).
 
 ## Killed
 

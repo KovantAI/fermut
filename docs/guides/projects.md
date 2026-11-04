@@ -1,4 +1,4 @@
-# Working on projects
+# Rolling out to a team
 
 How to introduce mutation testing into a real project without producing
 weeks of survivor triage. This page targets human-driven rollouts. If
@@ -26,16 +26,16 @@ where you actually stand. **Do not enable `--diff-only` yet.** The goal
 here is the absolute number, not the delta.
 
 ```sh
-fermut init --profile local --force
-# generate per-test coverage first — fermut uses it to skip irrelevant tests per mutant
-fermut coverage
-# or, manually: pytest --cov=src --cov-context=test   (writes .coverage)
-# --sample 1.0 overrides the local profile's `sample = 0.25`, so every mutant runs
-fermut run src/ --tests tests/ --coverage .coverage --sample 1.0 --json baseline.json
+fermut init
+fermut baseline --full --format json > baseline.json
 ```
 
-See **[Coverage](coverage.md)** for `fermut coverage`, the
-`.coverage`-vs-`coverage.json` tradeoff, and context-flag gotchas.
+[`fermut baseline`](../reference/cli/baseline.md) checks the environment,
+builds per-test coverage, and scores every covered mutant (`--full`; drop
+it for a quick 10% sample). It reports line coverage next to the mutation
+score, lists the files with the most survivors, and logs the run as run
+zero in the [trend](trends.md). For the per-survivor list, follow with a
+full `fermut run src/ --tests tests/ --json run.json`.
 
 A few things you might see:
 
@@ -46,12 +46,12 @@ A few things you might see:
 - **Lots of `errored` outcomes.** Likely means your test suite has
   side-effects on the source tree (writes to files inside `src/`,
   in-process patches that don't survive `fork`). See the
-  [`--isolation` modes](../reference/cli/run.md#isolation-modes); usually
+  [`--isolation` modes](../reference/cli/run-isolation.md#isolation-modes); usually
   switching to `copy` mode fixes it.
 - **Lots of timeouts.** Some test fixtures don't terminate well under
   arithmetic mutants. Raise `--timeout`; tune later.
 
-Save `baseline.json` somewhere — it's the "before" snapshot you'll
+Keep `baseline.json` — it's the "before" snapshot you'll
 compare future runs to.
 
 ## Step 2 — Pick a profile
@@ -129,57 +129,19 @@ Profiles are not mutually exclusive — they're starter templates. After
 
 ## Step 3 — Wire CI in measure-only mode
 
-Start with `continue-on-error: true`. The job records mutation runs and
-posts a PR comment but **does not block merges yet**. This applies to the
-hand-written workflow below; `continue-on-error` also hides setup
-failures. With the [`KovantAI/fermut` action](github-action.md#rolling-it-out),
-use its `blocking: "false"` input instead, which only softens the gate.
-
-The workflow below has two output-related steps: `fermut run` writes
-`fermut-report.md` to disk, then a separate `fermut pr-comment` step at
-the bottom uploads that file as a sticky PR comment. The markdown is
-the *intermediate artifact*, not the comment itself.
+Run the gate on every PR, but don't let it block merges yet. With the
+[packaged action](github-action.md), set `blocking: "false"`: a failing
+gate becomes a warning, while a broken setup still fails the job.
 
 ```yaml
-# .github/workflows/mutation-measure.yml
-name: Mutation (measure-only)
-
-on:
-  pull_request:
-    paths:
-      - "**/*.py"
-
-jobs:
-  measure:
-    runs-on: ubuntu-latest
-    continue-on-error: true            # <-- not yet a gate
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: KovantAI/fermut@v0.6.1
         with:
-          fetch-depth: 0
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
-        with:
-          python-version: "3.12"
-      - run: |
-          uv sync
-          uv tool install fermut
-      - run: |
-          # writes .coverage with per-test contexts; fermut reads it directly.
-          # (Or, manually: coverage run -m pytest && coverage json -o
-          # coverage.json --show-contexts, then pass --coverage coverage.json.)
-          uv run pytest --cov=src --cov-context=test
-      - run: |
-          uv tool run fermut run src/ \
-              --tests tests/ \
-              --coverage .coverage \
-              --markdown fermut-report.md \
-              --trend
-      - if: always() && hashFiles('fermut-report.md') != ''
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: uv tool run fermut pr-comment --markdown fermut-report.md
+          blocking: "false"
 ```
+
+With a hand-written workflow from [CI recipes](integrations.md#github-actions),
+add `continue-on-error: true` to the job instead. It also turns setup
+failures green, so don't leave it on longer than you need.
 
 Watch the comments roll in for a week. You'll see:
 
@@ -190,29 +152,12 @@ Watch the comments roll in for a week. You'll see:
 
 ## Step 4 — Flip the gate on, scoped to diff-only
 
-Once the noise level feels manageable, remove `continue-on-error` so the
-job blocks merges. Make sure `--diff-only` is on so pre-existing
-survivors don't suddenly block PRs that didn't introduce them.
-
-```diff
- jobs:
-   gate:
-     runs-on: ubuntu-latest
--    continue-on-error: true
-     steps:
-       ...
-       - run: |
-           uv tool run fermut run src/ \
-               --tests tests/ \
-+              --diff-only origin/${{ github.base_ref }} \
-               --coverage .coverage \
-               --markdown fermut-report.md \
-               --trend
-```
-
-The default `pr-gate` profile already sets `diff_only = "main"`, so if
-you initialized with `--profile pr-gate` this is already in your config
-file.
+Once the noise level feels manageable, let the job block merges: remove
+`blocking: "false"` (or `continue-on-error`). Keep the gate on changed
+lines only, so pre-existing survivors don't block PRs that didn't
+introduce them. The packaged action always mutates the PR's diff; the
+`pr-gate` profile's `diff_only = "main"` does the same for a hand-written
+workflow.
 
 ## Step 5 — Tighten
 
@@ -251,38 +196,11 @@ nightly jobs, see
 
 ## History persistence in CI
 
-Trend tracking is observational data. GitHub Actions runners are
-ephemeral, so `.fermut/history.jsonl` resets every run unless you
-persist it. The simplest pattern: restore with `actions/cache/restore`
-(which never saves), and save with a separate `main`-only
-`actions/cache/save` step.
-
-```yaml
-- name: restore fermut history
-  uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
-  with:
-    path: .fermut/history.jsonl
-    key: fermut-history-main
-    restore-keys: |
-      fermut-history-main-
-
-- name: run fermut
-  run: fermut run src/ --tests tests/ --markdown report.md --trend
-
-- name: save fermut history
-  if: always() && github.ref == 'refs/heads/main'
-  uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
-  with:
-    path: .fermut/history.jsonl
-    key: fermut-history-main-${{ github.sha }}
-```
-
-Only the `main`-branch job *saves* the cache; PR jobs are read-only,
-so feature branches don't fork their own history streams. (The combined
-`actions/cache` would also save from PR jobs in its post-step, which is
-why the restore uses `actions/cache/restore`.) Tune to
-taste — some teams prefer committing `history.jsonl` to a side branch
-instead.
+CI runners start empty, so the score history needs persisting for
+`--trend` to have anything to compare. The packaged
+[`trend` action](github-action.md#score-trend) keeps it on a branch; for
+hand-written workflows see
+[CI recipes → History persistence](integrations.md#history-persistence).
 
 ## Common pitfalls (process)
 

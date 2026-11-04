@@ -1353,6 +1353,19 @@ fn baseline_reports_grade_and_anchors_trend() {
         .stdout(contains("\"mutation_score\""))
         .stdout(contains("\"grade\""))
         .stdout(contains("\"worst_files\""));
+    // stdout is the JSON document and nothing else: the coverage build it runs
+    // first must keep its progress (and pytest's session) off stdout, or
+    // `fermut baseline --format json > baseline.json` writes an unparsable file.
+    let out = Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("baseline")
+        .arg(&sample)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .unwrap();
+    serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .expect("baseline --format json stdout is a single JSON document");
 
     // The run wrote a history entry flagged `baseline: true`; `trend` marks
     // it as the anchor in its table.
@@ -1363,6 +1376,59 @@ fn baseline_reports_grade_and_anchors_trend() {
         .assert()
         .success()
         .stdout(contains("[baseline]"));
+}
+
+#[test]
+#[ignore = "requires pytest + coverage on PATH; enable once env is set up"]
+fn mcp_stdout_stays_json_rpc_while_a_tool_runs_pytest() {
+    // `fermut_baseline` builds coverage, which runs pytest. Every line the
+    // server writes to stdout must still be a JSON-RPC message: one stray
+    // line and an MCP client drops the connection.
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    let call = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "fermut_baseline", "arguments": {"path": sample}},
+    });
+    let requests = format!(
+        "{}\n{call}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}"#
+    );
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("fermut"))
+        .arg("mcp")
+        .current_dir(&sample)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Closing stdin after the requests ends the server once it has answered.
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(requests.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let messages: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("non-JSON-RPC line {l:?}: {e}")))
+        .collect();
+    assert_eq!(messages.len(), 2, "one response per request:\n{stdout}");
+    let result = &messages[1]["result"];
+    assert!(!result.is_null(), "baseline call failed: {}", messages[1]);
 }
 
 #[test]
@@ -1970,7 +2036,7 @@ fn coverage_refresh_prunes_deleted_source_file() {
         .arg(&sample)
         .assert()
         .success()
-        .stdout(contains("up to date"));
+        .stderr(contains("up to date"));
 }
 
 #[test]

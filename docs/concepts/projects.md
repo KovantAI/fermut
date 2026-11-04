@@ -16,7 +16,7 @@ write its own state.
 This page covers what makes a project, how fermut discovers it, and
 the layout fermut expects. For the task-side ("how do I roll fermut
 out across a project?"), see
-**[Working on projects](../guides/projects.md)**.
+**[Rolling out to a team](../guides/projects.md)**.
 
 ## What counts as a project
 
@@ -141,7 +141,7 @@ aggregation today.
 
 ## Where next
 
-- **[Working on projects](../guides/projects.md)** — the
+- **[Rolling out to a team](../guides/projects.md)** — the
   human-facing rollout playbook.
 - **[Configuration](configuration.md)** — file vs CLI vs profile,
   precedence rules.

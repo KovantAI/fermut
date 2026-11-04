@@ -295,11 +295,11 @@ coverage = ".coverage"
 
 Two things came along for free: `--diff-only` (no mutmut equivalent)
 and the sticky PR comment. The full workflow template is in
-**[Integrations → GitHub Actions](integrations.md#github-actions)**.
+**[CI recipes → GitHub Actions](integrations.md#github-actions)**.
 
 ## Where next
 
-- **[Working on projects](projects.md)** — the gradual-rollout
+- **[Rolling out to a team](projects.md)** — the gradual-rollout
   playbook applies cleanly after migration.
 - **[Filters](filters.md)** — `--diff-only`, `--coverage`,
   `--sample`, and the inline ignore markers in one place.

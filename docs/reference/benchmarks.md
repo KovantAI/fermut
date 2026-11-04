@@ -35,7 +35,7 @@ per-phase timing, mutant total, score, and return code.
 The numbers below are `cold`-scenario runs of fermut 0.6.1 (unreleased
 `main`, 2026-11-03) vs mutmut 3.8.1, **both re-run back-to-back on the same
 machine (2026-11-03)**, excluding clone / install. fermut runs its
-defaults: coverage filter on, [schemata](cli/run.md#schemata) on,
+defaults: coverage filter on, [schemata](cli/run-schemata.md) on,
 `--timeout-factor 3`, the `minimal` operator profile. mutmut runs its
 default.
 

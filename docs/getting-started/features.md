@@ -27,7 +27,7 @@ guide or reference page.
   process imports and collects your suite once, and each mutant runs in a
   fork of it instead of a fresh pytest. 1.5–3.9× faster whole runs on most
   suites tested, with the same verdicts; anything it can't vouch for runs the
-  normal way. See **[Schemata](../reference/cli/run.md#schemata)**.
+  normal way. See **[Schemata](../reference/cli/run-schemata.md)**.
 - **`ty` pre-filter.** Type-invalid mutants are dropped via
   [`ty`](https://github.com/astral-sh/ty) before they cost a pytest
   invocation. Removed 28–39% of covered mutants across 9 benchmarked
@@ -57,7 +57,7 @@ guide or reference page.
 - **JUnit / JSON / HTML / Markdown reports.** Stable JSON shapes, GHA
   annotations, self-contained HTML.
 - **Curated profiles.** `pr-gate`, `nightly`, `local`, `library`.
-  See **[Working on projects](../guides/projects.md)**.
+  See **[Rolling out to a team](../guides/projects.md)**.
 
 ## Migrating from another tool
 
@@ -104,7 +104,7 @@ signal. See **[Coding agents](../guides/coding-agents.md)**.
   server over stdio — agents call `fermut_doctor`, `fermut_baseline`,
   `fermut_run`, `fermut_next`, `fermut_explain`, `fermut_score`,
   `fermut_list_survivors` as tools instead of shelling out. See
-  **[Integrations → MCP](../guides/integrations.md#mcp-server)**.
+  **[Coding agents → MCP](../guides/coding-agents.md#mcp-server)**.
 
 ## Reference quick links
 

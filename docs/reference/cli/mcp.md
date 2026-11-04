@@ -89,5 +89,5 @@ data and can recover, rather than treating it as a transport fault.
 
 The [Claude Code plugin](../../guides/claude-code-skill.md#option-2-the-claude-code-plugin)
 registers the server automatically. See
-**[Integrations → MCP](../../guides/integrations.md#mcp-server)** for a
+**[Coding agents → MCP](../../guides/coding-agents.md#mcp-server)** for a
 Claude Code / Cursor setup snippet to register it by hand.

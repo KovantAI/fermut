@@ -77,7 +77,7 @@ suite.
 
 Under the hood the plugin writes the selected node ids to a file and passes
 `fermut run --select-tests <file>`; see
-[`--select-tests`](../reference/cli/run.md#select-tests).
+[`--select-tests`](../reference/cli/run-test-selection.md#a-subset-of-the-suite-select-tests).
 
 ## Options
 
@@ -125,7 +125,7 @@ specific fermut binary.
 
 fermut also loads a small reporter plugin (`-p _fermut_reporter`) into the
 pytest runs it starts for mutants, to learn exact outcomes (a mutant run in a
-[schemata](../reference/cli/run.md#schemata) fork reports through its
+[schemata](../reference/cli/run-schemata.md) fork reports through its
 template instead). That one is injected
 by fermut and needs nothing installed. See
 [Result reporter plugin](../reference/cli/run.md#result-reporter-plugin).

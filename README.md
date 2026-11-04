@@ -22,8 +22,8 @@ _Line coverage tells you which lines run. fermut tells you which lines your test
 ```text
 $ fermut run src/ --tests tests/
 
-SURVIVED  src/auth.py:42 [boundary-shift] `age >= 18` → `age > 18`
-TIMEOUT   src/slow.py:88 [arith-op-swap]  `n * 2`    → `n / 2`
+SURVIVED  src/auth.py:42@1187 [boundary-shift] `age >= 18` → `age > 18`
+TIMEOUT   src/slow.py:88@2304 [arith-op-swap] `n * 2` → `n / 2`
 
 152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3 (coverage 3), equivalent: 0, errored: 0  | score: 94.6%
 ```
@@ -116,7 +116,7 @@ Start here:
   then `fermut run`, first report in under five minutes.
 - **[Installation](docs/getting-started/installation.md)** — prerequisites
   and build paths.
-- **[Working on projects](docs/guides/projects.md)** — gradual rollout,
+- **[Rolling out to a team](docs/guides/projects.md)** — gradual rollout,
   profile choice, CI integration.
 - **[CLI reference](docs/reference/cli/index.md)** — every subcommand,
   every flag.

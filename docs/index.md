@@ -71,7 +71,7 @@ stuck on "interesting but too slow for CI" for a decade. The wins:
   in a fork of a pytest that already imported and collected the
   suite, instead of paying pytest startup per mutant. 1.5–3.9×
   faster end to end on most suites tested — see
-  [Schemata](reference/cli/run.md#schemata).
+  [Schemata](reference/cli/run-schemata.md).
 - **Type-aware pre-filter.** `ty` discards type-invalid mutants
   before they cost a test run: about 30–40% of covered mutants
   across 9 benchmarked libraries — see
@@ -100,20 +100,15 @@ prints line coverage next to a sampled mutation score and the files
 with the most survivors. See
 **[`fermut baseline`](reference/cli/baseline.md)**.
 
-The coverage it builds is the same as
-`pytest --cov=src --cov-context=test`: coverage.py's native
-`.coverage` SQLite database, which fermut reads directly and
-auto-discovers at the project root — no `--coverage` flag and no
-`coverage json` export step needed (pass `--coverage .coverage` to point
-at a non-default location). `fermut coverage` is a convenience wrapper
-that generates the same `.coverage` and refreshes it incrementally as
-your tests change. (Or, manually: `coverage json -o coverage.json
---show-contexts`, then `--coverage coverage.json`.)
+The coverage it builds is coverage.py's own `.coverage` database with
+per-test contexts, which `fermut run` finds at the project root by
+itself. After you change tests, `fermut coverage` refreshes it
+incrementally. See **[Coverage](guides/coverage.md)** for the details.
 
 Expected output — a line per survivor/timeout, then a one-line summary:
 
 ```
-SURVIVED  src/auth.py:42 [boundary-shift] `age >= 18` → `age > 18`
+SURVIVED  src/auth.py:42@1187 [boundary-shift] `age >= 18` → `age > 18`
 
 152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3 (coverage 3), equivalent: 0, errored: 0  | score: 94.6%
 ```

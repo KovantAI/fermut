@@ -11,7 +11,7 @@ your tests don't actually catch.
 
 This page walks the **solo loop**: one developer, one machine, no CI.
 That's the fastest path to seeing whether fermut earns its keep on your
-codebase. Once you're convinced, **[Working on projects](../guides/projects.md)**
+codebase. Once you're convinced, **[Rolling out to a team](../guides/projects.md)**
 covers the team rollout (baseline → measure-only CI → gate → tighten).
 
 ## 1. Initialize the project
@@ -55,7 +55,7 @@ overwrite, `--dry-run` to preview without touching disk.
 
 For the solo loop, the auto-detected defaults are fine. Profile choice
 (`pr-gate`, `nightly`, `local`, `library`) matters once you're wiring CI
-— covered in **[Working on projects](../guides/projects.md#step-2-pick-a-profile)**.
+— covered in **[Rolling out to a team](../guides/projects.md#step-2-pick-a-profile)**.
 
 ## 2. Get an honest baseline
 
@@ -102,12 +102,9 @@ Generate per-test coverage:
 pytest --cov=src --cov-context=test
 ```
 
-This writes coverage.py's native `.coverage` SQLite database, which
-fermut reads directly and auto-discovers at the project root — no
-`coverage json` export step. (`fermut coverage` is a convenience wrapper
-that does the same discovery-from-config and also refreshes
-incrementally as you add tests. Or, manually: `coverage json -o
-coverage.json --show-contexts`, then pass `--coverage coverage.json`.)
+This writes coverage.py's `.coverage` database, which fermut reads
+directly and finds at the project root by itself. `fermut coverage` does
+the same and refreshes it incrementally as you add tests.
 
 `--cov-context=test` is what tags each covered line with the pytest
 nodeID of the test that touched it. Without it, fermut knows the line
@@ -159,8 +156,8 @@ Re-runs are much faster thanks to the AST-hash cache — typically
 Output — a line per survivor/timeout/error, then a one-line summary:
 
 ```
-SURVIVED  src/auth.py:42 [boundary-shift] `age >= 18` → `age > 18`
-TIMEOUT   src/slow.py:88 [arith-op-swap] `n * 2` → `n / 2`
+SURVIVED  src/auth.py:42@1187 [boundary-shift] `age >= 18` → `age > 18`
+TIMEOUT   src/slow.py:88@2304 [arith-op-swap] `n * 2` → `n / 2`
 
 152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3 (coverage 3), equivalent: 0, errored: 0  | score: 94.6%
 ```
@@ -311,7 +308,7 @@ Tracking the trajectory is more useful than chasing a fixed target.
 
 Solo loop proves the value on one branch. To make it stick across the team:
 
-- **[Working on projects](../guides/projects.md)** — five-step rollout:
+- **[Rolling out to a team](../guides/projects.md)** — five-step rollout:
   baseline → profile → measure-only CI → gate → tighten. Tells you how
   to avoid the "ship a noisy gate, team hates mutation testing" trap.
 - **[Coding agents](../guides/coding-agents.md)** — if AI agents are

@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 
+use crate::runner::resolve_tool;
+
 const GHA_PR_GATE: &str = include_str!("../../../examples/github-actions/pr-gate.yml");
 
 /// All the inputs `fermut init` needs. Kept in a struct so the dispatch
@@ -300,14 +302,15 @@ fn detect(start: &Path) -> Result<Detection> {
     let project_root = find_project_root(start);
     let source_root = detect_source_root(&project_root);
     let tests = detect_tests(&project_root);
-    let runner = if which("pytest").is_some() {
+    let runner = if resolve_tool("pytest", &project_root).is_some() {
         "pytest"
     } else {
         "unittest"
     };
     // The embedded checker needs no binary; only FERMUT_TY_EMBEDDED=0 makes
     // the filter depend on `ty` being on PATH.
-    let ty_available = which("ty").is_some() || !crate::filter::ty::env_disables_embedded();
+    let ty_available =
+        resolve_tool("ty", &project_root).is_some() || !crate::filter::ty::env_disables_embedded();
     let coverage = detect_coverage(&project_root);
     let hypothesis = pyproject_mentions(&project_root, &["hypothesis"])
         || lockfile_mentions(&project_root, &["hypothesis"]);
@@ -328,7 +331,7 @@ fn detect(start: &Path) -> Result<Detection> {
 }
 
 fn detect_coverage(root: &Path) -> CoverageDetection {
-    detect_coverage_impl(root, which("coverage").is_some())
+    detect_coverage_impl(root, resolve_tool("coverage", root).is_some())
 }
 
 // Pure variant so tests can pin the PATH-lookup outcome instead of racing
@@ -440,24 +443,6 @@ fn count_py_files(dir: &Path) -> usize {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "py"))
         .count()
-}
-
-fn which(bin: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(bin);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        #[cfg(windows)]
-        {
-            let exe = dir.join(format!("{bin}.exe"));
-            if exe.is_file() {
-                return Some(exe);
-            }
-        }
-    }
-    None
 }
 
 fn rel(p: &Path, base: &Path) -> String {
@@ -775,6 +760,32 @@ mod tests {
             root.canonicalize().unwrap(),
             tmp.path().canonicalize().unwrap()
         );
+    }
+
+    // pytest installed only in the project's `.venv` (not activated, not on
+    // PATH) must still pick the pytest runner — `doctor` and `run` find it
+    // there, so a `unittest` pick would fail with "no tests collected".
+    #[cfg(unix)]
+    #[test]
+    fn detect_finds_pytest_in_unactivated_dot_venv() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("VIRTUAL_ENV").is_some() {
+            return; // VIRTUAL_ENV wins over `.venv` discovery.
+        }
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join("pyproject.toml"),
+            "[project]\nname = \"x\"\n",
+        )
+        .unwrap();
+        let bin = tmp.path().join(".venv/bin");
+        fs::create_dir_all(&bin).unwrap();
+        for name in ["python", "pytest"] {
+            let p = bin.join(name);
+            fs::write(&p, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(detect(tmp.path()).unwrap().runner, "pytest");
     }
 
     #[test]

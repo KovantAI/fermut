@@ -165,7 +165,7 @@ cosmic-ray features without a fermut equivalent today:
   fermut equivalent for "spread the run across N machines" is
   `--shard i/n` in a CI matrix — zero-coordination, deterministic
   per `mutant.id`. See
-  **[Integrations → Sharded full sweep](integrations.md#sharded-full-sweep)**.
+  **[CI recipes → Sharded full sweep](integrations.md#sharded-full-sweep)**.
 - **Persistent session DB.** Resumability comes from the result
   cache, not from a session. You can't "open" an old session and
   re-query it — you keep the JSON reports.
@@ -233,13 +233,13 @@ fermut show report.json
 Three things came along for free: `--diff-only` for PR gates,
 `--shard` for parallelism without celery, and the sticky PR
 comment. The CI variant is in
-**[Integrations → GitHub Actions](integrations.md#github-actions)**.
+**[CI recipes → GitHub Actions](integrations.md#github-actions)**.
 
 ## Where next
 
-- **[Working on projects](projects.md)** — gradual-rollout playbook
+- **[Rolling out to a team](projects.md)** — gradual-rollout playbook
   applies cleanly after migration.
-- **[Integrations → Sharded full sweep](integrations.md#sharded-full-sweep)** —
+- **[CI recipes → Sharded full sweep](integrations.md#sharded-full-sweep)** —
   the celery replacement.
 - **[Landscape](../concepts/landscape.md)** — the honest
   feature-by-feature comparison.

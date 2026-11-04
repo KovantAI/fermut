@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # ref vs --schemata parity on app suites copied to APPS (agent-library, apb-mutation),
-# each with its own venv at ~/code/<app>/.venv. Usage: RUN=n runapps.sh [app...]
+# each with its own venv at $VENVS/<app>/.venv (default ~/code). Usage: RUN=n runapps.sh [app...]
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
-OUT=$HERE/results/10repo
+OUT=${OUT:-$HERE/results/10repo}
+VENVS=${VENVS:-$HOME/code}
 FERMUT=${FERMUT:-$HERE/../../target/release/fermut}
 APPS=${APPS:?set APPS to the directory holding the app copies}
 UNIT="not integration and not acceptance and not manual and not redteam and not agentdojo and not bdd and not azure"
@@ -21,8 +22,8 @@ for app in ${*:-apb-mutation agent-library}; do
   for mode in ${MODES:-ref schemata}; do
     flag=(--no-schemata); [ "$mode" = schemata ] && flag=(--schemata)  # on by default
     t0=$(date +%s)
-    ( cd "$APPS/$app" && PATH="$HOME/code/$app/.venv/bin:$PATH" ${MEASURE:+python3 "$HERE/peakrss.py" "$OUT/$mode-$app${RUN:+-r$RUN}.rss.json" --} "$FERMUT" run src --tests tests \
-        --coverage "$APPS/$app/.coverage" --no-cache --no-history --timeout 30 --baseline-timeout 1800 \
+    ( cd "$APPS/$app" && PATH="$VENVS/$app/.venv/bin:$PATH" ${MEASURE:+python3 "$HERE/peakrss.py" "$OUT/$mode-$app${RUN:+-r$RUN}.rss.json" --} "$FERMUT" run src --tests tests \
+        --coverage "$APPS/$app/.coverage" --no-cache --no-history --timeout 30 --baseline-timeout 1800 ${JOBS:+--jobs $JOBS} \
         --sample "$sample" --pytest-arg=-m "--pytest-arg=$UNIT" ${extra[@]+"${extra[@]}"} \
         --json "$OUT/$mode-$app${RUN:+-r$RUN}.json" ${flag[@]+"${flag[@]}"} ) > "$OUT/$mode-$app${RUN:+-r$RUN}.log" 2>&1
     echo "$app $mode${RUN:+ r$RUN} rc=$? wall=$(( $(date +%s) - t0 ))s" | tee -a "$OUT/walls.txt"

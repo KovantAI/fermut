@@ -5,7 +5,7 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates curl git pkg-config libssl-dev python3 \
+        build-essential ca-certificates curl git libmagic1 pkg-config libssl-dev python3 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:/root/.local/bin:$PATH

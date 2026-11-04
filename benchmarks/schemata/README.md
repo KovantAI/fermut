@@ -33,6 +33,63 @@ fermut run jwt --tests tests --coverage "$PWD/fermut-pyjwt/coverage.json" \
 python3 ../schemata/compare.py --ref ../schemata/results/ref-pyjwt-*.json --spike ../schemata/results/spike-co-pyjwt-*.json
 ```
 
+## Linux parity (2026-11-04, backlog #40)
+
+`linux/run.sh setup && linux/run.sh parity 3 && linux/run.sh compare`:
+Ubuntu 24.04 container (Docker Desktop, aarch64, 14 CPUs, 8 GB, `JOBS=8`),
+build 854a4da6db, Python 3.13, venvs pinned to the macOS fixtures
+(`linux/pins/`, refreshed 2026-11-04). 10 repos × 3 rounds × ref/schemata,
+`--timeout 10`.
+
+| repo | executed | ref score | sch score | stable diffs | flaky r/s | ref wall | sch wall | speedup |
+|---|---|---|---|---|---|---|---|---|
+| click | 1409 | 78.7 | 78.7 | 0 | 0/0 | 70s | 26s | 2.7× |
+| flask | 788 | 74.2 | 74.2 | 0 | 0/0 | 48s | 18s | 2.7× |
+| jinja2 | 1911 | 76.2 | 76.2 | 0 | 0/0 | 111s | 30s | 3.7× |
+| markupsafe | 217 | 66.8 | 66.8 | 0 | 0/0 | 12s | 14s | 0.9× |
+| more-itertools | 3326 | 85.6 | 85.6 | 0 | 0/0 | 209s | 114s | 1.8× |
+| pyjwt | 1739 | 78.9 | 78.9 | 0 | 0/0 | 87s | 33s | 2.6× |
+| starlette | 5960 | 79.4 | 79.4 | 0 | 0/0 | 469s | 203s | 2.3× |
+| trio | 2330 | 52.7–52.8 | 52.7 | **1** | 1/1 | 285s | 224s | 1.3× |
+| typer | 1597 | 69.1 | 69.1 | 0 | 0/0 | 220s | 176s | 1.3× |
+| werkzeug | 2487 | 72.0–72.1 | 72.1 | 0 | 1/0 | 147s | 55s | 2.7× |
+
+Walls are medians. Total 1658 → 893 s (1.9×).
+
+- **The one stable diff** (trio `_core/_thread_cache.py@5793`, `daemon=True`
+  dropped): ref `timed_out` ×3, schemata `survived` ×3. The worker threads turn
+  non-daemon, so a cold pytest hangs at interpreter exit waiting for them; a
+  forked child leaves with `os._exit` and never waits. Backlog #61. (macOS
+  sampled this mutant out, so it never showed there.)
+- 79 trio mutants are `error` in both modes alike: pytest 9.2 exit 3 when
+  `-p trio._tests.pytest_plugin` imports the broken package (backlog #59,
+  fixed after this run in 41614e4361: 75 of 76 become kills).
+- starlette deselects `test_staticfiles_with_invalid_dir_permissions_returns_401`
+  when run as root (root ignores `chmod`; `run10.sh`).
+- A first attempt was discarded: the Mac slept mid-run, which pauses the VM
+  (trio schemata 1131 s, 15-min mutant "timeouts"). `linux/run.sh` now runs
+  under `caffeinate`.
+
+Apps (`linux/run.sh apps 3`, 4 workers: at the default 14 the suites OOM the
+8 GB VM). Sources copied into the volume (`COPYFILE_DISABLE=1`, or macOS tar
+adds `._*` AppleDouble files pytest collects), venvs pinned to the macOS ones
+(Python 3.12; the private `kovant-*` wheels re-zipped from the uv cache, no
+index credentials in the container), coverage via `fermut coverage --full`
+with `runapps.sh`'s marker filter and deselects. agent-library needs
+`libmagic1` (Dockerfile).
+
+| app | executed | ref score | sch score | stable diffs | flaky | ref wall | sch wall | speedup |
+|---|---|---|---|---|---|---|---|---|
+| agent-library | 379 | 71.2 | 71.0 | 1 | 0/0 | 891s | 556s | 1.6× |
+| apb-mutation | 590 | 85.2 | 84.7 | 3 | 0/0 | 1076s | 237s | 4.5× |
+
+All 4 stable diffs are ref `timed_out` / schemata `survived` at the
+`--timeout 30` border: ref hung inside an ordinary test after ~21 s of test
+time plus ~9 s of cold start; the warm fork finished the same selection in
+23–28 s. A budget flip, not a semantic diff (macOS saw the same kind on apb,
+`usage_telemetry.py@1807`). agent-library is 1.6× faster on Linux where macOS
+was slower than ref (fork-unsafe frameworks, #43), as #40 predicted.
+
 ## Phases 1–3 results (2026-10-25)
 
 ### How the spike works

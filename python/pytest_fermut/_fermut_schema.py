@@ -440,23 +440,56 @@ class Template:
         os.write(self.resp, (json.dumps(obj) + "\n").encode())
 
     # Record every switched function that runs before the fork.
+    def saw(self, code):
+        fns = self.by_filename.get(code.co_filename)
+        if fns is None:
+            fns = self.by_filename[code.co_filename] = self.switched.get(
+                os.path.realpath(code.co_filename), {}
+            )
+        hit = fns.get(code.co_firstlineno)
+        if hit:
+            self.ran.add(hit)
+
     def profile(self, frame, event, arg):
         if event == "call":
-            code = frame.f_code
-            fns = self.by_filename.get(code.co_filename)
-            if fns is None:
-                fns = self.by_filename[code.co_filename] = self.switched.get(
-                    os.path.realpath(code.co_filename), {}
-                )
-            hit = fns.get(code.co_firstlineno)
-            if hit:
-                self.ran.add(hit)
+            self.saw(frame.f_code)
+
+    def on_start(self, code, offset):
+        self.saw(code)
+        # Seen once is enough: the event goes off for this code object, so
+        # the rest of import and collection runs untraced (a setprofile hook
+        # on every call doubled agent-library's ready time).
+        return sys.monitoring.DISABLE
+
+    def trace(self):
+        """Start recording; `sys.monitoring` on 3.12+ unless another tool
+        holds the profiler slot, `setprofile` otherwise."""
+        mon = getattr(sys, "monitoring", None)
+        self.tool = None
+        if mon is not None and mon.get_tool(mon.PROFILER_ID) is None:
+            self.tool = mon.PROFILER_ID
+            mon.use_tool_id(self.tool, "fermut")
+            mon.register_callback(self.tool, mon.events.PY_START, self.on_start)
+            mon.set_events(self.tool, mon.events.PY_START)  # global: every thread
+        else:
+            sys.setprofile(self.profile)
+            threading.setprofile(self.profile)
+
+    def untrace(self):
+        if self.tool is not None:
+            mon = sys.monitoring
+            mon.set_events(self.tool, 0)
+            mon.register_callback(self.tool, mon.events.PY_START, None)
+            mon.free_tool_id(self.tool)
+            self.tool = None
+        else:
+            sys.setprofile(None)
+            threading.setprofile(None)
 
     def run(self):
         os.chdir(self.mirror_root)
         setattr(builtins, ACTIVE, 0)
-        sys.setprofile(self.profile)
-        threading.setprofile(self.profile)
+        self.trace()
         import pytest
 
         template = self
@@ -464,8 +497,7 @@ class Template:
         class Plugin:
             @pytest.hookimpl(tryfirst=True)
             def pytest_runtestloop(self, session):
-                sys.setprofile(None)
-                threading.setprofile(None)
+                template.untrace()
                 others = [
                     t.name
                     for t in threading.enumerate()
@@ -497,7 +529,7 @@ class Template:
         rc = pytest.main(list(self.pytest_args), plugins=[Plugin()])
         # Only reached when pytest stopped before the test loop (collection
         # errors, usage errors): the caller falls back to spawning.
-        sys.setprofile(None)
+        self.untrace()
         self.send(
             {"ready": False, "error": f"pytest exited {int(rc)} before the test loop"}
         )

@@ -399,7 +399,7 @@ def project_mutant(id_, file, needle, replacement, root):
 
 
 class Server:
-    def __init__(self, root, schema_path):
+    def __init__(self, root, schema_path, occupy_profiler=False):
         # As fermut runs it: pytest's temp root inside the mirror's workdir.
         self.temproot = root / "pytest-temproot"
         self.temproot.mkdir(exist_ok=True)
@@ -410,9 +410,25 @@ class Server:
             "PYTEST_DEBUG_TEMPROOT": str(self.temproot),
         }
         env.pop("FM_ACTIVE", None)
+        # Another tool holding sys.monitoring's profiler slot pushes the
+        # template onto its setprofile fallback.
+        launch = (
+            [
+                "-c",
+                (
+                    "import runpy, sys; m = sys.monitoring; "
+                    "m.use_tool_id(m.PROFILER_ID, 'other'); "
+                    "sys.argv = sys.argv[1:]; "
+                    "runpy.run_path(sys.argv[0], run_name='__main__')"
+                ),
+            ]
+            if occupy_profiler
+            else []
+        )
         self.proc = subprocess.Popen(
             [
                 sys.executable,
+                *launch,
                 str(HELPER),
                 "serve",
                 str(root),
@@ -462,7 +478,7 @@ class Server:
 
 
 @pytest.fixture
-def served(tmp_path):
+def served(tmp_path, request):
     for rel, text in PROJECT.items():
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel).write_text(text)
@@ -478,12 +494,28 @@ def served(tmp_path):
     ]
     result = schema.schematize(str(tmp_path), muts)
     (tmp_path / "schema.json").write_text(json.dumps(result))
-    server = Server(tmp_path, tmp_path / "schema.json")
+    server = Server(
+        tmp_path, tmp_path / "schema.json", getattr(request, "param", False)
+    )
     yield server, {k: v["idx"] for k, v in result["mutants"].items()}
     if server.proc.poll() is None:
         server.close()
 
 
+@pytest.mark.parametrize(
+    "served",
+    [
+        pytest.param(False, id="default-tracer"),
+        pytest.param(
+            True,
+            id="setprofile-fallback",
+            marks=pytest.mark.skipif(
+                sys.version_info < (3, 12), reason="always setprofile below 3.12"
+            ),
+        ),
+    ],
+    indirect=True,
+)
 def test_serve_kills_survives_and_flags_pre_fork_functions(served):
     server, idx = served
     ready = server.recv()

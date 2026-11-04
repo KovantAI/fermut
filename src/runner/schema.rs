@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::pytest::{run_timing, PytestRunner};
 use super::pytest_result::RunResult;
@@ -789,6 +789,7 @@ impl Template {
         if !ready.ready {
             bail!("template refused: {}", ready.error.unwrap_or_default());
         }
+        debug!(unsafe_ranges = ?ready.unsafe_ranges, "template ready");
         Ok(Self {
             child: Mutex::new(child),
             mem_cap: schema.mem_cap,

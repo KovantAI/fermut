@@ -976,7 +976,13 @@ impl<'a> Collector<'a> {
     /// Drop each element of a list/set/tuple literal in turn (PositionalDrop).
     /// Shared by `Expr::List`/`Set`/`Tuple`, which differ only in node type.
     fn emit_seq_drop(&mut self, elts: &[Expr], container: AnyNodeRef) {
-        for elt in elts {
+        let tuple = matches!(container, AnyNodeRef::ExprTuple(_));
+        for (i, elt) in elts.iter().enumerate() {
+            // `(a, *b)` → `(*b)` / `x = *b` is a syntax error: a tuple can't
+            // shrink to a lone starred element. Lists and sets can.
+            if tuple && elts.len() == 2 && elts[1 - i].is_starred_expr() {
+                continue;
+            }
             let er = self.paren_range(elt, container);
             let r = self.extend_to_consume_comma(er, container.range());
             self.push(Operator::PositionalDrop, r, "");
@@ -1736,6 +1742,21 @@ def f(brand, color, origin, a, b, c, xs, n, d):
         assert!(contains("f(a, b)\n", Operator::PositionalDrop));
         assert!(contains("x = [1, 2, 3]\n", Operator::PositionalDrop));
         assert!(contains("x = (1, 2)\n", Operator::PositionalDrop));
+    }
+
+    #[test]
+    fn parity_positional_drop_never_leaves_lone_starred_tuple() {
+        // Fuzz crash: `(repo, *d)` → `(*d)` doesn't parse.
+        for src in ["x = (a, *d)\n", "x = a, *d\n", "x = (*d, a)\n"] {
+            for m in collect(Path::new("t.py"), src).unwrap() {
+                let patched = crate::patch_source(src, m.range, &m.replacement);
+                assert!(
+                    ruff_python_parser::parse_module(&patched).is_ok(),
+                    "{m:?} → {patched}"
+                );
+            }
+        }
+        assert!(contains("x = [a, *d]\n", Operator::PositionalDrop));
     }
 
     #[test]

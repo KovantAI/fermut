@@ -1442,6 +1442,22 @@ mod tests {
     }
 
     #[test]
+    fn max_memory_reads_the_config_file_and_rejects_a_bad_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        let toml = tmp.path().join("fermut.toml");
+        std::fs::write(&toml, "max_memory = \"1G\"\n").unwrap();
+        let cfg = call(tmp.path().to_path_buf(), None).unwrap();
+        assert_eq!(cfg.max_memory, MemoryCap::Bytes(1 << 30));
+
+        std::fs::write(&toml, "max_memory = \"big\"\n").unwrap();
+        let err = call(tmp.path().to_path_buf(), None).unwrap_err();
+        assert!(
+            err.to_string().contains("max_memory in config"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn the_timeout_factor_defaults_on_unless_turned_off() {
         let tmp = tempfile::tempdir().unwrap();
         let factor = |toml: &str, tweak: &dyn Fn(&mut RunConfigArgs)| {

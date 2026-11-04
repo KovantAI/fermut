@@ -64,8 +64,10 @@ pub struct FileConfig {
     /// outcomes (import breaks, the killing test). Default true; CLI
     /// `--no-pytest-plugin` overrides.
     pub pytest_plugin: Option<bool>,
-    /// [experimental] Run function-body mutants from a schema by forking a
-    /// warm pytest process. Default false; CLI `--schemata` turns it on.
+    /// Run function-body mutants from a schema by forking a warm pytest
+    /// process. Default on wherever it can run (pytest runner, Unix); `false`
+    /// turns it off, `true` makes an unsupported setup an error. CLI
+    /// `--no-schemata` / `--schemata` override.
     pub schemata: Option<bool>,
     /// Path to the advisory kill-order sidecar. Default
     /// `<artifact_root>/.fermut/kill-order.json`; relative paths resolve

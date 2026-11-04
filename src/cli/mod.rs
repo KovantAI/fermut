@@ -327,14 +327,20 @@ pub(crate) struct RunConfigArgs {
     #[arg(long)]
     pub no_pytest_plugin: bool,
 
-    /// [experimental] Schemata mode: build every function-body mutant into
-    /// one schema up front, then run each mutant by forking a pytest process
-    /// that has already imported and collected the suite, instead of starting
-    /// pytest per mutant. Same verdicts by design; mutants it can't serve
-    /// safely (module/class level, code that ran during import or collection)
-    /// run the normal way. Pytest runner on Unix only. Also settable via
-    /// `schemata = true`.
+    /// Turn schemata mode off: start a fresh pytest per mutant instead of
+    /// forking one that already imported and collected the suite. Schemata is
+    /// on by default with the pytest runner on Unix; it builds every
+    /// function-body mutant into one schema up front, and anything it can't
+    /// serve safely (module/class level, code that ran during import or
+    /// collection, a test that crashes or fails in a fork) runs the normal way.
+    /// Same verdicts by design. Also settable via `schemata = false`.
     #[arg(long)]
+    pub no_schemata: bool,
+
+    /// Require schemata mode (over `schemata = false` in config): an error,
+    /// not a silent fallback, when the runner or platform can't fork one.
+    /// Conflicts with `--no-schemata`.
+    #[arg(long, conflicts_with = "no_schemata")]
     pub schemata: bool,
 
     /// Wall-clock ceiling (seconds) on the per-mutant testing phase. When
@@ -356,6 +362,10 @@ pub(crate) struct RunConfigArgs {
     /// for the flat `--timeout`.
     #[arg(long, value_name = "FACTOR")]
     pub timeout_factor: Option<f64>,
+
+    /// Use the flat `--timeout` for every mutant. Same as `--timeout-factor 0`.
+    #[arg(long, conflicts_with = "timeout_factor")]
+    pub no_timeout_factor: bool,
 
     /// Wall time of a green whole-suite run you already did (seconds). When
     /// fermut's baseline is skipped it stands in for it when sizing

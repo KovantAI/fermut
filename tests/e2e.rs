@@ -515,6 +515,12 @@ fn schemata_gives_the_same_verdicts_as_a_normal_run() {
         .and_then(|n| n.parse().ok())
         .unwrap_or_else(|| panic!("no schemata summary in:\n{stderr}"));
     assert!(served > 0, "no mutant was run from the schema:\n{stderr}");
+    // Survivors from the schema are spot-checked the normal way; a
+    // disagreement would mean a fork made a test pass.
+    assert!(
+        !stderr.contains("survived in a fork but is"),
+        "the survivor audit disagreed:\n{stderr}"
+    );
 
     // Kill-sets recorded from the schema (every covering test runs, no `-x`)
     // match the spawn path's, mutant for mutant.

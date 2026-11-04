@@ -82,8 +82,10 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         smart_order: cli_smart_order,
         no_pytest_plugin: cli_no_pytest_plugin,
         schemata: cli_schemata,
+        no_schemata: cli_no_schemata,
         max_time: cli_max_time,
         timeout_factor: cli_timeout_factor,
+        no_timeout_factor: cli_no_timeout_factor,
         baseline_secs: cli_baseline_secs,
         record_kill_sets: cli_record_kill_sets,
         only_dominators,
@@ -351,7 +353,6 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     // beside cache/history.
     let smart_order = resolve_smart_order(cli_no_smart_order, cli_smart_order, file.smart_order);
     let pytest_plugin = !cli_no_pytest_plugin && file.pytest_plugin.unwrap_or(true);
-    let schemata = cli_schemata || file.schemata.unwrap_or(false);
     let kill_order_path = file
         .kill_order_path
         .clone()
@@ -390,10 +391,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         globset::Glob::new(pat).with_context(|| format!("invalid exclude glob: {pat:?}"))?;
     }
     let runner = cli_runner.or(file.runner).unwrap_or_default();
-    if schemata {
-        check_schemata(runner)?;
-        warn!("`--schemata` is experimental; verdicts should match a normal run, please report any that don't");
-    }
+    let schemata = resolve_schemata(cli_no_schemata, cli_schemata, file.schemata, runner)?;
     // Resolve the pytest interpreter: explicit `--python` / config `python`
     // (relative values anchored at the config base dir) is authoritative;
     // otherwise auto-discover a venv near the source root. `None` keeps the
@@ -433,7 +431,11 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         );
     }
     // On by default; `0` turns it off (flat `--timeout`).
-    let explicit_factor = cli_timeout_factor.or(file.timeout_factor);
+    let explicit_factor = if cli_no_timeout_factor {
+        Some(0.0)
+    } else {
+        cli_timeout_factor.or(file.timeout_factor)
+    };
     let timeout_factor = match explicit_factor {
         Some(0.0) => None,
         Some(f) => Some(f),
@@ -508,7 +510,30 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     })
 }
 
-/// Clap value parser for `--cache-audit-rate`: a fraction in `[0, 1]`.
+/// Schemata is on by default wherever it can run. `--no-schemata` /
+/// `schemata = false` turn it off; `--schemata` / `schemata = true` demand it,
+/// so an unsupported runner or platform is an error rather than a silent
+/// normal run.
+fn resolve_schemata(
+    cli_no: bool,
+    cli_yes: bool,
+    file: Option<bool>,
+    runner: RunnerKind,
+) -> Result<bool> {
+    let requested = if cli_no {
+        Some(false)
+    } else if cli_yes {
+        Some(true)
+    } else {
+        file
+    };
+    match requested {
+        Some(false) => Ok(false),
+        Some(true) => check_schemata(runner).map(|()| true),
+        None => Ok(check_schemata(runner).is_ok()),
+    }
+}
+
 /// Schemata forks a warm pytest process: pytest runner only, and `fork` only
 /// exists on Unix.
 fn check_schemata(runner: RunnerKind) -> Result<()> {
@@ -521,6 +546,7 @@ fn check_schemata(runner: RunnerKind) -> Result<()> {
     Ok(())
 }
 
+/// Clap value parser for `--cache-audit-rate`: a fraction in `[0, 1]`.
 pub(crate) fn parse_audit_rate(s: &str) -> Result<f64, String> {
     let r: f64 = s.parse().map_err(|_| format!("`{s}` is not a number"))?;
     check_audit_rate(r)
@@ -895,8 +921,10 @@ mod tests {
             smart_order: false,
             no_pytest_plugin: false,
             schemata: false,
+            no_schemata: false,
             max_time: None,
             timeout_factor: None,
+            no_timeout_factor: false,
             baseline_secs: None,
             record_kill_sets: None,
             only_dominators: false,
@@ -1164,6 +1192,23 @@ mod tests {
     }
 
     #[test]
+    fn schemata_is_on_wherever_it_can_run_unless_turned_off() {
+        let (py, rs) = (RunnerKind::Pytest, RunnerKind::Rstest);
+        let on = |no, yes, file, runner| resolve_schemata(no, yes, file, runner).ok();
+        // Default: on with pytest on Unix, quietly off elsewhere.
+        assert_eq!(on(false, false, None, py), Some(cfg!(unix)));
+        assert_eq!(on(false, false, None, rs), Some(false));
+        // Off wins over config and is fine with any runner.
+        assert_eq!(on(true, false, Some(true), py), Some(false));
+        assert_eq!(on(false, false, Some(false), py), Some(false));
+        assert_eq!(on(true, false, None, rs), Some(false));
+        // Asked for explicitly: an unsupported runner is an error, not a fallback.
+        assert_eq!(on(false, true, Some(false), py), cfg!(unix).then_some(true));
+        assert_eq!(on(false, true, None, rs), None);
+        assert_eq!(on(false, false, Some(true), rs), None);
+    }
+
+    #[test]
     fn schemata_needs_the_pytest_runner() {
         assert!(check_schemata(RunnerKind::Rstest).is_err());
         assert!(check_schemata(RunnerKind::Unittest).is_err());
@@ -1348,6 +1393,32 @@ mod tests {
         tracing::subscriber::with_default(sub, f);
         let bytes = buf.0.lock().unwrap().clone();
         String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn the_timeout_factor_defaults_on_unless_turned_off() {
+        let tmp = tempfile::tempdir().unwrap();
+        let factor = |toml: &str, tweak: &dyn Fn(&mut RunConfigArgs)| {
+            std::fs::write(tmp.path().join("fermut.toml"), toml).unwrap();
+            let mut args = run_args(empty_filter());
+            tweak(&mut args);
+            build_config(tmp.path().to_path_buf(), args)
+                .unwrap()
+                .timeout_factor
+        };
+        assert_eq!(factor("", &|_| ()), Some(3.0));
+        assert_eq!(factor("", &|a| a.no_timeout_factor = true), None);
+        assert_eq!(factor("timeout_factor = 0\n", &|_| ()), None);
+        assert_eq!(factor("schemata = false\n", &|_| ()), Some(3.0));
+        assert_eq!(factor("timeout_factor = 5\n", &|_| ()), Some(5.0));
+        // A default nobody asked for doesn't warn about a missing baseline.
+        let log = logged(|| {
+            factor("", &|a| a.no_verify_baseline = true);
+        });
+        assert!(
+            !log.contains("--timeout-factor needs the baseline run"),
+            "{log}"
+        );
     }
 
     #[test]

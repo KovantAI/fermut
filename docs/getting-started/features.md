@@ -23,6 +23,11 @@ guide or reference page.
 - **Native-Rust mutator.** Mutation generation runs on
   [`ruff_python_parser`](https://github.com/astral-sh/ruff), not a
   Python AST walker.
+- **Schemata.** On by default with the pytest runner on Unix: one pytest
+  process imports and collects your suite once, and each mutant runs in a
+  fork of it instead of a fresh pytest. 1.5–3.9× faster whole runs on most
+  suites tested, with the same verdicts; anything it can't vouch for runs the
+  normal way. See **[Schemata](../reference/cli/run.md#schemata)**.
 - **`ty` pre-filter.** Type-invalid mutants are dropped via
   [`ty`](https://github.com/astral-sh/ty) before they cost a pytest
   invocation. Typically removes 20–40% of naive mutants on type-hinted
@@ -32,7 +37,8 @@ guide or reference page.
   AST hash changes). Whitespace/comment edits keep the AST hash, but the
   id embeds the mutant's byte offset, so mutants below such an edit
   still miss; only mutants above it keep their hits. `scope` covers the run-shape inputs that change the
-  outcome without changing the AST: runner kind, timeout, hypothesis
+  outcome without changing the AST: runner kind (schemata on or off shares
+  it), timeout, hypothesis
   seed, pytest args, and the per-mutant test selection set when
   coverage-driven selection is on. Edits to one file only re-run
   that file's mutants. See **[Caching](../concepts/caching.md)**.

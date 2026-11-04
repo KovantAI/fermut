@@ -9,16 +9,25 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Added
-- `fermut run --schemata` (experimental, pytest runner on Unix): build every
-  function-body mutant into one schema, then run each mutant by forking a
-  pytest process that already imported and collected the suite, instead of
-  starting pytest per mutant. Verdicts match a normal run. Mutants it can't
-  serve safely, such as module-level code or functions that ran during
-  import, run the normal way. Also `schemata = true` in config.
+- **Schemata mode, on by default** with the pytest runner on Unix: every
+  function-body mutant is built into one schema, and each mutant runs in a
+  fork of a single pytest process that imported and collected the suite
+  once, instead of in a fresh pytest. Whole runs were 1.5–3.9× faster on most
+  suites tested (apb-mutation 794 s → 203 s; starlette 226 s → 116 s), with
+  the same verdicts: 0 differences that held across 3 runs on 10 libraries
+  and 2 application suites. Anything it can't vouch for runs the normal way:
+  mutants outside function bodies or in code that ran during import or
+  collection, a kill whose tests also fail in a fork with no mutant active,
+  any timeout, and any fork that crashes (on macOS, DNS, proxy and Kerberos
+  lookups aren't fork-safe). About 5% of survivors are also re-run the normal
+  way as an audit; a disagreement is logged and the normal verdict used. `--no-schemata` / `schemata = false` turn it
+  off; `--schemata` / `schemata = true` make an unsupported runner or
+  platform an error instead of a silent normal run. Cached verdicts are
+  shared with normal runs.
 - `--timeout-factor F` (config `timeout_factor`): size each mutant's timeout
   from the baseline run, `min(--timeout, F × baseline wall + 5 s)`, so hung
   mutants stop in seconds instead of at the flat 30 s. On by default
-  (`F = 3`); `--timeout-factor 0` / `timeout_factor = 0` restores the flat
+  (`F = 3`); `--timeout-factor 0` / `--no-timeout-factor` / `timeout_factor = 0` restores the flat
   timeout. Turning it on changes the config hash, so `fermut trend` records a
   config change and flat-timeout cache entries re-run once. With
   `F = 3`: more-itertools 314 s → 162 s, pyjwt 79 s → 59 s, jinja2
@@ -77,7 +86,11 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   (`$TMPDIR/pytest-of-$USER`): their cleanup races, and under
   `filterwarnings = error` the resulting warning fails the run. Each worker
   now has its own root (`PYTEST_DEBUG_TEMPROOT`). A `tmp_path`-heavy project
-  saw 13–21 false kills per run (2–3% of mutants), varying run to run.
+  saw 13–21 false kills per run (2–3% of mutants), varying run to run. The
+  baseline runs under the same root, so a suite that depends on the length of
+  its `tmp_path` (typer wraps it at 80 columns) now fails the baseline instead
+  of failing every mutant run that selects those tests: on typer 147 of 1205
+  kills came from 5 such tests.
 - Uneven worker load: mutants were split into fixed contiguous ranges per
   worker, so a range of slow mutants could leave one pytest running alone
   for most of the run. Each mutant is now scheduled on its own. A full

@@ -27,7 +27,8 @@ After every successful mutant evaluation, fermut writes one entry to
   file, so sibling-function edits keep cache hits intact (see
   [`cache_scope`](../reference/configuration.md#schema)).
 - `scope` captures every input that could change the outcome without
-  touching the AST: runner kind, interpreter, timeout, hypothesis
+  touching the AST: runner kind (with or without schemata: the verdicts
+  match, so they share the cache), interpreter, timeout, hypothesis
   seed, pytest args, the per-mutant test selection set when
   coverage-driven selection is on, and a fingerprint of the tests
   that run against the mutant (see

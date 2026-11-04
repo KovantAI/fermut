@@ -1,4 +1,4 @@
-//! Schemata mode for the pytest runner (`--schemata`, experimental).
+//! Schemata mode for the pytest runner (on by default on Unix; `--no-schemata`).
 //!
 //! Instead of splicing one mutant into a mirror and starting pytest per
 //! mutant, every function-body mutant is compiled into one *schema* up front:
@@ -68,7 +68,20 @@ pub struct SchemaRunner {
     /// summary.
     served: AtomicU64,
     spawned: AtomicU64,
+    /// Survivor audit (see [`SURVIVOR_AUDIT_RATE`]): how many were re-run the
+    /// normal way, and how many of those the normal run killed.
+    audited: AtomicU64,
+    disagreed: AtomicU64,
+    first_survivor: AtomicBool,
 }
+
+/// Fraction of survivors from the schema re-run the normal way. Kill
+/// confirmation catches a fork-only failure; this samples for the other
+/// direction — something in a fork making a test pass that a fresh process
+/// fails. Picked by mutant id, so the same ones every run, plus the first
+/// survivor so even a small run checks one.
+const SURVIVOR_AUDIT_RATE: f64 = 0.05;
+const SURVIVOR_AUDIT_SEED: u64 = 0x5c4e_a0d1;
 
 /// The built schema: one read-only mirror shared by every template.
 struct Schema {
@@ -114,6 +127,9 @@ impl SchemaRunner {
             confirmed: Mutex::new(HashMap::new()),
             served: AtomicU64::new(0),
             spawned: AtomicU64::new(0),
+            audited: AtomicU64::new(0),
+            disagreed: AtomicU64::new(0),
+            first_survivor: AtomicBool::new(false),
         }
     }
 
@@ -298,6 +314,33 @@ impl SchemaRunner {
         ok
     }
 
+    fn audit_pick(&self, id: &str) -> bool {
+        !self.first_survivor.swap(true, Ordering::Relaxed)
+            || crate::filter::sample::score(SURVIVOR_AUDIT_SEED, id) < SURVIVOR_AUDIT_RATE
+    }
+
+    /// Re-run a survivor from the schema the normal way; that run's verdict
+    /// stands. A kill there means a fork made a test pass that a fresh
+    /// process fails — worth a report.
+    fn audit_survivor(&self, mutant: &Arc<Mutant>, served: Served) -> Result<MutantOutcome> {
+        self.audited.fetch_add(1, Ordering::Relaxed);
+        drop(served);
+        let normal = self.inner.run(mutant)?;
+        if matches!(
+            normal,
+            MutantOutcome::Killed { .. } | MutantOutcome::TimedOut { .. }
+        ) {
+            self.disagreed.fetch_add(1, Ordering::Relaxed);
+            warn!(
+                "--schemata: {} survived in a fork but is {} in a normal run; using the normal run. \
+                 Please report this (and compare with --no-schemata).",
+                mutant.id,
+                normal.status_label()
+            );
+        }
+        Ok(normal)
+    }
+
     /// Turn a served run into the outcome the spawn path would have produced.
     fn outcome(&self, mutant: &Arc<Mutant>, served: Served, record: bool) -> MutantOutcome {
         let (key_file, key_op) = self.inner.kill_key(mutant);
@@ -331,6 +374,14 @@ impl Drop for SchemaRunner {
         let (served, spawned) = (*self.served.get_mut(), *self.spawned.get_mut());
         if served + spawned > 0 {
             info!("schemata: {served} mutants run from the schema, {spawned} run normally");
+        }
+        let (audited, disagreed) = (*self.audited.get_mut(), *self.disagreed.get_mut());
+        if audited > 0 {
+            info!(
+                "schemata: survivor audit re-ran {audited} survivor(s) the normal way; \
+                 {} agreed, {disagreed} didn't",
+                audited - disagreed
+            );
         }
     }
 }
@@ -498,6 +549,10 @@ impl Runner for SchemaRunner {
         match self.serve(mutant, None, all) {
             Some(served) if usable(&served) => {
                 self.served.fetch_add(1, Ordering::Relaxed);
+                let survived = served.status.and_then(|s| s.code()) == Some(0);
+                if survived && self.audit_pick(&mutant.id) {
+                    return self.audit_survivor(mutant, served);
+                }
                 Ok(self.outcome(mutant, served, true))
             }
             _ => {
@@ -1129,6 +1184,24 @@ done"#
             !check(r#"{"status":768,"error":"Traceback"}"#),
             "a broken helper still fails it"
         );
+    }
+
+    #[test]
+    fn the_survivor_audit_picks_the_first_and_a_stable_five_percent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        let picks = |runner: &SchemaRunner| -> Vec<bool> {
+            (0..4000)
+                .map(|i| runner.audit_pick(&format!("src/m.py@{i}:op:a->b")))
+                .collect()
+        };
+        let (a, b) = (fake_runner(&dir), fake_runner(&dir));
+        let (pa, pb) = (picks(&a), picks(&b));
+        assert!(pa[0], "the first survivor is always audited");
+        assert_eq!(pa[1..], pb[1..], "the same mutants every run");
+        let n = pa[1..].iter().filter(|&&p| p).count();
+        assert!((140..=260).contains(&n), "~5% of 3999: {n}");
     }
 
     #[test]

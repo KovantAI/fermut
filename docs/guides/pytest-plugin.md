@@ -124,6 +124,8 @@ specific fermut binary.
 ## Not the same as fermut's result reporter
 
 fermut also loads a small reporter plugin (`-p _fermut_reporter`) into the
-pytest runs it spawns per mutant, to learn exact outcomes. That one is injected
+pytest runs it starts for mutants, to learn exact outcomes (a mutant run in a
+[schemata](../reference/cli/run.md#schemata) fork reports through its
+template instead). That one is injected
 by fermut and needs nothing installed. See
 [Result reporter plugin](../reference/cli/run.md#result-reporter-plugin).

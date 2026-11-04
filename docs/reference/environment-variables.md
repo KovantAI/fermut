@@ -18,6 +18,12 @@ Precedence is the standard **CLI flag > env var > config file > built-in default
 | `FERMUT_BASELINE_SECS`     | Default for `--baseline-secs`. `pytest --fermut` sets it to a whole-suite session's duration. See [Timeout budgets](cli/run.md#timeout-budgets). |
 | `FERMUT_CACHE_KEY`         | Secret that namespaces **and** HMAC-signs the result cache. Set it (e.g. in CI) to segment or bust the cache by an external key. Setting it empty disables signing (warns); keys shorter than 16 bytes warn but still apply. |
 
+## Set by fermut for your tests
+
+| Variable     | Effect |
+|--------------|--------|
+| `FM_ACTIVE`  | Under [schemata](cli/run.md#schemata), the active mutant's number in the schema. Exported so a Python subprocess a test starts runs the same mutant; `0` (or unset) means none. Don't set it yourself. |
+
 ## Inherited from the ecosystem
 
 | Variable             | Effect                                                                                                                              |

@@ -114,6 +114,20 @@ both built from the same crate root. The module structure:
   per mutant. `-x` is dropped under `--record-kill-sets`; `-p` loads the
   injected JSONL reporter when the pytest plugin is on. The same runner
   drives `rstest` (`runner = "rstest"`), swapping only the executable.
+- `SchemaRunner` — the default for the pytest runner on Unix
+  (`--no-schemata` turns it off; see [Schemata](../cli/run.md#schemata)).
+  Wraps a `PytestRunner`. `Runner::prepare` hands it the mutants the cheap
+  filters admit; it builds one schema mirror from them (every function-body
+  mutant behind an active-index switch, via the embedded
+  `python/pytest_fermut/_fermut_schema.py`), then starts one template — a
+  pytest session that imported and collected the suite — which every worker
+  shares. A mutant runs as a forked child of the template; requests carry an
+  id so children run side by side. Before serving, the suite runs on the
+  schema with no mutant active, a slice per worker. A kill only stands once
+  the tests that child ran pass in a fork with no mutant active (cached per
+  test list); timeouts, crashed children and everything outside the schema
+  go to the wrapped `PytestRunner`. A stable ~5% sample of survivors is
+  re-run there too (`SURVIVOR_AUDIT_RATE`), and that verdict is reported.
 - `UnittestRunner` — invokes `<python> -m unittest discover -s
   <mirrored-tests> -p <unittest_pattern>` (default `test*.py`).
 
@@ -122,7 +136,7 @@ a new runner, implement the trait and add a `RunnerKind` variant — the
 engine dispatches through the trait object, so swapping is a contained
 change.
 
-Both runners share **worker mirrors**: one mirror per rayon worker
+The spawn-path runners share **worker mirrors**: one mirror per rayon worker
 thread, built once on first use. The mirror is a cheap copy of the
 project tree (reflink/clonefile when supported; plain copy otherwise).
 Per mutant, the patched bytes are spliced into the mirror's copy of
@@ -142,8 +156,14 @@ pub trait Filter: Send + Sync {
     fn name(&self) -> &'static str;
     /// Ok(true) if the mutant should be tested, Ok(false) to drop it.
     fn admits(&self, mutant: &Mutant) -> Result<bool>;
+    /// Spawns a subprocess per mutant (ruff / ty / tce). Default false.
+    fn costly(&self) -> bool { false }
 }
 ```
+
+The cheap filters (everything not `costly`) also run once up front, to
+size what `Runner::prepare` gets — the schemata runner builds only those
+mutants into its schema.
 
 A rejected mutant becomes `Skipped { filter: name() }`. Adding a filter
 is one struct + one `chain.push` in `filter::build_chain`, at its cost

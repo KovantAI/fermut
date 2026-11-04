@@ -44,7 +44,7 @@ impl Filter for SampleFilter {
 
 /// Map (seed, id) to a uniform [0.0, 1.0) value by hashing then taking the
 /// top 53 bits (the f64 mantissa width) so the result is exactly representable.
-fn score(seed: u64, id: &str) -> f64 {
+pub(crate) fn score(seed: u64, id: &str) -> f64 {
     let mut hasher = Sha256::new();
     hasher.update(seed.to_le_bytes());
     hasher.update(id.as_bytes());

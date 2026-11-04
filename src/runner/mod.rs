@@ -12,6 +12,7 @@
 
 pub(crate) mod exit;
 pub mod kill_sets;
+pub(crate) mod memory;
 pub(crate) mod process_group;
 pub mod pytest;
 pub(crate) mod pytest_result;
@@ -56,6 +57,10 @@ pub trait Runner: Send + Sync {
     /// Replace the per-mutant timeout, for the `--timeout-factor` budget sized
     /// after the baseline. Default no-op, for test doubles that never time out.
     fn set_timeout(&mut self, _timeout: Duration) {}
+
+    /// Cap each mutant's memory at `bytes` (see [`memory`]), sized after the
+    /// baseline so the baseline itself runs uncapped. Default no-op.
+    fn set_memory_cap(&mut self, _bytes: u64) {}
 
     /// Drain the kills learned this run (which test killed which
     /// `(file, operator)`), for the engine to fold into the smart-ordering

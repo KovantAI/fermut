@@ -52,6 +52,8 @@ const DEFAULT_PATTERN: &str = "test*.py";
 pub struct UnittestRunner {
     tests: PathBuf,
     timeout: Duration,
+    /// Per-mutant memory cap in bytes, set after the baseline.
+    mem_cap: Option<u64>,
     baseline_timeout: Duration,
     isolation: IsolationMode,
     /// Interpreter to run `-m unittest` with (resolved venv / `--python`, else
@@ -73,6 +75,7 @@ impl UnittestRunner {
         Self {
             tests,
             timeout,
+            mem_cap: None,
             baseline_timeout,
             isolation,
             python,
@@ -93,6 +96,10 @@ impl UnittestRunner {
             .arg("-p")
             .arg(&self.pattern);
         configure_mirror_cmd(&mut cmd, mirror)?;
+        // `None` until the baseline (which shares this command) has run.
+        if let Some(bytes) = self.mem_cap {
+            super::memory::cap_memory(&mut cmd, bytes);
+        }
         Ok(cmd)
     }
 
@@ -127,6 +134,10 @@ impl Runner for UnittestRunner {
         self.timeout = timeout;
     }
 
+    fn set_memory_cap(&mut self, bytes: u64) {
+        self.mem_cap = Some(bytes);
+    }
+
     fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
         run_patched(
             &self.tests,
@@ -143,6 +154,7 @@ impl Runner for UnittestRunner {
                 cmd.stdout(Stdio::null()).stderr(Stdio::null());
                 let started = std::time::Instant::now();
                 let mut child = cmd.spawn().context("spawning python -m unittest")?;
+                let _watch = super::memory::watch(child.id(), self.mem_cap);
 
                 let outcome = match child
                     .wait_timeout(self.timeout)
@@ -626,6 +638,29 @@ mod tests {
         let m = mutant(calc, "return 1", "return 2");
         let o = r.run(&Arc::new(m)).unwrap();
         assert!(matches!(o, MutantOutcome::TimedOut { .. }), "{o:?}");
+    }
+
+    /// `--max-memory` reaches the mutant's process: a mutant allocating past
+    /// the cap is killed (MemoryError on Linux, the watchdog's SIGKILL on
+    /// macOS), and one under it runs as before.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn memory_cap_kills_a_runaway_mutant_only() {
+        let Some(py) = python_or_skip() else { return };
+        let (dir, calc) = project();
+        let mut r = runner_timeout(dir.path().join("tests"), py, Duration::from_secs(30));
+        r.set_memory_cap(256 << 20);
+        // Still returns 1, so only the cap can fail `test_f`.
+        let hog = mutant(
+            calc.clone(),
+            "return 1",
+            "return (b'x' * (1 << 30), __import__('time').sleep(10))[1] or 1",
+        );
+        let o = r.run(&Arc::new(hog)).unwrap();
+        assert!(matches!(o, MutantOutcome::Killed { .. }), "{o:?}");
+        let small = mutant(calc, "return 10", "return 20");
+        let o = r.run(&Arc::new(small)).unwrap();
+        assert!(matches!(o, MutantOutcome::Survived { .. }), "{o:?}");
     }
 
     #[test]

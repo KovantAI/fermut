@@ -379,6 +379,7 @@ mod chain_order_tests {
             max_time_secs: None,
             timeout_factor: None,
             baseline_secs: None,
+            max_memory: crate::config::MemoryCap::Auto,
             record_kill_sets: None,
         }
     }

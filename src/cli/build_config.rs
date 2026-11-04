@@ -12,7 +12,9 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use super::RunConfigArgs;
-use crate::config::{CacheScope, Config, ConfigSource, IsolationMode, LoadedConfig, RunnerKind};
+use crate::config::{
+    CacheScope, Config, ConfigSource, IsolationMode, LoadedConfig, MemoryCap, RunnerKind,
+};
 use crate::filter;
 use crate::mutator::Operator;
 
@@ -86,6 +88,8 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         max_time: cli_max_time,
         timeout_factor: cli_timeout_factor,
         no_timeout_factor: cli_no_timeout_factor,
+        max_memory: cli_max_memory,
+        no_max_memory: cli_no_max_memory,
         baseline_secs: cli_baseline_secs,
         record_kill_sets: cli_record_kill_sets,
         only_dominators,
@@ -458,6 +462,12 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         }
     }
 
+    let max_memory = resolve_max_memory(
+        cli_no_max_memory,
+        cli_max_memory,
+        file.max_memory.as_deref(),
+    )?;
+
     Ok(Config {
         source_root,
         tests,
@@ -504,9 +514,34 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         max_time_secs,
         timeout_factor,
         baseline_secs: cli_baseline_secs,
+        max_memory,
         record_kill_sets: cli_record_kill_sets.map(absolutize),
         only_dominators,
         inferred_audit_rate: audit_inferred.unwrap_or(crate::config::DEFAULT_CACHE_AUDIT_RATE),
+    })
+}
+
+/// `--no-max-memory` > `--max-memory` > `max_memory` > auto; a size of 0 is off.
+/// An explicit cap on a platform that can't enforce it warns.
+fn resolve_max_memory(cli_no: bool, cli: Option<u64>, file: Option<&str>) -> Result<MemoryCap> {
+    let explicit = match (cli_no, cli, file) {
+        (true, ..) => Some(0),
+        (_, Some(b), _) => Some(b),
+        (_, _, Some(s)) => Some(
+            crate::runner::memory::parse_size(s)
+                .map_err(|e| anyhow::anyhow!("max_memory in config: {e}"))?,
+        ),
+        _ => None,
+    };
+    Ok(match explicit {
+        None => MemoryCap::Auto,
+        Some(0) => MemoryCap::Off,
+        Some(b) => {
+            if !crate::runner::memory::ENFORCED {
+                warn!("--max-memory is only enforced on Linux; mutants run uncapped here");
+            }
+            MemoryCap::Bytes(b)
+        }
     })
 }
 
@@ -909,6 +944,8 @@ mod tests {
             max_time: None,
             timeout_factor: None,
             no_timeout_factor: false,
+            max_memory: None,
+            no_max_memory: false,
             baseline_secs: None,
             record_kill_sets: None,
             only_dominators: false,
@@ -1377,6 +1414,47 @@ mod tests {
         tracing::subscriber::with_default(sub, f);
         let bytes = buf.0.lock().unwrap().clone();
         String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn max_memory_flag_beats_config_and_zero_is_off() {
+        assert_eq!(
+            resolve_max_memory(false, None, None).unwrap(),
+            MemoryCap::Auto
+        );
+        assert_eq!(
+            resolve_max_memory(false, None, Some("0")).unwrap(),
+            MemoryCap::Off
+        );
+        assert_eq!(
+            resolve_max_memory(false, None, Some("1G")).unwrap(),
+            MemoryCap::Bytes(1 << 30)
+        );
+        assert_eq!(
+            resolve_max_memory(false, Some(5), Some("1G")).unwrap(),
+            MemoryCap::Bytes(5)
+        );
+        assert_eq!(
+            resolve_max_memory(true, None, Some("1G")).unwrap(),
+            MemoryCap::Off
+        );
+        assert!(resolve_max_memory(false, None, Some("big")).is_err());
+    }
+
+    #[test]
+    fn max_memory_reads_the_config_file_and_rejects_a_bad_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        let toml = tmp.path().join("fermut.toml");
+        std::fs::write(&toml, "max_memory = \"1G\"\n").unwrap();
+        let cfg = call(tmp.path().to_path_buf(), None).unwrap();
+        assert_eq!(cfg.max_memory, MemoryCap::Bytes(1 << 30));
+
+        std::fs::write(&toml, "max_memory = \"big\"\n").unwrap();
+        let err = call(tmp.path().to_path_buf(), None).unwrap_err();
+        assert!(
+            err.to_string().contains("max_memory in config"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

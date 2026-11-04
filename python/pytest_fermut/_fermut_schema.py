@@ -631,6 +631,7 @@ class Template:
 
         try:
             os.setpgid(0, 0)
+            cap_memory()
             os.close(self.resp)
             self.req.close()
             # Python's own handler, as in a cold run: SIG_DFL would turn a
@@ -721,6 +722,21 @@ class Template:
                 teardown_all(session)
                 break
         return 1 if failed else 0
+
+
+def cap_memory():
+    """Cap this forked child's data size at FM_MEM_CAP bytes, as fermut caps a
+    normal run (runner/memory.rs): a runaway mutant gets MemoryError instead
+    of growing until its timeout. The template itself stays uncapped. Linux
+    only: macOS ignores the limit, fermut's watchdog caps the child there."""
+    cap = os.environ.get("FM_MEM_CAP")
+    if not cap or not sys.platform.startswith("linux"):
+        return
+    import resource
+
+    _, hard = resource.getrlimit(resource.RLIMIT_DATA)
+    cap = int(cap) if hard == resource.RLIM_INFINITY else min(int(cap), hard)
+    resource.setrlimit(resource.RLIMIT_DATA, (cap, cap))
 
 
 class Run:

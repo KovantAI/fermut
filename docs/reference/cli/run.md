@@ -62,6 +62,8 @@ fermut run [PATH] [flags...]
 | `--max-time <SECS>`         | off (whole catalogue)            | Wall-clock ceiling on the testing phase. Evaluates highest-value mutants first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` (excluded from the score) instead of run — in-flight mutants finish. A predictable time ceiling for PR gates. See [Time-boxed runs](#time-boxed-runs-max-time). |
 | `--timeout-factor <F>`      | `3` (`0` = flat `--timeout`)     | Size each mutant's timeout from the baseline run: `min(--timeout, F × baseline wall + 5 s)`, so hung mutants stop in seconds. Needs the baseline; without one, the flat `--timeout` applies. See [Timeout budgets](#timeout-budgets). |
 | `--no-timeout-factor`       | off                              | Use the flat `--timeout` for every mutant. Same as `--timeout-factor 0` / `timeout_factor = 0`. |
+| `--max-memory <SIZE>`       | auto on Linux/macOS              | Cap each mutant's memory, e.g. `512M`, `4G`; `0` for off. A mutant past it fails with `MemoryError` and counts as killed. See [Memory cap](#memory-cap). |
+| `--no-max-memory`           | off                              | Don't cap mutant memory. Same as `max_memory = "0"`. |
 | `--baseline-secs <SECS>`    | none                             | Wall time of a green whole-suite run you already did. When fermut's baseline is skipped it sizes `--timeout-factor` timeouts in its place (fermut's own baseline wins when it runs). Ignored without `--timeout-factor`. A whole-suite `pytest --fermut` session passes its session time in `FERMUT_BASELINE_SECS`. |
 | `--record-kill-sets <PATH>` | off                              | [experimental] Write each mutant's full kill-set (every covering test that fails) to `PATH` as JSONL, the input to [`subsume`](subsume.md) and [`hom`](hom.md). Drops pytest's `-x`, so it is much slower. Pytest/rstest only. Pair with `--no-cache`: a cache hit runs nothing and records nothing. |
 | `--only-dominators`         | off                              | [experimental] Run dominator mutants from `.fermut/dominators.json` and infer the kills they imply; for nightly sweeps, refused with `--diff-only`/`--since`/`--record-kill-sets`. See [`fermut subsume`](subsume.md#fermut-run-only-dominators-experimental). |
@@ -208,6 +210,33 @@ limit. With a 1.4 s suite and `F = 3`, mutants get 10 s instead of 30 s.
   the cache on every run.
 
 Set it in config as `timeout_factor` under `[tool.fermut]`.
+
+## Memory cap (`--max-memory`) { #memory-cap }
+
+A mutant that turns a loop into an endless append grows until its timeout:
+single processes reached 4–8 GB, and with several workers a whole run
+10–18 GB, enough to swap or get a CI runner killed. On Linux and macOS
+fermut caps each mutant's memory. Past the cap the mutant's run fails
+(`MemoryError` on Linux, a kill on macOS) and the mutant counts as killed —
+usually long before its timeout.
+
+- **Default.** 4 × the baseline run's peak memory, at least 2 GiB, so a clean
+  mutant has the room the clean suite had and more. Without fermut's own
+  baseline (`--no-verify-baseline`) there is nothing to size from and mutants
+  run uncapped unless you pass `--max-memory`.
+- **Verdicts.** The default cap only ends runaway mutants sooner (killed
+  instead of timed out, both detected). An explicit `--max-memory` is part of
+  the cache and history scope, since a cap below what the suite needs would
+  turn survivors into kills.
+- **Platforms.** On Linux the kernel enforces it. macOS ignores that limit,
+  so fermut samples each mutant's test process every 50 ms and kills it past
+  the cap (also scored killed); a fast-growing mutant can overshoot by one
+  sample, and memory in xdist workers or the test's own subprocesses isn't
+  counted. On Windows mutants run uncapped for now (fermut warns on an
+  explicit `--max-memory`); a Job Object memory limit would add it — open an
+  issue if you need it.
+
+Set it in config as `max_memory` under `[tool.fermut]`.
 
 ## Schemata { #schemata }
 

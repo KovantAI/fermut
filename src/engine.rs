@@ -19,7 +19,7 @@ use tracing::{debug, info, warn};
 
 use crate::ast_hash::{self, ScopeMap};
 use crate::cache::Cache;
-use crate::config::{CacheScope, Config, RunnerKind};
+use crate::config::{CacheScope, Config, MemoryCap, RunnerKind};
 use crate::equiv::{EquivPipeline, EquivVerdict};
 use crate::filter::{self, Filter};
 use crate::history::HistoryEntry;
@@ -350,8 +350,18 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     let filters = filter::build_chain(cfg)?;
     let mut runner = runner::build(cfg);
 
-    let baseline_wall = preflight_baseline(cfg, runner.as_ref(), mutants)?
-        .or_else(|| cfg.baseline_secs.map(Duration::from_secs_f64));
+    let own_baseline = preflight_baseline(cfg, runner.as_ref(), mutants)?;
+    if let Some(bytes) = memory_cap_bytes(
+        cfg.max_memory,
+        own_baseline.and_then(|_| runner::memory::children_peak_rss()),
+    ) {
+        info!(
+            cap_mib = bytes >> 20,
+            "per-mutant memory cap (--max-memory)"
+        );
+        runner.set_memory_cap(bytes);
+    }
+    let baseline_wall = own_baseline.or_else(|| cfg.baseline_secs.map(Duration::from_secs_f64));
     // Only the runner sees the budget. The cache scope and history hash keep
     // the configured `timeout_secs` + factor: the budget moves a little every
     // run and would otherwise miss the cache every time.
@@ -599,6 +609,16 @@ fn budgeted_timeout_secs(cfg: &Config, baseline_wall: Option<Duration>) -> Optio
         "per-mutant timeout sized from the baseline (--timeout-factor)"
     );
     Some(secs)
+}
+
+/// The per-mutant memory cap, if any. Auto needs `peak`, the baseline's peak
+/// RSS — only measured on Linux, after a baseline fermut ran itself.
+fn memory_cap_bytes(cap: MemoryCap, peak: Option<u64>) -> Option<u64> {
+    match cap {
+        MemoryCap::Off => None,
+        MemoryCap::Bytes(b) => Some(b),
+        MemoryCap::Auto => peak.map(runner::memory::auto_cap),
+    }
 }
 
 /// Testing-phase wall-clock ceiling from `--max-time`. `None` when unset.
@@ -1071,6 +1091,12 @@ fn compute_scope_prefix(cfg: &Config) -> String {
     if let Some(f) = cfg.timeout_factor {
         h.update(b"|timeout_factor=");
         h.update(f.to_le_bytes());
+    }
+    // An explicit cap can turn a survivor into a kill; the auto cap is sized
+    // so it only turns a timeout into one (both detected), so it isn't fed.
+    if let MemoryCap::Bytes(b) = cfg.max_memory {
+        h.update(b"|max_memory=");
+        h.update(b.to_le_bytes());
     }
     h.update(b"|hseed=");
     if let Some(s) = cfg.hypothesis_seed {
@@ -1710,6 +1736,35 @@ mod tests {
     }
 
     #[test]
+    fn scope_prefix_tracks_only_an_explicit_memory_cap() {
+        let mut cfg = base_test_config();
+        let auto = compute_scope_prefix(&cfg);
+        cfg.max_memory = MemoryCap::Off;
+        assert_eq!(
+            auto,
+            compute_scope_prefix(&cfg),
+            "old caches keep their scope"
+        );
+        cfg.max_memory = MemoryCap::Bytes(1 << 30);
+        assert_ne!(auto, compute_scope_prefix(&cfg));
+    }
+
+    #[test]
+    fn memory_cap_is_explicit_or_sized_from_the_baseline_peak() {
+        assert_eq!(memory_cap_bytes(MemoryCap::Off, Some(1 << 30)), None);
+        assert_eq!(memory_cap_bytes(MemoryCap::Bytes(5), None), Some(5));
+        assert_eq!(
+            memory_cap_bytes(MemoryCap::Auto, None),
+            None,
+            "no baseline, no cap"
+        );
+        assert_eq!(
+            memory_cap_bytes(MemoryCap::Auto, Some(1 << 30)),
+            Some(4 << 30)
+        );
+    }
+
+    #[test]
     fn mutant_scope_survives_edit_to_non_covering_test() {
         let fx = ScopeFixture::new();
         let cfg = fx.config(RunnerKind::Pytest, true);
@@ -1883,6 +1938,7 @@ mod tests {
             max_time_secs: None,
             timeout_factor: None,
             baseline_secs: None,
+            max_memory: MemoryCap::Auto,
             record_kill_sets: None,
         }
     }

@@ -740,3 +740,41 @@ def test_serve_refuses_on_collection_errors(tmp_path):
     msg = server.recv()
     assert msg["ready"] is False and "collection" in msg["error"]
     server.close()
+
+
+@pytest.fixture
+def rlimit(monkeypatch):
+    """A fake `resource` module on Linux: records setrlimit calls."""
+    calls = []
+    fake = types.SimpleNamespace(
+        RLIMIT_DATA=2,
+        RLIM_INFINITY=-1,
+        hard=-1,
+        getrlimit=lambda _: (fake.hard, fake.hard),
+        setrlimit=lambda which, lim: calls.append((which, lim)),
+    )
+    monkeypatch.setitem(sys.modules, "resource", fake)
+    monkeypatch.setattr(sys, "platform", "linux")
+    fake.calls = calls
+    return fake
+
+
+def test_cap_memory_sets_the_data_limit_capped_by_the_hard_limit(rlimit, monkeypatch):
+    monkeypatch.setenv("FM_MEM_CAP", "1000")
+    schema.cap_memory()
+    rlimit.hard = 500
+    schema.cap_memory()
+    rlimit.hard = 5000
+    schema.cap_memory()
+    assert rlimit.calls == [(2, (1000, 1000)), (2, (500, 500)), (2, (1000, 1000))]
+
+
+def test_cap_memory_is_a_no_op_unset_or_off_linux(rlimit, monkeypatch):
+    monkeypatch.delenv("FM_MEM_CAP", raising=False)
+    schema.cap_memory()
+    monkeypatch.setenv("FM_MEM_CAP", "")
+    schema.cap_memory()
+    monkeypatch.setenv("FM_MEM_CAP", "1000")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    schema.cap_memory()
+    assert rlimit.calls == []

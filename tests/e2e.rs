@@ -1955,7 +1955,7 @@ fn coverage_output_flag_receives_the_data() {
         "from src.calculator import add\n\n\ndef test_extra():\n    assert add(1, 1) == 2\n",
     )
     .unwrap();
-    coverage(tmp.path()).stdout(contains("re-ran 1 test file(s)"));
+    coverage(tmp.path()).stderr(contains("re-ran 1 test file(s)"));
     let conn = rusqlite::Connection::open(&out).unwrap();
     let extra: i64 = conn
         .query_row(
@@ -2017,7 +2017,7 @@ fn coverage_refresh_prunes_deleted_source_file() {
         .arg(&sample)
         .assert()
         .success()
-        .stdout(contains("dropped 1 removed source file(s)"));
+        .stderr(contains("dropped 1 removed source file(s)"));
 
     let after = recorded();
     assert!(

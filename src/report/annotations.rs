@@ -67,6 +67,22 @@ fn gha_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::report::testing::make_mutant;
+
+    #[test]
+    fn prints_every_outcome_kind_without_panicking() {
+        let m = || make_mutant();
+        Report::new(vec![
+            MutantOutcome::killed(m()),
+            MutantOutcome::skipped(m(), "ty"),
+            MutantOutcome::equivalent(m(), "same bytecode", "bytecode-identity"),
+            MutantOutcome::survived(m()),
+            MutantOutcome::timed_out_in(m(), Some("t.py::test_x".into())),
+            MutantOutcome::timed_out(m()),
+            MutantOutcome::error(m(), "boom\n100%".into()),
+        ])
+        .print_github_annotations();
+    }
 
     #[test]
     fn gha_escape_replaces_specials() {

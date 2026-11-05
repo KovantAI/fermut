@@ -354,10 +354,12 @@ pub(crate) fn run_baseline_with_timeout(
             let prog = cmd.get_program().to_string_lossy().into_owned();
             anyhow::bail!(
                 "could not start the test runner: `{prog}` was not found on PATH.\n\n\
-                 Install it and activate your virtualenv if you use one, then verify with \
-                 `fermut doctor`:\n  \
+                 Install it and activate your virtualenv if you use one, or pass \
+                 `--python /path/to/venv`, then verify with `fermut doctor`:\n  \
                  pytest  → `pip install pytest pytest-cov`\n  \
-                 unittest → ensure `python` is on PATH"
+                 unittest → ensure `python` is on PATH\n\n\
+                 More: {}",
+                crate::TROUBLESHOOTING_URL
             );
         }
         Err(e) => return Err(e).context("spawning baseline test process"),

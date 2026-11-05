@@ -121,9 +121,10 @@ rustls = "0.23"
 # rather than blanket `clippy::pedantic`, which currently fires ~40 lints
 # (mostly `cast_possible_truncation`) — tighten toward pedantic incrementally.
 [lints.rust]
-# No new `unsafe` without an explicit, reviewed opt-in. The only two FFI sites
-# (process-group kill in `runner/process_group.rs`) carry a scoped
-# `#[allow(unsafe_code)]` with a SAFETY note.
+# No new `unsafe` without an explicit, reviewed opt-in. Each FFI site
+# (process groups in `runner/process_group.rs`, memory caps in
+# `runner/memory.rs`, the MCP stdout guard in `cli/subcmd/mcp.rs`) carries a
+# scoped `#[allow(unsafe_code)]` with a SAFETY note.
 unsafe_code = "deny"
 
 [lints.clippy]

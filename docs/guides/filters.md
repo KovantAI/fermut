@@ -196,8 +196,9 @@ Enable when you want maximum noise reduction.
 ## `--no-ty-filter`
 
 Disables the ty pre-filter. **Do not turn this off unless you have
-a specific reason** — it's the single biggest speed win on
-type-hinted codebases (20–40% of naive mutants are type-invalid).
+a specific reason** — it drops about 30–40% of covered mutants
+before they cost a test run
+([benchmarks](../reference/benchmarks.md#ty-filter)).
 
 ```sh
 fermut run src/ --no-ty-filter

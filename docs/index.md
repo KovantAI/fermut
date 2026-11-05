@@ -11,8 +11,10 @@ perturbation is a named, located, reproducible hole in your test
 suite.
 
 fermut is mutation testing built to be fast enough to actually run.
-The mutator is native Rust; the type-aware `ty` pre-filter discards
-type-invalid mutants in ~25 ms each before they cost a pytest run;
+The mutator is native Rust; per-test coverage runs only the tests
+that touch each mutant; mutants run in forks of one pytest that has
+already imported your suite (schemata); the type-aware `ty`
+pre-filter discards type-invalid mutants before they cost a test run;
 content-hash caching means re-runs only pay for what changed. The
 test runner stays the one your team already trusts — `pytest`,
 `rstest` or `unittest`.
@@ -64,10 +66,16 @@ stuck on "interesting but too slow for CI" for a decade. The wins:
 - **Mutate in Rust, test in Python.** The hot loop (parse, mutate,
   splice, fork) is native code; the test runner stays the one your
   team already trusts.
-- **Type-aware pre-filter.** `ty` discards type-invalid mutants in
-  ~25 ms each before they cost a 5-second pytest run. 20–40% of
-  naive mutants get dropped here on type-hinted codebases — see
-  [benchmarks](reference/benchmarks.md).
+- **Collect once, fork per mutant.** Schemata builds every
+  function-body mutant into one copy of your code; each mutant runs
+  in a fork of a pytest that already imported and collected the
+  suite, instead of paying pytest startup per mutant. 1.5–3.9×
+  faster end to end on most suites tested — see
+  [Schemata](reference/cli/run-schemata.md).
+- **Type-aware pre-filter.** `ty` discards type-invalid mutants
+  before they cost a test run: about 30–40% of covered mutants
+  across 9 benchmarked libraries — see
+  [benchmarks](reference/benchmarks.md#ty-filter).
 - **Content-hash cache.** Re-running on the same commit re-uses
   prior verdicts. PR re-runs cost the diff, not the whole sweep.
 
@@ -82,24 +90,25 @@ profile based on project size:
 ```sh
 cd path/to/your/project
 fermut init
-# build coverage first — fermut uses it to skip irrelevant tests per mutant
-pytest --cov=src --cov-context=test
+fermut baseline   # environment check + coverage + sampled score
 fermut run src/ --tests tests/
 ```
 
-`pytest --cov=src --cov-context=test` writes coverage.py's native
-`.coverage` SQLite database, which fermut reads directly and
-auto-discovers at the project root — no `--coverage` flag and no
-`coverage json` export step needed (pass `--coverage .coverage` to point
-at a non-default location). `fermut coverage` is a convenience wrapper
-that generates the same `.coverage` and refreshes it incrementally as
-your tests change. (Or, manually: `coverage json -o coverage.json
---show-contexts`, then `--coverage coverage.json`.)
+`fermut baseline` is the "where do I stand" step: it runs
+[`doctor`](reference/cli/doctor.md), builds per-test coverage, and
+prints line coverage next to a sampled mutation score and the files
+with the most survivors. See
+**[`fermut baseline`](reference/cli/baseline.md)**.
+
+The coverage it builds is coverage.py's own `.coverage` database with
+per-test contexts, which `fermut run` finds at the project root by
+itself. After you change tests, `fermut coverage` refreshes it
+incrementally. See **[Coverage](guides/coverage.md)** for the details.
 
 Expected output — a line per survivor/timeout, then a one-line summary:
 
 ```
-SURVIVED  src/auth.py:42 [boundary-shift] `age >= 18` → `age > 18`
+SURVIVED  src/auth.py:42@1187 [boundary-shift] `age >= 18` → `age > 18`
 
 152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3 (coverage 3), equivalent: 0, errored: 0  | score: 94.6%
 ```

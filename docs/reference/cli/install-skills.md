@@ -30,4 +30,4 @@ whose files differ is left alone and the command exits `1`, unless `--force`.
 directory are kept.
 
 Installing as a Claude Code plugin instead, and what to do when the skill
-doesn't appear: **[Claude Code playbook](../../guides/claude-code-skill.md#install-the-skill)**.
+doesn't appear: **[Agent skill & plugin](../../guides/claude-code-skill.md#install-the-skill)**.

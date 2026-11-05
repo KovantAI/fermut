@@ -50,7 +50,7 @@ If the warning above says the embedded checker failed to build, fix
 the project config it names, or install the binary so the subprocess
 fallback works.
 
-**Disable the ty filter** if you accept the ~20–40% extra mutants
+**Disable the ty filter** if you accept the ~30–40% extra mutants
 that ty would have caught:
 
 ```sh
@@ -65,9 +65,10 @@ ty_filter = false
 
 ## Why no silent no-op
 
-The ty filter rejects ~20–40% of mutants on typical type-hinted
-projects (type errors the patched code introduces). If fermut silently
-ran without it, `fermut run` would be ~1.5–2× slower with no
+The ty filter rejects ~30–40% of covered mutants: type errors the
+patched code introduces ([benchmarks](../benchmarks.md#ty-filter)). If
+fermut silently ran without it, `fermut run` would test ~1.4–1.7× as
+many mutants with no
 indication anything was wrong, which is easy to miss on a CI
 dashboard. So when neither the embedded checker nor the binary is
 available, fermut fails loudly and makes you choose: install ty, or

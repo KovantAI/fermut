@@ -138,7 +138,8 @@ pub(crate) fn compute_baseline(args: BaselineArgs) -> Result<BaselineReport> {
     if diag.get("healthy").and_then(|v| v.as_bool()) == Some(false) {
         return Err(anyhow!(
             "environment not ready — run `fermut doctor` and fix the failing \
-             checks, then re-run `fermut baseline`"
+             checks, then re-run `fermut baseline`. More: {}",
+            crate::TROUBLESHOOTING_URL
         ));
     }
 
@@ -280,7 +281,7 @@ fn top_survivor_files(report: &Report, top: usize) -> Vec<FileSurvivors> {
     for o in &report.outcomes {
         if let MutantOutcome::Survived { mutant, .. } = o {
             *by_file
-                .entry(mutant.file.display().to_string())
+                .entry(crate::util::display_path(&mutant.file).to_string())
                 .or_default() += 1;
         }
     }

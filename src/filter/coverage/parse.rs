@@ -294,11 +294,12 @@ impl CoverageContexts {
         if !any_contexts {
             if dropped_outside > 0 {
                 return Err(anyhow::anyhow!(
-                    "coverage.json at {} has per-test contexts, but all {} fall \
+                    "coverage file {} has per-test contexts, but all {} fall \
                      outside project_root {}. Tests appear to live in a sibling \
-                     package; point `--project-root` at the directory that \
-                     contains them (or the monorepo root) so pytest can resolve \
-                     the rebased node ids. If the tests do live under it, fermut \
+                     package. The project root is the nearest directory above the \
+                     source root with a pyproject.toml or setup.cfg; it must \
+                     contain the tests too (e.g. the monorepo root) so pytest can \
+                     resolve the rebased node ids. If the tests do live under it, fermut \
                      resolved the coverage paths wrongly: please report it at {}",
                     path.display(),
                     dropped_outside,
@@ -307,12 +308,13 @@ impl CoverageContexts {
                 ));
             }
             return Err(anyhow::anyhow!(
-                "coverage.json at {} has no per-test contexts. Regenerate with \
-                 `pytest --cov=src --cov-context=test` (requires pytest-cov) \
-                 followed by `coverage json -o coverage.json --show-contexts`. \
-                 Note: `coverage run --context=LABEL` sets only a static label \
-                 and won't produce per-test selectors.",
-                path.display()
+                "coverage file {} has no per-test contexts. Regenerate it with \
+                 `fermut coverage` (or `pytest --cov=src --cov-context=test`, \
+                 which needs pytest-cov). `coverage run --context=LABEL` sets \
+                 only a static label and won't produce per-test selectors. \
+                 More: {}",
+                path.display(),
+                crate::TROUBLESHOOTING_URL
             ));
         }
 

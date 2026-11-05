@@ -11,7 +11,7 @@ your tests don't actually catch.
 
 This page walks the **solo loop**: one developer, one machine, no CI.
 That's the fastest path to seeing whether fermut earns its keep on your
-codebase. Once you're convinced, **[Working on projects](../guides/projects.md)**
+codebase. Once you're convinced, **[Rolling out to a team](../guides/projects.md)**
 covers the team rollout (baseline → measure-only CI → gate → tighten).
 
 ## 1. Initialize the project
@@ -55,9 +55,38 @@ overwrite, `--dry-run` to preview without touching disk.
 
 For the solo loop, the auto-detected defaults are fine. Profile choice
 (`pr-gate`, `nightly`, `local`, `library`) matters once you're wiring CI
-— covered in **[Working on projects](../guides/projects.md#step-2-pick-a-profile)**.
+— covered in **[Rolling out to a team](../guides/projects.md#step-2-pick-a-profile)**.
 
 ## 2. Get an honest baseline
+
+The quickest answer to "where do I stand" is one command:
+
+```sh
+fermut baseline
+```
+
+It runs [`fermut doctor`](../reference/cli/doctor.md), builds per-test
+coverage, and runs a sampled mutation pass over covered code. Then it
+prints line coverage next to the mutation score, a grade, and the files
+with the most survivors:
+
+```text
+  line coverage     92%
+  mutation score    61%  (on covered code, 10% sample)
+  ───────────────────────────────
+  test-quality gap  39 pts   ← covered code whose behavior no test checks
+  untested risk     8%     ← lines no test executes at all
+
+  grade: Ok — real gaps in covered code
+```
+
+The gap between the two numbers is the point: covered lines whose
+behavior no test checks. The run is logged as run zero in the
+[trend](#5-watch-the-trend). `--full` gives the exact score instead of
+the 10% sample. See [`fermut baseline`](../reference/cli/baseline.md).
+
+The rest of this section does the same by hand with a full
+`fermut run`, which you need for the per-survivor report in step 3.
 
 Generate per-test coverage first. fermut uses it to run only the tests
 whose execution touched the mutated line — biggest wall-clock win on any
@@ -73,12 +102,9 @@ Generate per-test coverage:
 pytest --cov=src --cov-context=test
 ```
 
-This writes coverage.py's native `.coverage` SQLite database, which
-fermut reads directly and auto-discovers at the project root — no
-`coverage json` export step. (`fermut coverage` is a convenience wrapper
-that does the same discovery-from-config and also refreshes
-incrementally as you add tests. Or, manually: `coverage json -o
-coverage.json --show-contexts`, then pass `--coverage coverage.json`.)
+This writes coverage.py's `.coverage` database, which fermut reads
+directly and finds at the project root by itself. `fermut coverage` does
+the same and refreshes it incrementally as you add tests.
 
 `--cov-context=test` is what tags each covered line with the pytest
 nodeID of the test that touched it. Without it, fermut knows the line
@@ -100,24 +126,31 @@ fermut run src/ --tests tests/ --coverage .coverage --json baseline.json
 adding `-q` (quiet) gives just the clean report — the sample outputs shown
 below are the `-q` form. The `INFO` lines aren't errors.
 
-**How long should this take?** Rough wall-clock anchors for a fresh
-run (no cache, default profile, `ty` filter on):
+**How long should this take?** Mostly as long as your suite takes,
+times the number of mutants that reach it. Cold runs with default
+settings, coverage included, on one machine
+([benchmarks](../reference/benchmarks.md#cold-runs-pinned-oss-repos)):
 
-| Project size                     | Expected wall-clock      |
-|----------------------------------|--------------------------|
-| ~10 source files, ~50 tests      | 10–30 seconds            |
-| ~50 source files, ~500 tests     | 1–5 minutes              |
-| ~500 source files, ~5000 tests   | 15–45 minutes            |
+| Library        | Mutants generated → tested | Cold run |
+|----------------|----------------------------|----------|
+| markupsafe     | 1,069 → 217                | ~15 s    |
+| pyjwt          | 6,475 → 1,730              | ~53 s    |
+| more-itertools | 9,451 → 3,326              | ~2 min   |
+| typer          | 6,414 → 1,597              | ~3.5 min |
+| werkzeug       | 41,146 → 7,982             | ~3 min   |
 
-If your run is dramatically slower than this on first pass, the
+typer has fewer mutants than werkzeug but a much slower suite, which is
+why it takes longer. If your run is dramatically slower than this on first pass, the
 usual suspect is the coverage filter not being applied (no per-test
 contexts — see [coverage-rejected](../reference/troubleshooting/coverage-rejected.md)).
 ty runs in-process by default, so the `ty` binary isn't needed for a
 normal run. If the embedded checker is unavailable and the binary is
 missing too, the run aborts before any mutant is tested; see
 [ty-not-found](../reference/troubleshooting/ty-not-found.md).
-Re-runs are much faster thanks to the AST-hash cache — typically
-80–95% cache hit on a no-source-change re-run.
+Re-runs reuse cached verdicts: a re-run with nothing changed tests no
+mutants and skips the baseline suite run (pyjwt: 38 s cold, 0.3 s
+warm). After an edit, run `fermut coverage` first; see
+[Coverage → Freshness guard](../guides/coverage.md#freshness-guard).
 
 > **Coverage generation failed?** Fix it before continuing — fermut
 > treats `coverage` + `pytest-cov` as required and `fermut doctor`
@@ -130,8 +163,8 @@ Re-runs are much faster thanks to the AST-hash cache — typically
 Output — a line per survivor/timeout/error, then a one-line summary:
 
 ```
-SURVIVED  src/auth.py:42 [boundary-shift] `age >= 18` → `age > 18`
-TIMEOUT   src/slow.py:88 [arith-op-swap] `n * 2` → `n / 2`
+SURVIVED  src/auth.py:42@1187 [boundary-shift] `age >= 18` → `age > 18`
+TIMEOUT   src/slow.py:88@2304 [arith-op-swap] `n * 2` → `n / 2`
 
 152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3 (coverage 3), equivalent: 0, errored: 0  | score: 94.6%
 ```
@@ -145,10 +178,12 @@ from both sides of the ratio (here `141 / 149 = 94.6%`). See
 **[mutation score](../concepts/mutation-testing.md#the-mutation-score)**
 for the formula.
 
-Don't panic if the first score is below 50%. On a suite that has
-never been mutation-tested, **first runs typically land between
-40% and 70%** — that's the size of the gap between "tests exist"
-and "tests would catch a regression," not a tooling failure. The
+Don't panic at the first score. Nine mature, well-tested open-source
+libraries score **67–86%** with fermut's defaults
+([benchmarks](../reference/benchmarks.md#cold-runs-pinned-oss-repos)), and
+a suite that has never been mutation-tested usually starts lower. The
+gap is the distance between "tests exist" and "tests would catch a
+regression," not a tooling failure. The
 number to watch is the trend, not the absolute floor. Save
 `baseline.json` — it's the "before" snapshot.
 
@@ -176,9 +211,8 @@ The most common surprises, in roughly the order people hit them:
 - **Lots of timeouts.** Some tests don't terminate cleanly under
   arithmetic mutants (infinite loops on boundary-shifted
   conditions). Raise `--timeout`; tune later.
-- **Score lower than expected.** Not a bug. See the "40–70% on a
-  suite that has never been mutation-tested" note above the
-  "What can go wrong" header.
+- **Score lower than expected.** Not a bug. Even mature libraries
+  score 67–86%; see the note above the "What can go wrong" header.
 - **Run is much slower than the wall-clock table.** Check that
   the ty filter isn't disabled (`ty_filter = false` / `--no-ty-filter`),
   and that coverage is being honored (the `.coverage` DB has per-test contexts).
@@ -282,7 +316,7 @@ Tracking the trajectory is more useful than chasing a fixed target.
 
 Solo loop proves the value on one branch. To make it stick across the team:
 
-- **[Working on projects](../guides/projects.md)** — five-step rollout:
+- **[Rolling out to a team](../guides/projects.md)** — five-step rollout:
   baseline → profile → measure-only CI → gate → tighten. Tells you how
   to avoid the "ship a noisy gate, team hates mutation testing" trap.
 - **[Coding agents](../guides/coding-agents.md)** — if AI agents are

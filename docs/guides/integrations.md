@@ -1,14 +1,13 @@
-# Integrations
+# CI recipes
 
-How to wire fermut into the systems that already build/test your code.
+Hand-written workflows for full control over each step, and for CI
+systems other than GitHub Actions. On GitHub Actions, the
+**[packaged action](github-action.md)** (`uses: KovantAI/fermut@<tag>`)
+does all of this behind a few inputs: install, coverage, caching, gate,
+summary, sticky comment and sharding. Start there unless you need
+something it doesn't do.
 
 ## GitHub Actions
-
-> **Prefer the packaged action.** `uses: KovantAI/fermut@<tag>` wraps
-> everything below — install, coverage, caching, gate, summary, sticky
-> comment, sharding — behind a few inputs. See
-> **[GitHub Action](github-action.md)**. The raw YAML here is for other
-> CI systems or for full control.
 
 A PR-gate workflow with caching and a score trend. `fermut init
 --with-gha` writes a simpler variant at `.github/workflows/fermut.yml`
@@ -79,9 +78,7 @@ Key points:
 - `fermut coverage` runs the suite and writes the `.coverage`
   database fermut reads directly (no `coverage json` export step). The
   workflow passes `--coverage .coverage` explicitly; at the project root
-  fermut also auto-discovers it. Or, manually: `pytest --cov=src
-  --cov-context=test && coverage json -o coverage.json --show-contexts`,
-  passed as `--coverage coverage.json` (the legacy JSON path).
+  fermut also auto-discovers it.
 - `fetch-depth: 0` is required so `--diff-only` can compute the
   merge base.
 - `actions/cache` keyed on lockfile + sources persists the result
@@ -92,8 +89,12 @@ Key points:
 - `pr-comment` posts a sticky comment that updates in place on
   re-runs.
 
-For the gradual-rollout playbook (measure-only first, then enable
-the gate), see **[Working on projects](projects.md#step-3-wire-ci-in-measure-only-mode)**.
+**Measure-only first.** To watch the score for a while before it can
+block merges, add `continue-on-error: true` to the job. It also hides
+setup failures, such as a broken install or coverage step, so remove it
+once the score settles. (The packaged action's `blocking: "false"` only
+softens the gate.) The rollout steps are in
+**[Rolling out to a team](projects.md#step-3-wire-ci-in-measure-only-mode)**.
 
 ## Sharded full sweep
 
@@ -253,8 +254,8 @@ History persistence shared across both jobs:
 - The nightly job saves a fresh history entry under
   `fermut-history-main-${{ github.run_id }}`, which becomes the new
   baseline for PR comments via the `restore-keys` prefix match.
-- See [history persistence in CI](projects.md#history-persistence-in-ci)
-  for the alternative (committing `history.jsonl` to a side branch).
+- See [History persistence](#history-persistence) for the general
+  pattern and alternatives.
 
 Notifications on nightly failure — pick one:
 
@@ -281,202 +282,43 @@ Common tweaks:
 
 ## Shrinking the coverage index per PR { #coverage-scoping }
 
-The PR gate above runs `fermut coverage` fresh on every run, which
-rebuilds the whole `.coverage` database from a full-suite sweep. On a
-slow suite that sweep, not the mutation run, becomes the long pole. Two
-recipes cut it — they compose, and both are safe alongside `--diff-only`.
+Building `.coverage` from scratch on every PR is often the slowest step.
+Caching it across runs, scoping it to the changed files, or building it
+once on `main` for PRs to reuse: **[Coverage in CI](ci-coverage.md)**.
 
-Know what each one buys before reaching for it:
+## History persistence { #history-persistence }
 
-| Recipe | Saves | Does **not** save |
-|--------|-------|-------------------|
-| A. Cache `.coverage` across runs | suite runtime — refresh re-measures only changed test files, not the whole suite | the first (cold-cache) run, which still sweeps fully |
-| B. Scope `--cov` to changed files | index size, fermut's parse time, cache footprint | suite runtime — every test still runs under coverage |
-
-### Recipe A: cache `.coverage` so the refresh is incremental { #cache-coverage }
-
-`fermut coverage` is already incremental: given an existing database it
-re-runs only the test files whose content changed (and the tests whose
-contexts cover changed *source* lines), then appends them in. In CI that
-machinery is wasted unless the database survives between runs — a fresh
-checkout starts with no `.coverage`, so the "incremental" refresh falls
-straight back to a full sweep.
-
-Cache the database and its fingerprint sidecar across PR runs:
+CI runners are ephemeral, so `.fermut/history.jsonl` starts empty every
+run unless you persist it, and `--trend` has nothing to compare against.
+Restore it on every run with `actions/cache/restore` (which never saves),
+and save it only from `main`:
 
 ```yaml
-      - name: restore coverage db
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
-        with:
-          path: |
-            .coverage
-            .coverage.fermut-fingerprints.json
-          key: fermut-coverage-${{ runner.os }}-${{ github.sha }}
-          restore-keys: |
-            fermut-coverage-${{ runner.os }}-
+- name: restore fermut history
+  uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+  with:
+    path: .fermut/history.jsonl
+    key: fermut-history-main
+    restore-keys: |
+      fermut-history-main-
 
-      - run: uv tool run fermut coverage --source src --tests tests/
+- name: run fermut
+  run: fermut run src/ --tests tests/ --markdown report.md --trend
 
-      - name: save coverage db
-        if: always()
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
-        with:
-          path: |
-            .coverage
-            .coverage.fermut-fingerprints.json
-          key: fermut-coverage-${{ runner.os }}-${{ github.sha }}
+- name: save fermut history
+  if: always() && github.ref == 'refs/heads/main'
+  uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+  with:
+    path: .fermut/history.jsonl
+    key: fermut-history-main-${{ github.sha }}
 ```
 
-Both paths are mandatory. The sidecar
-(`.coverage.fermut-fingerprints.json`) holds the per-file content hashes
-`fermut coverage` diffs against; restore the `.coverage` DB without it
-and fermut can't tell what changed, so it rebuilds fully — exactly the
-sweep the cache was meant to skip.
-
-Notes:
-
-- **Content-hash, not mtime.** `fermut coverage` fingerprints test files
-  by content, precisely so a fresh checkout (which rewrites every mtime)
-  doesn't force a full re-measure. Caching is what makes that pay off.
-- **Correctness is preserved, not traded away.** A changed source line
-  re-runs the tests that cover it, so the incremental DB stays diff-safe
-  for `--diff-only` / `--since`; a genuinely new code path under an
-  unchanged test is conservatively coverage-skipped until the next
-  refresh, never falsely killed. See
-  [`fermut coverage` incremental correctness](../reference/cli/coverage.md#incremental-correctness).
-- **Restore-keys prefix** lets a PR seed from the most recent cache even
-  when no exact-SHA hit exists, so the first run on a branch is still
-  incremental against `main`'s database.
-
-### Recipe B: scope the index to the changed subtree { #scope-cov }
-
-Under `--diff-only`, mutants land only on changed lines, so the coverage
-filter only ever looks up tests for lines in changed files. Measuring the
-whole source tree still produces a correct index — just a larger one than
-the gate needs.
-
-For a **subtree**, point `fermut coverage` at it — `--source` becomes the
-`--cov=` target:
-
-```sh
-fermut coverage --source src/pkg/payments --tests tests/
-```
-
-For **specific scattered files**, drop to the manual pytest-cov path with
-one `--cov=` per changed file (fermut reads the resulting `.coverage`
-just the same):
-
-```sh
-CHANGED=$(git diff --name-only origin/main -- '*.py' | grep '^src/')
-pytest $(printf ' --cov=%s' $CHANGED) --cov-context=test
-fermut run src/ --tests tests/ --diff-only origin/main --coverage .coverage
-```
-
-This is safe because every changed line lives in a measured file, so its
-per-test contexts are always present; the continuation-line fallback
-stays within the same file too. What you save is index size and fermut's
-parse time — the suite still runs in full, since coverage instruments the
-whole run regardless of `--cov` scope. On suites where the multi-GB
-`coverage.json` or a slow parse was the pain, this is the lever; on
-suites where the *sweep* is the pain, reach for Recipe A instead (or both).
-
-> **Don't combine Recipe B with Recipe A's cache blindly.** A cached
-> `.coverage` scoped to one PR's changed files is wrong for the next PR's
-> different files. If you scope `--cov`, either skip the cache or key it
-> so a different changed-file set misses. For most repos, cache the
-> full-tree database (Recipe A) and leave `--cov` at the source root —
-> the incremental refresh already keeps it cheap.
-
-### Recipe C: build the baseline on `main`, reuse it in PRs { #baseline-on-main }
-
-Recipe A's `restore-keys` prefix seeds a PR from *whichever* cache is most
-recent — possibly another feature branch's database. Recipe C makes the
-seed deterministic: a push-to-`main` job builds one authoritative
-`.coverage`, and every PR restores **that** key read-only, then
-`fermut coverage` patches only its own diff on top. It's the same
-architecture as [history persistence in CI](#pr-gate-nightly) — the
-main-branch job owns the artifact, PRs consume it — applied to the
-coverage database instead of `history.jsonl`.
-
-Why it's correct: a PR is `main` plus a diff, and given main's database
-`fermut coverage` re-runs the changed test files *and* every test whose
-contexts cover a changed source line, so the changed lines that
-`--diff-only` mutates always get fresh contexts. A baseline that has
-drifted behind `main` only means more files to re-measure, never a wrong
-selection. And it's visible at all because **GitHub Actions lets a PR
-read caches created on its base branch** — a `.coverage` built on `main`
-is restorable from a PR targeting `main`.
-
-Baseline builder — a job on push to `main` that saves the database under a
-stable, run-scoped key:
-
-```yaml
-# .github/workflows/fermut-baseline.yml
-name: Coverage baseline
-
-on:
-  push:
-    branches: [main]
-
-concurrency:
-  group: fermut-coverage-baseline
-  cancel-in-progress: true
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
-        with:
-          fetch-depth: 0
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
-        with:
-          python-version: "3.12"
-      - run: |
-          uv sync
-          uv tool install fermut
-      - run: uv tool run fermut coverage --source src --tests tests/
-      - uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
-        with:
-          path: |
-            .coverage
-            .coverage.fermut-fingerprints.json
-          key: fermut-coverage-main-${{ github.sha }}
-```
-
-PR gate — restore the baseline **read-only** (no save step), then let
-`fermut coverage` patch the diff:
-
-```yaml
-      - name: restore main coverage baseline
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
-        with:
-          path: |
-            .coverage
-            .coverage.fermut-fingerprints.json
-          key: fermut-coverage-main-${{ github.event.pull_request.base.sha }}
-          restore-keys: |
-            fermut-coverage-main-
-
-      - run: uv tool run fermut coverage --source src --tests tests/
-      # …fermut run --diff-only --coverage .coverage as usual
-```
-
-- **Read-only in PRs is the whole point.** No save step on the PR job, so
-  a feature branch's coverage can never overwrite the baseline. Same rule
-  the [nightly history job](#pr-gate-nightly) follows.
-- **Exact key then prefix.** The `key` targets the base commit's baseline
-  directly; `restore-keys: fermut-coverage-main-` falls back to the most
-  recent main baseline when that exact SHA wasn't built (e.g. a fast merge
-  before the builder finished).
-- **Full-tree baseline, unscoped `--cov`.** Recipe C shares one database
-  across every PR, so it must measure the whole source root — don't layer
-  Recipe B's `--cov` scoping onto the baseline (that warning above still
-  holds).
-- **A vs C.** Use A for a single active branch or a solo repo — simpler,
-  one workflow. Use C when many PRs are open at once and you want each to
-  start from the same clean `main` seed instead of racing over a shared
-  key.
+PR jobs only read, so feature branches never fork their own history.
+The combined `actions/cache` would save from PR jobs in its post-step,
+which is why the restore uses `actions/cache/restore`. Caches can be
+evicted; for a history that's never lost, the packaged
+[`trend` action](github-action.md#score-trend) keeps it on an orphan
+branch instead.
 
 ## Pre-commit
 
@@ -504,58 +346,27 @@ only see uncommitted edits: on a clean tree at push time it finds zero
 mutants and tests nothing.) Run `git fetch` periodically so
 `origin/main` is current.
 
-## Coding agents
+## Other CI systems
 
-fermut is built to drop into an AI coding agent's inner loop. The
-recommended invocation, cache strategy, and JSON parsing recipes
-live in **[Coding agents](coding-agents.md)**.
+fermut is a plain CLI, so any CI works. Translate the steps:
 
-## MCP server { #mcp-server }
-
-`fermut mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)
-server over stdio, so an agent calls fermut as native tools
-(`fermut_doctor`, `fermut_baseline`, `fermut_run`, `fermut_next`,
-`fermut_explain`, `fermut_score`, `fermut_list_survivors`) instead of shelling out and
-parsing JSON. See the
-**[`fermut mcp` reference](../reference/cli/mcp.md)** for the tool list and
-error model.
-
-The [Claude Code plugin](claude-code-skill.md#option-2-the-claude-code-plugin)
-registers the server for you, alongside the agent skill. To register it
-yourself with an MCP client — Claude Code:
-
-```sh
-claude mcp add fermut -- fermut mcp
-```
-
-Or by hand, in a client config that takes a server map:
-
-```json
-{
-  "mcpServers": {
-    "fermut": { "command": "fermut", "args": ["mcp"] }
-  }
-}
-```
-
-The server honors the project's `fermut.toml`, so run it from (or point the
-client's working directory at) the project root. No network access, no API
-key — the tools wrap the same local engine the CLI uses.
-
-## ReadTheDocs / docs builds
-
-This site builds on ReadTheDocs with `docs/requirements.txt`. The
-`strict: true` mode in `mkdocs.yml` is what catches broken internal
-links before they ship. Run locally with:
-
-```sh
-uv pip install -r docs/requirements.txt
-uv run mkdocs serve
-```
+1. Check out with full history (`fetch-depth: 0` or equivalent), so
+   `--diff-only` can find the merge base.
+2. Install Python and the project's dependencies, including `pytest-cov`.
+3. Install fermut (`uv tool install fermut`, `pipx install fermut` or
+   `pip install fermut`).
+4. Run `fermut coverage` to build `.coverage`.
+5. `fermut run src/ --tests tests/ --diff-only <base-ref> --no-verify-baseline --markdown report.md --trend`.
+   `--no-verify-baseline` is safe because step 4 already ran the full
+   suite in the same job; drop it if your CI splits those steps across
+   jobs. See [baseline check in CI](ci-quickstart.md#baseline-check-in-ci).
+6. Optional: post `report.md` to the merge request through your
+   platform's API. `fermut pr-comment` is GitHub-only; elsewhere, upload
+   the report as a job artifact.
 
 ## Where next
 
-- **[Working on projects](projects.md)** — the rollout playbook.
-- **[Coding agents](coding-agents.md)** — agent inner-loop integration.
-- **[CLI reference](../reference/cli/index.md)** — every flag the
-  integrations rely on.
+- **[GitHub Action](github-action.md)**: the packaged action and its inputs.
+- **[Rolling out to a team](projects.md)**: measure, then gate, then tighten.
+- **[CLI reference](../reference/cli/index.md)**: every flag these
+  recipes rely on.

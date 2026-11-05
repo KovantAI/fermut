@@ -96,6 +96,10 @@ jobs:
       # e2e test spawns it from PATH, so it must be installed alongside pytest.
       - run: pip install --require-hashes -r .github/requirements/e2e.txt
       - run: cargo test --all-features --locked --test e2e -- --include-ignored
+      # The e2e build leaves the binary here; every subcommand and flag it
+      # declares must appear in docs/reference/cli/.
+      - name: CLI reference covers every flag
+        run: scripts/check-cli-docs.sh target/debug/fermut
 
   python-plugin:
     # The pytest plugins shipped in the wheel (python/pytest_fermut): the

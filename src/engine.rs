@@ -726,6 +726,7 @@ fn preflight_baseline(
              --no-verify-baseline.\n\n\
              If the same tests pass when you run them yourself, fermut's \
              copy of the project broke them: please report it at {}{}\n\n\
+             Common causes: {}\n\n\
              --- test output (tail) ---\n{output}",
             crate::ISSUES_URL,
             if cfg.private_home {
@@ -735,7 +736,8 @@ fn preflight_baseline(
                  keeps your real home."
             } else {
                 ""
-            }
+            },
+            crate::TROUBLESHOOTING_URL,
         )),
     }
 }

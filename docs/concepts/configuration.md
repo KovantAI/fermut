@@ -70,7 +70,7 @@ write a `fermut.toml` tuned to one specific use case:
 
 Profiles are not mutually exclusive — they're templates. After
 `init`, the generated `fermut.toml` is plain text; hand-edit
-anything. See **[Working on projects](../guides/projects.md)** for
+anything. See **[Rolling out to a team](../guides/projects.md)** for
 the full rollout playbook.
 
 ## Environment variables
@@ -84,7 +84,7 @@ Precedence is the standard CLI > env > config-file > default.
 
 - **[Configuration reference](../reference/configuration.md)** —
   every key with type, default, and effect.
-- **[Working on projects](../guides/projects.md)** — picking and
+- **[Rolling out to a team](../guides/projects.md)** — picking and
   tightening a profile.
 - **[Filters](../guides/filters.md)** — `--ops`, `--skip-ops`,
   `--diff-only`, inline ignore markers.

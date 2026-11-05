@@ -7,6 +7,9 @@ the tool.
 - **[Mutation testing](mutation-testing.md)** — what it measures,
   vocabulary (operator / mutant / survived / killed), the score,
   the filter chain, worker isolation.
+- **[How a run works](how-a-run-works.md)** — the pipeline from
+  config to summary line: generation, filters, cache, baseline, forked
+  runs, verdicts.
 - **[Projects](projects.md)** — what fermut considers a project,
   how it discovers the root, source/tests/state layout.
 - **[Configuration](configuration.md)** — file vs CLI vs profile,

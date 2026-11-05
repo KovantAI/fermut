@@ -3,7 +3,7 @@
 Zero to a green mutation-testing job on every PR, in one read. The
 goal here is **getting something running**, not picking the perfect
 profile. The full rollout playbook lives in
-**[Working on projects](projects.md)**; this page is the on-ramp.
+**[Rolling out to a team](projects.md)**; this page is the on-ramp.
 
 ## Prerequisites
 
@@ -28,9 +28,8 @@ is the fastest way to lose the team's trust in mutation testing.
 
 - [ ] **[First steps](../getting-started/first-steps.md)** — five-minute
       local run, confirms fermut works on your codebase.
-- [ ] **[Working on projects → Step 1: baseline](projects.md#step-1-get-an-honest-baseline)** —
-      one full-tree run without `--diff-only` to see your starting
-      score honestly. Enabling a PR gate before this almost always
+- [ ] **[`fermut baseline`](../reference/cli/baseline.md)** — see your
+      starting score on the whole tree, not just a diff. Enabling a PR gate before this almost always
       surfaces a wall of pre-existing survivors.
 
 If any box is unchecked, **stop and do that first** — the page it
@@ -38,23 +37,42 @@ links to is short. Come back when all boxes are checked.
 
 ## TL;DR (after prerequisites)
 
+On GitHub Actions, add the [packaged action](github-action.md) as
+`.github/workflows/mutation.yml`:
+
+```yaml
+name: Mutation
+on: pull_request
+
+permissions:
+  contents: read
+  pull-requests: write   # sticky PR comment
+
+jobs:
+  fermut:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<sha>
+      - uses: KovantAI/fermut@v0.7.0
+        with:
+          blocking: "false"   # warn only, while you watch the score
+```
+
+Push. On the next PR you'll see a [sticky PR comment](../reference/cli/pr-comment.md)
+— one comment that updates in place on re-runs — with the score and any
+survivors on changed lines, and the same report in the job summary. The
+action installs fermut, builds per-test coverage, caches verdicts and
+coverage across runs, and mutates only the PR's diff. Remove `blocking`
+once the score is stable; [Rolling out to a team](projects.md) covers
+when.
+
+Prefer a workflow file you own end to end? `fermut init` can write one:
+
 ```sh
 fermut init --profile pr-gate --with-gha
 git add fermut.toml .github/workflows/fermut.yml
 git commit -m "ci: add fermut mutation gate"
 ```
-
-Push. On the next PR you'll see a [sticky PR comment](../reference/cli/pr-comment.md)
-from `fermut pr-comment` — one comment that updates in place on
-re-runs, not a stack of duplicates — with the score and any
-survivors on changed lines. That's it; the rest of this page is what
-the generated files actually do and how to customize them.
-
-> **Gradual rollout?** If you'd rather watch the score for a week
-> before letting the gate block merges, follow the
-> **measure-only variant** at
-> [projects.md / Step 3](projects.md#step-3-wire-ci-in-measure-only-mode)
-> instead of the TL;DR above.
 
 ## What `fermut init --with-gha` writes
 
@@ -81,9 +99,8 @@ Key points:
   selection.
 - Runs `fermut run --diff-only origin/<PR base>` and writes
   `fermut-report.md` and `fermut-report.json`.
-- Has **no cache step**: every run starts cold. Use the
-  [`KovantAI/fermut` action](github-action.md) instead if you want
-  verdicts and coverage cached across runs.
+- Has **no cache step**: every run starts cold. Add the cache steps from
+  [CI recipes](integrations.md#github-actions), or use the packaged action.
 - Posts a sticky PR comment via `fermut pr-comment`. The comment
   updates in place on each re-run.
 
@@ -106,8 +123,7 @@ The first PR after wiring this up will produce one of three outcomes:
   The comment is still posted. Expected, not a failure.
 - **Green, comment with score and zero survivors.** The happy path.
 - **Red, comment listing survivors.** Each survivor is one line with
-  its absolute `path:line`, operator and the `original → replacement`
-  edit. Run `fermut explain` locally on one for the full context, then
+  its `path:line`, operator and the `original → replacement` edit. Run `fermut explain` locally on one for the full context, then
   fix it or add a `# fermut: ignore[<op>]` marker.
 
 If you get **`errored` outcomes** in the comment instead of
@@ -116,20 +132,11 @@ tree. See [troubleshooting / errored outcomes](../reference/troubleshooting/erro
 
 ## Onboarding without a gate first
 
-The default `pr-gate` workflow blocks merges. If you'd rather watch
-the score for a week before flipping the gate on, follow the
-**measure-only** variant in
-**[projects.md / Step 3](projects.md#step-3-wire-ci-in-measure-only-mode)**.
-For this hand-written workflow the difference is one line:
-`continue-on-error: true` on the job. Note it also hides setup failures
-(a broken install or coverage step shows green too). If you use the
-[`KovantAI/fermut` action](github-action.md#rolling-it-out) instead,
-prefer its `blocking: "false"` input, which only softens the gate.
-
-This is the recommended path for codebases that haven't run
-mutation testing before — see
-[projects.md / Step 1](projects.md#step-1-get-an-honest-baseline)
-for why.
+The TL;DR starts with `blocking: "false"`, so a failing gate only warns.
+The `--with-gha` workflow blocks merges from the first run; to soften it,
+add `continue-on-error: true` to its job, which also hides setup
+failures. Codebases that haven't run mutation testing before should start
+non-blocking — see [Rolling out to a team](projects.md).
 
 ## Baseline check in CI
 
@@ -158,31 +165,16 @@ and the run aborts with a clear message rather than hanging the job.
 
 ## Non-GHA CI
 
-The generated template is GitHub Actions. fermut itself is a normal
-CLI, so any CI works — translate the steps:
-
-1. Checkout with full history (`fetch-depth: 0` equivalent).
-2. Install Python + the project's deps.
-3. Install fermut (`uv tool install fermut`, `pipx install fermut`,
-   or `pip install fermut`).
-4. Run `fermut coverage` to build a `.coverage` database (or, manually:
-   `pytest --cov=src --cov-context=test`, which writes `.coverage`).
-5. `fermut run src/ --tests tests/ --diff-only <base-ref> --coverage .coverage --no-verify-baseline --markdown report.md --trend`
-   (`--no-verify-baseline` is safe here because step 4 already ran the full
-   suite in this same job; drop it if your CI splits those steps across jobs.)
-6. Optional: post the markdown report to the PR via your platform's
-   API. `fermut pr-comment` is GitHub-specific; for GitLab / Bitbucket,
-   upload `report.md` as a job artifact instead.
+The steps translate to any CI; see
+[CI recipes → Other CI systems](integrations.md#other-ci-systems).
 
 ## Where next
 
-- **[Working on projects](projects.md)** — the gradual rollout
-  playbook (baseline → measure → gate → tighten).
-- **[PR gate + nightly recipe](integrations.md#pr-gate-nightly)** —
-  add a nightly sweep alongside the PR gate, sharing one config.
-- **[Integrations](integrations.md)** — full GHA YAML, sharded
-  nightly sweep, pre-commit, history persistence.
+- **[GitHub Action](github-action.md)** — every input, sharded sweeps and
+  the score trend.
+- **[Rolling out to a team](projects.md)** — baseline, measure, gate,
+  tighten.
+- **[CI recipes](integrations.md)** — hand-written workflows: caching,
+  PR gate + nightly, coverage scoping, history persistence.
 - **[`fermut init`](../reference/cli/init.md)** — every flag the
   bootstrap supports.
-- **[`fermut run`](../reference/cli/run.md)** — every flag the CI job
-  uses.

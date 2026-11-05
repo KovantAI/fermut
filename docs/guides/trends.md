@@ -142,5 +142,5 @@ This is what coding agents consume as a reward signal. See
 
 - **[`fermut trend` CLI](../reference/cli/trend.md)** — every
   flag.
-- **[Working on projects](projects.md)** — when to enable history
+- **[Rolling out to a team](projects.md)** — when to enable history
   vs. when to leave it off.

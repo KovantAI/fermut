@@ -8,6 +8,24 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+### Changed
+- Human-readable output (`run`, `list`, `show`, `baseline`'s worst files)
+  prints source paths relative to the current directory
+  (`src/calculator.py:14@216`) instead of the full checkout path. Mutant ids
+  and JSON reports still carry absolute paths.
+
+### Fixed
+- `fermut init` picked the `unittest` runner when pytest was installed only in
+  the project's `.venv` and the venv wasn't activated. It now looks in the
+  venv, as `doctor` and `run` do.
+- `fermut baseline --format json` printed coverage progress and pytest's
+  session output to stdout ahead of the JSON. All of `fermut coverage`'s
+  output now goes to stderr.
+- The MCP server's `fermut_baseline` tool wrote that same output into the
+  JSON-RPC stream, which breaks MCP clients. The server now writes JSON-RPC to
+  a private copy of stdout and points stdout at stderr, so nothing a tool or
+  child process prints can reach the stream.
+
 ## [0.7.0] - 2026-11-04
 
 ### Added

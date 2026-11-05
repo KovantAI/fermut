@@ -35,7 +35,7 @@ per-phase timing, mutant total, score, and return code.
 The numbers below are `cold`-scenario runs of fermut 0.7.0 (pre-release
 `main`, 2026-11-03) vs mutmut 3.8.1, **both re-run back-to-back on the same
 machine (2026-11-03)**, excluding clone / install. fermut runs its
-defaults: coverage filter on, [schemata](cli/run.md#schemata) on,
+defaults: coverage filter on, [schemata](cli/run-schemata.md) on,
 `--timeout-factor 3`, the `minimal` operator profile. mutmut runs its
 default.
 
@@ -145,6 +145,30 @@ benchmark harness now generates it automatically for fermut. Mutmut has no equiv
 full suite — which is also why it wins on a tiny-suite repo like
 more-itertools where the full suite is already cheap.
 
+### The `ty` filter { #ty-filter }
+
+The `ty` filter runs after the coverage filter, so its share is measured
+against the mutants that would otherwise run: `ty` drops ÷ (`ty` drops +
+scored). From the default-config runs in the memory-cap A/B
+(2026-11-01, Linux, schemata on, `benchmarks/schemata/results/memcap/`):
+
+| Repo           | Scored | Dropped by `ty` | Share   |
+|----------------|--------|-----------------|---------|
+| more-itertools | 3326   | 1305            | 28%     |
+| click          | 1408   | 636             | 31%     |
+| markupsafe     | 217    | 105             | 33%     |
+| typer          | 1597   | 909             | 36%     |
+| werkzeug       | 2486   | 1407            | 36%     |
+| pyjwt          | 1739   | 1017            | 37%     |
+| jinja2         | 1911   | 1108            | 37%     |
+| flask          | 788    | 473             | 38%     |
+| trio           | 2340   | 1475            | 39%     |
+
+So roughly **30–40% of the covered mutants never reach pytest**. On
+application suites outside this set the share has ranged from 12% to
+53%. Each drop saves one mutant's test run. The filter's own cost isn't
+broken out separately: it's part of the `mutation` column above.
+
 ### mutmut and cosmic-ray — cold + warm
 
 Neither tool has a coverage filter, so both run the full suite per
@@ -196,13 +220,21 @@ the existing `.coverage` DB. Same session as the cold table (2026-11-03).
 | more-itertools v10.5.0 | ~123s       | ~2s         | ~2s                    | ~3s         |
 | markupsafe 3.0.3       | ~15s        | —           | —                      | ~1s         |
 
-- **A warm re-run is almost all baseline check.** Every verdict comes from
-  the cache, but fermut still runs the unmutated suite once first
-  (`verify_baseline`), to refuse a red suite before trusting anything.
-  That's ~57s of typer's ~61s (its suite is slow), ~3s of pyjwt's. June's
-  ~8s typer warm predates the baseline check; `--no-verify-baseline`
-  skips it at your own risk.
-- **Loop ≈ warm.** The loop edit appends a comment, which leaves the AST
+- **The warm column predates a change: a fully cached run now skips the
+  baseline check.** In this session every verdict came from the cache, but
+  fermut still ran the unmutated suite once first (`verify_baseline`):
+  ~57s of typer's ~61s, ~3s of pyjwt's. Since then, a run where every
+  mutant is a cache hit runs no tests at all, baseline included. Re-measured
+  on pyjwt (2026-11-04, a different machine from the table): **~38s cold,
+  ~0.3s warm**.
+- **An edit costs one coverage refresh plus the affected mutants.** Same
+  pyjwt session, one statement added to a function body: `fermut coverage`
+  re-ran the 6 affected test files in ~5s, then the run took ~36s. Skip
+  the refresh and the stale `.coverage` is ignored: the run took ~311s and
+  reported almost twice the survivors, because every mutant ran the whole
+  suite and uncovered lines counted. With `--diff-only HEAD` (the agent
+  loop), the same edit took ~11s, nearly all of it the baseline check.
+- **Loop ≈ warm in the table.** The harness's loop edit appends a comment, which leaves the AST
   untouched, so fermut's *structural* cache key (scope AST hash, not byte
   hash) stays valid and nothing re-runs. This is a best case; a real edit
   to a function body re-runs just that function's mutants.

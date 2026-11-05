@@ -23,9 +23,9 @@ notice?* If no test noticed, the test suite has a hole at that
 location. The hole is named, located, and reproducible — not a vague
 "increase coverage" goal.
 
-Concretely, on most Python codebases that have never been
-mutation-tested, the score lands somewhere between 40% and 70% on the
-first run. That gap is not a tooling failure; it's the difference
+Concretely, nine mature, well-tested open-source Python libraries score
+67–86% with fermut's defaults ([benchmarks](../reference/benchmarks.md#cold-runs-pinned-oss-repos)),
+and code that has never been mutation-tested usually starts lower. That gap is not a tooling failure; it's the difference
 between "tests exist" and "tests would catch the regression you're
 worried about." Closing it pays off most in code that *cannot* be
 allowed to silently break — auth, billing, data migrations, parsing.
@@ -175,7 +175,7 @@ Three outcomes are excluded from both sides of the ratio:
 Worked sample. If `fermut run` reports:
 
 ```
-152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3, equivalent: 0, errored: 0  | score: 94.6%
+152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3 (coverage 3), equivalent: 0, errored: 0  | score: 94.6%
 ```
 
 Then `detected = 141` (140 + 1), denominator = `141 + 8 = 149`, and
@@ -238,10 +238,10 @@ Order is cheap → expensive:
 | ty             | in-process  | Drop mutants that introduce new ty diagnostics (embedded checker; subprocess fallback) |
 | tce            | subprocess  | Drop mutants whose bytecode is identical to the original (optional, `--tce`) |
 
-The ty filter matters because 20–40% of naive mutants (e.g. swapping
-an arithmetic op into a string-context binop) are type-invalid on
-type-hinted codebases — see [benchmarks](../reference/benchmarks.md).
-Catching them with a ~25ms type check is dramatically cheaper than
+The ty filter matters because about 30–40% of covered mutants (e.g.
+swapping an arithmetic op into a string-context binop) are
+type-invalid — see [benchmarks](../reference/benchmarks.md#ty-filter).
+Catching them with an in-process type check is much cheaper than
 catching them with a pytest run.
 
 Inline-ignore markers and the docstring auto-skip work earlier: those
@@ -258,7 +258,7 @@ catalogue and the inline-ignore syntax, and the
   why it's the iteration-speed lever.
 - **[Landscape](landscape.md)** — how fermut compares to mutmut and
   cosmic-ray, and the motivation for a new tool.
-- **[Isolation modes](../reference/cli/run.md#isolation-modes)** — how
+- **[Isolation modes](../reference/cli/run-isolation.md#isolation-modes)** — how
   workers patch source without touching the original tree.
 
 ## What fermut doesn't do (yet)

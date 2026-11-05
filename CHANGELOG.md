@@ -117,6 +117,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   them comparing numpy or pandas values. Set
   `operators = "classic"` (or `--operators classic`) to keep the old
   operators.
+- **A run where every mutant is a cache hit skips the baseline suite run.**
+  Nothing will be tested, so there's nothing for a red suite to falsify; the
+  run reuses the cached verdicts and finishes without running any tests
+  (typer 74 s → 3 s, pyjwt 0.3 s). Runs with `--deselect`/`-k`/`-m` narrowing
+  skip it too: the last baseline's deselection is stored in the cache, keyed
+  on the pytest arguments, config files and the tests tree. Any mutant that
+  still needs running brings the baseline check back.
 
 ### Deprecated
 - Operator profile name `default`: it now means `classic` and warns. It will

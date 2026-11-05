@@ -13,6 +13,7 @@ fermut run src/pkg --no-cache --record-kill-sets kill-sets.jsonl
 fermut hom src/pkg --kill-sets kill-sets.jsonl --coverage .coverage
 ```
 
+<!-- cli-docs: inherits run -->
 `hom` takes every flag `run` accepts for building the run config (`--tests`,
 `--jobs`, `--timeout`, `--runner`, `--python`, `--coverage`, the operator and
 filter flags, and the rest). The flags below are specific to `hom`:

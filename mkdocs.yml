@@ -10,7 +10,6 @@ theme:
   name: material
   features:
     - navigation.sections
-    - navigation.expand
     - navigation.top
     - navigation.tracking
     - navigation.indexes
@@ -87,22 +86,26 @@ nav:
       - Getting help: getting-started/getting-help.md
   - Guides:
       - guides/index.md
-      - CI quickstart: guides/ci-quickstart.md
-      - GitHub Action: guides/github-action.md
-      - Integrations: guides/integrations.md
-      - pytest plugin: guides/pytest-plugin.md
-      - Working on projects: guides/projects.md
-      - Tightening the inner loop: guides/inner-loop.md
-      - Coding agents: guides/coding-agents.md
-      - Claude Code playbook: guides/claude-code-skill.md
-      - Survivor triage: guides/survivor-triage.md
-      - Equivalent mutants: guides/equivalent-mutants.md
-      - Trends: guides/trends.md
-      - Coverage: guides/coverage.md
-      - Jupyter notebooks: guides/notebooks.md
-      - Filters: guides/filters.md
-      - Migrate from mutmut: guides/migrate-from-mutmut.md
-      - Migrate from cosmic-ray: guides/migrate-from-cosmic-ray.md
+      - Local use:
+          - Coverage: guides/coverage.md
+          - Tightening the inner loop: guides/inner-loop.md
+          - Survivor triage: guides/survivor-triage.md
+          - Equivalent mutants: guides/equivalent-mutants.md
+          - Filters: guides/filters.md
+          - pytest plugin: guides/pytest-plugin.md
+          - Jupyter notebooks: guides/notebooks.md
+      - CI and teams:
+          - CI quickstart: guides/ci-quickstart.md
+          - GitHub Action: guides/github-action.md
+          - CI recipes: guides/integrations.md
+          - Rolling out to a team: guides/projects.md
+          - Trends: guides/trends.md
+      - Coding agents:
+          - Coding agents: guides/coding-agents.md
+          - Agent skill & plugin: guides/claude-code-skill.md
+      - Migrating:
+          - From mutmut: guides/migrate-from-mutmut.md
+          - From cosmic-ray: guides/migrate-from-cosmic-ray.md
   - Concepts:
       - concepts/index.md
       - Mutation testing: concepts/mutation-testing.md
@@ -117,7 +120,11 @@ nav:
           - reference/cli/index.md
           - fermut init: reference/cli/init.md
           - fermut baseline: reference/cli/baseline.md
-          - fermut run: reference/cli/run.md
+          - fermut run:
+              - reference/cli/run.md
+              - Schemata: reference/cli/run-schemata.md
+              - Isolation: reference/cli/run-isolation.md
+              - Test selection: reference/cli/run-test-selection.md
           - fermut coverage: reference/cli/coverage.md
           - fermut list: reference/cli/list.md
           - fermut show: reference/cli/show.md
@@ -172,7 +179,7 @@ nav:
           - reference/internals/index.md
           - Adding an operator: reference/internals/adding-operators.md
       - Benchmarks: reference/benchmarks.md
-      - Parity: reference/parity.md
+      - mutmut parity: reference/parity.md
       - Policies:
           - reference/policies/index.md
           - Versioning: reference/policies/versioning.md
@@ -199,3 +206,8 @@ extra_javascript:
 # a doc set with rot. Toggle off locally if you intentionally leave dangling
 # links during work-in-progress.
 strict: true
+# Zensical (CI, Read the Docs) checks anchors in strict mode already; plain
+# MkDocs only does with these, so a local `mkdocs build --strict` agrees.
+validation:
+  anchors: warn
+  unrecognized_links: warn

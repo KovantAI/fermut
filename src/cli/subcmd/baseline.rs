@@ -280,7 +280,7 @@ fn top_survivor_files(report: &Report, top: usize) -> Vec<FileSurvivors> {
     for o in &report.outcomes {
         if let MutantOutcome::Survived { mutant, .. } = o {
             *by_file
-                .entry(mutant.file.display().to_string())
+                .entry(crate::util::display_path(&mutant.file).to_string())
                 .or_default() += 1;
         }
     }

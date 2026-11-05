@@ -83,7 +83,7 @@ impl Mutant {
         // full `<file>@<offset>:...` id.
         format!(
             "{}:{}@{} [{}] `{}` → `{}`",
-            self.file.display(),
+            crate::util::display_path(&self.file),
             self.line,
             u32::from(self.range.start()),
             self.operator.name(),

@@ -9,7 +9,7 @@ Precedence is the standard **CLI flag > env var > config file > built-in default
 
 | Variable                   | Effect                                                                                                                                                  |
 |----------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `FERMUT_ISOLATION`         | Default for `--isolation` (`auto` / `copy` / `hardlink` / `reflink`). See [Isolation modes](cli/run.md#isolation-modes).                                |
+| `FERMUT_ISOLATION`         | Default for `--isolation` (`auto` / `copy` / `hardlink` / `reflink`). See [Isolation modes](cli/run-isolation.md#isolation-modes).                                |
 | `FERMUT_TY_EMBEDDED`       | When set to `0`, forces the legacy ty subprocess path instead of the embedded in-process checker. Any other value (or unset) keeps embedded on. See [filters → embedded vs subprocess ty](../guides/filters.md#embedded-vs-subprocess-ty-default-embedded). |
 | `FERMUT_PYTHON`            | Python interpreter used by the bytecode-identity detector and the `--tce` pre-filter. Defaults to `python3` on `PATH`. Not the interpreter that runs your tests (that's `--python` / `VIRTUAL_ENV`). |
 | `FERMUT_LLM_MOCK`          | When set to a truthy value (`1`, `true`, `yes`, `on`), `fermut explain --llm` and `fermut suggest` use a deterministic offline mock client instead of calling Anthropic. Test/offline only. |
@@ -22,7 +22,7 @@ Precedence is the standard **CLI flag > env var > config file > built-in default
 
 | Variable     | Effect |
 |--------------|--------|
-| `FM_ACTIVE`  | Under [schemata](cli/run.md#schemata), the active mutant's number in the schema. Exported so a Python subprocess a test starts runs the same mutant; `0` means none. A subprocess started without it (`env={...}`) finds the mutant by its process group instead, unless it starts a new session. Don't set it yourself. |
+| `FM_ACTIVE`  | Under [schemata](cli/run-schemata.md), the active mutant's number in the schema. Exported so a Python subprocess a test starts runs the same mutant; `0` means none. A subprocess started without it (`env={...}`) finds the mutant by its process group instead, unless it starts a new session. Don't set it yourself. |
 
 ## Inherited from the ecosystem
 

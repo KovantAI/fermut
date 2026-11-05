@@ -39,4 +39,9 @@ exclude_globs = [
 exclude_re = [
     # `cached && log` only gates an unasserted "cache hit" line on stderr.
     'src/cli/subcmd/suggest.rs:.*replace && with \|\| in generate_one',
+    # Only prints the "what now" footer to stderr.
+    'src/cli/subcmd/coverage.rs:.*replace report_done with \(\)',
+    # fd/handle syscall failure branches (no fault injection) and the
+    # #[cfg(windows)] half, which Linux CI compiles out.
+    'src/cli/subcmd/mcp.rs:.* in take_protocol_stdout',
 ]

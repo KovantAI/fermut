@@ -22,8 +22,8 @@ _Line coverage tells you which lines run. fermut tells you which lines your test
 ```text
 $ fermut run src/ --tests tests/
 
-SURVIVED  src/auth.py:42 [boundary-shift] `age >= 18` → `age > 18`
-TIMEOUT   src/slow.py:88 [arith-op-swap]  `n * 2`    → `n / 2`
+SURVIVED  src/auth.py:42@1187 [boundary-shift] `age >= 18` → `age > 18`
+TIMEOUT   src/slow.py:88@2304 [arith-op-swap] `n * 2` → `n / 2`
 
 152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3 (coverage 3), equivalent: 0, errored: 0  | score: 94.6%
 ```
@@ -59,13 +59,10 @@ cargo install --git https://github.com/KovantAI/fermut --locked    # from source
 
 # in your project (needs pytest, coverage, pytest-cov, ty on the same PATH — see Installation)
 fermut init                     # detect source/tests/runner, write fermut.toml
-
-# fermut init wires per-test coverage when pytest-cov is present;
-# generate it before the first run (skip if your config has no `coverage` key):
-pytest --cov=src --cov-context=test    # writes .coverage; fermut auto-discovers it at the project root
-# (or, manually: coverage json -o coverage.json --show-contexts, then --coverage coverage.json)
-
-fermut run src/ --tests tests/  # first mutation report (add -q to silence progress logs)
+fermut baseline                 # where you stand: checks the env, builds .coverage,
+                                # line coverage vs a sampled mutation score + worst files
+fermut run src/ --tests tests/  # full mutation report (add -q to silence progress logs)
+fermut next                     # the survivor worth a test first
 ```
 
 For a CI gate, generate the opinionated profile instead — diff-only +
@@ -119,7 +116,7 @@ Start here:
   then `fermut run`, first report in under five minutes.
 - **[Installation](docs/getting-started/installation.md)** — prerequisites
   and build paths.
-- **[Working on projects](docs/guides/projects.md)** — gradual rollout,
+- **[Rolling out to a team](docs/guides/projects.md)** — gradual rollout,
   profile choice, CI integration.
 - **[CLI reference](docs/reference/cli/index.md)** — every subcommand,
   every flag.

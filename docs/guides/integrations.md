@@ -1,14 +1,13 @@
-# Integrations
+# CI recipes
 
-How to wire fermut into the systems that already build/test your code.
+Hand-written workflows for full control over each step, and for CI
+systems other than GitHub Actions. On GitHub Actions, the
+**[packaged action](github-action.md)** (`uses: KovantAI/fermut@<tag>`)
+does all of this behind a few inputs: install, coverage, caching, gate,
+summary, sticky comment and sharding. Start there unless you need
+something it doesn't do.
 
 ## GitHub Actions
-
-> **Prefer the packaged action.** `uses: KovantAI/fermut@<tag>` wraps
-> everything below — install, coverage, caching, gate, summary, sticky
-> comment, sharding — behind a few inputs. See
-> **[GitHub Action](github-action.md)**. The raw YAML here is for other
-> CI systems or for full control.
 
 A PR-gate workflow with caching and a score trend. `fermut init
 --with-gha` writes a simpler variant at `.github/workflows/fermut.yml`
@@ -79,9 +78,7 @@ Key points:
 - `fermut coverage` runs the suite and writes the `.coverage`
   database fermut reads directly (no `coverage json` export step). The
   workflow passes `--coverage .coverage` explicitly; at the project root
-  fermut also auto-discovers it. Or, manually: `pytest --cov=src
-  --cov-context=test && coverage json -o coverage.json --show-contexts`,
-  passed as `--coverage coverage.json` (the legacy JSON path).
+  fermut also auto-discovers it.
 - `fetch-depth: 0` is required so `--diff-only` can compute the
   merge base.
 - `actions/cache` keyed on lockfile + sources persists the result
@@ -92,8 +89,12 @@ Key points:
 - `pr-comment` posts a sticky comment that updates in place on
   re-runs.
 
-For the gradual-rollout playbook (measure-only first, then enable
-the gate), see **[Working on projects](projects.md#step-3-wire-ci-in-measure-only-mode)**.
+**Measure-only first.** To watch the score for a while before it can
+block merges, add `continue-on-error: true` to the job. It also hides
+setup failures, such as a broken install or coverage step, so remove it
+once the score settles. (The packaged action's `blocking: "false"` only
+softens the gate.) The rollout steps are in
+**[Rolling out to a team](projects.md#step-3-wire-ci-in-measure-only-mode)**.
 
 ## Sharded full sweep
 
@@ -253,8 +254,8 @@ History persistence shared across both jobs:
 - The nightly job saves a fresh history entry under
   `fermut-history-main-${{ github.run_id }}`, which becomes the new
   baseline for PR comments via the `restore-keys` prefix match.
-- See [history persistence in CI](projects.md#history-persistence-in-ci)
-  for the alternative (committing `history.jsonl` to a side branch).
+- See [History persistence](#history-persistence) for the general
+  pattern and alternatives.
 
 Notifications on nightly failure — pick one:
 
@@ -478,6 +479,40 @@ PR gate — restore the baseline **read-only** (no save step), then let
   start from the same clean `main` seed instead of racing over a shared
   key.
 
+## History persistence { #history-persistence }
+
+CI runners are ephemeral, so `.fermut/history.jsonl` starts empty every
+run unless you persist it, and `--trend` has nothing to compare against.
+Restore it on every run with `actions/cache/restore` (which never saves),
+and save it only from `main`:
+
+```yaml
+- name: restore fermut history
+  uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+  with:
+    path: .fermut/history.jsonl
+    key: fermut-history-main
+    restore-keys: |
+      fermut-history-main-
+
+- name: run fermut
+  run: fermut run src/ --tests tests/ --markdown report.md --trend
+
+- name: save fermut history
+  if: always() && github.ref == 'refs/heads/main'
+  uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+  with:
+    path: .fermut/history.jsonl
+    key: fermut-history-main-${{ github.sha }}
+```
+
+PR jobs only read, so feature branches never fork their own history.
+The combined `actions/cache` would save from PR jobs in its post-step,
+which is why the restore uses `actions/cache/restore`. Caches can be
+evicted; for a history that's never lost, the packaged
+[`trend` action](github-action.md#score-trend) keeps it on an orphan
+branch instead.
+
 ## Pre-commit
 
 fermut itself ships pre-commit hooks for the Rust source. To run
@@ -504,58 +539,27 @@ only see uncommitted edits: on a clean tree at push time it finds zero
 mutants and tests nothing.) Run `git fetch` periodically so
 `origin/main` is current.
 
-## Coding agents
+## Other CI systems
 
-fermut is built to drop into an AI coding agent's inner loop. The
-recommended invocation, cache strategy, and JSON parsing recipes
-live in **[Coding agents](coding-agents.md)**.
+fermut is a plain CLI, so any CI works. Translate the steps:
 
-## MCP server { #mcp-server }
-
-`fermut mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)
-server over stdio, so an agent calls fermut as native tools
-(`fermut_doctor`, `fermut_baseline`, `fermut_run`, `fermut_next`,
-`fermut_explain`, `fermut_score`, `fermut_list_survivors`) instead of shelling out and
-parsing JSON. See the
-**[`fermut mcp` reference](../reference/cli/mcp.md)** for the tool list and
-error model.
-
-The [Claude Code plugin](claude-code-skill.md#option-2-the-claude-code-plugin)
-registers the server for you, alongside the agent skill. To register it
-yourself with an MCP client — Claude Code:
-
-```sh
-claude mcp add fermut -- fermut mcp
-```
-
-Or by hand, in a client config that takes a server map:
-
-```json
-{
-  "mcpServers": {
-    "fermut": { "command": "fermut", "args": ["mcp"] }
-  }
-}
-```
-
-The server honors the project's `fermut.toml`, so run it from (or point the
-client's working directory at) the project root. No network access, no API
-key — the tools wrap the same local engine the CLI uses.
-
-## ReadTheDocs / docs builds
-
-This site builds on ReadTheDocs with `docs/requirements.txt`. The
-`strict: true` mode in `mkdocs.yml` is what catches broken internal
-links before they ship. Run locally with:
-
-```sh
-uv pip install -r docs/requirements.txt
-uv run mkdocs serve
-```
+1. Check out with full history (`fetch-depth: 0` or equivalent), so
+   `--diff-only` can find the merge base.
+2. Install Python and the project's dependencies, including `pytest-cov`.
+3. Install fermut (`uv tool install fermut`, `pipx install fermut` or
+   `pip install fermut`).
+4. Run `fermut coverage` to build `.coverage`.
+5. `fermut run src/ --tests tests/ --diff-only <base-ref> --no-verify-baseline --markdown report.md --trend`.
+   `--no-verify-baseline` is safe because step 4 already ran the full
+   suite in the same job; drop it if your CI splits those steps across
+   jobs. See [baseline check in CI](ci-quickstart.md#baseline-check-in-ci).
+6. Optional: post `report.md` to the merge request through your
+   platform's API. `fermut pr-comment` is GitHub-only; elsewhere, upload
+   the report as a job artifact.
 
 ## Where next
 
-- **[Working on projects](projects.md)** — the rollout playbook.
-- **[Coding agents](coding-agents.md)** — agent inner-loop integration.
-- **[CLI reference](../reference/cli/index.md)** — every flag the
-  integrations rely on.
+- **[GitHub Action](github-action.md)**: the packaged action and its inputs.
+- **[Rolling out to a team](projects.md)**: measure, then gate, then tighten.
+- **[CLI reference](../reference/cli/index.md)**: every flag these
+  recipes rely on.

@@ -94,7 +94,7 @@ of this page is the prerequisites table, optional tools, and the
 | Python ≥ 3.10                              | required | Running your tests under mutation                                     | `brew install python` or `uv python install 3.12`                                                                    |
 | `pytest`                                   | required | Test runner fermut invokes (stdlib `unittest` works for legacy suites; pytest is the supported path) | `uv add --dev pytest`                                                                                                |
 | `coverage` + `pytest-cov`                  | required | Per-test coverage filter — without it every mutant runs the full suite (see below) | `uv add --dev coverage pytest-cov`                                                                                   |
-| `ty` *(optional)*                          | optional | Type-aware mutant pre-filter (20–40% of naive mutants dropped before pytest sees them). Runs embedded in fermut; the binary is only the fallback, or needed with `FERMUT_TY_EMBEDDED=0` | `uv tool install ty`                                                                                                 |
+| `ty` *(optional)*                          | optional | Type-aware mutant pre-filter (drops ~30–40% of covered mutants before pytest sees them). Runs embedded in fermut; the binary is only the fallback, or needed with `FERMUT_TY_EMBEDDED=0` | `uv tool install ty`                                                                                                 |
 | `ruff` *(optional)*                        | optional | Lint-based pre-filter, off by default                                 | `uv tool install ruff`                                                                                               |
 | `gh` *(optional)*                          | optional | `fermut pr-comment` (preinstalled on every GitHub Actions runner)     | <https://cli.github.com>                                                                                             |
 
@@ -121,9 +121,9 @@ the system `python3` may be 3.9 with none of the project's packages.
   and no `.coverage` at the project root, it runs without coverage
   (every mutant runs the full suite).
 - **`ty`** is the type-aware pre-filter. On type-hinted codebases
-  20–40% of naive mutants are type-invalid and get dropped in
-  ~25 ms each before pytest sees them
-  ([benchmarks](../reference/benchmarks.md)). On by default and
+  about 30–40% of covered mutants are type-invalid and get dropped
+  before pytest sees them
+  ([benchmarks](../reference/benchmarks.md#ty-filter)). On by default and
   checked in-process, so the `ty` binary isn't needed;
   `--no-ty-filter` opts out for older untyped suites.
 

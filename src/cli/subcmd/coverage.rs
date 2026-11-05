@@ -156,13 +156,13 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
     let full = opts.full || !db_path.exists() || prior.is_none();
     if full {
         if db_path.exists() && prior.is_none() && !opts.full {
-            println!(
+            eprintln!(
                 "{} has no fermut fingerprint sidecar; rebuilding fully to establish an \
                  incremental baseline.",
                 display_rel(&db_path, &base_dir)
             );
         } else {
-            println!("Running full test suite under coverage…");
+            eprintln!("Running full test suite under coverage…");
         }
         let ran_ok = run_pytest(
             &base_dir,
@@ -191,7 +191,7 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
     let prior = prior.unwrap_or_default();
 
     let Some(plan) = plan_incremental(&current, &prior, &db_path, &base_dir)? else {
-        println!(
+        eprintln!(
             "{} is up to date (no test or source content changed since it was written). \
              Nothing to do.",
             display_rel(&db_path, &base_dir)
@@ -228,7 +228,7 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
             );
         }
         if !tests_for_sources.is_empty() {
-            println!(
+            eprintln!(
                 "{touched_sources} changed or removed source file(s); re-measuring the {} \
                  test file(s) that cover them.",
                 tests_for_sources.len()
@@ -236,13 +236,13 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
         }
     }
     if !rerun.is_empty() {
-        println!("appending coverage for {} test file(s):", rerun.len());
+        eprintln!("appending coverage for {} test file(s):", rerun.len());
         for f in &rerun {
-            println!("  {}", display_rel(f, &base_dir));
+            eprintln!("  {}", display_rel(f, &base_dir));
         }
     }
     if !deleted_tests.is_empty() {
-        println!(
+        eprintln!(
             "purging contexts for {} removed test file(s).",
             deleted_tests.len()
         );
@@ -259,7 +259,7 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
     let purged = purge_contexts(&db_path, &prefixes)
         .with_context(|| format!("purging stale contexts from {}", db_path.display()))?;
     if purged > 0 {
-        println!("Purged {purged} stale context(s).");
+        eprintln!("Purged {purged} stale context(s).");
     }
 
     // Import-time lines (module bodies, `def`/`class` headers) are recorded
@@ -286,10 +286,10 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
     {
         Prune::Pruned(paths) => {
             if !paths.is_empty() {
-                println!("dropping {} removed source file(s):", paths.len());
+                eprintln!("dropping {} removed source file(s):", paths.len());
                 if paths.len() <= 10 || std::io::stdout().is_terminal() {
                     for p in &paths {
-                        println!("  {p}");
+                        eprintln!("  {p}");
                     }
                 }
             }
@@ -739,7 +739,11 @@ fn run_pytest(
         // relative — matches the purge prefixes and the reader's rebasing.
         cmd.arg(rel_to(t, base_dir).unwrap_or_else(|| t.clone()));
     }
+    // Everything this command prints is progress, so pytest's output goes to
+    // stderr too: stdout carries `baseline --format json` and the MCP
+    // server's JSON-RPC stream, both of which run this in-process.
     let status = cmd
+        .stdout(std::process::Stdio::from(std::io::stderr()))
         .status()
         .context("spawning pytest (is pytest + pytest-cov installed?)")?;
     // pytest exits non-zero when tests fail. Coverage data is still written for
@@ -956,7 +960,7 @@ enum Done {
 /// coverage, tell the user the one thing they need to do.
 fn report_done(loaded: &LoadedConfig, db_path: &Path, done: Done) {
     match done {
-        Done::Full => println!("\nWrote {}.", display_rel(db_path, &loaded.base_dir)),
+        Done::Full => eprintln!("\nWrote {}.", display_rel(db_path, &loaded.base_dir)),
         Done::Incremental {
             reran,
             removed,
@@ -975,18 +979,18 @@ fn report_done(loaded: &LoadedConfig, db_path: &Path, done: Done) {
             if parts.is_empty() {
                 // Source changed but no coverer was re-runnable (see the warning
                 // above); the baseline advanced but the DB is otherwise unchanged.
-                println!("\nCoverage baseline updated (nothing to re-run).");
+                eprintln!("\nCoverage baseline updated (nothing to re-run).");
             } else {
-                println!("\nRefreshed coverage — {}.", parts.join(", "));
+                eprintln!("\nRefreshed coverage — {}.", parts.join(", "));
             }
         }
     }
     let configured = loaded.file.coverage.is_some();
     if configured {
-        println!("`fermut run` will use it.");
+        eprintln!("`fermut run` will use it.");
     } else {
         let rel = display_rel(db_path, &loaded.base_dir);
-        println!(
+        eprintln!(
             "To use it, run `fermut run --coverage {rel}` \
              (or add `coverage = \"{rel}\"` to your fermut config so it's automatic)."
         );
@@ -1725,6 +1729,41 @@ mod tests {
             got,
             vec!["src/foo.py".to_string(), "tests/test_new.py".to_string()]
         );
+    }
+
+    /// Full rebuild of a sidecar-less `.coverage` with a stand-in interpreter
+    /// exiting `code`. Returns whether the fingerprint baseline was written.
+    #[cfg(unix)]
+    fn full_rebuild_with_exit(code: u8) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("fermut.toml"), "").unwrap();
+        std::fs::create_dir(root.join("tests")).unwrap();
+        std::fs::write(root.join("tests/test_a.py"), "def test_a(): pass\n").unwrap();
+        // A DB with no sidecar: the "rebuild fully" path.
+        std::fs::write(root.join(".coverage"), "").unwrap();
+        let py = root.join("python");
+        std::fs::write(&py, format!("#!/bin/sh\nexit {code}\n")).unwrap();
+        std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+        coverage(CoverageArgs {
+            path: root.to_path_buf(),
+            source: Some(root.to_path_buf()),
+            tests: Some(root.join("tests")),
+            full: false,
+            output: None,
+            python: Some(py),
+            pytest_args: vec![],
+        })
+        .unwrap();
+        fingerprints_path(&root.join(".coverage")).exists()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_rebuild_writes_baseline_only_when_pytest_passes() {
+        assert!(full_rebuild_with_exit(0));
+        assert!(!full_rebuild_with_exit(1));
     }
 }
 

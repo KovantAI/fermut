@@ -19,5 +19,5 @@ state and leak across mutants.
 
 ## See also
 
-- **[Isolation modes](../cli/run.md#isolation-modes)** — what each
+- **[Isolation modes](../cli/run-isolation.md#isolation-modes)** — what each
   mode does and when to pick which.

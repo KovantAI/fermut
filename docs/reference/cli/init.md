@@ -11,7 +11,7 @@ fermut init [PATH] [--profile NAME] [--list-profiles]
 | Flag                | Default     | Effect                                                                                                   |
 |---------------------|-------------|----------------------------------------------------------------------------------------------------------|
 | `PATH`              | `.`         | Where to start the project-root walk.                                                                    |
-| `--profile <name>`  | none        | Pre-seed with `pr-gate`, `nightly`, `local`, or `library`. See [Working on projects](../../guides/projects.md#step-2-pick-a-profile). |
+| `--profile <name>`  | none        | Pre-seed with `pr-gate`, `nightly`, `local`, or `library`. See [Rolling out to a team](../../guides/projects.md#step-2-pick-a-profile). |
 | `--list-profiles`   | off         | Print the profile catalogue and exit.                                                                     |
 | `--pyproject`       | off         | Write `[tool.fermut]` into `pyproject.toml` instead of `fermut.toml`.                                     |
 | `--force`           | off         | Overwrite an existing config block.                                                                       |

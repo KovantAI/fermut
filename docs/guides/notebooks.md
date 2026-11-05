@@ -99,15 +99,7 @@ fermut run analysis.py --tests tests/ --coverage .coverage
 ```
 
 `fermut coverage` runs the suite and writes a `.coverage` database
-fermut reads directly (no `coverage json` export step). Or, manually:
-
-```sh
-pytest --cov=analysis --cov-context=test
-coverage json -o coverage.json --show-contexts
-fermut run analysis.py --tests tests/ --coverage coverage.json
-```
-
-Either way the coverage data carries the per-test contexts fermut
+fermut reads directly. The coverage data carries the per-test contexts fermut
 needs — each line tagged with the pytest nodeID that hit it (a
 `coverage.json` export shows them as):
 
@@ -132,9 +124,6 @@ jupytext --sync analysis.ipynb && \
   fermut coverage --source analysis --tests tests/ && \
   fermut run analysis.py --tests tests/ --coverage .coverage
 ```
-
-(Or the manual `pytest --cov … && coverage json …` export, passed as
-`--coverage coverage.json`.)
 
 Commit the paired `.py` (or regenerate in CI) so the mutation target
 is always present.

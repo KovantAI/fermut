@@ -107,12 +107,12 @@ of impact:
    `--sample 0.1`. Less recall, faster cycle.
 
 For the team-scale equivalent (PR gate, nightly sweep), see
-**[Working on projects](projects.md)** and
+**[Rolling out to a team](projects.md)** and
 **[CI quickstart](ci-quickstart.md)**.
 
 ## Where next
 
-- **[Working on projects](projects.md)** — when you're ready to
+- **[Rolling out to a team](projects.md)** — when you're ready to
   share the score with the team.
 - **[Survivor triage](survivor-triage.md)** — what to do with each
   surviving mutant the inner loop surfaces.

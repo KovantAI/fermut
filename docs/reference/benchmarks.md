@@ -35,7 +35,7 @@ per-phase timing, mutant total, score, and return code.
 The numbers below are `cold`-scenario runs of fermut 0.6.1 (unreleased
 `main`, 2026-11-03) vs mutmut 3.8.1, **both re-run back-to-back on the same
 machine (2026-11-03)**, excluding clone / install. fermut runs its
-defaults: coverage filter on, [schemata](cli/run.md#schemata) on,
+defaults: coverage filter on, [schemata](cli/run-schemata.md) on,
 `--timeout-factor 3`, the `minimal` operator profile. mutmut runs its
 default.
 
@@ -144,6 +144,30 @@ root, or pass `--coverage .coverage`, or wire it via `fermut init`); the
 benchmark harness now generates it automatically for fermut. Mutmut has no equivalent, so its per-mutant cost is the
 full suite — which is also why it wins on a tiny-suite repo like
 more-itertools where the full suite is already cheap.
+
+### The `ty` filter { #ty-filter }
+
+The `ty` filter runs after the coverage filter, so its share is measured
+against the mutants that would otherwise run: `ty` drops ÷ (`ty` drops +
+scored). From the default-config runs in the memory-cap A/B
+(2026-11-01, Linux, schemata on, `benchmarks/schemata/results/memcap/`):
+
+| Repo           | Scored | Dropped by `ty` | Share   |
+|----------------|--------|-----------------|---------|
+| more-itertools | 3326   | 1305            | 28%     |
+| click          | 1408   | 636             | 31%     |
+| markupsafe     | 217    | 105             | 33%     |
+| typer          | 1597   | 909             | 36%     |
+| werkzeug       | 2486   | 1407            | 36%     |
+| pyjwt          | 1739   | 1017            | 37%     |
+| jinja2         | 1911   | 1108            | 37%     |
+| flask          | 788    | 473             | 38%     |
+| trio           | 2340   | 1475            | 39%     |
+
+So roughly **30–40% of the covered mutants never reach pytest**. On
+application suites outside this set the share has ranged from 12% to
+53%. Each drop saves one mutant's test run. The filter's own cost isn't
+broken out separately: it's part of the `mutation` column above.
 
 ### mutmut and cosmic-ray — cold + warm
 

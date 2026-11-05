@@ -17,6 +17,7 @@ fermut baseline [PATH] [--full] [--sample <RATIO>] [--top <N>] [--format human|j
 | `--top <N>`        | `3`     | How many worst-offender files to list.                                                 |
 | `--format`         | `human` | `json` emits the same numbers for an agent or dashboard.                               |
 
+<!-- cli-docs: inherits run -->
 The filter flags shared with [`run`](run.md) (`--ops`, `--skip-ops`,
 `--exclude`, `--diff-only`, …) also apply. The coverage filter is on by default (the
 discovered `.coverage`): mutating code no test executes would mix two

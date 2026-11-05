@@ -582,6 +582,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn write_message_emits_one_newline_terminated_json_line() {
+        let mut buf = Vec::new();
+        write_message(&mut buf, &json!({"id": 1})).unwrap();
+        assert_eq!(buf, b"{\"id\":1}\n");
+    }
+
+    #[test]
     fn initialize_echoes_client_protocol_version() {
         let params = json!({"protocolVersion": "2024-11-05"});
         let r = initialize(&params);

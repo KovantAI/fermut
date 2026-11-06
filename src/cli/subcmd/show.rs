@@ -111,3 +111,44 @@ pub(crate) fn run(args: ShowArgs) -> Result<()> {
     } = args;
     show(&report, target.as_deref(), all)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::report::testing::make_mutant;
+
+    #[test]
+    fn list_and_detail_views_render_every_status() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("t.py");
+        std::fs::write(&src, "a + b\n").unwrap();
+        let mut m = make_mutant();
+        m.file = src;
+        let mut missing = make_mutant();
+        missing.id = "gone".into();
+        missing.file = tmp.path().join("missing.py");
+        let report = Report::new(vec![
+            MutantOutcome::survived(m.clone()),
+            MutantOutcome::killed(m.clone()),
+            MutantOutcome::skipped(m.clone(), "ty"),
+            MutantOutcome::error(m.clone(), "boom".into()),
+            MutantOutcome::equivalent(m, "same bytecode", "bytecode-identity"),
+            MutantOutcome::survived(missing),
+        ]);
+        let path = tmp.path().join("r.json");
+        std::fs::write(&path, serde_json::to_string(&report).unwrap()).unwrap();
+
+        show(&path, None, false).unwrap();
+        run(ShowArgs {
+            report: path.clone(),
+            target: None,
+            all: true,
+        })
+        .unwrap();
+        for i in 1..=6 {
+            show(&path, Some(&i.to_string()), false).unwrap();
+        }
+        assert!(show(&path, Some("99"), false).is_err());
+        assert!(show(&tmp.path().join("nope.json"), None, false).is_err());
+    }
+}

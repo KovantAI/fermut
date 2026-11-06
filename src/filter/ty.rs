@@ -483,6 +483,55 @@ mod tests {
         }
     }
 
+    /// End-to-end through the in-process pool: a type-breaking mutant is
+    /// rejected, a benign one admitted, the second ask is a cache hit, and
+    /// drop persists the verdicts.
+    #[cfg(feature = "embedded-ty")]
+    #[test]
+    fn embedded_pool_gates_type_breaking_mutants_and_caches() {
+        if env_disables_embedded() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("m.py");
+        std::fs::write(&file, "x: int = 1 + 2\n").unwrap();
+        let file = file.canonicalize().unwrap();
+        let src = std::fs::read_to_string(&file).unwrap();
+        let at = |needle: &str, repl: &str| {
+            let start = src.find(needle).unwrap() as u32;
+            Mutant {
+                range: TextRange::new(
+                    TextSize::from(start),
+                    TextSize::from(start + needle.len() as u32),
+                ),
+                original: needle.into(),
+                replacement: repl.into(),
+                ..dummy_mutant(&file)
+            }
+        };
+        let benign = at("+", "-");
+        let breaking = at("1", "'a'");
+        let cache = dir.path().join("ty-cache.json");
+
+        let filter = TyFilter::with_cache_and_project(Some(cache.clone()), dir.path(), 2).unwrap();
+        assert!(filter.costly());
+        assert_eq!(filter.name(), "ty");
+        assert!(filter.admits(&benign).unwrap());
+        assert!(!filter.admits(&breaking).unwrap());
+        assert_eq!(filter.cached_verdict(&breaking), Some(false));
+        assert!(!filter.admits(&breaking).unwrap(), "cache hit agrees");
+        // A slot other than 0 is built lazily on first use.
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap()
+            .broadcast(|_| filter.mutant_error_count(&benign).unwrap());
+        drop(filter);
+        assert!(std::fs::read_to_string(&cache)
+            .unwrap()
+            .contains("ty-cache:v1"));
+    }
+
     #[test]
     fn cache_default_path_under_dot_fermut() {
         let p = TyFilter::default_cache_path(Path::new("/proj"));

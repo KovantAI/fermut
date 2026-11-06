@@ -68,7 +68,7 @@ The plugin makes the skill available in every project. It also registers the
 `fermut_doctor`, `fermut_run`, `fermut_next`, `fermut_explain` and the other
 tools natively instead of shelling out. The server runs the `fermut` on your
 `PATH` from the directory you start Claude Code in, so install fermut first
-(`pip install fermut`); without it, `/mcp` lists the `fermut` server as failed
+(`uv tool install fermut`, see [Installation](../getting-started/installation.md)); without it, `/mcp` lists the `fermut` server as failed
 and the skill still works through the CLI.
 
 Its version follows fermut releases, so plugin updates bring the skill for the
@@ -131,7 +131,7 @@ Asked something like "get the mutation score above 80%", the agent:
    [`fermut next`](../reference/cli/next.md) ranks them, using
    [`fermut explain --format json`](../reference/cli/explain.md) for
    each one, and writes the killing test in its own session.
-4. After touching tests, refreshes coverage with
+4. After every edit, source or test, refreshes coverage with
    [`fermut coverage`](../reference/cli/coverage.md) and re-runs. The
    cache means only the affected mutants run again.
 

@@ -4,7 +4,7 @@ Wheels are built and published for:
 
 - Linux x86_64 / aarch64
 - macOS x86_64 / arm64
-- Windows x86_64
+- Windows x86_64 (some features differ; see [Windows support](windows.md))
 
 Source builds work anywhere the Rust toolchain supports. We accept
 PRs to broaden the wheel matrix.

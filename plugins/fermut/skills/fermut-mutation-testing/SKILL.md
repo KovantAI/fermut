@@ -157,8 +157,11 @@ drivers such as CI scripts.
 Then:
 
 1. Run the new test: it must pass on the real code.
-2. `fermut coverage` — refreshes `.coverage`, re-measuring only changed test
-   files.
+2. `fermut coverage` — refreshes `.coverage`, re-running only the affected
+   test files. Do this after **any** edit, source or test: a `.coverage`
+   older than the code is ignored, every mutant then runs the whole suite,
+   and uncovered lines count as survivors (on pyjwt, 311 s instead of 36 s,
+   with twice the survivors).
 3. Re-run the same `fermut run` command. The cache re-runs only the mutants
    your change affects.
 4. Check the iteration helped:

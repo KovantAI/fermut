@@ -28,8 +28,9 @@ well.
 - **[GitHub Action](github-action.md)** — `uses: KovantAI/fermut@<tag>`:
   PR gate, sharded sweeps, score trend and cache warming.
 - **[CI recipes](integrations.md)** — hand-written workflows: caching,
-  PR gate + nightly, coverage scoping, history persistence, pre-commit,
-  other CI systems.
+  PR gate + nightly, history persistence, pre-commit, other CI systems.
+- **[Coverage in CI](ci-coverage.md)** — cache `.coverage` across runs,
+  scope it to the diff, or build it once on `main` for PRs to reuse.
 - **[Rolling out to a team](projects.md)** — baseline → measure-only →
   gate → tighten.
 - **[Trends](trends.md)** — recording score history, showing it on

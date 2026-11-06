@@ -8,6 +8,24 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+### Changed
+- Human-readable output (`run`, `list`, `show`, `baseline`'s worst files)
+  prints source paths relative to the current directory
+  (`src/calculator.py:14@216`) instead of the full checkout path. Mutant ids
+  and JSON reports still carry absolute paths.
+
+### Fixed
+- `fermut init` picked the `unittest` runner when pytest was installed only in
+  the project's `.venv` and the venv wasn't activated. It now looks in the
+  venv, as `doctor` and `run` do.
+- `fermut baseline --format json` printed coverage progress and pytest's
+  session output to stdout ahead of the JSON. All of `fermut coverage`'s
+  output now goes to stderr.
+- The MCP server's `fermut_baseline` tool wrote that same output into the
+  JSON-RPC stream, which breaks MCP clients. The server now writes JSON-RPC to
+  a private copy of stdout and points stdout at stderr, so nothing a tool or
+  child process prints can reach the stream.
+
 ## [0.7.0] - 2026-11-04
 
 ### Added
@@ -99,6 +117,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   them comparing numpy or pandas values. Set
   `operators = "classic"` (or `--operators classic`) to keep the old
   operators.
+- **A run where every mutant is a cache hit skips the baseline suite run.**
+  Nothing will be tested, so there's nothing for a red suite to falsify; the
+  run reuses the cached verdicts and finishes without running any tests
+  (typer 74 s → 3 s, pyjwt 0.3 s). Runs with `--deselect`/`-k`/`-m` narrowing
+  skip it too: the last baseline's deselection is stored in the cache, keyed
+  on the pytest arguments, config files and the tests tree. Any mutant that
+  still needs running brings the baseline check back.
 
 ### Deprecated
 - Operator profile name `default`: it now means `classic` and warns. It will

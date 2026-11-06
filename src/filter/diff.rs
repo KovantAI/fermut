@@ -432,6 +432,87 @@ mod tests {
         );
     }
 
+    fn repo_with_one_commit() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        git(cwd, &["init", "-q", "-b", "main"]);
+        git(cwd, &["config", "user.email", "t@t"]);
+        git(cwd, &["config", "user.name", "t"]);
+        std::fs::write(cwd.join("f.py"), "a\nb\nc\n").unwrap();
+        git(cwd, &["add", "."]);
+        git(cwd, &["commit", "-qm", "base"]);
+        tmp
+    }
+
+    fn mutant_at(file: PathBuf, line: u32) -> Mutant {
+        Mutant {
+            file,
+            line,
+            ..crate::report::testing::make_mutant()
+        }
+    }
+
+    #[test]
+    fn since_ref_admits_only_edited_lines() {
+        let tmp = repo_with_one_commit();
+        let cwd = tmp.path();
+        std::fs::write(cwd.join("f.py"), "a\nB\nc\n").unwrap();
+        let filter = DiffFilter::from_git_since("HEAD", cwd).unwrap();
+        assert_eq!(filter.name(), "since");
+        let f = cwd.join("f.py");
+        assert!(filter.admits(&mutant_at(f.clone(), 2)).unwrap());
+        assert!(!filter.admits(&mutant_at(f, 1)).unwrap());
+        assert!(!filter.admits(&mutant_at(cwd.join("other.py"), 2)).unwrap());
+    }
+
+    #[test]
+    fn since_accepts_a_date_and_rejects_garbage() {
+        let tmp = repo_with_one_commit();
+        let cwd = tmp.path();
+        assert!(DiffFilter::from_git_since("2099-01-01", cwd).is_ok());
+        let err = DiffFilter::from_git_since("1970-01-02", cwd)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("could not resolve --since"), "{err}");
+    }
+
+    #[test]
+    fn diff_only_unknown_base_and_unrelated_history_error() {
+        let tmp = repo_with_one_commit();
+        let cwd = tmp.path();
+        let err = DiffFilter::from_git("no-such-branch", cwd)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("--no-diff-only"), "{err}");
+
+        git(cwd, &["checkout", "-q", "--orphan", "lonely"]);
+        git(cwd, &["commit", "-qm", "orphan"]);
+        let err = DiffFilter::from_git("main", cwd).err().unwrap().to_string();
+        assert!(err.contains("unrelated histories"), "{err}");
+    }
+
+    #[test]
+    fn diff_outside_repo_hints_no_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = git_diff(&["HEAD"], tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("--no-diff-only"), "{err}");
+    }
+
+    #[test]
+    fn git_diff_error_generic_hint_and_empty_stderr() {
+        let msg = git_diff_error("", failing_status()).to_string();
+        assert!(msg.contains("(no output)"));
+        assert!(msg.contains("fix the git error above"));
+    }
+
+    #[test]
+    fn deleted_file_hunks_are_ignored() {
+        let diff = "+++ /dev/null\n@@ -1,2 +0,0 @@\n";
+        assert!(parse_unified_diff(diff, Path::new(".")).is_empty());
+    }
+
     #[test]
     fn parse_sets_changed_lines() {
         let diff = "\

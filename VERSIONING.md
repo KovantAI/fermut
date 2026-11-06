@@ -112,7 +112,9 @@ Breaking changes include:
 - Renaming a JSON field.
 - Changing a field's type.
 - Removing a field.
-- Changing the discriminant tag name (`status`) or its set of values.
+- Renaming the discriminant tag (`status`), or removing or renaming one
+  of its values. Adding a value is non-breaking (`MutantOutcome` is
+  `#[non_exhaustive]`, above); consumers should tolerate unknown values.
 
 Adding a new optional field is **non-breaking**. Consumers should ignore
 unknown fields.

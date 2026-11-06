@@ -10,6 +10,8 @@ The stability, support, and breaking-change contracts fermut makes.
   range, what dropping a version means.
 - **[Platforms](platforms.md)** — published wheel matrix, source
   build coverage.
+- **[Windows support](windows.md)** — what differs on Windows
+  (no schemata, private `HOME`, the GitHub Action).
 - **[Distribution channels](distribution.md)** — public PyPI,
   source.
 - **[Security](security.md)** — how to report a vulnerability.

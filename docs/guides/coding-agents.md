@@ -65,7 +65,8 @@ Returns:
   "original": ">=", "replacement": ">" }
 ```
 
-The `id` grammar is `<file>@<byte-offset>:<operator>:<original>-><replacement>`.
+The `id` grammar is `<file>@<byte-offset>:<operator>:<original>-><replacement>`
+(with `exp:` before the operator for an experimental one; see [JSON output](../reference/json.md#mutant)).
 `original` / `replacement` are the operator token only, not the whole
 expression. **Caveat for agents that store ids across runs:** `<file>` is
 always the absolute path (even for `fermut run src/`), so ids captured on one
@@ -84,8 +85,10 @@ re-evaluate (cache hit on the rest). Boundary mutant moves from
 `"delta": 0.7`.
 
 Loop on step 1 until the score clears the target or every survivor
-is justified as equivalent / acceptable. The whole cycle stays
-under 10 seconds on warm cache for repos in the 500-mutant range.
+is justified as equivalent / acceptable. On pyjwt, a cycle after editing
+one function took about 11 seconds with `--diff-only HEAD`, nearly all of
+it the baseline run of the unmutated suite; the cycle cost tracks your
+suite's run time, not the repo's size.
 
 ## The recommended agent loop
 
@@ -110,7 +113,7 @@ the default history and adds `--trend` + `--markdown` for the PR comment. Don't 
 Key invariants:
 
 1. **Don't re-run the full sweep every iteration.** Use `--diff-only`
-   (CI workflow) or `--diff-only HEAD~1` (local), so the agent only burns
+   (CI workflow) or `--diff-only HEAD` (local, uncommitted edits), so the agent only burns
    wall-clock on lines it changed.
 2. **Always read `out.json`, not stdout.** Stdout is for humans. JSON is
    stable across releases per the [versioning policy](https://github.com/KovantAI/fermut/blob/main/VERSIONING.md).
@@ -120,13 +123,14 @@ Key invariants:
 4. **Pin determinism.** Set `hypothesis_seed` in `fermut.toml`. Without
    it, Hypothesis-driven tests can mask or fabricate survivors between
    runs and the agent will chase ghosts.
-5. **Regenerate coverage whenever tests change — not just once.**
-   The coverage filter narrows tests per mutant from this file; a stale
-   one silently mis-selects tests (mutants get `skipped (coverage …)` or
-   the wrong tests run), shifting survivor counts with no error. Run
-   `fermut coverage` at the top of any iteration that touched tests — it
-   re-measures only the changed test files and writes a `.coverage`
-   database fermut reads directly. Never commit the coverage file.
+5. **Run `fermut coverage` after every edit, source or test.** A
+   `.coverage` older than any source or test file is ignored (the run
+   logs `ignoring auto-discovered coverage … it is older than …`), so
+   every mutant runs the whole suite and uncovered lines count as
+   survivors. On pyjwt, one edited function turned a 38 s run into 311 s
+   and nearly doubled the survivors. `fermut coverage` re-runs only the
+   affected test files (5 s there), and the next run took 36 s. Never
+   commit the coverage file.
 
 ## Cache strategy
 
@@ -153,33 +157,9 @@ The full key, what is and isn't cached, and when to clear it are in
 
 ## Trend tracking is the agent's feedback signal
 
-`fermut trend` reads the history log (`.fermut/history.jsonl` by default;
-pass `--history-path .fermut/agent-history.jsonl` for the inner-loop scratch log) and prints the
-per-run table. For an agent, the useful comparison is **score delta vs the
-previous iteration** — not the absolute score:
-
-```sh
-fermut trend --history-path .fermut/agent-history.jsonl --limit 3 --format json
-```
-
-```json
-[
-  {"timestamp":"…","mutation_score":78.0,"killed":39,"survived":11,…},
-  {"timestamp":"…","mutation_score":82.0,"killed":41,"survived":9,…},
-  {"timestamp":"…","mutation_score":85.7,"killed":24,"survived":4,…}
-]
-```
-
-Two derived signals the agent should consume:
-
-- **`history[-1].mutation_score - history[-2].mutation_score`** — did
-  this iteration improve the suite?
-- **`history[-1].survived - history[-2].survived`** — did the agent
-  introduce *new* survivors? (Score can move up while survivor count
-  also rises if the agent added killed mutants faster than survivors.)
-
-Both signals are derived for you by **[`fermut score`](../reference/cli/score.md)** —
-no jq, no hand-rolled history diff:
+What tells an agent whether an iteration helped is the **score change since
+the previous run**, not the absolute score.
+[`fermut score`](../reference/cli/score.md) computes it from the history log:
 
 ```sh
 fermut score --history-path .fermut/agent-history.jsonl --format json
@@ -187,41 +167,30 @@ fermut score --history-path .fermut/agent-history.jsonl --format json
 
 ```json
 { "score": 85.7, "delta": 3.7, "baseline_score": 82.0,
-  "new_survivors": [], "newly_killed": ["src/auth.py@812:…"],
+  "new_survivors": [], "newly_killed": ["/repo/src/auth.py@812:…"],
   "regressed": false }
 ```
 
-`regressed` is `true` when the score dropped or a previously-killed mutant
-came back — the rollback trigger below, computed in the binary. Add
-`--fail-on-regression <pts>` to make it exit non-zero for a CI / agent gate,
-or `--baseline N` to compare against `N` runs back instead of the immediate
-prior. Reach for the raw `trend` deltas only when you need the full window.
+`regressed` is `true` when the score dropped or a previously killed mutant
+survives again. `--baseline N` compares against `N` runs back;
+`--fail-on-regression <pts>` makes it exit non-zero, for a gate. All
+fields: [JSON output → `fermut score`](../reference/json.md#fermut-score).
 
-How to *act* on those deltas — a sketch for an agent's outer loop:
+How an agent's outer loop can act on it:
 
 ```python
-# pseudocode for an agent's post-iteration check
-delta = h[-1].mutation_score - h[-2].mutation_score
-new_survivors = set(h[-1].survivor_ids) - set(h[-2].survivor_ids)
-
-if delta < -0.5 or new_survivors:
-    # Iteration made things worse or introduced new gaps.
-    # Revert the last edit (git restore / agent rollback), then either
-    # narrow scope (try one survivor instead of all) or escalate to a
-    # human / a stronger model.
-    revert_last_edit()
-elif delta < 0.5:
-    # Plateau. Same survivor set as last iteration — your last edit
-    # didn't help. Try a different survivor before grinding the same
-    # one again.
-    pick_different_survivor()
+r = fermut_score()                 # the JSON above
+if r["regressed"]:
+    revert_last_edit()             # worse, or a kill came back
+elif r["delta"] is not None and r["delta"] < 0.5 and not r["newly_killed"]:
+    pick_different_survivor()      # plateau: the last edit didn't help
 else:
-    # Progress. Commit, snapshot, continue.
     commit_iteration()
 ```
 
-Pin `hypothesis_seed` and use the cache, otherwise the delta is noisy
-and the rollback rule above fires on phantom regressions.
+Pin `hypothesis_seed` and keep the cache on, or the delta is noisy and the
+revert rule fires on regressions that aren't real. For the whole history,
+use [`fermut trend`](../reference/cli/trend.md).
 
 ## Driving fermut programmatically
 
@@ -240,20 +209,19 @@ fermut run src/ --tests tests/ \
 
 ### JSON size and context budget
 
-Each outcome serializes to roughly 8 short fields — `mutant.id`,
-file, line, operator, original, replacement, `range` (the mutated span
-as `[start, end]` byte offsets — `start` is the `@N` in the id), plus
-the `status` tag and (for skipped/equivalent/errored) one extra field. At default
-formatting that is **~50–80 tokens per outcome** for an LLM-driven
-agent feeding the JSON back into its context.
-
-Rules of thumb on a typical repo:
+Each outcome carries the mutant (`id`, `file`, `line`, `operator`,
+`original`, `replacement`, `range`), its `status`, and for some statuses
+one extra field. Most of its size is the absolute source path, which
+appears twice (in `id` and `file`). Measured on pyjwt (6,475 mutants,
+paths like `/home/runner/work/pyjwt/pyjwt/jwt/api_jwt.py`), that comes to
+**about 100 tokens per outcome**, and **about 650k tokens** for the whole
+report. Longer checkout paths cost more.
 
 | Mutants in report | Approx tokens (full JSON) | Strategy |
 |------------------:|---------------------------|----------|
-| ≤ 500             | ~25k                      | Feed the whole report; let the model pick the next survivor. |
-| 500 – 5,000       | 25k – 250k                | Filter to `status == "survived"` first; most outcomes are `killed` and add no signal. |
-| > 5,000           | > 250k                    | Don't read the JSON directly. Use `fermut show <selector>` or `fermut explain --format json <selector>` per survivor — small targeted reads, no context-window pressure. |
+| ≤ 500             | ≤ ~50k                    | Feed the whole report; let the model pick the next survivor. |
+| 500 – 5,000       | ~50k – 500k               | Filter to `status == "survived"` first; most outcomes are `killed` or `skipped` and add no signal. |
+| > 5,000           | > ~500k                   | Don't read the JSON directly. Use `fermut next --max-tokens N`, or `fermut explain --format json <id>` per survivor. |
 
 The least-effort path at any size is **[`fermut next --max-tokens N`](../reference/cli/next.md#token-budget)** —
 it filters to survivors, ranks them, trims the fields, and fits the result
@@ -276,144 +244,57 @@ jq '[.outcomes[]
     .fermut/last.json
 ```
 
-That trims ~60% off the per-outcome token count and drops all
-already-killed mutants entirely. Agents working in a 200k-context
-window can fit roughly 3,000 filtered survivors using this shape.
+Dropping every non-survivor is what matters: on pyjwt the 712 survivors
+in this shape came to about 51k tokens, under 10% of the full report.
+Trimming the fields saves another ~30% per survivor. A 200k context fits
+roughly 2,800 survivors in this shape.
 
 ### Parsing survivors from JSON
 
-The report is `{ "summary": {...}, "outcomes": [...] }`. The `summary` object
-carries the headline numbers so you don't have to re-derive them by counting
-outcomes:
+Every field of the run report, and of the `next`, `explain` and `score`
+output, is described in **[JSON output](../reference/json.md)**. Two rules
+matter most:
 
-```json
-{
-  "summary": {
-    "total": 158,
-    "killed": 37,
-    "survived": 8,
-    "timed_out": 0,
-    "skipped": 113,
-    "equivalent": 0,
-    "errored": 0,
-    "mutation_score": 82.2
-  },
-  "outcomes": [ ... ]
-}
-```
-
-Read the score directly:
+- Read `summary.scored` before `summary.mutation_score`: with `scored == 0`
+  the score is a placeholder `100.0`, not a perfect run.
+- To pick the next survivor, use [`fermut next`](../reference/cli/next.md)
+  rather than sorting outcomes yourself. It groups survivors by
+  `(file, operator)`, ranks the groups by how many one test is likely to
+  kill and how easy that test is, and gives the score gain for killing one
+  (`min_gain_pts`) or the whole group (`max_gain_pts`).
 
 ```sh
-jq '.summary.mutation_score' .fermut/last.json
+jq '.summary | {score: .mutation_score, scored}' .fermut/last.json
+fermut next .fermut/last.json --limit 5
 ```
 
-The shape of one outcome:
+### `explain`, `suggest` and `autofix`
 
-```json
-{
-  "status": "survived",
-  "mutant": {
-    "id": "/abs/repo/src/auth.py@812:boundary-shift:>=->>",
-    "file": "/abs/repo/src/auth.py",
-    "line": 42,
-    "operator": "boundary-shift",
-    "original": ">=",
-    "replacement": ">",
-    "range": [812, 820]
-  }
-}
-```
-
-To pick the next survivor to address, prefer
-**[`fermut next`](../reference/cli/next.md)** over a hand-rolled sort — it
-ranks survivors by cluster leverage (one test *often* kills a whole
-`(file, operator)` pattern — a heuristic, not a guarantee) then kill-ease,
-and reports a score-gain range per cluster (`min` = kill the representative,
-`max` = kill the whole cluster):
+**An LLM-driven agent should use `explain --format json` and write the test
+itself.** `explain` makes no network calls: it returns the source around
+the mutant, the enclosing function, an operator-specific hint, the tests
+that ran the line without noticing, and a pytest skeleton
+([fields](../reference/json.md#fermut-explain-format-json)). The agent
+already has the repo in context, so its test will fit better than one from a
+second, context-free model call.
 
 ```sh
-fermut next .fermut/last.json
+fermut explain .fermut/last.json <id> --format json
 ```
 
-```json
-[ { "rank": 1, "id": "src/a.py@40:boundary-shift:>=->>",
-    "file": "src/a.py", "line": 12, "operator": "boundary-shift",
-    "cluster_size": 2, "ease": "high", "min_gain_pts": 25.0, "max_gain_pts": 50.0,
-    "sibling_ids": ["src/a.py@60:boundary-shift:<=-><"] } ]
-```
+**A driver that isn't an LLM** (a shell script, a CI job) can have fermut
+write tests through the Anthropic API instead:
 
-### Driving `explain` and `suggest` from agent loops
+- [`fermut autofix`](../reference/cli/autofix.md) generates a test, keeps it
+  only if it kills the mutant and the suite stays green, and reverts the
+  rest. Prefer it for unattended runs.
+- [`fermut suggest`](../reference/cli/suggest.md) only generates; with
+  `--apply` it appends to your test files without verifying. Review before
+  committing: the model may call helpers your project doesn't have.
 
-`fermut explain` and `fermut suggest` are the two subcommands that
-exist specifically for in-loop agent consumption.
-
-**Use `explain --format json` from inside an agent session.** It is a
-pure heuristic pump — no network, no LLM cost — and emits a stable
-`ExplainReport` shape that names file:line, enclosing symbol,
-operator-specific hint, coverage signal, and a pytest skeleton. The
-agent already has its own LLM context loaded with the repo; passing the
-report through that context is cheaper and more accurate than asking a
-second model. Reach for `--llm` only when the agent driver is *not*
-itself an LLM (a shell script, a CI job).
-
-```sh
-fermut run src/ --tests tests/ --json out.json --no-history --quiet
-# pick a survivor
-fermut explain out.json <id> \
-    --tests tests \
-    --coverage .coverage \
-    --format json
-# agent reads stdout, writes the killing test in its own session
-```
-
-**`fermut autofix` adds a verify loop on top of `suggest`** — it generates a
-test, confirms it kills the mutant *and* keeps the suite green, and keeps
-only proven tests (reverting the rest). For a non-LLM driver that wants
-ready-to-commit results without a separate re-run, prefer `autofix
---all-survivors` over `suggest --apply`. See
-**[`fermut autofix`](../reference/cli/autofix.md)**. (An LLM-driven agent
-should still write its own test from `explain` — autofix's value is the
-generate-and-verify automation, which a capable agent already provides by
-calling `fermut run` after writing the test. Full rationale:
-**[why no generation MCP tool](../reference/cli/mcp.md#no-generation-tools)**.)
-
-**`fermut suggest` is the right tool when the driver is not an LLM.**
-Shell scripts, CI jobs, or "fix all survivors in one shot" workflows
-benefit from `suggest --all-survivors --apply --parallel N`. Each call
-emits a single pytest function bound to the matching test file. The
-generated tests need human review before merge — the model writes from
-limited context and may reach for helpers that don't exist in your
-project.
-
-```sh
-# Agent or CI: regenerate killing tests for every survivor in parallel,
-# then re-run fermut to confirm.
-fermut suggest .fermut/last.json \
-    --all-survivors --apply --parallel 4 \
-    --tests tests --format json > /tmp/suggest.json
-fermut run src/ --tests tests/ --json .fermut/last.json
-```
-
-The `--format json` output preserves report order even under
-`--parallel`, so downstream tooling can correlate `entries[i]` with the
-i-th survivor.
-
-`suggest` cost-controls:
-
-- `--no-cache` is for prompt iteration only. The default cache at
-  `.fermut/llm-cache.json` keys on `(mutant.id, sha256(file),
-  sha256(prompt))` — re-runs against unchanged source are free.
-- `--parallel N` shortens wall-clock but respects your tenant's rate
-  limits when N is small. Default `1`.
-- `--sample-count 0` cuts ~50% of prompt tokens at the cost of less
-  style mimicry. Useful for very large test suites.
-
-**Cost.** Each `suggest` call sends the mutant, the surrounding source and
-a few sample tests to the Anthropic API, so cost scales with survivor
-count; warm re-runs on unchanged source hit the LLM cache and cost
-nothing. Check your own usage logs before running `--all-survivors` on a
-large report.
+Both cost an API call per survivor, cached by file and prompt, so a re-run
+on unchanged source is free. Why there's no MCP tool for test generation:
+[`fermut mcp`](../reference/cli/mcp.md#no-generation-tools).
 
 ### `fermut doctor` as a preflight
 

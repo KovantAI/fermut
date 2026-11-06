@@ -104,8 +104,9 @@ mutant. For a project with 500 mutants and a 30-second test suite,
 that's 4 hours of CI per run.
 
 With coverage, fermut runs only the tests whose execution **touched
-the mutated line**. The same 500 mutants might cost 5 minutes
-because most of them only need 2–3 tests.
+the mutated line**. Measured: pyjwt went from ~392 s to ~47 s (~8×) and
+typer from ~2174 s to ~214 s (~10×)
+([benchmarks](../reference/benchmarks.md#the-coverage-filter-is-what-makes-fermut-fast)).
 
 The slow path isn't just slower — it's the difference between
 "runnable in a PR loop" and "runnable nightly only." That's why
@@ -277,7 +278,7 @@ for the full workflow.
 
 To stop CI rebuilding coverage full-suite every run, and to shrink the
 index to just the changed files, see
-**[CI recipes → Shrinking the coverage index per PR](integrations.md#coverage-scoping)**
+**[Coverage in CI](ci-coverage.md)**
 — cache the `.coverage` DB so the refresh stays incremental (Recipe A),
 scope `--cov` to the changed subtree (Recipe B), or build one
 authoritative baseline on `main` that every PR restores read-only

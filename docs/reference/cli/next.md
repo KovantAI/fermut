@@ -69,8 +69,8 @@ an unexecuted line and need a brand-new test, not just an assertion.
 [
   {
     "rank": 1,
-    "id": "src/a.py@40:boundary-shift:>=->>",
-    "file": "src/a.py",
+    "id": "/home/me/proj/src/a.py@40:boundary-shift:>=->>",
+    "file": "/home/me/proj/src/a.py",
     "line": 12,
     "operator": "boundary-shift",
     "original": ">=",
@@ -80,7 +80,7 @@ an unexecuted line and need a brand-new test, not just an assertion.
     "min_gain_pts": 25.0,
     "max_gain_pts": 50.0,
     "hint": "boundary shift (`>=`↔`>` …). Add a test where the input equals the bound.",
-    "sibling_ids": ["src/a.py@60:boundary-shift:<=-><"],
+    "sibling_ids": ["/home/me/proj/src/a.py@60:boundary-shift:<=-><"],
     "subsumed_ids": [],
     "coverage_selected": true
   }

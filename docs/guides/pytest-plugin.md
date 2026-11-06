@@ -5,7 +5,7 @@ Run mutation testing without leaving pytest. The plugin ships inside the
 whole setup:
 
 ```sh
-uv add --dev fermut        # or: pip install fermut
+uv add --dev fermut        # or: pip install fermut, into the project venv
 pytest --fermut
 ```
 

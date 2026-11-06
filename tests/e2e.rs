@@ -2359,3 +2359,243 @@ fn autofix_reverts_a_test_that_does_not_kill_and_explain_llm_caches() {
         .stdout(contains("\"cached\": true"))
         .stdout(contains("def test_mock_generated"));
 }
+
+// ---------------------------------------------------------------------------
+// Documented output stays true.
+//
+// The docs quote fermut's human output (SURVIVED lines, the summary line) and
+// describe its JSON field by field. These tests tie both to the real thing:
+// the documented lines must match the same patterns as real output (and their
+// numbers must add up), and every JSON key a real run emits must be described
+// in docs/reference/json.md.
+// ---------------------------------------------------------------------------
+
+/// `152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3 (coverage 3),
+/// equivalent: 0, errored: 0  | score: 94.6%`. The skip breakdown is printed
+/// whenever anything was skipped.
+const SUMMARY_LINE: &str = r"^(\d+) mutants — killed: (\d+), survived: (\d+), timeout: (\d+), skipped: (\d+)(?: \(([a-z-]+ \d+(?:, [a-z-]+ \d+)*)\))?, equivalent: (\d+), errored: (\d+)  \| score: (\d+(?:\.\d)?)%$";
+/// `SURVIVED  src/auth.py:42@1187 [boundary-shift] `age >= 18` → `age > 18``,
+/// and the same for TIMEOUT (optionally `(in <test>)`), ERROR and EQUIV.
+const OUTCOME_LINE: &str =
+    r"^(?:SURVIVED  |TIMEOUT   |ERROR     |EQUIV     )\S+:\d+@\d+ \[[a-z:-]+\] `.*` → `.*`";
+
+fn doc_files() -> Vec<PathBuf> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut files = vec![root.join("README.md")];
+    files.extend(
+        walkdir::WalkDir::new(root.join("docs"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+            .map(|e| e.into_path()),
+    );
+    files
+}
+
+/// Checks one summary line's arithmetic: the counts add up to the total, the
+/// skip breakdown adds up to `skipped`, and the score is detected / scored.
+fn check_summary(line: &str, re: &regex::Regex) -> Result<(), String> {
+    let c = re
+        .captures(line)
+        .ok_or("doesn't match the summary format")?;
+    let n = |i: usize| c[i].parse::<u64>().unwrap();
+    let (total, killed, survived, timeout, skipped) = (n(1), n(2), n(3), n(4), n(5));
+    let (equivalent, errored) = (n(7), n(8));
+    if killed + survived + timeout + skipped + equivalent + errored != total {
+        return Err("counts don't add up to the total".into());
+    }
+    match c.get(6) {
+        Some(parts) => {
+            let sum: u64 = parts
+                .as_str()
+                .split(", ")
+                .map(|p| p.rsplit(' ').next().unwrap().parse::<u64>().unwrap())
+                .sum();
+            if sum != skipped {
+                return Err("skip breakdown doesn't add up to `skipped`".into());
+            }
+        }
+        None if skipped > 0 => return Err("`skipped` > 0 needs its (filter n) breakdown".into()),
+        None => {}
+    }
+    let scored = killed + survived + timeout;
+    if scored > 0 {
+        let expected = ((killed + timeout) as f64 * 1000.0 / scored as f64).round() / 10.0;
+        let shown: f64 = c[9].parse().unwrap();
+        if (shown - expected).abs() > 0.05 {
+            return Err(format!("score {shown}% should be {expected}%"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn documented_output_lines_match_the_real_format() {
+    let summary = regex::Regex::new(SUMMARY_LINE).unwrap();
+    let outcome = regex::Regex::new(OUTCOME_LINE).unwrap();
+    // Anything that looks like a summary or outcome line is checked.
+    let looks_like_summary = regex::Regex::new(r"^\d+ mutants — ").unwrap();
+    let looks_like_outcome = regex::Regex::new(r"^(SURVIVED|TIMEOUT|ERROR|EQUIV) +\S").unwrap();
+    let mut problems = Vec::new();
+    let mut checked = 0;
+    for file in doc_files() {
+        let text = std::fs::read_to_string(&file).unwrap();
+        for (i, raw) in text.lines().enumerate() {
+            let line = raw.trim();
+            let at = format!("{}:{}", file.display(), i + 1);
+            if looks_like_summary.is_match(line) {
+                checked += 1;
+                if let Err(e) = check_summary(line, &summary) {
+                    problems.push(format!("{at}: {e}\n    {line}"));
+                }
+            } else if looks_like_outcome.is_match(line) {
+                checked += 1;
+                if !outcome.is_match(line) {
+                    problems.push(format!(
+                        "{at}: doesn't match the outcome format\n    {line}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(checked > 0, "found no documented output lines to check");
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
+#[ignore = "requires pytest + coverage on PATH; enable once env is set up"]
+fn real_output_matches_the_documented_formats_and_json_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    let fermut = || {
+        let mut c = Command::cargo_bin("fermut").unwrap();
+        c.current_dir(&sample);
+        c
+    };
+    // `--experimental` so the report carries skipped outcomes with a filter.
+    let out = fermut()
+        .args([
+            "run",
+            "src",
+            "--tests",
+            "tests",
+            "--json",
+            "r.json",
+            "--experimental",
+        ])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+
+    let summary = regex::Regex::new(SUMMARY_LINE).unwrap();
+    let outcome = regex::Regex::new(OUTCOME_LINE).unwrap();
+    let line = stdout
+        .lines()
+        .find(|l| l.contains(" mutants — "))
+        .unwrap_or_else(|| panic!("no summary line in:\n{stdout}"));
+    check_summary(line, &summary).unwrap_or_else(|e| panic!("{e}: {line}"));
+    let survived = stdout
+        .lines()
+        .find(|l| l.starts_with("SURVIVED"))
+        .unwrap_or_else(|| panic!("the sample has survivors:\n{stdout}"));
+    assert!(outcome.is_match(survived), "{survived}");
+
+    // Every key the JSON emits is described on the JSON reference page.
+    let doc = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/reference/json.md"),
+    )
+    .unwrap();
+    let mut undocumented = std::collections::BTreeSet::new();
+    let mut need = |key: &str| {
+        if !doc.contains(&format!("`{key}`")) {
+            undocumented.insert(key.to_string());
+        }
+    };
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sample.join("r.json")).unwrap()).unwrap();
+    let keys = |v: &serde_json::Value| -> Vec<String> {
+        v.as_object()
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    for k in keys(&report).iter().chain(&keys(&report["summary"])) {
+        need(k);
+    }
+    for o in report["outcomes"].as_array().unwrap() {
+        for k in keys(o).iter().chain(&keys(&o["mutant"])) {
+            need(k);
+        }
+        need(o["status"].as_str().unwrap());
+        if let Some(f) = o["filter"].as_str() {
+            need(f);
+        }
+    }
+    let next = fermut().args(["next", "r.json", "--all"]).output().unwrap();
+    let next: serde_json::Value = serde_json::from_slice(&next.stdout).unwrap();
+    for k in keys(&next[0]) {
+        need(&k);
+    }
+    let id = next[0]["id"].as_str().unwrap().to_string();
+    let explain = fermut()
+        .args(["explain", "r.json", &id, "--format", "json"])
+        .output()
+        .unwrap();
+    let explain: serde_json::Value = serde_json::from_slice(&explain.stdout).unwrap();
+    for k in keys(&explain) {
+        need(&k);
+    }
+    // A second run gives `score` a run to compare against.
+    fermut()
+        .args(["run", "src", "--tests", "tests", "-q"])
+        .output()
+        .unwrap();
+    let score = fermut()
+        .args(["score", "--format", "json"])
+        .output()
+        .unwrap();
+    let score: serde_json::Value = serde_json::from_slice(&score.stdout).unwrap_or_else(|e| {
+        panic!(
+            "score JSON: {e}: {}",
+            String::from_utf8_lossy(&score.stdout)
+        )
+    });
+    for k in keys(&score) {
+        need(&k);
+    }
+    let history = std::fs::read_to_string(sample.join(".fermut/history.jsonl")).unwrap();
+    for line in history.lines() {
+        for k in keys(&serde_json::from_str(line).unwrap()) {
+            need(&k);
+        }
+    }
+    assert!(
+        undocumented.is_empty(),
+        "JSON keys missing from docs/reference/json.md: {undocumented:?}"
+    );
+}
+
+// `fermut mcp` keeps the JSON-RPC stream on the real stdout and points the
+// process's stdout at stderr, so stdout carries exactly one line per response.
+#[test]
+fn mcp_answers_initialize_on_stdout() {
+    let out = Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("mcp")
+        .write_stdin(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#
+                .to_string()
+                + "\n",
+        )
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "stdout: {stdout}");
+    let msg: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(msg["id"], 1);
+    assert_eq!(msg["result"]["serverInfo"]["name"], "fermut");
+}

@@ -23,9 +23,10 @@ notice?* If no test noticed, the test suite has a hole at that
 location. The hole is named, located, and reproducible — not a vague
 "increase coverage" goal.
 
-Concretely, on most Python codebases that have never been
-mutation-tested, the score lands somewhere between 40% and 70% on the
-first run. That gap is not a tooling failure; it's the difference
+Concretely, nine of the ten mature, well-tested open-source Python
+libraries we benchmark score 67–86% with fermut's defaults (the tenth,
+trio, scores ~53% with a suite whose results vary between runs) ([benchmarks](../reference/benchmarks.md#cold-runs-pinned-oss-repos)),
+and code that has never been mutation-tested usually starts lower. That gap is not a tooling failure; it's the difference
 between "tests exist" and "tests would catch the regression you're
 worried about." Closing it pays off most in code that *cannot* be
 allowed to silently break — auth, billing, data migrations, parsing.
@@ -175,7 +176,7 @@ Three outcomes are excluded from both sides of the ratio:
 Worked sample. If `fermut run` reports:
 
 ```
-152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3, equivalent: 0, errored: 0  | score: 94.6%
+152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3 (coverage 3), equivalent: 0, errored: 0  | score: 94.6%
 ```
 
 Then `detected = 141` (140 + 1), denominator = `141 + 8 = 149`, and

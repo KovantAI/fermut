@@ -17,6 +17,6 @@ to `<=` on a loop condition), or your test fixture is slow.
 - Use a [timeout budget](../cli/run.md#timeout-budgets)
   (`--timeout-factor 3`): it sizes each mutant's timeout from the baseline
   run, so hung mutants stop in seconds. It's on by default with
-  [schemata](../cli/run-schemata.md), where a timeout is re-run the normal
-  way before it counts. If slow-but-correct mutants start timing out on a
+  [schemata](../cli/run-schemata.md), where a timeout is confirmed in a
+  fork with no mutant active before it counts. If slow-but-correct mutants start timing out on a
   busy machine, raise the factor or lower `--jobs`.

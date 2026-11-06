@@ -48,6 +48,12 @@ pub(crate) mod watch;
 #[doc(hidden)]
 pub const ISSUES_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/issues");
 
+/// The docs table of error messages and their fixes. The errors a new user
+/// is most likely to hit end with it.
+#[doc(hidden)]
+pub const TROUBLESHOOTING_URL: &str =
+    "https://fermut.readthedocs.io/en/latest/reference/troubleshooting/#by-error-message";
+
 /// The CLI entry point — the crate's only supported public API (`main.rs`).
 pub use cli::Cli;
 

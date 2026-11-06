@@ -139,18 +139,24 @@ the cold table above is canonical for the coverage-on absolutes):
   now correctly **skipped** rather than counted as survivors.
 - **typer:** ~2174s → **~214s** (~10×).
 
-Coverage is **opt-in** (auto-discovered from `.coverage` at the project
-root, or pass `--coverage .coverage`, or wire it via `fermut init`); the
-benchmark harness now generates it automatically for fermut. Mutmut has no equivalent, so its per-mutant cost is the
-full suite — which is also why it wins on a tiny-suite repo like
-more-itertools where the full suite is already cheap.
+Coverage is used whenever a `.coverage` DB exists: auto-discovered at
+the project root, or passed with `--coverage .coverage`. `fermut run`
+doesn't create one; `fermut coverage` (or `fermut baseline`) does, and
+the benchmark harness runs that step for fermut (the `cov_prep` column).
+Without a DB, every mutant runs the full suite. Mutmut has no
+equivalent, so its per-mutant cost is the full suite — which is also why
+it wins on a tiny-suite repo like markupsafe, where the full suite is
+already cheap.
 
 ### The `ty` filter { #ty-filter }
 
 The `ty` filter runs after the coverage filter, so its share is measured
 against the mutants that would otherwise run: `ty` drops ÷ (`ty` drops +
 scored). From the default-config runs in the memory-cap A/B
-(2026-11-01, Linux, schemata on, `benchmarks/schemata/results/memcap/`):
+(2026-11-01, Linux, schemata on, `benchmarks/schemata/results/memcap/`).
+That's a different session from the cold table, so some `Scored` counts
+differ from it (click, werkzeug, jinja2, flask, trio); read the share,
+not the counts:
 
 | Repo           | Scored | Dropped by `ty` | Share   |
 |----------------|--------|-----------------|---------|
@@ -220,13 +226,21 @@ the existing `.coverage` DB. Same session as the cold table (2026-11-03).
 | more-itertools v10.5.0 | ~123s       | ~2s         | ~2s                    | ~3s         |
 | markupsafe 3.0.3       | ~15s        | —           | —                      | ~1s         |
 
-- **A warm re-run is almost all baseline check.** Every verdict comes from
-  the cache, but fermut still runs the unmutated suite once first
-  (`verify_baseline`), to refuse a red suite before trusting anything.
-  That's ~57s of typer's ~61s (its suite is slow), ~3s of pyjwt's. June's
-  ~8s typer warm predates the baseline check; `--no-verify-baseline`
-  skips it at your own risk.
-- **Loop ≈ warm.** The loop edit appends a comment, which leaves the AST
+- **The warm column predates a change: a fully cached run now skips the
+  baseline check.** In this session every verdict came from the cache, but
+  fermut still ran the unmutated suite once first (`verify_baseline`):
+  ~57s of typer's ~61s, ~3s of pyjwt's. Since then, a run where every
+  mutant is a cache hit runs no tests at all, baseline included. Re-measured
+  on pyjwt (2026-11-04, a different machine from the table): **~38s cold,
+  ~0.3s warm**.
+- **An edit costs one coverage refresh plus the affected mutants.** Same
+  pyjwt session, one statement added to a function body: `fermut coverage`
+  re-ran the 6 affected test files in ~5s, then the run took ~36s. Skip
+  the refresh and the stale `.coverage` is ignored: the run took ~311s and
+  reported almost twice the survivors, because every mutant ran the whole
+  suite and uncovered lines counted. With `--diff-only HEAD` (the agent
+  loop), the same edit took ~11s, nearly all of it the baseline check.
+- **Loop ≈ warm in the table.** The harness's loop edit appends a comment, which leaves the AST
   untouched, so fermut's *structural* cache key (scope AST hash, not byte
   hash) stays valid and nothing re-runs. This is a best case; a real edit
   to a function body re-runs just that function's mutants.

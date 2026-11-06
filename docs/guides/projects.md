@@ -95,7 +95,7 @@ optimize for different starting points:
 === "Local"
 
     Goal: **dev-loop feedback**. You're iterating on tests; you want
-    sub-second cycles.
+    cycles of seconds.
 
     ```sh
     fermut init --profile local --force
@@ -134,7 +134,7 @@ Run the gate on every PR, but don't let it block merges yet. With the
 gate becomes a warning, while a broken setup still fails the job.
 
 ```yaml
-      - uses: KovantAI/fermut@v0.6.1
+      - uses: KovantAI/fermut@v0.7.0
         with:
           blocking: "false"
 ```

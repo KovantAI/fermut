@@ -126,24 +126,31 @@ fermut run src/ --tests tests/ --coverage .coverage --json baseline.json
 adding `-q` (quiet) gives just the clean report — the sample outputs shown
 below are the `-q` form. The `INFO` lines aren't errors.
 
-**How long should this take?** Rough wall-clock anchors for a fresh
-run (no cache, default profile, `ty` filter on):
+**How long should this take?** Mostly as long as your suite takes,
+times the number of mutants that reach it. Cold runs with default
+settings, coverage included, on one machine
+([benchmarks](../reference/benchmarks.md#cold-runs-pinned-oss-repos)):
 
-| Project size                     | Expected wall-clock      |
-|----------------------------------|--------------------------|
-| ~10 source files, ~50 tests      | 10–30 seconds            |
-| ~50 source files, ~500 tests     | 1–5 minutes              |
-| ~500 source files, ~5000 tests   | 15–45 minutes            |
+| Library        | Mutants generated → tested | Cold run |
+|----------------|----------------------------|----------|
+| markupsafe     | 1,069 → 217                | ~15 s    |
+| pyjwt          | 6,475 → 1,730              | ~53 s    |
+| more-itertools | 9,451 → 3,326              | ~2 min   |
+| typer          | 6,414 → 1,597              | ~3.5 min |
+| werkzeug       | 41,146 → 7,982             | ~3 min   |
 
-If your run is dramatically slower than this on first pass, the
+typer has fewer mutants than werkzeug but a much slower suite, which is
+why it takes longer. If your run is dramatically slower than this on first pass, the
 usual suspect is the coverage filter not being applied (no per-test
 contexts — see [coverage-rejected](../reference/troubleshooting/coverage-rejected.md)).
 ty runs in-process by default, so the `ty` binary isn't needed for a
 normal run. If the embedded checker is unavailable and the binary is
 missing too, the run aborts before any mutant is tested; see
 [ty-not-found](../reference/troubleshooting/ty-not-found.md).
-Re-runs are much faster thanks to the AST-hash cache — typically
-80–95% cache hit on a no-source-change re-run.
+Re-runs reuse cached verdicts: a re-run with nothing changed tests no
+mutants and skips the baseline suite run (pyjwt: ~38 s cold, ~0.3 s
+warm, [measured together](../reference/benchmarks.md#warm-and-loop-runs-the-incremental-story)). After an edit, run `fermut coverage` first; see
+[Coverage → Freshness guard](../guides/coverage.md#freshness-guard).
 
 > **Coverage generation failed?** Fix it before continuing — fermut
 > treats `coverage` + `pytest-cov` as required and `fermut doctor`
@@ -171,10 +178,12 @@ from both sides of the ratio (here `141 / 149 = 94.6%`). See
 **[mutation score](../concepts/mutation-testing.md#the-mutation-score)**
 for the formula.
 
-Don't panic if the first score is below 50%. On a suite that has
-never been mutation-tested, **first runs typically land between
-40% and 70%** — that's the size of the gap between "tests exist"
-and "tests would catch a regression," not a tooling failure. The
+Don't panic at the first score. Nine mature, well-tested open-source
+libraries score **67–86%** with fermut's defaults
+([benchmarks](../reference/benchmarks.md#cold-runs-pinned-oss-repos)), and
+a suite that has never been mutation-tested usually starts lower. The
+gap is the distance between "tests exist" and "tests would catch a
+regression," not a tooling failure. The
 number to watch is the trend, not the absolute floor. Save
 `baseline.json` — it's the "before" snapshot.
 
@@ -202,9 +211,8 @@ The most common surprises, in roughly the order people hit them:
 - **Lots of timeouts.** Some tests don't terminate cleanly under
   arithmetic mutants (infinite loops on boundary-shifted
   conditions). Raise `--timeout`; tune later.
-- **Score lower than expected.** Not a bug. See the "40–70% on a
-  suite that has never been mutation-tested" note above the
-  "What can go wrong" header.
+- **Score lower than expected.** Not a bug. Even mature libraries
+  score 67–86%; see the note above the "What can go wrong" header.
 - **Run is much slower than the wall-clock table.** Check that
   the ty filter isn't disabled (`ty_filter = false` / `--no-ty-filter`),
   and that coverage is being honored (the `.coverage` DB has per-test contexts).

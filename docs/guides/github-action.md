@@ -283,7 +283,8 @@ with the credentials scoped to that step, and set `install-command: ""`:
 
 ## Notes
 
-- **Runners:** Linux and macOS.
+- **Runners:** Linux and macOS. On Windows runners, call the CLI
+  directly; see [Windows support](../reference/policies/windows.md#running-on-a-windows-ci-runner).
 - **Fork PRs:** the token is read-only, so the comment step logs a
   warning and the report stays in the job summary.
 - **Services:** the action runs inside your job, so `services:` and

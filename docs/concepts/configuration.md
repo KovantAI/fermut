@@ -65,7 +65,7 @@ write a `fermut.toml` tuned to one specific use case:
 |-------------|-------------------------------------|-------------------------------------------------------------------|
 | `pr-gate`   | Pre-merge CI gate. Fail fast.       | `diff_only`, `coverage`, narrow ops, short timeout, seeded.       |
 | `nightly`   | Cron full sweep. Catch drift.       | All operators (incl. experimental), 60 s timeout, no coverage.    |
-| `local`     | Dev loop. Sub-second cycle.         | `sample = 0.25`, all stable ops, cache on, no coverage.           |
+| `local`     | Dev loop. Cycles of seconds.       | `sample = 0.25`, all stable ops, cache on, no coverage.           |
 | `library`   | Library authors. Reproducible.      | All stable ops, seeded, moderate timeout.                          |
 
 Profiles are not mutually exclusive — they're templates. After

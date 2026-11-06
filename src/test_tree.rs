@@ -20,9 +20,11 @@
 //!   `__init__.py`, fixture data). Support files are included conservatively:
 //!   any change to one invalidates every scoped fingerprint.
 //!
+//! Both fingerprints also fold in every `conftest.py` above the tests root.
+//!
 //! Residual risk, shared with the whole-tree fingerprint: a test that imports
-//! a helper outside both the tests tree and the mutated source, or a
-//! `conftest.py` above the tests root, is not tracked. A test module that
+//! a helper outside both the tests tree and the mutated source is not
+//! tracked. A test module that
 //! imports another *test module* (`from tests.test_a import helper`) is also
 //! not tracked by the scoped fingerprint — move such helpers into a support
 //! file.
@@ -99,6 +101,22 @@ impl TestTree {
             fold_file(&mut whole, rel, fh);
             if !is_test_module(rel) && !is_conftest(rel) {
                 fold_file(&mut support, rel, fh);
+            }
+        }
+        // A `conftest.py` above the tests root (e.g. a repo-root one with
+        // `tests/` as the root) loads for every test, so it's part of both
+        // fingerprints. Keyed by depth (`../conftest.py`), not absolute path,
+        // so the key survives a checkout at another path. Every ancestor is
+        // checked, like `engine::deselection_key`: one pytest ignores (above
+        // its rootdir) only over-invalidates.
+        let mut up = PathBuf::new();
+        for dir in root.ancestors().skip(1) {
+            up.push("..");
+            if let Ok(bytes) = std::fs::read(dir.join("conftest.py")) {
+                let rel = up.join("conftest.py");
+                let fh: [u8; 32] = Sha256::digest(&bytes).into();
+                fold_file(&mut whole, &rel, &fh);
+                fold_file(&mut support, &rel, &fh);
             }
         }
         Self {
@@ -282,6 +300,27 @@ mod tests {
         let before = fp(tmp.path());
         write(tmp.path(), "a/deep/conftest.py", "new = 1\n");
         assert_ne!(before, fp(tmp.path()));
+    }
+
+    #[test]
+    fn both_track_a_conftest_above_the_tests_root() {
+        // Repo-root `conftest.py` with `tests/` as the tests root (#63).
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "conftest.py", "root = 1\n");
+        write(tmp.path(), "tests/a/test_a.py", "def test_a(): pass\n");
+        let tests = tmp.path().join("tests");
+        let fps = || {
+            let tree = TestTree::walk(&tests);
+            let scoped = tree.scoped([Path::new("a/test_a.py")]);
+            (tree.whole().to_string(), scoped)
+        };
+        let (whole, scoped) = fps();
+        write(tmp.path(), "conftest.py", "root = 2\n");
+        let (whole2, scoped2) = fps();
+        assert_ne!(whole, whole2);
+        assert_ne!(scoped, scoped2);
+        std::fs::remove_file(tmp.path().join("conftest.py")).unwrap();
+        assert_ne!(fps(), (whole2, scoped2), "removing it counts too");
     }
 
     #[test]

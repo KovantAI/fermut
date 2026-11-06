@@ -32,7 +32,7 @@ per-phase timing, mutant total, score, and return code.
 
 ## Cold runs (pinned OSS repos)
 
-The numbers below are `cold`-scenario runs of fermut 0.6.1 (unreleased
+The numbers below are `cold`-scenario runs of fermut 0.7.0 (pre-release
 `main`, 2026-11-03) vs mutmut 3.8.1, **both re-run back-to-back on the same
 machine (2026-11-03)**, excluding clone / install. fermut runs its
 defaults: coverage filter on, [schemata](cli/run-schemata.md) on,
@@ -309,8 +309,8 @@ and `benchmarks/configs/tools.toml`. Results land in
 ## Caveats — read before trusting the numbers
 
 - **Preliminary data.** This is a small, in-progress sample, not a
-  finished benchmark. fermut is unreleased `main` after 0.6.1
-  (2026-11-03), with schemata on by default.
+  finished benchmark. fermut is 0.7.0 (pre-release `main`,
+  2026-11-03), with schemata on by default.
 - **Score parity.** The tools find different mutants because
   operator catalogues differ. Scores are **not** directly
   comparable. A fermut `100.0` on a well-tested repo is a red flag,

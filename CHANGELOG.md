@@ -8,6 +8,8 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-04
+
 ### Added
 - **Per-mutant memory cap on Linux, macOS and Windows** (`--max-memory`, on by default). A
   runaway mutant (an endless append) used to grow until its timeout — 4–8 GB
@@ -28,15 +30,19 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   the same verdicts: 0 differences that held across 3 runs on 10 libraries
   and 2 application suites. Anything it can't vouch for runs the normal way:
   mutants outside function bodies or in code that ran during import or
-  collection, a kill whose tests also fail in a fork with no mutant active,
-  any timeout, and any fork that crashes (on macOS, DNS, proxy and Kerberos
-  lookups aren't fork-safe). About 5% of survivors are also re-run the normal
+  collection, a kill or timeout whose tests also fail or hang in a fork with
+  no mutant active, a timeout before any test began, and any fork that crashes (on macOS, DNS, proxy and Kerberos
+  lookups aren't fork-safe). A confirmed timeout stands without a normal
+  re-run, so a hung mutant costs one timeout, not two. About 5% of survivors
+  and timeouts are also re-run the normal
   way as an audit; a disagreement is logged and the normal verdict used. `--no-schemata` / `schemata = false` turn it
   off; `--schemata` / `schemata = true` make an unsupported runner or
   platform an error instead of a silent normal run. Cached verdicts are
   shared with normal runs. The schema holds only mutants that will run:
   cache hits and remembered ty rejects stay out, so a warm run after a
-  small edit spawns its few misses instead of starting a template.
+  small edit spawns its few misses instead of starting a template, and a
+  schema with fewer than 2 mutants per worker (a small `--diff-only` run)
+  skips the template.
 - `--timeout-factor F` (config `timeout_factor`): size each mutant's timeout
   from the baseline run, `min(--timeout, F × baseline wall + 5 s)`, so hung
   mutants stop in seconds instead of at the flat 30 s. On by default
@@ -71,8 +77,18 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   fails only under fermut, merge conflicts between shards of one config,
   coverage paths all outside the project root) and any panic now point to
   the GitHub issue tracker.
+- Worker mirrors are precompiled to checked-hash `.pyc` (PEP 552), so each
+  mutant's process loads untouched project modules instead of recompiling
+  them. The mutated file always misses its hash and compiles from source.
+- `fermut doctor` warns when under 80% of the venv's `site-packages` is
+  precompiled (uncompiled dependencies recompile on every mutant spawn) and
+  prints the `compileall` fix.
 
 ### Changed
+- The worker mirror keeps hidden directories other than known junk (`.git`,
+  `.venv`, `.pytest_cache`, `.claude`, …), so tests reading scripts or
+  fixtures from `.github` or `.data` now find them. Such directories also
+  count toward the test-tree hash.
 - **`minimal` is the default operator profile.** Ordering compares and
   `and`/`or` used as a condition now get the mutants no other mutant
   subsumes (`a < b` → `<=`, `!=`, `False`) instead of the easily killed swaps
@@ -89,6 +105,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   be removed in a later release.
 
 ### Fixed
+- A mutant that raises `KeyboardInterrupt` inside a test is a kill under
+  schemata, as it is in a normal run (pytest exits 2, interrupted).
+- `PositionalDrop` no longer shrinks a two-element tuple to a lone starred
+  element (`(a, *b)` → `(*b)`), which didn't parse.
 - A mutant that makes importing the package raise `SystemExit` (flipping an
   `if __name__ == "__main__": main()` guard) scored `error` on pytest 8+:
   collection doesn't catch it, so pytest reports an internal error and exits
@@ -306,7 +326,8 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 Baseline release. Earlier history is recorded in the git log and release notes.
 
-[Unreleased]: https://github.com/KovantAI/fermut/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/KovantAI/fermut/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/KovantAI/fermut/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/KovantAI/fermut/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/KovantAI/fermut/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/KovantAI/fermut/compare/v0.4.1...v0.5.0

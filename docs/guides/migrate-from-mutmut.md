@@ -89,26 +89,42 @@ migrate. (Tracking issue welcome if this hits you in practice.)
 mutmut and fermut both support inline skip markers, but the spelling
 differs:
 
-| mutmut                  | fermut                                       |
-|-------------------------|----------------------------------------------|
-| `# pragma: no mutate`   | `# fermut: ignore`                           |
-| (line-level only)       | `# fermut: ignore[arith-op-swap]` (op-scoped) |
-| (no module-level form)  | no file marker — list the file in `exclude`  |
+| mutmut                         | fermut                                        |
+|--------------------------------|-----------------------------------------------|
+| `# pragma: no mutate`          | `# fermut: ignore`                            |
+| `# pragma: no mutate start` / `end` (3.x) | `# fermut: ignore-start` / `ignore-end` |
+| `# pragma: no mutate block` (3.x) | `# fermut: ignore-block`                   |
+| `do_not_mutate_patterns` (3.x) | `ignore_patterns` (same regexes)              |
+| `do_not_mutate` (3.x)          | `exclude` (globs re-rooted under `source_root`) |
+| (no operator scope)            | `# fermut: ignore[arith-op-swap]` (op-scoped) |
 
 fermut's marker is also operator-scopable — `# fermut: ignore[arith-op-swap]`
 silences only that operator on the line, where mutmut's pragma is
 all-or-nothing. See **[Inline ignore](../reference/operators/inline-ignore.md)**.
 
-A one-liner that covers most repos:
+`fermut migrate mutmut` does all of the above: it rewrites the pragmas
+in place (region forms included) and writes `exclude` /
+`ignore_patterns` into the generated config. Review the diff before
+committing; mutmut pragmas occasionally land on lines where the fermut
+marker wants a narrower operator scope.
 
-```sh
-rg -l '# pragma: no mutate' \
-    | xargs sd '# pragma: no mutate' '# fermut: ignore'
-```
+### Your known-equivalent mutants
 
-(Or `sed -i` — your call. Review the diff before committing; mutmut
-pragmas occasionally land on lines where the equivalent fermut marker
-wants a narrower operator scope.)
+mutmut has no "equivalent" status and no list of them: a team marks a
+mutant it has judged equivalent with `# pragma: no mutate` on the line,
+a `do_not_mutate_patterns` regex, or a `do_not_mutate` file glob.
+The migrator carries all three over, so the mutants your team has
+already triaged stay suppressed under fermut, with no re-triage.
+
+If you instead kept the list outside mutmut (a spreadsheet of
+`mutmut show` ids, say), it doesn't port. A mutmut id
+(`module.x_function__mutmut_3`) is a per-function counter. A fermut id
+(`file@offset:op:orig->repl`) is a byte offset. Neither one maps onto
+the other. Re-check
+the survivors from fermut's first run instead. fermut's equivalence
+detector already settles many of them (see
+[Equivalent mutants](equivalent-mutants.md)), and for the rest, mark
+the line with `# fermut: ignore[op]`.
 
 ## Config
 
@@ -130,6 +146,9 @@ Common-key mapping:
 | `pytest_add_cli_args` (3.x)         | `pytest_args`                                                    |
 | `backup`                            | n/a — fermut uses per-worker mirrors (see `isolation`)           |
 | `dict_synonyms`                     | n/a — see *What doesn't translate*                                |
+| `do_not_mutate` (3.x)               | `exclude` (patterns re-rooted under `source_root`)               |
+| `do_not_mutate_patterns` (3.x)      | `ignore_patterns`                                                |
+| `only_mutate` (3.x)                 | n/a — narrow `source_root` or list the rest in `exclude`         |
 | `also_copy`                         | n/a — worker mirror copies the source tree by default            |
 | `pre_mutation`                      | n/a — see *What doesn't translate*                                |
 | `post_mutation`                     | n/a — see *What doesn't translate*                                |

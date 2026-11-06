@@ -14,6 +14,16 @@ return value or fallback  # fermut: ignore[bool-op-swap]
 | `# fermut: ignore`                    | Skip **every** operator on this line         |
 | `# fermut: ignore[op-name]`           | Skip only the listed operator on this line   |
 | `# fermut: ignore[op-a, op-b]`        | Skip multiple operators (comma-separated)    |
+| `# fermut: ignore-start` … `# fermut: ignore-end` | Skip every operator on the lines between, markers included |
+| `# fermut: ignore-block` after a header (`if`, `def`, `for`, `with`, `try`, …) | Skip the header line and its whole body (not the `else`/`except` clauses) |
+| `# fermut: ignore-block` on a line of its own | Skip from the marker to the end of the enclosing block |
+
+The region forms mirror mutmut 3's `# pragma: no mutate start` /
+`end` / `block`, and `fermut migrate mutmut` rewrites those to these.
+An unclosed `ignore-start` runs to the end of the file; a stray
+`ignore-end` does nothing. For a pattern that recurs across files
+(every `log.debug(...)` call, say), use `ignore_patterns` in
+[Configuration](../configuration.md) instead of a marker per line.
 
 Operator names match the CLI / config (`arith-op-swap`,
 `boundary-shift`, …); experimental ops accept the bare name or the

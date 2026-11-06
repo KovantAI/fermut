@@ -395,6 +395,11 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     for pat in &exclude {
         globset::Glob::new(pat).with_context(|| format!("invalid exclude glob: {pat:?}"))?;
     }
+    let ignore_patterns = file.ignore_patterns.clone().unwrap_or_default();
+    for pat in &ignore_patterns {
+        regex::Regex::new(pat)
+            .with_context(|| format!("invalid ignore_patterns regex: {pat:?}"))?;
+    }
     let runner = cli_runner.or(file.runner).unwrap_or_default();
     let schemata = resolve_schemata(cli_no_schemata, cli_schemata, file.schemata, runner)?;
     // Resolve the pytest interpreter: explicit `--python` / config `python`
@@ -511,6 +516,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         cache_scope,
         fail_under,
         exclude,
+        ignore_patterns,
         verify_baseline,
         private_home,
         baseline_timeout_secs,

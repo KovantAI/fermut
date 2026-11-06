@@ -77,11 +77,12 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
     // deep-copying the four heap fields on every outcome construction, cache
     // insert, and cache-hit lookup. Nothing mutates a `Mutant` after collection
     // — only the Vec is reordered — so the shared `Arc` needs no interior mut.
-    let mut mutants: Vec<Arc<Mutant>> = mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)
-        .with_context(|| format!("collecting mutations under {}", cfg.source_root.display()))?
-        .into_iter()
-        .map(Arc::new)
-        .collect();
+    let mut mutants: Vec<Arc<Mutant>> =
+        mutator::collect_from_tree(&cfg.source_root, &cfg.exclude, &cfg.ignore_patterns)
+            .with_context(|| format!("collecting mutations under {}", cfg.source_root.display()))?
+            .into_iter()
+            .map(Arc::new)
+            .collect();
     info!(count = mutants.len(), "mutations generated");
 
     // `--sample` scales only the TESTING phase: every mutant above was still
@@ -2149,6 +2150,7 @@ mod tests {
             cache_scope: CacheScope::File,
             fail_under: None,
             exclude: Vec::new(),
+            ignore_patterns: Vec::new(),
             verify_baseline: false,
             private_home: true,
             baseline_timeout_secs: 300,

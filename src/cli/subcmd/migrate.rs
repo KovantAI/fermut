@@ -96,8 +96,11 @@ struct FermutConfig {
     coverage: Option<PathBuf>,
     isolation: Option<&'static str>,
     /// Glob patterns relative to `source_root`. Populated from cosmic-ray
-    /// `excluded-modules` (translated via [`normalize_exclude_pattern`]).
+    /// `excluded-modules` and mutmut `do_not_mutate` (normalized via
+    /// [`normalize_excludes_against_source_root`]).
     exclude: Vec<String>,
+    /// Line regexes. Populated from mutmut `do_not_mutate_patterns`.
+    ignore_patterns: Vec<String>,
 }
 
 pub fn migrate(opts: MigrateOpts) -> Result<()> {
@@ -213,6 +216,7 @@ fn translate_mutmut(project_root: &Path, explicit: Option<&Path>) -> Result<Tran
     for (key, value) in &table {
         translate_mutmut_key(key, value, &mut out);
     }
+    normalize_excludes_against_source_root(&mut out);
     Ok(out)
 }
 
@@ -328,6 +332,24 @@ fn translate_mutmut_key(key: &str, raw: &str, out: &mut Translation) {
         // Known mutmut keys without an equivalent — surface them so the
         // user knows what we dropped, with the *original* hyphen/underscore
         // spelling preserved.
+        "do_not_mutate" => match parse_string_list(raw) {
+            Some(globs) => out.config.exclude.extend(globs),
+            None => out.unmapped.push((
+                key.into(),
+                format!("expected a list of globs, got `{raw}`. Move them to `exclude` by hand."),
+            )),
+        },
+        "do_not_mutate_patterns" => match parse_string_list(raw) {
+            Some(pats) => out.config.ignore_patterns.extend(pats),
+            None => out.unmapped.push((
+                key.into(),
+                format!("expected a list of regexes, got `{raw}`. Move them to `ignore_patterns` by hand."),
+            )),
+        },
+        "only_mutate" => out.unmapped.push((
+            key.into(),
+            format!("fermut has no include list (value was `{raw}`); narrow `source_root` or list the rest in `exclude`."),
+        )),
         "backup" => out.unmapped.push((
             key.into(),
             "fermut writes per-worker mirrors; nothing to back up. Drop this key.".into(),
@@ -429,11 +451,11 @@ fn normalize_excludes_against_source_root(out: &mut Translation) {
             // Pattern matches source_root itself — meaningless under fermut's
             // collection root (would exclude everything). Surface it.
             warnings.push(format!(
-                "excluded-modules pattern `{pat}` equals source_root; review manually."
+                "exclude pattern `{pat}` equals source_root; review manually."
             ));
         } else if !pat.starts_with(&prefix) {
             warnings.push(format!(
-                "excluded-modules pattern `{pat}` does not sit under source_root `{prefix}/`; kept verbatim. Review if it still matches what you intended."
+                "exclude pattern `{pat}` does not sit under source_root `{prefix}/`; kept verbatim. Review if it still matches what you intended."
             ));
         }
     }
@@ -562,6 +584,7 @@ impl FermutConfig {
             && self.coverage.is_none()
             && self.isolation.is_none()
             && self.exclude.is_empty()
+            && self.ignore_patterns.is_empty()
     }
 }
 
@@ -661,13 +684,25 @@ fn render_fermut_body(c: &FermutConfig) -> String {
         }
         out.push_str("]\n");
     }
+    if !c.ignore_patterns.is_empty() {
+        // Regexes carry backslashes, so escape for a TOML basic string.
+        let quoted: Vec<String> = c
+            .ignore_patterns
+            .iter()
+            .map(|p| format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect();
+        out.push_str(&format!("ignore_patterns = [{}]\n", quoted.join(", ")));
+    }
     out
 }
 
 /// Rewrite `# pragma: no mutate` → `# fermut: ignore` in every `.py` file
-/// under `root`. Returns the list of (path, replacement-count) pairs that
+/// under `root`; the mutmut 3 region forms `… block` / `start` / `end` become
+/// `# fermut: ignore-block` / `ignore-start` / `ignore-end`. Returns the list of (path, replacement-count) pairs that
 /// changed. In `--dry-run` the files are not written.
 fn rewrite_pragmas(root: &Path, dry_run: bool) -> Result<Vec<(PathBuf, usize)>> {
+    let pragma = regex::Regex::new(r"# pragma: no mutate(?:[: \t]+(block|start|end)\b)?")
+        .expect("static regex");
     let mut touched = Vec::new();
     if !root.exists() {
         return Ok(touched);
@@ -697,10 +732,13 @@ fn rewrite_pragmas(root: &Path, dry_run: bool) -> Result<Vec<(PathBuf, usize)>> 
         if !text.contains("# pragma: no mutate") {
             continue;
         }
-        let next = text.replace("# pragma: no mutate", "# fermut: ignore");
-        let n = text.matches("# pragma: no mutate").count();
+        let n = pragma.find_iter(&text).count();
+        let next = pragma.replace_all(&text, |c: &regex::Captures| match c.get(1) {
+            Some(form) => format!("# fermut: ignore-{}", form.as_str()),
+            None => "# fermut: ignore".to_string(),
+        });
         if !dry_run {
-            fs::write(entry.path(), &next)
+            fs::write(entry.path(), next.as_bytes())
                 .with_context(|| format!("writing {}", entry.path().display()))?;
         }
         touched.push((entry.path().to_path_buf(), n));
@@ -985,6 +1023,64 @@ y = 2
     }
 
     #[test]
+    fn mutmut_3_skip_lists_translate_to_exclude_and_ignore_patterns() {
+        let mut tx = Translation::default();
+        translate_mutmut_key("source_paths", "[\"src/\"]", &mut tx);
+        translate_mutmut_key(
+            "do_not_mutate",
+            "[\"src/legacy/*\", \"src/gen.py\"]",
+            &mut tx,
+        );
+        // As `toml_table_to_strings` renders it: backslashes escaped.
+        translate_mutmut_key(
+            "do_not_mutate_patterns",
+            r#"["log\\.debug\\(", "^\\s*assert "]"#,
+            &mut tx,
+        );
+        translate_mutmut_key("only_mutate", "[\"src/core/*\"]", &mut tx);
+        normalize_excludes_against_source_root(&mut tx);
+        assert_eq!(tx.config.exclude, vec!["legacy/*", "gen.py"]);
+        assert_eq!(
+            tx.config.ignore_patterns,
+            vec![r"log\.debug\(", r"^\s*assert "]
+        );
+        assert_eq!(tx.unmapped.len(), 1);
+        assert_eq!(tx.unmapped[0].0, "only_mutate");
+
+        // The rendered body must parse back to the same regexes.
+        let body = render_fermut_body(&tx.config);
+        let parsed: toml::Value = toml::from_str(&body).unwrap();
+        let pats: Vec<&str> = parsed["ignore_patterns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(pats, vec![r"log\.debug\(", r"^\s*assert "]);
+    }
+
+    #[test]
+    fn pragma_rewrite_maps_region_forms() {
+        let tmp = tempdir().unwrap();
+        let a = tmp.path().join("a.py");
+        fs::write(
+            &a,
+            "# pragma: no mutate start\nx = 1\n# pragma: no mutate: end\n\
+             if x:  # pragma: no mutate block\n    y = 2  # pragma: no mutate\n\
+             z = 3  # pragma: no mutate blocked\n",
+        )
+        .unwrap();
+        let touched = rewrite_pragmas(tmp.path(), false).unwrap();
+        assert_eq!(touched[0].1, 5);
+        assert_eq!(
+            fs::read_to_string(&a).unwrap(),
+            "# fermut: ignore-start\nx = 1\n# fermut: ignore-end\n\
+             if x:  # fermut: ignore-block\n    y = 2  # fermut: ignore\n\
+             z = 3  # fermut: ignore blocked\n"
+        );
+    }
+
+    #[test]
     fn mutmut_3_type_check_command_surfaces_as_replaced_by_ty() {
         let mut tx = Translation::default();
         translate_mutmut_key(
@@ -1183,6 +1279,7 @@ name = "celery4"
             coverage: Some(PathBuf::from(".coverage")),
             isolation: Some("copy"),
             exclude: vec!["migrations/**".into(), "legacy/*.py".into()],
+            ignore_patterns: Vec::new(),
         };
         let body = render_fermut_body(&c);
         assert!(body.contains("source_root = \"src\""));

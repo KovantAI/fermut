@@ -136,6 +136,9 @@ pub struct Config {
     /// mutation collection. Matching files and directories are pruned before
     /// parsing, so they never produce mutants. Empty = no exclusions.
     pub exclude: Vec<String>,
+    /// Regexes matched against each source line; mutants on a matching line
+    /// are dropped at collection. Empty = none.
+    pub ignore_patterns: Vec<String>,
     /// Run the unmutated test suite once before mutating and abort if it
     /// isn't green. A red suite makes every covered mutant exit non-zero and
     /// be counted "killed", inflating the score toward 100%. Default on;

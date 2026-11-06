@@ -68,7 +68,7 @@ The plugin makes the skill available in every project. It also registers the
 `fermut_doctor`, `fermut_run`, `fermut_next`, `fermut_explain` and the other
 tools natively instead of shelling out. The server runs the `fermut` on your
 `PATH` from the directory you start Claude Code in, so install fermut first
-(`pip install fermut`); without it, `/mcp` lists the `fermut` server as failed
+(`uv tool install fermut`, see [Installation](../getting-started/installation.md)); without it, `/mcp` lists the `fermut` server as failed
 and the skill still works through the CLI.
 
 Its version follows fermut releases, so plugin updates bring the skill for the

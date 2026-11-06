@@ -81,6 +81,7 @@ nav:
   - Getting started:
       - getting-started/index.md
       - Installation: getting-started/installation.md
+      - Enterprise and offline installs: getting-started/enterprise-install.md
       - First steps: getting-started/first-steps.md
       - Features: getting-started/features.md
       - Getting help: getting-started/getting-help.md
@@ -98,6 +99,7 @@ nav:
           - CI quickstart: guides/ci-quickstart.md
           - GitHub Action: guides/github-action.md
           - CI recipes: guides/integrations.md
+          - GitLab CI and Jenkins: guides/ci-gitlab-jenkins.md
           - Coverage in CI: guides/ci-coverage.md
           - Rolling out to a team: guides/projects.md
           - Trends: guides/trends.md
@@ -189,6 +191,7 @@ nav:
           - MSRV: reference/policies/msrv.md
           - Python versions: reference/policies/python-versions.md
           - Platforms: reference/policies/platforms.md
+          - Windows support: reference/policies/windows.md
           - Distribution: reference/policies/distribution.md
           - Security: reference/policies/security.md
       - License: reference/license.md

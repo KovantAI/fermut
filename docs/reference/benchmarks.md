@@ -153,7 +153,10 @@ already cheap.
 The `ty` filter runs after the coverage filter, so its share is measured
 against the mutants that would otherwise run: `ty` drops ÷ (`ty` drops +
 scored). From the default-config runs in the memory-cap A/B
-(2026-11-01, Linux, schemata on, `benchmarks/schemata/results/memcap/`):
+(2026-11-01, Linux, schemata on, `benchmarks/schemata/results/memcap/`).
+That's a different session from the cold table, so some `Scored` counts
+differ from it (click, werkzeug, jinja2, flask, trio); read the share,
+not the counts:
 
 | Repo           | Scored | Dropped by `ty` | Share   |
 |----------------|--------|-----------------|---------|

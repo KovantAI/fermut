@@ -38,15 +38,16 @@ uv sync --all-extras --dev               # install project deps + dev extras
 source .venv/bin/activate                # put .venv/bin first on PATH
 ```
 
-For an existing uv project, just `uv sync` then activate. If you
-prefer `uv run` over an activated shell, you can prefix every
-command — `uv run fermut doctor`, `uv run pytest`, etc. — and skip
-the activate step.
+For an existing uv project, just `uv sync`. Activating is optional:
+`fermut doctor`, `run` and `coverage` find the project venv on their
+own (`$VIRTUAL_ENV`, or a `.venv` walking up from the source root) and
+probe tools there first.
 
-Why this matters: `fermut doctor` resolves `python`, `pytest`, and
-`coverage` from the current shell's `PATH`. Without an
-activated venv, a macOS box with system `python3` 3.9 will fail the
-≥ 3.10 check even when your project's actual interpreter is 3.12.
+Why the venv matters: with no venv found, fermut falls back to the
+tools on `PATH`, and a macOS box with system `python3` 3.9 will fail
+the ≥ 3.10 check even when your project's actual interpreter is 3.12.
+A venv somewhere else (not `.venv`, not activated) needs
+`--python <path>` or `python = "…"` in config.
 
 ### 2. Install fermut
 
@@ -66,19 +67,30 @@ pipx install fermut   # via pipx
 pip install fermut    # plain pip
 ```
 
-All resolve from public PyPI. For a from-source install (hacking on
+Which to pick: `uv tool install` gives you the CLI and the
+[`fermut mcp`](../reference/cli/mcp.md) server. The
+[pytest plugin](../guides/pytest-plugin.md) (`pytest --fermut`) loads
+only when fermut is installed **in the project's environment**, so use
+`uv add --dev fermut` (or `pip install` into the project venv) if you
+want it; that also pins fermut's version per project.
+
+All resolve from public PyPI; for internal mirrors, offline installs,
+verifying releases and containers, see
+[Enterprise and offline installs](enterprise-install.md). For a from-source install (hacking on
 fermut or an unsupported platform), see
 [Build from source](#build-from-source).
 
 ### 3. Install the Python deps fermut drives
 
-Add `pytest`, `coverage`, `pytest-cov`, and `ty` to the project's
-dev group so they land in the same `.venv` your tests run from:
+Add `pytest`, `coverage`, and `pytest-cov` to the project's dev group
+so they land in the same `.venv` your tests run from:
 
 ```sh
 uv add --dev pytest coverage pytest-cov
-uv tool install ty                       # ty is global; one install serves every project
 ```
+
+`ty` runs embedded in fermut; the `ty` binary is only a fallback (see
+the table below).
 
 The [prerequisites table](#prerequisites) below has the full list
 and explains why each one earns its slot.

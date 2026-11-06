@@ -364,6 +364,10 @@ fermut is a plain CLI, so any CI works. Translate the steps:
    platform's API. `fermut pr-comment` is GitHub-only; elsewhere, upload
    the report as a job artifact.
 
+Full pipelines for GitLab CI and Jenkins, including MR notes, sharding and
+telling a broken run from a failed gate:
+**[GitLab CI and Jenkins](ci-gitlab-jenkins.md)**.
+
 ## Where next
 
 - **[GitHub Action](github-action.md)**: the packaged action and its inputs.

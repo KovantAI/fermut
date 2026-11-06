@@ -39,10 +39,9 @@ Stable:
   `--fail-under`, a scoreless run with no errors, or any finished run
   under `--no-fail`); `1` the gate failed (survivors, score below
   `--fail-under`, a regression past `--fail-on-regression`, or a
-  scoreless run where mutants errored) **or** a runtime error occurred
-  (even with `--no-fail`); `2` command-line usage error (from clap). A runtime error is
-  currently not distinguishable from a failed gate by exit code; read
-  stderr or the JSON report.
+  scoreless run where mutants errored); `2` command-line usage error (from
+  clap); `3` runtime error (bad config, red baseline, git or I/O failure),
+  even with `--no-fail`.
 - The structure of `--help` output is **not** stable — only the
   command/flag names are.
 

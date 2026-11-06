@@ -12,12 +12,13 @@ for GitLab CI and Jenkins.
 
 ## Telling a broken run from a failed gate
 
-`fermut run` exits `1` both when the gate fails (a survivor, or a score
-under `--fail-under`) and when the run itself errors out (bad config, red
-baseline, git failure); see [exit codes](../reference/cli/run.md). A shared
-CI template usually wants to tell "tests are weak" from "the job broke".
-Split them: run with `--no-fail` so a non-zero exit can only mean the run
-broke, then gate on the [JSON report](../reference/json.md):
+`fermut run` exits `1` when the gate fails (a survivor, or a score under
+`--fail-under`) and `3` when the run itself errors out (bad config, red
+baseline, git failure); see [exit codes](../reference/cli/run.md). `merge`
+and `trend --fail-on-regression` follow the same split. A shared CI template
+can branch on the code directly. To keep the gate in its own step instead,
+run with `--no-fail` so a non-zero exit can only mean the run broke, then
+gate on the [JSON report](../reference/json.md):
 
 ```sh
 fermut run src/ --tests tests/ --no-fail --json report.json  # non-zero = infra error

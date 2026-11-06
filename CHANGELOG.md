@@ -9,6 +9,11 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Changed
+- **Breaking:** a runtime error (bad config, red baseline, git or I/O
+  failure, a failed `merge` check) now exits `3` instead of `1`, so CI can
+  tell a broken run from a failed gate. `1` still means the gate failed
+  (survivors, `--fail-under`, `--fail-on-regression`); `2` is a usage error.
+  The GitHub action fails a run that exits `3` even with `blocking: false`.
 - Human-readable output (`run`, `list`, `show`, `baseline`'s worst files)
   prints source paths relative to the current directory
   (`src/calculator.py:14@216`) instead of the full checkout path. Mutant ids

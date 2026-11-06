@@ -81,7 +81,7 @@ and always `1` when combined with `--no-history` (the gate has nothing to read).
 Under `--only-dominators`, `1` when any audited inferred kill fails to
 reproduce (`.fermut/dominators.json` is stale). `--no-fail` always exits `0`
 on the mutation result. A run that errors out (bad config, red baseline, git
-failure) also exits `1`; clap usage errors exit `2`. Wire the gate into CI to fail on mutation score.
+failure) exits `3`, even with `--no-fail`; clap usage errors exit `2`. Wire the gate into CI to fail on mutation score.
 
 ## Smart test ordering { #smart-test-ordering }
 

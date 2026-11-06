@@ -35,7 +35,8 @@ standard CLI > env > config-file > default.
 ## Private `HOME` { #private-home }
 
 By default every worker, and every schemata fork, runs tests with a
-private, empty `HOME` (and `XDG_*` directories), removed when it exits.
+private, empty `HOME` (and `XDG_*` directories; on Windows also
+`USERPROFILE`, `APPDATA` and `LOCALAPPDATA`), removed when it exits.
 Tests that create files under `~` then can't fail each other across
 workers, which would show up as a false kill, and can't write into your
 real home.

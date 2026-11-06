@@ -141,8 +141,9 @@ pub(crate) fn run(args: HomArgs) -> Result<()> {
 
     // 2. Regenerate the FOM catalogue and join by id — the catalogue carries the
     //    ranges/replacements the JSONL omits.
-    let catalogue = mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)
-        .context("regenerating FOM catalogue")?;
+    let catalogue =
+        mutator::collect_from_tree(&cfg.source_root, &cfg.exclude, &cfg.ignore_patterns)
+            .context("regenerating FOM catalogue")?;
     // Cache each file's function spans once so the same-function gate is a cheap
     // lookup per mutant rather than a re-parse.
     let mut spans_by_file: HashMap<PathBuf, Vec<TextRange>> = HashMap::new();

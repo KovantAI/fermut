@@ -8,6 +8,23 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+### Added
+- Region ignore markers: `# fermut: ignore-start` … `# fermut: ignore-end`,
+  and `# fermut: ignore-block`, which covers a compound statement's header
+  and body, or the rest of the enclosing block when the marker is on its own
+  line.
+- `ignore_patterns` config key: regexes matched against source lines. A
+  mutant on a matching line is dropped.
+- `fermut migrate mutmut` translates mutmut 3's `do_not_mutate` to
+  `exclude` and `do_not_mutate_patterns` to `ignore_patterns`, and flags
+  `only_mutate` for manual review.
+
+### Fixed
+- `fermut migrate mutmut` turned `# pragma: no mutate block` / `start` /
+  `end` into one-line `# fermut: ignore` markers. Whole regions that had been
+  excluded under mutmut were mutated after migrating. These now map to the
+  region markers.
+
 ### Changed
 - Human-readable output (`run`, `list`, `show`, `baseline`'s worst files)
   prints source paths relative to the current directory

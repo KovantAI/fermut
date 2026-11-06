@@ -59,7 +59,8 @@ pub(crate) fn run(opts: ListArgs) -> Result<()> {
             ..Default::default()
         },
     )?;
-    let mutants = crate::mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)?;
+    let mutants =
+        crate::mutator::collect_from_tree(&cfg.source_root, &cfg.exclude, &cfg.ignore_patterns)?;
     let chain = filter::build_chain(&cfg)?;
     let mut kept = 0usize;
     for m in &mutants {

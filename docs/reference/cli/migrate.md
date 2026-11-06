@@ -32,7 +32,10 @@ fermut migrate <FROM> [PATH] [--config PATH] [--pyproject] [--force]
 | `[tool.mutmut].pytest_add_cli_args` (3.x)                  | `pytest_args`                               |
 | `[tool.mutmut].use_coverage = true` (1.x/2.x)              | `coverage = ".coverage"`                    |
 | `[tool.mutmut].mutate_only_covered_lines = true` (3.x)     | `coverage = ".coverage"`                    |
+| `[tool.mutmut].do_not_mutate` (3.x globs)                  | `exclude` (re-rooted under `source_root`)   |
+| `[tool.mutmut].do_not_mutate_patterns` (3.x regexes)       | `ignore_patterns`                           |
 | `# pragma: no mutate` in `.py`                             | `# fermut: ignore`                          |
+| `# pragma: no mutate block` / `start` / `end` (3.x)        | `# fermut: ignore-block` / `-start` / `-end` |
 | `[cosmic-ray].module-path`                                 | `source_root`                               |
 | `[cosmic-ray].timeout` (float)                             | `timeout` (rounded up to whole seconds)     |
 | `[cosmic-ray].test-command`                                | `runner` + `pytest_args`                    |
@@ -44,7 +47,8 @@ The migrator prints a "manual review" report listing every key it
 couldn't map, with a short reason. Common cases:
 
 - mutmut: `backup`, `dict_synonyms`, `also_copy`, `pre_mutation`,
-  `post_mutation`, `simple_output`.
+  `post_mutation`, `simple_output`, `only_mutate` (fermut has no include
+  list; narrow `source_root` or use `exclude`).
 - cosmic-ray: `interceptors`, `badge`. (`excluded-modules` maps to
   `exclude`; `distributor` and `execution-engine` have no analogue and are
   explained in the migrator's notes rather than this list.)

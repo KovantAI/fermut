@@ -379,6 +379,7 @@ mod chain_order_tests {
             cache_scope: CacheScope::File,
             fail_under: None,
             exclude: Vec::new(),
+            ignore_patterns: Vec::new(),
             verify_baseline: false,
             private_home: true,
             baseline_timeout_secs: 300,

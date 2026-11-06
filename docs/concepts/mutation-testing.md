@@ -23,8 +23,9 @@ notice?* If no test noticed, the test suite has a hole at that
 location. The hole is named, located, and reproducible — not a vague
 "increase coverage" goal.
 
-Concretely, nine mature, well-tested open-source Python libraries score
-67–86% with fermut's defaults ([benchmarks](../reference/benchmarks.md#cold-runs-pinned-oss-repos)),
+Concretely, nine of the ten mature, well-tested open-source Python
+libraries we benchmark score 67–86% with fermut's defaults (the tenth,
+trio, scores ~53% with a suite whose results vary between runs) ([benchmarks](../reference/benchmarks.md#cold-runs-pinned-oss-repos)),
 and code that has never been mutation-tested usually starts lower. That gap is not a tooling failure; it's the difference
 between "tests exist" and "tests would catch the regression you're
 worried about." Closing it pays off most in code that *cannot* be

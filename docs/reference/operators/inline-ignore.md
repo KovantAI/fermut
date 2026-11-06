@@ -5,7 +5,7 @@ that line:
 
 ```python
 x = compute() + offset    # fermut: ignore
-y = a if flag else b      # fermut: ignore[arith-op-swap, bool-op-swap]
+y = (a + b) and ready    # fermut: ignore[arith-op-swap, bool-op-swap]
 return value or fallback  # fermut: ignore[bool-op-swap]
 ```
 

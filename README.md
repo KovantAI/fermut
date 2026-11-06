@@ -40,7 +40,8 @@ slipped through. In short — it answers **"are my tests any good?"**
 - 🤖 **Agent-first** — machine-readable JSON reports, deterministic mutant
   IDs, `next`/`explain`/`score` subcommands built for a coding agent in the loop.
 - 🔁 **Incremental** — an unchanged re-run is answered from the cache
-  (pyjwt: 38s cold, 0.3s warm), and `--diff-only` scopes mutation to
+  (pyjwt: ~38s cold, ~0.3s warm, measured together after the
+  [benchmark table](https://fermut.readthedocs.io/reference/benchmarks/#warm-and-loop-runs-the-incremental-story)), and `--diff-only` scopes mutation to
   lines changed vs `main`.
 - 🚦 **CI-ready** — non-zero exit when any mutant survives (or, with
   `--fail-under`, when the score drops below a threshold), wire it straight
@@ -58,7 +59,7 @@ type-awareness. Humans welcome too.
 uv tool install fermut                                             # prebuilt wheel from PyPI, no Rust needed
 cargo install --git https://github.com/KovantAI/fermut --locked    # from source: needs Rust + ~2 min first compile
 
-# in your project (needs pytest, coverage, pytest-cov, ty on the same PATH — see Installation)
+# in your project (needs pytest, coverage, pytest-cov on the same PATH; ty is embedded — see Installation)
 fermut init                     # detect source/tests/runner, write fermut.toml
 fermut baseline                 # where you stand: checks the env, builds .coverage,
                                 # line coverage vs a sampled mutation score + worst files

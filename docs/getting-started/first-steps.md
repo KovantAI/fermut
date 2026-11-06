@@ -148,8 +148,8 @@ normal run. If the embedded checker is unavailable and the binary is
 missing too, the run aborts before any mutant is tested; see
 [ty-not-found](../reference/troubleshooting/ty-not-found.md).
 Re-runs reuse cached verdicts: a re-run with nothing changed tests no
-mutants and skips the baseline suite run (pyjwt: 38 s cold, 0.3 s
-warm). After an edit, run `fermut coverage` first; see
+mutants and skips the baseline suite run (pyjwt: ~38 s cold, ~0.3 s
+warm, [measured together](../reference/benchmarks.md#warm-and-loop-runs-the-incremental-story)). After an edit, run `fermut coverage` first; see
 [Coverage → Freshness guard](../guides/coverage.md#freshness-guard).
 
 > **Coverage generation failed?** Fix it before continuing — fermut

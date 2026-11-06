@@ -29,7 +29,7 @@ What each flag does:
   `.coverage` sits at the project root, fermut auto-discovers it and
   you can drop the flag; pass it explicitly to be unambiguous.
 
-Together: sub-second feedback on whether the test you just wrote
+Together: feedback in seconds on whether the test you just wrote
 actually kills the mutant you intended.
 
 > **Needs git history.** `--diff-only` resolves the merge base of
@@ -98,8 +98,10 @@ recall. Acceptable for inner loop; not for the PR gate.
 If `--diff-only --watch` still feels slow, three levers in order
 of impact:
 
-1. **Check `ty` is on `$PATH`.** Without it the filter chain skips
-   ~30% fewer mutants. `fermut doctor` reports.
+1. **Check the `ty` filter is on.** It runs embedded in fermut, so
+   this only bites with `FERMUT_TY_EMBEDDED=0` and no `ty` binary on
+   `$PATH`; without it the filter chain skips ~30% fewer mutants.
+   `fermut doctor` reports.
 2. **Tighten `--ops`.** If you only care about boundary regressions
    today, `--ops boundary-shift,compare-op-swap` cuts mutant count
    dramatically.

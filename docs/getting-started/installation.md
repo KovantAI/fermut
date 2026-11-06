@@ -43,8 +43,8 @@ prefer `uv run` over an activated shell, you can prefix every
 command — `uv run fermut doctor`, `uv run pytest`, etc. — and skip
 the activate step.
 
-Why this matters: `fermut doctor` resolves `python`, `pytest`,
-`coverage`, and `ty` from the current shell's `PATH`. Without an
+Why this matters: `fermut doctor` resolves `python`, `pytest`, and
+`coverage` from the current shell's `PATH`. Without an
 activated venv, a macOS box with system `python3` 3.9 will fail the
 ≥ 3.10 check even when your project's actual interpreter is 3.12.
 

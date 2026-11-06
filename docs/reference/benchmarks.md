@@ -139,11 +139,14 @@ the cold table above is canonical for the coverage-on absolutes):
   now correctly **skipped** rather than counted as survivors.
 - **typer:** ~2174s → **~214s** (~10×).
 
-Coverage is **opt-in** (auto-discovered from `.coverage` at the project
-root, or pass `--coverage .coverage`, or wire it via `fermut init`); the
-benchmark harness now generates it automatically for fermut. Mutmut has no equivalent, so its per-mutant cost is the
-full suite — which is also why it wins on a tiny-suite repo like
-more-itertools where the full suite is already cheap.
+Coverage is used whenever a `.coverage` DB exists: auto-discovered at
+the project root, or passed with `--coverage .coverage`. `fermut run`
+doesn't create one; `fermut coverage` (or `fermut baseline`) does, and
+the benchmark harness runs that step for fermut (the `cov_prep` column).
+Without a DB, every mutant runs the full suite. Mutmut has no
+equivalent, so its per-mutant cost is the full suite — which is also why
+it wins on a tiny-suite repo like markupsafe, where the full suite is
+already cheap.
 
 ### The `ty` filter { #ty-filter }
 

@@ -157,11 +157,11 @@ breakdown (one-time `coverage_prep` + steady-state `mutation`) — lives in
 of truth. It isn't duplicated here (two copies inevitably drift); the
 qualitative picture:
 
-Mixed but competitive. fermut wins on **typer** (faster *and*
-higher-scoring) and out-scores mutmut on **pyjwt** at similar speed.
-mutmut wins on **more-itertools** — a tiny pure-Python suite where
-the full-suite-per-mutant cost is already cheap and fermut's
-ty + coverage overhead doesn't pay off. The coverage filter (run
+Mixed but competitive. fermut is faster on **typer** at a similar
+score, and out-scores mutmut on **pyjwt** at similar speed. The two tie
+on time on **more-itertools**, where mutmut scores higher. mutmut wins
+on **markupsafe** — a tiny suite where the full-suite-per-mutant cost is
+already cheap and fermut's ty + coverage overhead doesn't pay off. The coverage filter (run
 only the tests crossing each mutated line) is the lever: uncovered-line
 mutants are *skipped*, not counted as survivors, which both cuts
 wall-clock and lifts the score. Coverage is used whenever a `.coverage` DB with per-test contexts is at the project root (or `--coverage` points at one);
@@ -169,7 +169,8 @@ mutmut has no equivalent. Scores across tools are **not directly
 comparable**.
 
 fermut's per-mutant cache answers an unchanged re-run without running
-any tests: on pyjwt, 38 s cold and 0.3 s warm. See
+any tests: on pyjwt, ~38 s cold and ~0.3 s warm (measured together, on a
+different machine from the cold table's ~53 s). See
 [Reference → Benchmarks](../reference/benchmarks.md#warm-and-loop-runs-the-incremental-story)
 for the warm and edit-loop numbers.
 

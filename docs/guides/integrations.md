@@ -320,40 +320,6 @@ evicted; for a history that's never lost, the packaged
 [`trend` action](github-action.md#score-trend) keeps it on an orphan
 branch instead.
 
-## History persistence { #history-persistence }
-
-CI runners are ephemeral, so `.fermut/history.jsonl` starts empty every
-run unless you persist it, and `--trend` has nothing to compare against.
-Restore it on every run with `actions/cache/restore` (which never saves),
-and save it only from `main`:
-
-```yaml
-- name: restore fermut history
-  uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
-  with:
-    path: .fermut/history.jsonl
-    key: fermut-history-main
-    restore-keys: |
-      fermut-history-main-
-
-- name: run fermut
-  run: fermut run src/ --tests tests/ --markdown report.md --trend
-
-- name: save fermut history
-  if: always() && github.ref == 'refs/heads/main'
-  uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
-  with:
-    path: .fermut/history.jsonl
-    key: fermut-history-main-${{ github.sha }}
-```
-
-PR jobs only read, so feature branches never fork their own history.
-The combined `actions/cache` would save from PR jobs in its post-step,
-which is why the restore uses `actions/cache/restore`. Caches can be
-evicted; for a history that's never lost, the packaged
-[`trend` action](github-action.md#score-trend) keeps it on an orphan
-branch instead.
-
 ## Pre-commit
 
 fermut itself ships pre-commit hooks for the Rust source. To run

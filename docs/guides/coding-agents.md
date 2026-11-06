@@ -113,7 +113,7 @@ the default history and adds `--trend` + `--markdown` for the PR comment. Don't 
 Key invariants:
 
 1. **Don't re-run the full sweep every iteration.** Use `--diff-only`
-   (CI workflow) or `--diff-only HEAD~1` (local), so the agent only burns
+   (CI workflow) or `--diff-only HEAD` (local, uncommitted edits), so the agent only burns
    wall-clock on lines it changed.
 2. **Always read `out.json`, not stdout.** Stdout is for humans. JSON is
    stable across releases per the [versioning policy](https://github.com/KovantAI/fermut/blob/main/VERSIONING.md).

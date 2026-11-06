@@ -115,7 +115,7 @@ uses it to post.
 
 ## First run — what to expect
 
-The first PR after wiring this up will produce one of three outcomes:
+The first PR after wiring this up will produce one of four outcomes:
 
 - **No run at all.** The PR touched no `.py`, `pyproject.toml` or
   `fermut.toml`, so the workflow didn't trigger.

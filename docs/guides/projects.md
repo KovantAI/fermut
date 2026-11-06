@@ -95,7 +95,7 @@ optimize for different starting points:
 === "Local"
 
     Goal: **dev-loop feedback**. You're iterating on tests; you want
-    sub-second cycles.
+    cycles of seconds.
 
     ```sh
     fermut init --profile local --force

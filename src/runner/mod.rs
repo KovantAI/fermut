@@ -260,13 +260,27 @@ pub(crate) const PRIVATE_HOME_ENV: &str = "FERMUT_PRIVATE_HOME";
 
 /// `HOME` and the XDG base dirs, all inside `home`. Setting the XDG dirs
 /// (not just removing them) matters: an exported `XDG_CONFIG_HOME` would
-/// otherwise stay shared.
+/// otherwise stay shared. On Windows Python resolves `~` from `USERPROFILE`
+/// (it ignores `HOME`), and click/typer's `get_app_dir` reads `APPDATA` /
+/// `LOCALAPPDATA`, so those move too.
 fn set_home(cmd: &mut std::process::Command, home: &Path) {
     cmd.env("HOME", home);
     for (var, rel) in XDG_DIRS {
         cmd.env(var, home.join(rel));
     }
+    if cfg!(windows) {
+        cmd.env("USERPROFILE", home);
+        for (var, rel) in WINDOWS_DIRS {
+            cmd.env(var, home.join(rel));
+        }
+    }
 }
+
+/// Windows' per-user app dirs and their defaults under `USERPROFILE`.
+const WINDOWS_DIRS: [(&str, &str); 2] = [
+    ("APPDATA", r"AppData\Roaming"),
+    ("LOCALAPPDATA", r"AppData\Local"),
+];
 
 /// XDG base dirs and their spec defaults under `HOME`; kept in step with the
 /// schemata helper's per-fork copy (`Template.child`).
@@ -1353,9 +1367,45 @@ mod tests {
             Some(std::ffi::OsStr::new("1"))
         );
         assert_ne!(var(&on, "HOME"), var(&env_of(&b, true), "HOME"));
+        if cfg!(windows) {
+            assert_eq!(var(&on, "USERPROFILE"), Some(a.home.clone().into()));
+            assert_eq!(
+                var(&on, "APPDATA"),
+                Some(a.home.join(r"AppData\Roaming").into())
+            );
+        }
         let off = env_of(&a, false);
         assert_eq!(var(&off, "HOME"), None, "inherits the real home");
         assert_eq!(var(&off, crate::runner::PRIVATE_HOME_ENV), None);
+    }
+
+    /// Python on Windows takes `~` from `USERPROFILE`, not `HOME`; the
+    /// private home must still be where `Path.home()` lands.
+    #[cfg(windows)]
+    #[test]
+    fn python_home_resolves_into_the_private_home_on_windows() {
+        let Ok(py) = which::which("python") else {
+            eprintln!("skipping: no python on PATH");
+            return;
+        };
+        let (_tmp, _root, tests, _src) = fake_project();
+        let m = Mirror::build(&tests, IsolationMode::Auto).unwrap();
+        let mut cmd = std::process::Command::new(py);
+        cmd.args([
+            "-c",
+            "import os, pathlib; print(pathlib.Path.home()); print(os.path.expanduser('~'))",
+        ]);
+        crate::runner::configure_mirror_cmd(&mut cmd, &m, true).unwrap();
+        let out = cmd.output().unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let home = m.home.canonicalize().unwrap();
+        for line in String::from_utf8(out.stdout).unwrap().lines() {
+            assert_eq!(
+                std::path::Path::new(line).canonicalize().unwrap(),
+                home,
+                "`~` escaped the private home"
+            );
+        }
     }
 
     /// werkzeug parametrizes on absolute paths, so the recorded id carries the

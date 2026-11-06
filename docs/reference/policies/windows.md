@@ -15,7 +15,7 @@ can tell whether a Windows result or timing should match Linux/macOS.
 | [Timeout budget](../cli/run.md#timeout-budgets) | yes | yes |
 | Killing a timed-out mutant's process tree | process group, `SIGKILL` | new process group, `CTRL_BREAK_EVENT`, then the leader is force-killed |
 | [Memory cap](../cli/run.md#memory-cap) | Linux `RLIMIT_DATA`; macOS RSS watchdog | Job Object: caps the mutant's whole process tree, fails with `MemoryError` |
-| [Private `HOME`](../cli/run-isolation.md#private-home) | isolates `~` | sets `HOME`/`XDG_*` only; see below |
+| [Private `HOME`](../cli/run-isolation.md#private-home) | isolates `~` | isolates `~`: also sets `USERPROFILE`, `APPDATA`, `LOCALAPPDATA` |
 | [GitHub Action](../../guides/github-action.md) | yes | **no** (Linux and macOS runners); use the CLI |
 | `fermut pr-comment` | yes (`gh`) | yes (`gh`) |
 
@@ -30,14 +30,6 @@ passing `--schemata` (or `schemata = true` in config) fails with
 slower than the [benchmarks](../benchmarks.md), which are all
 Linux/macOS with schemata on. Schemata is built to give the same verdicts
 as the normal runner, so scores stay comparable; only time differs.
-
-**Private `HOME` doesn't cover `~`.** fermut gives each worker an empty
-`HOME` and `XDG_*` directories. On Windows, Python resolves `~` from
-`USERPROFILE`, not `HOME`, so tests that use `Path.home()` or
-`os.path.expanduser` still see your real profile, and two workers writing
-the same file there can collide. Tests that write under `~` can then cause
-[score swings](../troubleshooting/score-swings.md); point them at
-`tmp_path` instead.
 
 **Memory cap.** Each mutant's run joins a Job Object that caps the memory
 of every process in it, test subprocesses included. Past the cap, Python

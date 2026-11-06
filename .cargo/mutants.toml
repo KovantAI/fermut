@@ -39,4 +39,15 @@ exclude_globs = [
 exclude_re = [
     # `cached && log` only gates an unasserted "cache hit" line on stderr.
     'src/cli/subcmd/suggest.rs:.*replace && with \|\| in generate_one',
+    # These conditions only pick or gate a progress line on stderr.
+    'src/cli/subcmd/coverage.rs:(158|230|238|244|261|288):.* in coverage$',
+    'src/cli/subcmd/coverage.rs:.*replace report_done with \(\)',
+    # Its verdict depends on a real pytest + pytest-cov run, which the mutants
+    # job has no Python for; covered end to end by the coverage e2e suite.
+    'src/cli/subcmd/coverage.rs:.*replace run_pytest -> Result<bool> with Ok\((true|false)\)',
+    # The cfg(windows) half never compiles on the Linux runner. On Unix, a
+    # successful fcntl/dup2 returns a positive fd, so `< 0` -> `== 0`/`<= 0`
+    # is equivalent; `< 0` -> `> 0` is killed by the mcp e2e test.
+    'src/cli/subcmd/mcp.rs:.*replace (\|\| with &&|== with !=) in take_protocol_stdout',
+    'src/cli/subcmd/mcp.rs:.*replace < with (==|<=) in take_protocol_stdout',
 ]

@@ -2574,3 +2574,28 @@ fn real_output_matches_the_documented_formats_and_json_fields() {
         "JSON keys missing from docs/reference/json.md: {undocumented:?}"
     );
 }
+
+// `fermut mcp` keeps the JSON-RPC stream on the real stdout and points the
+// process's stdout at stderr, so stdout carries exactly one line per response.
+#[test]
+fn mcp_answers_initialize_on_stdout() {
+    let out = Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("mcp")
+        .write_stdin(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#
+                .to_string()
+                + "\n",
+        )
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "stdout: {stdout}");
+    let msg: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(msg["id"], 1);
+    assert_eq!(msg["result"]["serverInfo"]["name"], "fermut");
+}

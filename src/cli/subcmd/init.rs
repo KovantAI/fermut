@@ -788,6 +788,16 @@ mod tests {
         assert_eq!(detect(tmp.path()).unwrap().runner, "pytest");
     }
 
+    // The embedded checker makes ty available with no binary anywhere.
+    #[test]
+    fn detect_reports_embedded_ty_without_a_binary() {
+        let tmp = tempdir().unwrap();
+        if resolve_tool("ty", tmp.path()).is_some() || crate::filter::ty::env_disables_embedded() {
+            return; // ty on PATH, or the embedded path is off: nothing to pin.
+        }
+        assert!(detect(tmp.path()).unwrap().ty_available);
+    }
+
     #[test]
     fn detect_prefers_src_dir() {
         let tmp = tempdir().unwrap();

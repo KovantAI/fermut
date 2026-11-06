@@ -8,6 +8,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+### Added
+- `run` always writes `.fermut/last.json`, and `show`, `next`, `explain`,
+  `suggest` and `autofix` read it when no report path is given.
+  `fermut results` is an alias for `show`, so `mutmut results` /
+  `mutmut show <id>` map to `fermut results` / `fermut show <id>`.
+
 ### Changed
 - Human-readable output (`run`, `list`, `show`, `baseline`'s worst files)
   prints source paths relative to the current directory

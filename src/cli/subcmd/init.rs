@@ -769,9 +769,6 @@ mod tests {
     #[test]
     fn detect_finds_pytest_in_unactivated_dot_venv() {
         use std::os::unix::fs::PermissionsExt;
-        if std::env::var_os("VIRTUAL_ENV").is_some() {
-            return; // VIRTUAL_ENV wins over `.venv` discovery.
-        }
         let tmp = tempdir().unwrap();
         fs::write(
             tmp.path().join("pyproject.toml"),
@@ -785,17 +782,20 @@ mod tests {
             fs::write(&p, "#!/bin/sh\n").unwrap();
             fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        assert_eq!(detect(tmp.path()).unwrap().runner, "pytest");
+        // VIRTUAL_ENV wins over `.venv` discovery.
+        if std::env::var_os("VIRTUAL_ENV").is_none() {
+            assert_eq!(detect(tmp.path()).unwrap().runner, "pytest");
+        }
     }
 
-    // The embedded checker makes ty available with no binary anywhere.
+    // Without a `ty` binary the embedded checker still makes the filter
+    // available, unless FERMUT_TY_EMBEDDED=0.
     #[test]
-    fn detect_reports_embedded_ty_without_a_binary() {
+    fn detect_ty_available_via_binary_or_embedded_checker() {
         let tmp = tempdir().unwrap();
-        if resolve_tool("ty", tmp.path()).is_some() || crate::filter::ty::env_disables_embedded() {
-            return; // ty on PATH, or the embedded path is off: nothing to pin.
-        }
-        assert!(detect(tmp.path()).unwrap().ty_available);
+        let binary = resolve_tool("ty", tmp.path()).is_some();
+        let embedded = !crate::filter::ty::env_disables_embedded();
+        assert_eq!(detect(tmp.path()).unwrap().ty_available, binary || embedded);
     }
 
     #[test]

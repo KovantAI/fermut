@@ -136,18 +136,14 @@ fn take_protocol_stdout() -> std::io::Result<std::fs::File> {
     std::io::stdout().flush()?;
     #[cfg(unix)]
     {
-        use std::os::fd::FromRawFd;
-        // CLOEXEC, so child processes don't inherit the channel.
-        // SAFETY: plain fd syscalls; the duplicate is owned by `channel` alone.
-        let fd = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 0) };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let channel = unsafe { std::fs::File::from_raw_fd(fd) };
+        use std::os::fd::AsFd;
+        // std dups with F_DUPFD_CLOEXEC, so child processes don't inherit it.
+        let channel = std::io::stdout().as_fd().try_clone_to_owned()?;
+        // SAFETY: plain fd syscall on the process's own std descriptors.
         if unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) } < 0 {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(channel)
+        Ok(channel.into())
     }
     #[cfg(windows)]
     {
@@ -580,6 +576,13 @@ fn tool_run(args: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_message_emits_one_newline_terminated_json_line() {
+        let mut buf = Vec::new();
+        write_message(&mut buf, &json!({"id": 1})).unwrap();
+        assert_eq!(buf, b"{\"id\":1}\n");
+    }
 
     #[test]
     fn initialize_echoes_client_protocol_version() {

@@ -769,6 +769,12 @@ class Template:
                 session.config._ensure_unconfigure()
             except BaseException:  # noqa: BLE001
                 code = code or 1
+            # A cold run's interpreter exit: run threading's atexit hooks
+            # (executors stop their workers), then wait on every non-daemon
+            # thread a test left running. One that never ends hangs the
+            # child, which times out like the cold run (trio: a mutant that
+            # drops `daemon=True`). `os._exit` below would skip this.
+            threading._shutdown()
         except BaseException:  # noqa: BLE001 - nothing may escape a forked child
             code = 3
             emit(ev="error", tb=traceback.format_exc())

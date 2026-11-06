@@ -1730,6 +1730,41 @@ mod tests {
             vec!["src/foo.py".to_string(), "tests/test_new.py".to_string()]
         );
     }
+
+    /// Full rebuild of a sidecar-less `.coverage` with a stand-in interpreter
+    /// exiting `code`. Returns whether the fingerprint baseline was written.
+    #[cfg(unix)]
+    fn full_rebuild_with_exit(code: u8) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("fermut.toml"), "").unwrap();
+        std::fs::create_dir(root.join("tests")).unwrap();
+        std::fs::write(root.join("tests/test_a.py"), "def test_a(): pass\n").unwrap();
+        // A DB with no sidecar: the "rebuild fully" path.
+        std::fs::write(root.join(".coverage"), "").unwrap();
+        let py = root.join("python");
+        std::fs::write(&py, format!("#!/bin/sh\nexit {code}\n")).unwrap();
+        std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+        coverage(CoverageArgs {
+            path: root.to_path_buf(),
+            source: Some(root.to_path_buf()),
+            tests: Some(root.join("tests")),
+            full: false,
+            output: None,
+            python: Some(py),
+            pytest_args: vec![],
+        })
+        .unwrap();
+        fingerprints_path(&root.join(".coverage")).exists()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_rebuild_writes_baseline_only_when_pytest_passes() {
+        assert!(full_rebuild_with_exit(0));
+        assert!(!full_rebuild_with_exit(1));
+    }
 }
 
 #[derive(clap::Args, Debug)]

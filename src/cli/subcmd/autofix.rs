@@ -79,6 +79,7 @@ impl From<AutofixArgs> for AutofixOpts {
             format,
             triage,
         } = a;
+        let (report, target) = crate::cli::report_and_target(report, target);
         AutofixOpts {
             report,
             target,
@@ -966,8 +967,9 @@ mod tests {
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct AutofixArgs {
-    /// Path to a JSON report produced by `fermut run --json …`.
-    pub(crate) report: std::path::PathBuf,
+    /// JSON report from `fermut run`. Defaults to `.fermut/last.json`, which
+    /// every `run` writes.
+    pub(crate) report: Option<std::path::PathBuf>,
 
     /// Mutant selector: 1-based index, or substring of mutant id.
     /// Omit when `--all-survivors` is set.

@@ -13,7 +13,7 @@ pub(crate) mod build_config;
 mod merge;
 mod subcmd;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -561,7 +561,9 @@ enum Cmd {
     /// is printed under "manual review" so nothing is silently dropped.
     Migrate(subcmd::migrate::MigrateArgs),
 
-    /// Inspect mutants from a prior JSON report.
+    /// Inspect mutants from a prior JSON report (`.fermut/last.json` by
+    /// default). `fermut results` is an alias, after `mutmut results`.
+    #[command(visible_alias = "results")]
     Show(subcmd::show::ShowArgs),
 
     /// Rank surviving mutants by which one to fix next.
@@ -709,6 +711,35 @@ pub(crate) fn current_project_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// `.fermut/last.json` under `path`'s project root — `run` always writes the
+/// report here, and report-reading subcommands default to it.
+pub(crate) fn last_report_path(path: &Path) -> PathBuf {
+    crate::history::resolve_root(path)
+        .join(".fermut")
+        .join("last.json")
+}
+
+/// Resolve the optional `[REPORT] [TARGET]` positionals. A lone first arg
+/// that isn't a report (no `.json` extension, not an existing file) is the
+/// target, so `fermut show 3` reads `.fermut/last.json` like `mutmut show`.
+pub(crate) fn report_and_target(
+    first: Option<PathBuf>,
+    target: Option<String>,
+) -> (PathBuf, Option<String>) {
+    match first {
+        Some(p)
+            if target.is_some() || p.is_file() || p.extension().is_some_and(|e| e == "json") =>
+        {
+            (p, target)
+        }
+        Some(p) => (
+            last_report_path(&current_project_root()),
+            Some(p.to_string_lossy().into_owned()),
+        ),
+        None => (last_report_path(&current_project_root()), target),
+    }
+}
+
 impl Cli {
     pub fn run(self) -> Result<()> {
         match self.cmd {
@@ -742,6 +773,29 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn report_positional_falls_back_to_last_json() {
+        let last = last_report_path(&current_project_root());
+        let p = |s: &str| Some(PathBuf::from(s));
+        // Lone non-report arg is the selector.
+        assert_eq!(
+            report_and_target(p("3"), None),
+            (last.clone(), Some("3".into()))
+        );
+        assert_eq!(report_and_target(None, None), (last, None));
+        // `.json` or two positionals keep the explicit report.
+        assert_eq!(
+            report_and_target(p("r.json"), None),
+            (PathBuf::from("r.json"), None)
+        );
+        assert_eq!(
+            report_and_target(p("r"), Some("3".into())),
+            (PathBuf::from("r"), Some("3".into()))
+        );
+        assert!(Cli::try_parse_from(["fermut", "results"]).is_ok());
+        assert!(Cli::try_parse_from(["fermut", "explain"]).is_err());
+    }
 
     #[test]
     fn no_fail_and_gate_flags_are_mutually_exclusive_in_the_parser() {

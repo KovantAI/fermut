@@ -81,7 +81,9 @@ impl From<NextArgs> for NextOpts {
             format,
         } = a;
         NextOpts {
-            report,
+            report: report.unwrap_or_else(|| {
+                crate::cli::last_report_path(&crate::cli::current_project_root())
+            }),
             limit: if all { None } else { Some(limit) },
             max_tokens,
             format,
@@ -658,8 +660,9 @@ mod tests {
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct NextArgs {
-    /// Path to a JSON report produced by `fermut run --json …`.
-    pub(crate) report: std::path::PathBuf,
+    /// JSON report from `fermut run`. Defaults to `.fermut/last.json`, which
+    /// every `run` writes.
+    pub(crate) report: Option<std::path::PathBuf>,
 
     /// Number of ranked survivors to emit. Defaults to 1 — the single
     /// best next target.

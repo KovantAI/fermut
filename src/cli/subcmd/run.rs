@@ -162,6 +162,7 @@ pub fn run(opts: RunOpts) -> Result<()> {
     let cfg = build_config(path, cfg_args)?;
     let want_annotations = annotate || std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true");
     let fmt = format.into();
+    let last_report = crate::cli::last_report_path(&cfg.source_root);
     // The closure receives the *prior* history (entries that
     // existed before this run started) so the markdown trend
     // block plots "this run vs every earlier run" without
@@ -173,6 +174,12 @@ pub fn run(opts: RunOpts) -> Result<()> {
         report.print(fmt);
         if want_annotations {
             report.print_github_annotations();
+        }
+        // Always kept, so `show` / `next` / `explain` work without `--json`
+        // (the `mutmut results` workflow). Best-effort: a read-only tree
+        // mustn't fail the run.
+        if let Err(e) = report.write_json(&last_report) {
+            tracing::warn!("could not write {}: {e:#}", last_report.display());
         }
         if let Some(p) = &sinks.json {
             report.write_json(p)?;

@@ -1627,15 +1627,14 @@ fn explain_requires_a_target() {
     let report = dir.path().join("report.json");
     std::fs::write(&report, NEXT_REPORT).unwrap();
 
-    // `explain` needs a mutant id to explain; omitting it is a parse error,
-    // caught before the report is read.
+    // `explain` needs a mutant id to explain; a lone report path is not one.
     Command::cargo_bin("fermut")
         .unwrap()
         .arg("explain")
         .arg(&report)
         .assert()
         .failure()
-        .stderr(contains("required arguments"));
+        .stderr(contains("missing mutant selector"));
 }
 
 #[test]

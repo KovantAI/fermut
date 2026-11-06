@@ -78,9 +78,10 @@ impl From<(ExplainArgs, PathBuf)> for ExplainOpts {
             cache_path,
             format,
         } = a;
+        let (report, target) = crate::cli::report_and_target(report, target);
         ExplainOpts {
             report,
-            target,
+            target: target.unwrap_or_default(),
             context_lines: context,
             tests: tests_or_default(tests, &project_root),
             coverage,
@@ -895,6 +896,7 @@ pub(crate) fn locate_outcome_impl<'a>(
     outcomes: &'a [MutantOutcome],
     target: &str,
 ) -> Result<&'a MutantOutcome> {
+    anyhow::ensure!(!target.is_empty(), "missing mutant selector (index or id)");
     if let Ok(idx) = target.parse::<usize>() {
         if idx >= 1 {
             return outcomes
@@ -939,8 +941,8 @@ mod tests {
         // so the caller controls it and the mapping is deterministic — including
         // the `context` → `context_lines` rename.
         let args = ExplainArgs {
-            report: PathBuf::from("r.json"),
-            target: "3".into(),
+            report: Some(PathBuf::from("r.json")),
+            target: Some("3".into()),
             context: 7,
             tests: None,
             coverage: None,
@@ -1314,12 +1316,14 @@ mod tests {
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct ExplainArgs {
-    /// Path to a JSON report produced by `fermut run --json …`.
-    pub(crate) report: std::path::PathBuf,
+    /// JSON report from `fermut run`. Defaults to `.fermut/last.json`, which
+    /// every `run` writes.
+    #[arg(required = true)]
+    pub(crate) report: Option<std::path::PathBuf>,
 
     /// Mutant selector: 1-based index into the report, or substring of
     /// mutant id (matches `fermut show`'s selector grammar).
-    pub(crate) target: String,
+    pub(crate) target: Option<String>,
 
     /// Number of source lines to show on each side of the mutant line.
     #[arg(long, default_value_t = 5)]

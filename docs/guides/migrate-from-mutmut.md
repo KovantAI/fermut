@@ -182,8 +182,8 @@ A side-by-side example:
 | `mutmut run --paths-to-mutate src/` | `fermut run src/`                               |
 | `mutmut run --use-coverage`         | `fermut run --coverage .coverage` (or a manual `--coverage coverage.json`) |
 | `mutmut run --mypy`                 | (default: `ty` pre-filter on; `--no-ty-filter` to disable) |
-| `mutmut results`                    | `fermut run --json report.json` then `fermut show report.json` |
-| `mutmut show <id>`                  | `fermut show report.json <id>`                  |
+| `mutmut results`                    | `fermut results` (reads `.fermut/last.json`, written by every `run`) |
+| `mutmut show <id>`                  | `fermut show <id>`                              |
 | `mutmut html`                       | `fermut run --html out.html`                    |
 | `mutmut junitxml`                   | `fermut run --junit out.xml`                    |
 | `mutmut stats`                      | `fermut trend` (per-run history, not aggregate) |

@@ -8,7 +8,16 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+### Added
+- MCP `fermut_coverage` tool: builds or incrementally refreshes `.coverage`,
+  like `fermut coverage`, and reports a failed pytest as a tool error.
+- MCP `fermut_run` and `fermut_score` take a `history_path` argument.
+
 ### Changed
+- MCP `fermut_run` appends to `.fermut/agent-history.jsonl` instead of the
+  shared `.fermut/history.jsonl`, and `fermut_score` reads it, so agent
+  iterations stay out of the project trend. Pass `history_path` for the old
+  behavior.
 - Human-readable output (`run`, `list`, `show`, `baseline`'s worst files)
   prints source paths relative to the current directory
   (`src/calculator.py:14@216`) instead of the full checkout path. Mutant ids

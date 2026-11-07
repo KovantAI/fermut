@@ -139,8 +139,12 @@ hits, audits (and drops), and misses.
 | `conftest.py` above the killing test           | invalidated           | invalidated          |
 | Coverage no longer lists the killing test      | invalidated           | invalidated          |
 
+Every `conftest.py` above the tests root (say a repo-root one with
+`tests/` as the tests root) loads for every test, so both modes fold it
+in: editing, adding or removing one invalidates every entry.
+
 Not tracked, in either mode: a helper module outside both the tests
-tree and the mutated source, and a `conftest.py` above the tests root.
+tree and the mutated source.
 The scoped fingerprint also misses a test module importing *another
 test module* (`from tests.test_a import helper`) — keep shared helpers
 in non-test files so they count as support files. Run `fermut clean`

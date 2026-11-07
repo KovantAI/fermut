@@ -115,5 +115,5 @@ loss needs real verdicts, so it needs an unsampled run.
   "switching costs you a caught bug".
 - **Line-content matching is a heuristic.** Whitespace-normalized line text can
   in principle collide; in practice the residual is small and hand-inspected.
-- mutmut runs use its default invocation (no mypy pre-check) for an
+- mutmut runs use its default invocation (no `type_check_command`) for an
   apples-to-apples comparison.

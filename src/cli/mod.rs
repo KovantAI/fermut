@@ -759,7 +759,7 @@ impl Cli {
             Cmd::PrComment(args) => pr_comment(args),
             Cmd::Init(args) => subcmd::init::run(args),
             Cmd::Migrate(args) => migrate(args.into()),
-            Cmd::Coverage(args) => coverage(args),
+            Cmd::Coverage(args) => coverage(args).map(|_| ()),
             Cmd::Clean(args) => subcmd::clean::run(args),
             Cmd::InstallSkills(args) => subcmd::install_skills::run(args),
             Cmd::Merge(args) => merge::run(args),

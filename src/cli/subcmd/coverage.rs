@@ -128,10 +128,15 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
         .unwrap_or_else(|| base_dir.join(".coverage"));
 
     // Resolve the interpreter the same way `fermut run` does: explicit
-    // `--python` (relative anchored at the config base), else auto-discover a
+    // `--python`, else the config's `python` (relative anchored at the config
+    // base), else auto-discover a
     // venv near the source root. `None` keeps the bare-`pytest`-on-PATH path.
     let python = {
-        let explicit = opts.python.clone().map(|p| loaded.resolve_path(p));
+        let explicit = opts
+            .python
+            .clone()
+            .or_else(|| loaded.file.python.clone())
+            .map(|p| loaded.resolve_path(p));
         crate::runner::resolve_python(&source, explicit.as_deref())
     };
 
@@ -480,6 +485,33 @@ fn load_fingerprints(db_path: &Path) -> Option<Fingerprints> {
         return None;
     }
     Some(fp)
+}
+
+/// Content-based freshness of `db_path`, read from its fingerprint sidecar —
+/// the check `fermut run` uses instead of mtime, so a checkout that restores
+/// identical bytes isn't stale. `None`: no usable sidecar, or one sharing no
+/// test path with the current tree (tests outside `tests`, or recorded against
+/// another base dir), so content can't vouch for it; the caller falls back to
+/// mtime. `Some(None)`: every tracked file matches.
+/// `Some(Some(path))`: one changed, added or removed file, for the message.
+pub(crate) fn content_staleness(
+    db_path: &Path,
+    source: &Path,
+    tests: &Path,
+    base_dir: &Path,
+) -> Option<Option<PathBuf>> {
+    let prior = load_fingerprints(db_path)?;
+    let current = current_fingerprints(tests, source, base_dir);
+    if !prior.tests.keys().any(|k| current.tests.contains_key(k)) {
+        return None;
+    }
+    let changed = changed_keys(&current.tests, &prior.tests)
+        .into_iter()
+        .chain(changed_keys(&current.sources, &prior.sources))
+        .chain(deleted_keys(&current.tests, &prior.tests))
+        .chain(deleted_keys(&current.sources, &prior.sources))
+        .next();
+    Some(changed.map(|k| base_dir.join(k)))
 }
 
 fn save_fingerprints(db_path: &Path, fp: &Fingerprints) -> Result<()> {
@@ -1206,6 +1238,46 @@ mod tests {
         let loaded = load_fingerprints(&db).unwrap();
         assert_eq!(loaded.tests, fp.tests);
         assert_eq!(loaded.sources, fp.sources);
+    }
+
+    #[test]
+    fn content_staleness_ignores_mtime_and_names_changed_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let (src, tests) = (base.join("src"), base.join("tests"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&tests).unwrap();
+        std::fs::write(src.join("m.py"), "x = 1\n").unwrap();
+        std::fs::write(tests.join("test_m.py"), "def test(): pass\n").unwrap();
+        let db = base.join(".coverage");
+        assert_eq!(
+            content_staleness(&db, &src, &tests, base),
+            None,
+            "no sidecar"
+        );
+
+        save_fingerprints(&db, &current_fingerprints(&tests, &src, base)).unwrap();
+        assert_eq!(content_staleness(&db, &src, &tests, base), Some(None));
+
+        // A checkout restoring identical bytes (newer mtime) is not a change.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(src.join("m.py"), "x = 1\n").unwrap();
+        assert_eq!(content_staleness(&db, &src, &tests, base), Some(None));
+
+        std::fs::write(src.join("m.py"), "x = 2\n").unwrap();
+        assert_eq!(
+            content_staleness(&db, &src, &tests, base),
+            Some(Some(src.join("m.py")))
+        );
+
+        // A sidecar tracking no tests can't vouch for them: defer to mtime.
+        save_fingerprints(&db, &current_fingerprints(&base.join("nope"), &src, base)).unwrap();
+        assert_eq!(content_staleness(&db, &src, &tests, base), None);
+
+        // Nor can one keyed against another base dir (every key would look
+        // deleted, and a refresh would purge the whole DB).
+        save_fingerprints(&db, &current_fingerprints(&tests, &src, base)).unwrap();
+        assert_eq!(content_staleness(&db, &src, &tests, &src), None);
     }
 
     /// A coverage DB where `src/foo.py` is covered by test_foo + test_both, and

@@ -312,7 +312,7 @@ fn resolve_coverage(
     let Some(db) = crate::cli::build_config::discover_coverage_db(&root) else {
         return Ok(None);
     };
-    if crate::cli::build_config::newer_source_than_coverage(&db, &root, tests, &root).is_some() {
+    if crate::cli::build_config::stale_coverage_witness(&db, &root, tests, &root, &root).is_some() {
         return Ok(None);
     }
     let sig = build_coverage_signal(&db, m)?;

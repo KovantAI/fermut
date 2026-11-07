@@ -123,14 +123,14 @@ Key invariants:
 4. **Pin determinism.** Set `hypothesis_seed` in `fermut.toml`. Without
    it, Hypothesis-driven tests can mask or fabricate survivors between
    runs and the agent will chase ghosts.
-5. **Run `fermut coverage` after every edit, source or test.** A
-   `.coverage` older than any source or test file is ignored (the run
-   logs `ignoring auto-discovered coverage … it is older than …`), so
+5. **Generate coverage with `fermut coverage`.** A `.coverage` it wrote
+   is refreshed by `fermut run` whenever a source or test file's content
+   changed, re-running only the affected test files. A stale `.coverage`
+   from bare pytest-cov is ignored instead (the run logs `ignoring
+   auto-discovered coverage …` and repeats it under the summary), so
    every mutant runs the whole suite and uncovered lines count as
-   survivors. On pyjwt, one edited function turned a 38 s run into 311 s
-   and nearly doubled the survivors. `fermut coverage` re-runs only the
-   affected test files (5 s there), and the next run took 36 s. Never
-   commit the coverage file.
+   survivors: on pyjwt, one edited function turned a 38 s run into 311 s
+   and nearly doubled the survivors. Never commit the coverage file.
 
 ## Cache strategy
 

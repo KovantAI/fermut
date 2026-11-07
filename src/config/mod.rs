@@ -55,6 +55,9 @@ pub struct Config {
     /// filter reads it (an uncovered line stays a `coverage` skip); everything
     /// else follows the narrowed `coverage`.
     pub coverage_unselected: Option<Arc<CoverageContexts>>,
+    /// Set when an auto-discovered coverage DB was stale and dropped; repeated
+    /// next to the summary so a slow, low-scoring run explains itself.
+    pub coverage_note: Option<String>,
     pub hypothesis_seed: Option<u64>,
     pub pytest_args: Vec<String>,
     pub cache: bool,

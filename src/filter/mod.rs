@@ -353,6 +353,7 @@ mod chain_order_tests {
             coverage_path: None,
             coverage: None,
             coverage_unselected: None,
+            coverage_note: None,
             hypothesis_seed: None,
             pytest_args: Vec::new(),
             cache: false,

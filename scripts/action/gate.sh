@@ -11,6 +11,11 @@ if [ "$ERRORED" -gt 0 ] && [ "$SCORED" = 0 ]; then
 fi
 
 if [ -n "$RC" ]; then
+  # 3 = the run broke after writing its report; not a gate verdict, so
+  # `blocking: false` doesn't hide it.
+  if [ "$RC" = 3 ]; then
+    die "fermut exited 3 — the run broke (see the log above), so the report is not a mutation result."
+  fi
   if [ "$RC" != 0 ]; then
     gate_fail "fermut exited $RC — score ${SCORE:-N/A}%${FAIL_UNDER:+ (threshold $FAIL_UNDER%)}, $SURVIVED survivor(s). See the job summary."
   fi

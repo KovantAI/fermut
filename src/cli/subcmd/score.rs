@@ -303,6 +303,7 @@ mod tests {
             survivor_ids: Some(survivors.iter().map(|s| s.to_string()).collect()),
             baseline: false,
             partial: false,
+            projects: Vec::new(),
         }
     }
 

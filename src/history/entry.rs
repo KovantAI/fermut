@@ -4,7 +4,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::report::{MutantOutcome, Report};
+use crate::report::{MutantOutcome, ProjectSummary, Report};
 
 use super::io::{current_git_branch, git_short_sha, iso8601_now};
 
@@ -98,6 +98,11 @@ pub struct HistoryEntry {
     /// sibling exclusion.
     #[serde(default, skip_serializing_if = "is_false")]
     pub partial: bool,
+    /// Per-project counts of an aggregated (`fermut merge DIR=REPORT`) run,
+    /// each with its own `config_hash` so one project's trend stays comparable
+    /// when another project's config changes. Empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<ProjectSummary>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -153,6 +158,7 @@ impl HistoryEntry {
             survivor_ids: Some(survivor_ids),
             baseline: false,
             partial,
+            projects: report.projects.clone(),
         }
     }
 
@@ -172,6 +178,35 @@ impl HistoryEntry {
     /// fabricates spurious drops, so both are excluded from the gate.
     pub fn is_comparable(&self) -> bool {
         !self.is_scoreless() && !self.partial
+    }
+
+    /// This aggregated entry seen as project `dir` alone: its counts, its own
+    /// `config_hash` and its survivors, so trend and the regression gate work
+    /// on one project unchanged. `None` when the entry has no such project.
+    pub fn project(&self, dir: &str) -> Option<Self> {
+        let p = self.projects.iter().find(|p| p.dir == dir)?;
+        let c = &p.counts;
+        let prefix = format!("{dir}/");
+        Some(Self {
+            mutation_score: c.mutation_score(),
+            killed: c.killed,
+            survived: c.survived,
+            timed_out: c.timed_out,
+            skipped: c.skipped,
+            errored: c.errored,
+            equivalent: c.equivalent,
+            total: Some(c.killed + c.survived + c.timed_out + c.skipped + c.errored),
+            duration_ms: None,
+            config_hash: p.config_hash.clone(),
+            survivor_ids: self.survivor_ids.as_ref().map(|ids| {
+                ids.iter()
+                    .filter(|id| id.starts_with(&prefix))
+                    .cloned()
+                    .collect()
+            }),
+            projects: Vec::new(),
+            ..self.clone()
+        })
     }
 }
 
@@ -232,6 +267,7 @@ mod tests {
             survivor_ids: None,
             baseline: false,
             partial: false,
+            projects: Vec::new(),
         }
     }
 
@@ -265,6 +301,27 @@ mod tests {
         let report = Report::new(vec![MutantOutcome::killed(mutant("x"))]);
         let e = HistoryEntry::from_report(&report, Path::new("."), None, None);
         assert_eq!(e.fermut_version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn projects_round_trip_and_old_entries_still_parse() {
+        let mut r = Report::new(vec![]);
+        r.projects = vec![ProjectSummary {
+            dir: "pkg/a".into(),
+            config_hash: Some("h".into()),
+            counts: crate::report::Counts {
+                killed: 2,
+                ..Default::default()
+            },
+        }];
+        let e = HistoryEntry::from_report(&r, Path::new("."), None, None);
+        let back: HistoryEntry = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back.projects[0].dir, "pkg/a");
+        assert_eq!(back.projects[0].counts.killed, 2);
+        let old = r#"{"timestamp":"t","mutation_score":1.0,"killed":1,"survived":0,"timed_out":0,"skipped":0,"errored":0}"#;
+        let old: HistoryEntry = serde_json::from_str(old).unwrap();
+        assert!(old.projects.is_empty());
+        assert!(!serde_json::to_string(&old).unwrap().contains("projects"));
     }
 
     #[test]

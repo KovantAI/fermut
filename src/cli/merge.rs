@@ -3,12 +3,14 @@
 //! file value.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 
 use crate::filter::shard::SHARD_FILTER_NAME;
-use crate::report::{MutantOutcome, Report, ReportFormat, ReportSinks, Shard};
+use crate::report::{MutantOutcome, ProjectSummary, Report, ReportFormat, ReportSinks, Shard};
 
 /// A `Skipped { filter: "shard" }` outcome is not a verdict — it is the
 /// placeholder a sharded run emits for every mutant *outside* its own slice.
@@ -155,29 +157,10 @@ pub(super) fn merge_reports(
     project_root: &Path,
     gates: &MergeGates,
 ) -> Result<()> {
-    let mut shards = ShardCheck {
-        expect: gates.expect_shards,
-        ..ShardCheck::default()
+    let merged = match group_by_project(inputs)? {
+        None => merge_group(inputs, gates.expect_shards)?,
+        Some(groups) => aggregate(groups, gates.expect_shards)?,
     };
-    // Read + parse lazily so `combine_outcomes` holds only one report's
-    // outcomes plus the running map at a time. A sharded report is the whole
-    // mutant universe, so eagerly collecting all N would be an N× blow-up.
-    let mut hashes = Vec::with_capacity(inputs.len());
-    let mut durations = Vec::with_capacity(inputs.len());
-    let reports = inputs.iter().map(|path| -> Result<Vec<MutantOutcome>> {
-        let report = crate::report::load(path)?;
-        shards.add(path, report.shard)?;
-        hashes.push(report.config_hash);
-        durations.push(report.duration_ms);
-        Ok(report.outcomes)
-    });
-    let outcomes = combine_outcomes(reports)?;
-    shards.finish()?;
-    let mut merged = Report::new(outcomes);
-    merged.config_hash = shared_config_hash(hashes)?;
-    // Total work across shards. `None` if any shard predates the field, rather
-    // than a sum that silently undercounts.
-    merged.duration_ms = durations.into_iter().sum();
     let config_hash = config_hash.or_else(|| merged.config_hash.clone());
 
     sinks.write_all(&merged)?;
@@ -222,6 +205,165 @@ pub(super) fn merge_reports(
             .with_context(|| format!("writing {}", p.display()))?;
     }
     Ok(())
+}
+
+/// Merges one shard set into a report: shard checks, verdict combine, the
+/// shared `config_hash`, summed duration.
+fn merge_group(inputs: &[PathBuf], expect_shards: Option<u32>) -> Result<Report> {
+    let mut shards = ShardCheck {
+        expect: expect_shards,
+        ..ShardCheck::default()
+    };
+    // Read + parse lazily so `combine_outcomes` holds only one report's
+    // outcomes plus the running map at a time. A sharded report is the whole
+    // mutant universe, so eagerly collecting all N would be an N× blow-up.
+    let mut hashes = Vec::with_capacity(inputs.len());
+    let mut durations = Vec::with_capacity(inputs.len());
+    let reports = inputs.iter().map(|path| -> Result<Vec<MutantOutcome>> {
+        let report = crate::report::load(path)?;
+        shards.add(path, report.shard)?;
+        hashes.push(report.config_hash);
+        durations.push(report.duration_ms);
+        Ok(report.outcomes)
+    });
+    let outcomes = combine_outcomes(reports)?;
+    shards.finish()?;
+    let mut merged = Report::new(outcomes);
+    merged.config_hash = shared_config_hash(hashes)?;
+    // Total work across shards. `None` if any shard predates the field, rather
+    // than a sum that silently undercounts.
+    merged.duration_ms = durations.into_iter().sum();
+    Ok(merged)
+}
+
+/// `(project dir, its input reports)`, in first-seen order.
+type Groups = Vec<(String, Vec<PathBuf>)>;
+
+/// Splits `DIR=PATH` inputs into per-project groups, in first-seen order.
+/// `None` when no input has a prefix: a plain shard merge.
+fn group_by_project(inputs: &[PathBuf]) -> Result<Option<Groups>> {
+    let split: Vec<_> = inputs
+        .iter()
+        .map(|p| p.to_str().and_then(|s| s.split_once('=')))
+        .collect();
+    if split.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let mut groups: Groups = Vec::new();
+    for (input, parts) in inputs.iter().zip(split) {
+        let Some((dir, path)) = parts else {
+            bail!(
+                "{} has no `DIR=` prefix, but other inputs do. Prefix every input to \
+                 aggregate projects.",
+                input.display()
+            );
+        };
+        let dir = dir.trim_end_matches('/');
+        let p = Path::new(dir);
+        if dir.is_empty() || p.is_absolute() || p.components().any(|c| c == Component::ParentDir) {
+            bail!("project dir {dir:?} must be a non-empty repo-relative path without `..`");
+        }
+        match groups.iter_mut().find(|(d, _)| d == dir) {
+            Some((_, paths)) => paths.push(path.into()),
+            None => groups.push((dir.to_string(), vec![path.into()])),
+        }
+    }
+    for (a, _) in &groups {
+        if let Some((b, _)) = groups
+            .iter()
+            .find(|(b, _)| b != a && Path::new(b).starts_with(a))
+        {
+            bail!("project {b} is nested inside project {a}: their mutants would count twice");
+        }
+    }
+    Ok(Some(groups))
+}
+
+/// Pools per-project merges into one report. Each project merges on its own
+/// (so shard checks and the config agreement stay per project), then its
+/// mutants are rebased under `DIR/` so ids from different projects never
+/// collide. The pooled counts are the scored-weighted score.
+fn aggregate(groups: Groups, expect_shards: Option<u32>) -> Result<Report> {
+    let mut outcomes = Vec::new();
+    let mut projects = Vec::with_capacity(groups.len());
+    let mut durations = Vec::with_capacity(groups.len());
+    for (dir, paths) in groups {
+        let report =
+            merge_group(&paths, expect_shards).with_context(|| format!("project {dir}"))?;
+        let counts = report.counts();
+        // The vacuous-100% bug one level down: a scoreless project would vanish
+        // inside the pooled score.
+        if counts.scored() == 0 {
+            bail!("project {dir} scored no mutant: its score is N/A, not 100%");
+        }
+        for mut o in report.outcomes {
+            let m = Arc::make_mut(o.mutant_mut());
+            let file = repo_relative(&m.file, &dir).with_context(|| {
+                format!(
+                    "project {dir}: mutant file {} is not under it",
+                    m.file.display()
+                )
+            })?;
+            // Ids start with the file path; swap it so ids match the file.
+            let old = m.file.display().to_string();
+            m.id = match m.id.strip_prefix(&old) {
+                Some(rest) => format!("{}{rest}", file.display()),
+                None => format!("{dir}/{}", m.id),
+            };
+            m.file = file;
+            outcomes.push(o);
+        }
+        durations.push(report.duration_ms);
+        projects.push(ProjectSummary {
+            dir,
+            config_hash: report.config_hash,
+            counts,
+        });
+    }
+    projects.sort_by(|a, b| {
+        a.counts
+            .mutation_score()
+            .total_cmp(&b.counts.mutation_score())
+            .then_with(|| a.dir.cmp(&b.dir))
+    });
+    let mut merged = Report::new(outcomes);
+    merged.config_hash = aggregate_hash(&projects);
+    merged.duration_ms = durations.into_iter().sum();
+    merged.projects = projects;
+    Ok(merged)
+}
+
+/// `file` re-rooted at the repo, starting at project `dir`. Mutant paths are
+/// absolute (`/ci/checkout/packages/a/src/x.py`), so the repo root is where
+/// `dir`'s components first appear; a relative path is project-relative.
+/// `None` when an absolute path doesn't contain `dir`.
+fn repo_relative(file: &Path, dir: &str) -> Option<PathBuf> {
+    if file.is_relative() {
+        return Some(Path::new(dir).join(file));
+    }
+    let parts: Vec<Component> = file.components().collect();
+    let want: Vec<Component> = Path::new(dir).components().collect();
+    let i = parts.windows(want.len()).position(|w| w == want)?;
+    Some(parts[i..].iter().collect())
+}
+
+/// Hash over the sorted `(dir, config_hash)` pairs: changes when any project's
+/// config changes or a project is added or removed, so the aggregate trend
+/// re-baselines instead of reading a different universe as a regression.
+/// `None` when any project predates `config_hash`.
+fn aggregate_hash(projects: &[ProjectSummary]) -> Option<String> {
+    let mut pairs = projects
+        .iter()
+        .map(|p| Some((p.dir.as_str(), p.config_hash.as_deref()?)))
+        .collect::<Option<Vec<_>>>()?;
+    pairs.sort_unstable();
+    let mut h = Sha256::new();
+    h.update(b"agg-v1");
+    for (dir, hash) in pairs {
+        // NUL can't appear in a command-line path: unambiguous separator.
+        h.update(format!("\0{dir}\0{hash}"));
+    }
+    Some(hex::encode(h.finalize()))
 }
 
 /// The `config_hash` every input report carries, ignoring `--shard` (see
@@ -732,6 +874,170 @@ mod tests {
         assert!(err.contains("conflicting verdicts"), "got: {err}");
     }
 
+    /// Writes `reports` (project dir, report) and runs an aggregating merge;
+    /// returns the merged JSON report.
+    fn aggregate_merge(reports: Vec<(&str, Report)>) -> Result<Report> {
+        let tmp = tempfile::tempdir().unwrap();
+        let inputs: Vec<PathBuf> = reports
+            .into_iter()
+            .enumerate()
+            .map(|(i, (dir, r))| {
+                let p = tmp.path().join(format!("r{i}.json"));
+                r.write_json(&p).unwrap();
+                PathBuf::from(format!("{dir}={}", p.display()))
+            })
+            .collect();
+        let out = tmp.path().join("agg.json");
+        merge_reports(
+            &inputs,
+            &ReportSinks {
+                json: Some(out.clone()),
+                ..Default::default()
+            },
+            None,
+            None,
+            tmp.path(),
+            &MergeGates::default(),
+        )?;
+        Ok(crate::report::load(&out).unwrap())
+    }
+
+    fn verdicts(killed: usize, survived: usize) -> Report {
+        let k = (0..killed).map(|i| MutantOutcome::killed(mutant(&format!("k{i}"))));
+        let s = (0..survived).map(|i| MutantOutcome::survived(mutant(&format!("s{i}"))));
+        Report::new(k.chain(s).collect())
+    }
+
+    #[test]
+    fn colliding_ids_across_projects_are_rebased_not_deduped() {
+        // Same id in both projects, different verdicts: a plain merge would
+        // bail on the conflict (or dedup identical ones).
+        let agg = aggregate_merge(vec![
+            (
+                "packages/a",
+                Report::new(vec![MutantOutcome::killed(mutant("x"))]),
+            ),
+            (
+                "packages/b",
+                Report::new(vec![MutantOutcome::survived(mutant("x"))]),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            labels(&agg.outcomes),
+            vec![("packages/a/x", "killed"), ("packages/b/x", "survived")]
+        );
+        assert_eq!(
+            agg.outcomes[0].mutant().file,
+            Path::new("packages/a/test.py")
+        );
+    }
+
+    #[test]
+    fn absolute_mutant_paths_are_rerooted_at_the_project_dir() {
+        let mut m = mutant("/ci/repo/packages/a/src/x.py@3:op:+->-");
+        m.file = PathBuf::from("/ci/repo/packages/a/src/x.py");
+        let agg = aggregate_merge(vec![(
+            "packages/a",
+            Report::new(vec![MutantOutcome::killed(m.clone())]),
+        )])
+        .unwrap();
+        let got = agg.outcomes[0].mutant();
+        assert_eq!(got.file, Path::new("packages/a/src/x.py"));
+        assert_eq!(got.id, "packages/a/src/x.py@3:op:+->-");
+
+        let err = aggregate_merge(vec![(
+            "packages/b",
+            Report::new(vec![MutantOutcome::killed(m)]),
+        )])
+        .unwrap_err();
+        assert!(err.to_string().contains("is not under it"), "{err}");
+    }
+
+    #[test]
+    fn pooled_score_is_scored_weighted_with_worst_project_first() {
+        // 9/10 and 1/90: pooled 10/100 = 10%, not the 50% mean.
+        let agg = aggregate_merge(vec![("a", verdicts(9, 1)), ("b", verdicts(1, 89))]).unwrap();
+        assert_eq!(agg.counts().mutation_score_opt(), Some(10.0));
+        let dirs: Vec<&str> = agg.projects.iter().map(|p| p.dir.as_str()).collect();
+        assert_eq!(dirs, ["b", "a"]);
+        assert_eq!(agg.projects[1].counts.killed, 9);
+    }
+
+    #[test]
+    fn missing_shard_in_one_project_names_it() {
+        let mut s1 = verdicts(1, 0);
+        s1.shard = shard(1, 2);
+        let err = aggregate_merge(vec![("a", verdicts(1, 0)), ("b", s1)]).unwrap_err();
+        assert!(format!("{err:#}").contains("project b"), "{err:#}");
+        assert!(format!("{err:#}").contains("2/2"), "{err:#}");
+    }
+
+    #[test]
+    fn bad_project_dirs_and_mixed_inputs_are_rejected() {
+        for dirs in [["/abs", "b"], ["../up", "b"], ["a", "a/sub"], ["", "b"]] {
+            let err = aggregate_merge(vec![(dirs[0], verdicts(1, 0)), (dirs[1], verdicts(1, 0))])
+                .unwrap_err();
+            assert!(err.to_string().contains("project"), "{dirs:?}: {err}");
+        }
+        let err =
+            group_by_project(&[PathBuf::from("a=x.json"), PathBuf::from("y.json")]).unwrap_err();
+        assert!(err.to_string().contains("no `DIR=` prefix"), "{err}");
+        // Component-wise nesting: `a/bc` is not inside `a/b`.
+        group_by_project(&[PathBuf::from("a/b=x"), PathBuf::from("a/bc=y")]).unwrap();
+    }
+
+    #[test]
+    fn scoreless_project_fails_the_aggregate() {
+        let none = Report::new(vec![MutantOutcome::skipped(mutant("a"), "ty")]);
+        let err = aggregate_merge(vec![("a", verdicts(5, 0)), ("b", none)]).unwrap_err();
+        assert!(
+            err.to_string().contains("project b scored no mutant"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn aggregate_hash_is_order_free_and_tracks_each_project() {
+        let p = |dir: &str, h: Option<&str>| ProjectSummary {
+            dir: dir.into(),
+            config_hash: h.map(str::to_string),
+            counts: Default::default(),
+        };
+        let ab = aggregate_hash(&[p("a", Some("1")), p("b", Some("2"))]).unwrap();
+        assert_eq!(
+            aggregate_hash(&[p("b", Some("2")), p("a", Some("1"))]),
+            Some(ab.clone())
+        );
+        assert_ne!(
+            aggregate_hash(&[p("a", Some("1")), p("b", Some("3"))]),
+            Some(ab.clone())
+        );
+        assert_ne!(aggregate_hash(&[p("a", Some("1"))]), Some(ab));
+        assert_eq!(aggregate_hash(&[p("a", Some("1")), p("b", None)]), None);
+    }
+
+    #[test]
+    fn plain_merge_writes_no_projects_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("s.json");
+        verdicts(1, 0).write_json(&p).unwrap();
+        let out = tmp.path().join("c.json");
+        merge_reports(
+            &[p],
+            &ReportSinks {
+                json: Some(out.clone()),
+                ..Default::default()
+            },
+            None,
+            None,
+            tmp.path(),
+            &MergeGates::default(),
+        )
+        .unwrap();
+        assert!(!std::fs::read_to_string(out).unwrap().contains("projects"));
+    }
+
     #[test]
     fn same_verdict_with_mutant_field_skew_is_idempotent() {
         // Same killed verdict for one id, but the reports disagree on a `Mutant`
@@ -752,7 +1058,9 @@ mod tests {
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct MergeArgs {
-    /// Input JSON reports to combine. At least one required.
+    /// Input JSON reports to combine. At least one required. Prefix each
+    /// with `DIR=` (repo-relative project root) to aggregate several
+    /// projects into one pooled report with a per-project breakdown.
     #[arg(required = true, num_args = 1..)]
     pub(crate) inputs: Vec<std::path::PathBuf>,
 

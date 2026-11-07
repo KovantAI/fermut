@@ -1,9 +1,10 @@
 # `fermut merge`
 
-Combine JSON reports from sharded runs.
+Combine JSON reports from sharded runs, or from several projects of a
+monorepo into one pooled report.
 
 ```sh
-fermut merge <input.json> [<input.json> ...] \
+fermut merge [<DIR>=]<input.json> [[<DIR>=]<input.json> ...] \
     [--json <p>] [--junit <p>] [--html <p>] [--markdown <p>] \
     [--history <p>] [--config-hash <hex>] [--project <dir>] \
     [--expect-shards <n>] [--max-errored <n>]
@@ -23,6 +24,26 @@ A report from `fermut run --shard i/n` records its slice as
 shard counts (`1/16` with `2/8`), and fails when an index in `1..=n` has no
 report, even one whose mutants were all filtered out. Reports that record no
 shard (unsharded runs, older fermut) skip the missing-index check.
+
+## Projects (`DIR=REPORT`)
+
+Prefix every input with its project's repo-relative root (`packages/auth=r.json`)
+to aggregate projects. Each project's inputs merge on their own with every
+check above. Each mutant's file and id are then re-rooted at the repo
+(`packages/auth/src/x.py`), and all projects are concatenated into one report.
+Its counts give the pooled score, weighted by how many mutants each project
+scored. The report gains a `projects` breakdown, worst score first, and its
+`config_hash` is a hash over every project's `(dir, config_hash)`. A
+`--history` entry carries the breakdown, with each project's own hash, for
+[`fermut trend --project`](trend.md).
+
+Merge fails when inputs mix prefixed and plain, when a `DIR` is absolute,
+empty or contains `..`, when one `DIR` is nested in another (its mutants
+would count twice), when a mutant's file is not under its `DIR`, and when a
+project scored nothing. `--expect-shards` applies per project;
+`--max-errored` to the pooled count.
+
+## Gates
 
 With `--history`, a merge that scored nothing fails instead of writing an
 entry: the score is N/A, and recording it would put a vacuous 100% in the

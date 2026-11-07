@@ -17,6 +17,20 @@
 # the shards with KovantAI/fermut/merge (or KovantAI/fermut/trend) in a job
 # that `needs:` this one.
 #
+# Monorepo: set `project` to the project's repo-relative dir (sharded or not).
+# The run uploads `<artifact-name>-proj-<slug>[-shard-<i>-of-<n>]`, never
+# gates, and merge/trend with the same `projects` list pool every project
+# into one score with a per-project breakdown:
+#
+#     matrix:
+#       project: [packages/auth, packages/billing]
+#       shard: [1, 2]
+#     ...
+#       - uses: KovantAI/fermut/sweep@v0.7.0
+#         with:
+#           project: ${{ matrix.project }}
+#           shard: ${{ matrix.shard }}/2
+#
 # See the root action.yml for the secrets and composite-vs-reusable notes.
 
 name: "fermut mutation sweep"
@@ -32,6 +46,10 @@ inputs:
     description: "Project root, relative to the workspace. For monorepos."
     required: false
     default: "."
+  project:
+    description: "Repo-relative project dir of a monorepo aggregate; replaces working-directory. The run uploads its report for merge/trend `projects` and never gates. Empty: a standalone run."
+    required: false
+    default: ""
   source:
     description: "Python source root. Empty uses fermut.toml, else the project root."
     required: false
@@ -59,7 +77,7 @@ inputs:
     required: false
     default: ""
   fail-under:
-    description: "Gate threshold in percent, when not sharded. Empty defers to fermut.toml, else any survivor fails."
+    description: "Gate threshold in percent, when neither sharded nor a project. Empty defers to fermut.toml, else any survivor fails."
     required: false
     default: ""
   blocking:
@@ -121,6 +139,7 @@ runs:
         BOOL_cache: ${{ inputs.cache }}
         FAIL_UNDER: ${{ inputs.fail-under }}
         WD: ${{ inputs.working-directory }}
+        PROJECT: ${{ inputs.project }}
         SHARD: ${{ inputs.shard }}
         ARTIFACT: ${{ inputs.artifact-name }}
       run: bash "$GITHUB_ACTION_PATH/../scripts/action/setup.sh"
@@ -154,7 +173,7 @@ runs:
     - name: Install project
       if: inputs.install-command != ''
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ steps.setup.outputs.wd }}
       env:
         INSTALL_COMMAND: ${{ inputs.install-command }}
       run: eval "$INSTALL_COMMAND"
@@ -162,7 +181,7 @@ runs:
     - name: Resolve interpreter and fermut
       id: env
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ steps.setup.outputs.wd }}
       env:
         SPEC: ${{ steps.fermut.outputs.spec }}
         NEED_COV: "true"
@@ -171,7 +190,7 @@ runs:
     - name: Post-install setup
       if: inputs.post-install-command != ''
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ steps.setup.outputs.wd }}
       env:
         POST_INSTALL_COMMAND: ${{ inputs.post-install-command }}
       run: eval "$POST_INSTALL_COMMAND"
@@ -182,8 +201,8 @@ runs:
       if: inputs.cache == 'true'
       with:
         path: |
-          ${{ inputs.working-directory }}/.fermut/cache.json
-          ${{ inputs.working-directory }}/.fermut/kill-order.json
+          ${{ steps.setup.outputs.wd }}/.fermut/cache.json
+          ${{ steps.setup.outputs.wd }}/.fermut/kill-order.json
         key: ${{ inputs.cache-key-prefix }}-verdicts-${{ steps.setup.outputs.artifact }}-${{ runner.os }}-${{ steps.key.outputs.hash }}
         restore-keys: |
           ${{ inputs.cache-key-prefix }}-verdicts-${{ steps.setup.outputs.artifact }}-${{ runner.os }}-
@@ -193,15 +212,15 @@ runs:
       if: inputs.cache == 'true'
       with:
         path: |
-          ${{ inputs.working-directory }}/.coverage
-          ${{ inputs.working-directory }}/.coverage.fermut-fingerprints.json
-        key: ${{ inputs.cache-key-prefix }}-coverage-${{ runner.os }}-${{ steps.key.outputs.hash }}
+          ${{ steps.setup.outputs.wd }}/.coverage
+          ${{ steps.setup.outputs.wd }}/.coverage.fermut-fingerprints.json
+        key: ${{ inputs.cache-key-prefix }}-coverage-${{ steps.setup.outputs.scope }}${{ runner.os }}-${{ steps.key.outputs.hash }}
         restore-keys: |
-          ${{ inputs.cache-key-prefix }}-coverage-${{ runner.os }}-
+          ${{ inputs.cache-key-prefix }}-coverage-${{ steps.setup.outputs.scope }}${{ runner.os }}-
 
     - name: Build per-test coverage
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ steps.setup.outputs.wd }}
       env:
         FERMUT: ${{ steps.env.outputs.bin }}
         PY: ${{ steps.env.outputs.python }}
@@ -212,7 +231,7 @@ runs:
     - name: Run fermut
       id: run
       shell: bash
-      working-directory: ${{ inputs.working-directory }}
+      working-directory: ${{ steps.setup.outputs.wd }}
       env:
         FERMUT: ${{ steps.env.outputs.bin }}
         PY: ${{ steps.env.outputs.python }}
@@ -231,7 +250,7 @@ runs:
       shell: bash
       env:
         OUT: ${{ steps.setup.outputs.out_abs }}
-        HEADING: ${{ inputs.shard != '' && format('fermut shard {0}', inputs.shard) || '' }}
+        HEADING: ${{ (inputs.shard != '' || inputs.project != '') && format('fermut {0} {1}', inputs.project, inputs.shard) || '' }}
       run: bash "$GITHUB_ACTION_PATH/../scripts/action/stats.sh"
 
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -244,7 +263,7 @@ runs:
         if-no-files-found: error
 
     - name: Enforce gate
-      if: ${{ !cancelled() && steps.stats.outcome == 'success' && inputs.shard == '' }}
+      if: ${{ !cancelled() && steps.stats.outcome == 'success' && inputs.shard == '' && inputs.project == '' }}
       shell: bash
       env:
         RC: ${{ steps.run.outputs.rc }}

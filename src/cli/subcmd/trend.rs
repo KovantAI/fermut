@@ -47,6 +47,9 @@ pub struct TrendOpts {
     /// older binary can't read them and can't repair them, so failing on them
     /// would only wedge CI during a version rollout.
     pub strict: bool,
+    /// Show one project of an aggregated (`fermut merge DIR=REPORT`) history:
+    /// its own counts and `config_hash`, entries without it dropped.
+    pub project: Option<String>,
 }
 
 impl From<TrendArgs> for TrendOpts {
@@ -65,6 +68,7 @@ impl From<TrendArgs> for TrendOpts {
             by,
             format,
             strict,
+            project,
         } = a;
         TrendOpts {
             path,
@@ -80,6 +84,7 @@ impl From<TrendArgs> for TrendOpts {
             group_by: by.map(Into::into),
             format,
             strict,
+            project: project.map(|p| p.trim_end_matches('/').to_string()),
         }
     }
 }
@@ -90,6 +95,8 @@ impl From<TrendArgs> for TrendOpts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrendGroupBy {
     File,
+    /// Per-project sparkline + latest score of an aggregated history.
+    Project,
 }
 
 /// Sparkline scaling strategy. `Fixed` always renders against `[0, 100]`
@@ -107,7 +114,10 @@ pub fn trend(opts: TrendOpts) -> Result<()> {
         .history_path
         .clone()
         .unwrap_or_else(|| history::default_history_path(&history::resolve_root(&opts.path)));
-    let (entries, stats) = history::load_with_stats(&history_path)?;
+    let (mut entries, stats) = history::load_with_stats(&history_path)?;
+    if let Some(dir) = &opts.project {
+        entries = entries.iter().filter_map(|e| e.project(dir)).collect();
+    }
     // Integrity check on malformed lines only. A malformed line doesn't parse,
     // so it carries no branch/date and can't be attributed to a query window —
     // the check is necessarily global. Newer-schema lines are readable in
@@ -180,14 +190,38 @@ pub fn trend(opts: TrendOpts) -> Result<()> {
     // without `--branch`, the helper anchors to the most recent entry's
     // branch so cross-branch noise doesn't trigger the gate.
     if let Some(threshold) = opts.fail_on_regression {
-        if let Some(drop) = crate::history::branch_scoped_regression(&filtered) {
-            if drop > threshold {
-                eprintln!("mutation score regressed by {drop:.1} pts (threshold {threshold:.1})");
-                std::process::exit(1);
-            }
+        let failures = regressions(&filtered, threshold);
+        for f in &failures {
+            eprintln!("{f}");
+        }
+        if !failures.is_empty() {
+            std::process::exit(1);
         }
     }
     Ok(())
+}
+
+/// Every regression beyond `threshold`: the whole history's, then each
+/// project's of an aggregated latest entry. Each project is checked against
+/// its own `config_hash`, so a config change in one project neither hides
+/// nor fakes a drop in another.
+fn regressions(entries: &[HistoryEntry], threshold: f64) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(drop) = history::branch_scoped_regression(entries).filter(|&d| d > threshold) {
+        out.push(format!(
+            "mutation score regressed by {drop:.1} pts (threshold {threshold:.1})"
+        ));
+    }
+    for p in entries.last().map_or(&[][..], |e| &e.projects) {
+        let series: Vec<HistoryEntry> = entries.iter().filter_map(|e| e.project(&p.dir)).collect();
+        if let Some(drop) = history::branch_scoped_regression(&series).filter(|&d| d > threshold) {
+            out.push(format!(
+                "project {}: mutation score regressed by {drop:.1} pts (threshold {threshold:.1})",
+                p.dir
+            ));
+        }
+    }
+    out
 }
 
 /// Resolve the sparkline range from the requested scale strategy.
@@ -383,6 +417,13 @@ fn print_grouping(entries: &[HistoryEntry], axis: TrendGroupBy) {
     let Some(last) = entries.last() else {
         return;
     };
+    match axis {
+        TrendGroupBy::File => print_survivors_by_file(entries, last),
+        TrendGroupBy::Project => print_projects(entries, last),
+    }
+}
+
+fn print_survivors_by_file(entries: &[HistoryEntry], last: &HistoryEntry) {
     let Some(ids) = last.survivor_ids.as_ref() else {
         return;
     };
@@ -390,25 +431,45 @@ fn print_grouping(entries: &[HistoryEntry], axis: TrendGroupBy) {
         return;
     }
     let ages = history::survivor_age_map(entries);
-    match axis {
-        TrendGroupBy::File => {
-            println!();
-            println!("survivors by file ({} total):", ids.len());
-            for (file, members) in history::survivors_by_file(ids) {
-                let max_age = members
-                    .iter()
-                    .map(|id| ages.get(id).copied().unwrap_or(1))
-                    .max()
-                    .unwrap_or(1);
-                println!(
-                    "  {:>4}  {:<60}  oldest survivor: {} run{}",
-                    members.len(),
-                    file,
-                    max_age,
-                    if max_age == 1 { "" } else { "s" },
-                );
-            }
-        }
+    println!();
+    println!("survivors by file ({} total):", ids.len());
+    for (file, members) in history::survivors_by_file(ids) {
+        let max_age = members
+            .iter()
+            .map(|id| ages.get(id).copied().unwrap_or(1))
+            .max()
+            .unwrap_or(1);
+        println!(
+            "  {:>4}  {:<60}  oldest survivor: {} run{}",
+            members.len(),
+            file,
+            max_age,
+            if max_age == 1 { "" } else { "s" },
+        );
+    }
+}
+
+/// Per project of the latest aggregated entry: a sparkline over the window's
+/// comparable runs of that project, and its latest score. Silent when the
+/// latest entry isn't an aggregate.
+fn print_projects(entries: &[HistoryEntry], last: &HistoryEntry) {
+    if last.projects.is_empty() {
+        return;
+    }
+    println!();
+    println!("projects ({}):", last.projects.len());
+    for p in &last.projects {
+        let scores = entries
+            .iter()
+            .filter_map(|e| e.project(&p.dir))
+            .filter(HistoryEntry::is_comparable)
+            .map(|e| e.mutation_score);
+        println!(
+            "  {:<40} {:<20} {:>7}",
+            p.dir,
+            history::sparkline_scaled(scores, 0.0, 100.0),
+            p.counts.score_label()
+        );
     }
 }
 
@@ -506,6 +567,7 @@ mod tests {
             survivor_ids: None,
             baseline: false,
             partial: false,
+            projects: Vec::new(),
         }
     }
 
@@ -758,7 +820,62 @@ mod tests {
             diff: false,
             group_by: None,
             strict: true,
+            project: None,
         }
+    }
+
+    /// An aggregate entry over projects `(dir, config_hash, killed, survived)`.
+    fn agg(ts: &str, projects: &[(&str, &str, usize, usize)]) -> HistoryEntry {
+        let mut e = entry(ts, 0.0, Some("main"));
+        e.projects = projects
+            .iter()
+            .map(
+                |&(dir, hash, killed, survived)| crate::report::ProjectSummary {
+                    dir: dir.into(),
+                    config_hash: Some(hash.into()),
+                    counts: crate::report::Counts {
+                        killed,
+                        survived,
+                        ..Default::default()
+                    },
+                },
+            )
+            .collect();
+        let (k, s) = projects.iter().fold((0, 0), |(k, s), p| (k + p.2, s + p.3));
+        e.killed = k;
+        e.survived = s;
+        e.mutation_score = 100.0 * k as f64 / (k + s) as f64;
+        e
+    }
+
+    #[test]
+    fn project_drop_fails_the_gate_while_the_aggregate_rebaselines() {
+        // `b`'s config changed (hash h2 → h3), so the aggregate hash would
+        // change and its line re-baseline. `a` still dropped 90 → 50 on its
+        // own unchanged hash: the per-project gate must catch it, and `b`'s
+        // new hash must not read as a drop.
+        let mut prev = agg("1", &[("a", "h1", 9, 1), ("b", "h2", 10, 0)]);
+        prev.config_hash = Some("agg1".into());
+        let mut curr = agg("2", &[("a", "h1", 5, 5), ("b", "h3", 1, 9)]);
+        curr.config_hash = Some("agg2".into());
+        let got = regressions(&[prev, curr], 1.0);
+        assert_eq!(
+            got,
+            ["project a: mutation score regressed by 40.0 pts (threshold 1.0)"]
+        );
+    }
+
+    #[test]
+    fn project_view_keeps_only_that_projects_counts_hash_and_survivors() {
+        let mut e = agg("1", &[("pkg/a", "h1", 3, 1), ("pkg/b", "h2", 0, 2)]);
+        e.survivor_ids = Some(vec!["pkg/a/x.py@1".into(), "pkg/ab/y.py@2".into()]);
+        let a = e.project("pkg/a").unwrap();
+        assert_eq!((a.killed, a.survived), (3, 1));
+        assert_eq!(a.mutation_score, 75.0);
+        assert_eq!(a.config_hash.as_deref(), Some("h1"));
+        assert_eq!(a.survivor_ids.unwrap(), ["pkg/a/x.py@1"]);
+        assert!(a.projects.is_empty());
+        assert!(e.project("pkg/c").is_none());
     }
 
     #[test]
@@ -844,10 +961,11 @@ pub(crate) struct TrendArgs {
     #[arg(long)]
     pub(crate) diff: bool,
 
-    /// Aggregate the latest run's survivors. `file` groups by source
+    /// Aggregate the latest run. `file` groups its survivors by source
     /// file and prints counts + the oldest survivor's age per group.
-    /// Reads only data already stored in `history.jsonl`, no report
-    /// needed.
+    /// `project` prints a sparkline + latest score per project of an
+    /// aggregated (`fermut merge DIR=REPORT`) history. Reads only data
+    /// already stored in `history.jsonl`, no report needed.
     #[arg(long, value_enum, value_name = "AXIS")]
     pub(crate) by: Option<crate::cli::TrendGroupByCli>,
 
@@ -864,4 +982,10 @@ pub(crate) struct TrendArgs {
     /// its own; run this as a separate step to guard the shared file.
     #[arg(long)]
     pub(crate) strict: bool,
+
+    /// Trend one project of an aggregated (`fermut merge DIR=REPORT`)
+    /// history: its own counts and `config_hash`, so its regression gate
+    /// ignores config changes in other projects.
+    #[arg(long, value_name = "DIR")]
+    pub(crate) project: Option<String>,
 }

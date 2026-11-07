@@ -646,4 +646,61 @@ mod tests {
             "overlay verdict must match on-disk verdict for identical content"
         );
     }
+
+    /// The `System` methods the checker does not override must delegate
+    /// straight to the wrapped `OsSystem`; an overlay only changes reads.
+    #[test]
+    fn overlay_system_delegates_non_overlaid_calls_to_disk() {
+        use ruff_db::system::walk_directory::WalkState;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let tmp = fixture_project("x = 1\n");
+        let root = canonical_system_path(tmp.path()).unwrap();
+        let file = root.join("src/mod.py");
+        let sys = OverlaySystem {
+            inner: OsSystem::new(&root),
+            overlays: Arc::new(Mutex::new(OverlayState::default())),
+        };
+        sys.overlays
+            .lock()
+            .unwrap()
+            .content
+            .insert(file.clone(), "y = 2\n".into());
+
+        assert_eq!(sys.read_to_string(&file).unwrap(), "y = 2\n");
+        assert_eq!(sys.canonicalize_path(&file).unwrap(), file);
+        assert!(sys.is_same_file(&file, &file).unwrap());
+        assert!(sys.read_to_notebook(&root.join("missing.ipynb")).is_err());
+        let virt = SystemVirtualPath::new("untitled:1");
+        assert!(sys.read_virtual_path_to_string(virt).is_err());
+        assert!(sys.read_virtual_path_to_notebook(virt).is_err());
+        assert!(sys.path_exists(&file));
+        assert!(!sys.path_exists(&root.join("nope.py")));
+        assert!(sys.which("fermut-no-such-binary-xyz").is_err());
+        assert_eq!(sys.current_directory(), root.as_path());
+        let _ = sys.user_config_directory();
+        let _ = sys.cache_dir();
+        assert!(sys.env_var("FERMUT_SURELY_UNSET_VAR_XYZ").is_err());
+        let names: Vec<_> = sys
+            .read_directory(&root.join("src"))
+            .unwrap()
+            .map(|e| e.unwrap().path().file_name().unwrap().to_string())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        let seen = Arc::new(AtomicUsize::new(0));
+        sys.walk_directory(&root.join("src")).run(|| {
+            let seen = Arc::clone(&seen);
+            Box::new(move |_| {
+                seen.fetch_add(1, Ordering::Relaxed);
+                WalkState::Continue
+            })
+        });
+        assert!(seen.load(Ordering::Relaxed) >= 2);
+        assert!(sys.as_writable().is_some());
+        assert!(sys.as_any().downcast_ref::<OverlaySystem>().is_some());
+        let mut sys = sys;
+        assert!(sys.as_any_mut().downcast_mut::<OverlaySystem>().is_some());
+        // A clone shares the overlay handle, so it sees the same overlay.
+        assert_eq!(sys.dyn_clone().read_to_string(&file).unwrap(), "y = 2\n");
+    }
 }

@@ -418,6 +418,81 @@ mod tests {
         assert!((round1(28.04) - 28.0).abs() < f64::EPSILON);
         assert!((round1(28.05) - 28.1).abs() < f64::EPSILON);
     }
+
+    #[test]
+    fn every_grade_has_a_distinct_blurb() {
+        let blurbs: std::collections::HashSet<_> = [
+            Grade::Strong,
+            Grade::Ok,
+            Grade::Weak,
+            Grade::Smoke,
+            Grade::Na,
+        ]
+        .iter()
+        .map(|g| g.blurb())
+        .collect();
+        assert_eq!(blurbs.len(), 5);
+        assert!(Grade::Na.blurb().contains("nothing scored"));
+    }
+
+    fn sample_report(grade: Grade, sampled: bool, line_coverage: Option<f64>) -> BaselineReport {
+        BaselineReport {
+            line_coverage,
+            mutation_score: 54.0,
+            scored: 10,
+            quality_gap: 46.0,
+            untested_risk: line_coverage.map(|lc| round1(100.0 - lc)),
+            grade,
+            killed: 5,
+            survived: 5,
+            sampled,
+            sample_fraction: if sampled { 0.1 } else { 1.0 },
+            worst_files: vec![FileSurvivors {
+                file: "a.py".into(),
+                survivors: 5,
+            }],
+        }
+    }
+
+    #[test]
+    fn print_human_renders_scored_and_na_variants() {
+        // Wiring smoke over every branch of the human renderer: sampled with
+        // coverage + worst files, full without coverage, and the N/A grade.
+        print_human(&sample_report(Grade::Weak, true, Some(90.0)));
+        print_human(&sample_report(Grade::Strong, false, None));
+        let mut na = sample_report(Grade::Na, false, None);
+        na.worst_files.clear();
+        print_human(&na);
+        // JSON omits the absent coverage axes rather than emitting null.
+        let v = serde_json::to_value(sample_report(Grade::Na, false, None)).unwrap();
+        assert_eq!(v["grade"], "na");
+        assert!(v.get("line_coverage").is_none());
+        assert!(v.get("untested_risk").is_none());
+    }
+
+    #[test]
+    fn compute_baseline_refuses_an_unhealthy_environment() {
+        // A configured tests dir that doesn't exist is a doctor `fail`, so
+        // baseline must stop before building coverage or running mutants.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("pyproject.toml"),
+            "[project]\nname = \"x\"\n[tool.fermut]\ntests = \"no_such_tests\"\n",
+        )
+        .unwrap();
+        let err = compute_baseline(BaselineArgs {
+            path: tmp.path().to_path_buf(),
+            full: false,
+            sample: None,
+            top: 3,
+            format: Format::Json,
+            filter: Default::default(),
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("environment not ready"), "got: {err}");
+        assert!(!tmp.path().join(".coverage").exists());
+    }
 }
 
 #[derive(clap::Args, Debug)]

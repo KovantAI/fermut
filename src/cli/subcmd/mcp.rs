@@ -916,6 +916,148 @@ mod tests {
         assert!(text.contains("pytest failed"), "got: {text}");
     }
 
+    /// Absolute path of a `python3` on PATH with pytest + pytest-cov
+    /// importable; tests needing a real suite skip without it.
+    fn python_with_pytest() -> Option<String> {
+        let out = std::process::Command::new("python3")
+            .args([
+                "-c",
+                "import sys, pytest, pytest_cov, coverage; print(sys.executable)",
+            ])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    /// A one-function project whose test kills `>=`→`>` but not every mutant.
+    fn tiny_project() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("fermut.toml"), "").unwrap();
+        std::fs::write(root.join("calc.py"), "def adult(x):\n    return x >= 18\n").unwrap();
+        std::fs::create_dir(root.join("tests")).unwrap();
+        std::fs::write(
+            root.join("tests/test_calc.py"),
+            "from calc import adult\n\ndef test_adult():\n    assert adult(18)\n    assert not adult(17)\n",
+        )
+        .unwrap();
+        tmp
+    }
+
+    #[test]
+    fn error_response_carries_id_code_and_message() {
+        let v = error_response(json!(7), RpcError::invalid_params("bad"));
+        assert_eq!(
+            v,
+            json!({"jsonrpc": "2.0", "id": 7, "error": {"code": -32602, "message": "bad"}})
+        );
+    }
+
+    #[test]
+    fn dispatch_routes_initialize_and_tools_list() {
+        let init = dispatch("initialize", &json!({})).unwrap();
+        assert_eq!(init["protocolVersion"], DEFAULT_PROTOCOL_VERSION);
+        let list = dispatch("tools/list", &json!({})).unwrap();
+        assert_eq!(list["tools"], tool_definitions());
+    }
+
+    #[test]
+    fn parent_dir_paths_are_rejected() {
+        for (name, args) in [
+            ("fermut_next", json!({"report": "../r.json"})),
+            (
+                "fermut_explain",
+                json!({"report": "../r.json", "target": "1"}),
+            ),
+            ("fermut_run", json!({"path": "a/../b"})),
+        ] {
+            let result = tools_call(&json!({"name": name, "arguments": args})).unwrap();
+            assert_eq!(result["isError"], true, "{name}");
+            let text = result["content"][0]["text"].as_str().unwrap();
+            assert!(text.starts_with("Invalid input"), "{name}: {text}");
+        }
+    }
+
+    #[test]
+    fn score_reads_history_and_reports_delta() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hist = tmp.path().join("h.jsonl");
+        let line = |ts: &str, score: f64, killed: usize, survived: usize| {
+            json!({"timestamp": ts, "mutation_score": score, "killed": killed,
+                   "survived": survived, "timed_out": 0, "skipped": 0, "errored": 0})
+            .to_string()
+        };
+        std::fs::write(
+            &hist,
+            format!("{}\n{}\n", line("t1", 50.0, 1, 1), line("t2", 100.0, 2, 0)),
+        )
+        .unwrap();
+        let result = tools_call(&json!({
+            "name": "fermut_score",
+            "arguments": {"history_path": hist.display().to_string(), "baseline": 1}
+        }))
+        .unwrap();
+        assert_eq!(result["isError"], false, "{result}");
+        let payload: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["score"], 100.0);
+        assert_eq!(payload["delta"], 50.0);
+    }
+
+    #[test]
+    fn coverage_success_returns_db_path() {
+        let Some(py) = python_with_pytest() else {
+            eprintln!("skipping: python3 with pytest + pytest-cov not available");
+            return;
+        };
+        let tmp = tiny_project();
+        let result = tools_call(&json!({
+            "name": "fermut_coverage",
+            "arguments": {"path": tmp.path().display().to_string(), "python": py, "full": true}
+        }))
+        .unwrap();
+        assert_eq!(result["isError"], false, "{result}");
+        let payload: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        let db = PathBuf::from(payload["coverage_path"].as_str().unwrap());
+        assert!(db.is_file(), "coverage db written at {}", db.display());
+    }
+
+    #[test]
+    fn run_writes_report_and_returns_summary() {
+        let Some(py) = python_with_pytest() else {
+            eprintln!("skipping: python3 with pytest + pytest-cov not available");
+            return;
+        };
+        let tmp = tiny_project();
+        let report = tmp.path().join("out.json");
+        let result = tools_call(&json!({
+            "name": "fermut_run",
+            "arguments": {
+                "path": tmp.path().display().to_string(),
+                "tests": tmp.path().join("tests").display().to_string(),
+                "python": py,
+                "jobs": 1,
+                "timeout": 30,
+                "report_path": report.display().to_string(),
+            }
+        }))
+        .unwrap();
+        assert_eq!(result["isError"], false, "{result}");
+        let payload: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["report_path"], report.display().to_string());
+        assert!(payload["summary"].is_object());
+        // The persisted report is what fermut_next / list_survivors read.
+        assert!(!crate::report::load(&report).unwrap().outcomes.is_empty());
+        // Default history is the scratch log, not the shared trend.
+        let root = crate::history::resolve_root(tmp.path());
+        assert!(root.join(".fermut").join(AGENT_HISTORY).is_file());
+    }
+
     #[test]
     fn score_with_no_history_is_tool_error() {
         let tmp = tempfile::tempdir().unwrap();

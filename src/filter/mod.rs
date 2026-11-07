@@ -512,6 +512,71 @@ mod chain_order_tests {
     }
 
     #[test]
+    fn is_subsequence_rejects_out_of_order() {
+        assert!(!is_subsequence(&["ty", "ruff"], CANONICAL_ORDER));
+    }
+
+    fn git(cwd: &std::path::Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git on PATH")
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    /// Every filter on, including the git-, ruff- and ty-backed ones: the
+    /// chain is exactly CANONICAL_ORDER. A fake `.venv` supplies `ruff`.
+    #[cfg(unix)]
+    #[test]
+    fn full_chain_matches_canonical_order() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("VIRTUAL_ENV").is_some() {
+            return; // an active venv would shadow the fake `.venv` ruff
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.email", "t@t"]);
+        git(root, &["config", "user.name", "t"]);
+        std::fs::write(root.join("f.py"), "a = 1\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        let bin = root.join(".venv/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for exe in ["python", "ruff"] {
+            std::fs::write(bin.join(exe), "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(bin.join(exe), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        let mut cfg = empty_config();
+        cfg.source_root = root.to_path_buf();
+        cfg.ops_allow = Some(HashSet::from([Operator::ArithOpSwap]));
+        cfg.shard = Some((1, 2));
+        cfg.sample_ratio = Some(0.5);
+        cfg.diff_base = Some("main".into());
+        cfg.since = Some("HEAD".into());
+        cfg.coverage = Some(Arc::new(CoverageContexts::default()));
+        cfg.ruff_filter = true;
+        cfg.ty_filter = true;
+        cfg.jobs = Some(1);
+        cfg.tce = true;
+        assert_eq!(names(&cfg), CANONICAL_ORDER);
+    }
+
+    #[test]
+    fn diff_base_outside_git_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = empty_config();
+        cfg.source_root = tmp.path().to_path_buf();
+        cfg.diff_base = Some("main".into());
+        assert!(build_chain(&cfg).is_err());
+    }
+
+    #[test]
     fn canonical_order_has_no_duplicates() {
         let mut seen = HashSet::new();
         for name in CANONICAL_ORDER {
@@ -571,6 +636,31 @@ mod patched_tempfile_tests {
             _ => return false,
         }
         chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    #[test]
+    fn module_name_check_rejects_leading_digit_and_hyphen() {
+        assert!(!is_valid_module_name("1mod"));
+        assert!(!is_valid_module_name("my-mod"));
+        assert!(is_valid_module_name("_my_mod2"));
+    }
+
+    #[test]
+    fn default_trait_methods_are_cheap_and_uncached() {
+        let f = experimental::ExperimentalFilter::new(true);
+        let m = Mutant {
+            id: "t".into(),
+            file: "x.py".into(),
+            operator: Operator::ArithOpSwap,
+            range: ruff_text_size::TextRange::new(0u32.into(), 1u32.into()),
+            original: "+".into(),
+            replacement: "-".into(),
+            line: 1,
+            stmt_line: 1,
+            site: None,
+        };
+        assert!(!f.costly());
+        assert_eq!(f.cached_verdict(&m), None);
     }
 
     #[test]

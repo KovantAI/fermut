@@ -1776,6 +1776,95 @@ mod tests {
         fingerprints_path(&root.join(".coverage")).exists()
     }
 
+    /// Incremental refresh where every recorded source is gone (a DB restored
+    /// onto another checkout), a new uncovered source appeared, and the re-run
+    /// pytest fails: contexts of the re-run tests are purged, the file rows are
+    /// kept (prune refuses), and the baseline sidecar is NOT advanced.
+    #[cfg(unix)]
+    #[test]
+    fn incremental_failed_rerun_keeps_baseline_and_skips_mass_prune() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("fermut.toml"), "").unwrap();
+        let db = make_db_with_files(&root);
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        for t in ["test_foo", "test_bar", "test_both"] {
+            std::fs::write(root.join(format!("tests/{t}.py")), "def test(): pass\n").unwrap();
+        }
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/new.py"), "z = 1\n").unwrap();
+        // Prior baseline: stale test hashes (all re-run), foo/bar present.
+        let prior = fp(
+            &[
+                "tests/test_foo.py",
+                "tests/test_bar.py",
+                "tests/test_both.py",
+            ],
+            &["src/foo.py", "src/bar.py"],
+        );
+        save_fingerprints(&db, &prior).unwrap();
+        let sidecar_before = std::fs::read(fingerprints_path(&db)).unwrap();
+
+        let args_log = root.join("args.txt");
+        let py = root.join("python");
+        std::fs::write(
+            &py,
+            format!(
+                "#!/bin/sh\necho \"$@\" > '{}'\nexit 1\n",
+                args_log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let got = coverage(CoverageArgs {
+            path: root.clone(),
+            source: Some(root.join("src")),
+            tests: Some(root.join("tests")),
+            full: false,
+            output: None,
+            python: Some(py),
+            pytest_args: vec!["--extra-flag".into()],
+        })
+        .unwrap();
+        assert!(!got.passed);
+        assert_eq!(
+            std::fs::read(fingerprints_path(&db)).unwrap(),
+            sidecar_before,
+            "a failed re-run must not advance the baseline"
+        );
+        let args = std::fs::read_to_string(&args_log).unwrap();
+        assert!(args.contains("--cov=src"), "{args}");
+        assert!(args.contains("--cov-append"), "{args}");
+        assert!(args.contains("--extra-flag"), "{args}");
+        let conn = Connection::open(&db).unwrap();
+        assert_eq!(count(&conn, "SELECT count(*) FROM context"), 0);
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM file"),
+            2,
+            "all-missing sources look like a checkout move: not pruned"
+        );
+    }
+
+    #[test]
+    fn full_rebuild_surfaces_an_unspawnable_interpreter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("fermut.toml"), "").unwrap();
+        let err = coverage(CoverageArgs {
+            path: root.to_path_buf(),
+            source: Some(root.to_path_buf()),
+            tests: Some(root.join("tests")),
+            full: true,
+            output: None,
+            python: Some(root.join("no-such-python")),
+            pytest_args: vec![],
+        });
+        assert!(err.is_err());
+        assert!(!fingerprints_path(&root.join(".coverage")).exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn full_rebuild_writes_baseline_only_when_pytest_passes() {

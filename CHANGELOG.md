@@ -8,18 +8,31 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+### Added
+- MCP `fermut_coverage` tool: builds or incrementally refreshes `.coverage`,
+  like `fermut coverage`, and reports a failed pytest as a tool error.
+- MCP `fermut_run` and `fermut_score` take a `history_path` argument.
+
 ### Changed
 - **Breaking:** a runtime error (bad config, red baseline, git or I/O
   failure, a failed `merge` check) now exits `3` instead of `1`, so CI can
   tell a broken run from a failed gate. `1` still means the gate failed
   (survivors, `--fail-under`, `--fail-on-regression`); `2` is a usage error.
   The GitHub action fails a run that exits `3` even with `blocking: false`.
+- MCP `fermut_run` appends to `.fermut/agent-history.jsonl` instead of the
+  shared `.fermut/history.jsonl`, and `fermut_score` reads it, so agent
+  iterations stay out of the project trend. Pass `history_path` for the old
+  behavior.
 - Human-readable output (`run`, `list`, `show`, `baseline`'s worst files)
   prints source paths relative to the current directory
   (`src/calculator.py:14@216`) instead of the full checkout path. Mutant ids
   and JSON reports still carry absolute paths.
 
 ### Fixed
+- The verdict cache ignored a `conftest.py` above the tests root (a repo-root
+  one with `tests/` as the tests root), so editing a fixture there kept stale
+  verdicts. Every such `conftest.py` is now part of the test fingerprint;
+  caches in projects that have one re-run once.
 - `fermut init` picked the `unittest` runner when pytest was installed only in
   the project's `.venv` and the venv wasn't activated. It now looks in the
   venv, as `doctor` and `run` do.

@@ -14,6 +14,11 @@ While the major is `0`, SemVer minor/patch numbers shift one slot:
 | `0.MINOR` | Anything that would be a **major** under post-1.0 rules (breaking changes to the user-facing contract). |
 | `0.MINOR.PATCH` | Anything that would be a **minor or patch** under post-1.0 rules (new features, bug fixes, doc-only changes). |
 
+Every breaking change is listed in `CHANGELOG.md`, and we try to give
+one minor release of deprecation warnings first (see
+[How to propose a breaking change](#how-to-propose-a-breaking-change)).
+Pin `fermut==0.MINOR.*` if you need stability between upgrades.
+
 We will declare `1.0.0` once the contract has been stable for two
 consecutive minor releases without unplanned breakage.
 
@@ -33,7 +38,10 @@ Standard SemVer:
 
 Stable:
 
-- Subcommand names (`run`, `list`, `show`, `clean`, `completions`).
+- Subcommand names: every subcommand in the
+  [CLI reference](https://fermut.readthedocs.io/reference/cli/) except
+  those marked *experimental* (today: `hom`, and `run --only-dominators` /
+  `--record-kill-sets`), which can change in any release.
 - Existing flag names, short forms, value parsers, and defaults.
 - Exit codes: `0` success (no survivors, the score clears
   `--fail-under`, a scoreless run with no errors, or any finished run
@@ -163,7 +171,8 @@ Pre-1.0, MSRV bumps go in a minor (`0.MINOR`) release.
    - New flag/key shipped alongside the old one for at least one minor
      release.
    - Old flag/key emits a `warn` log on use.
-   - Old flag/key removed in the next major.
+   - Old flag/key removed no earlier than the next breaking release:
+     the next `0.MINOR` pre-1.0, the next `MAJOR` after.
 4. Document in `CHANGELOG.md` under both the breaking-change release
    (`### Removed`) and any earlier deprecation release (`### Deprecated`).
 

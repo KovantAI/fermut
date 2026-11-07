@@ -195,6 +195,18 @@ jobs:
           uv tool install fermut
       - run: uv tool run fermut coverage --source src --tests tests/
 
+      # Verdict cache + smart-ordering history: without them every nightly
+      # runs cold. Unchanged files are answered from cache.json.
+      - name: restore fermut cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            .fermut/cache.json
+            .fermut/kill-order.json
+          key: fermut-nightly-cache
+          restore-keys: |
+            fermut-nightly-cache-
+
       - name: restore fermut history
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
         with:
@@ -210,7 +222,6 @@ jobs:
               --coverage .coverage \
               --no-diff-only \
               --ops "" \
-              --experimental \
               --timeout 60 \
               --markdown nightly-report.md \
               --json nightly.json \
@@ -222,6 +233,15 @@ jobs:
         with:
           path: .fermut/history.jsonl
           key: fermut-history-main-${{ github.run_id }}
+
+      - name: save fermut cache
+        if: always()
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        with:
+          path: |
+            .fermut/cache.json
+            .fermut/kill-order.json
+          key: fermut-nightly-cache-${{ github.run_id }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
@@ -237,9 +257,14 @@ How the override pattern works:
 - `fermut.toml` keeps `pr-gate` defaults (narrow ops, diff-only,
   short timeout) — PR jobs use those untouched.
 - The nightly job's CLI flags **override** the config for that one
-  run: `--ops ""` clears the narrow op allowlist, `--experimental`
-  adds exception/loop ops, `--timeout 60` matches the looser nightly
-  budget. `--no-diff-only` clears the `diff_only = "main"` key the
+  run: `--ops ""` clears the narrow op allowlist, `--timeout 60` matches
+  the looser nightly budget. Add `--experimental` for the exception/loop
+  operators too; it generates more mutants, so expect a longer run.
+- The verdict cache is restored and saved like the history, so a night
+  with few changes re-runs only the mutants in changed files. The
+  packaged [`sweep`](github-action.md#sharded-full-sweep) and
+  [`trend`](github-action.md#score-trend) actions do this caching (and
+  sharding) for you. `--no-diff-only` clears the `diff_only = "main"` key the
   `pr-gate` profile writes — without it, the nightly run on `main` diffs
   `main` against itself, mutates nothing, and passes.
 - See [CLI overrides vs config](../reference/cli/run.md#cli-overrides-vs-config)

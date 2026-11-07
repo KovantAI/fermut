@@ -27,7 +27,9 @@ shard (unsharded runs, older fermut) skip the missing-index check.
 With `--history`, a merge that scored nothing fails instead of writing an
 entry: the score is N/A, and recording it would put a vacuous 100% in the
 trend. Gates run after the report files are written, so a failed merge
-still leaves them to inspect.
+still leaves them to inspect. Every merge failure, these checks included, exits `3`:
+the merged result can't be trusted, so it is a broken run, not a failed
+gate.
 
 | Flag                  | Default | Description                                                                                                                                                                             |
 | --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

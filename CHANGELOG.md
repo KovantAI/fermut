@@ -14,6 +14,11 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 - MCP `fermut_run` and `fermut_score` take a `history_path` argument.
 
 ### Changed
+- **Breaking:** a runtime error (bad config, red baseline, git or I/O
+  failure, a failed `merge` check) now exits `3` instead of `1`, so CI can
+  tell a broken run from a failed gate. `1` still means the gate failed
+  (survivors, `--fail-under`, `--fail-on-regression`); `2` is a usage error.
+  The GitHub action fails a run that exits `3` even with `blocking: false`.
 - MCP `fermut_run` appends to `.fermut/agent-history.jsonl` instead of the
   shared `.fermut/history.jsonl`, and `fermut_score` reads it, so agent
   iterations stay out of the project trend. Pass `history_path` for the old

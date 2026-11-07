@@ -111,7 +111,7 @@ fn run_finds_known_survivor() {
         .arg(sample.join("tests"))
         .arg("--no-ty-filter")
         .assert()
-        .failure() // survivors → exit 1
+        .code(1) // survivors → gate failed
         .stdout(contains("SURVIVED"));
 }
 
@@ -1458,7 +1458,7 @@ fn next_rejects_zero_limit() {
         .arg("--limit")
         .arg("0")
         .assert()
-        .failure()
+        .code(3) // runtime error, not a gate verdict
         .stderr(contains("--limit must be at least 1"));
 }
 

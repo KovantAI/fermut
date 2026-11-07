@@ -249,7 +249,7 @@ pub(crate) fn configure_mirror_cmd(
     // across workers, each failure a false kill, and write into the real
     // home. The schemata template gives each fork its own (`PRIVATE_HOME_ENV`).
     if private_home {
-        set_home(cmd, &mirror.home);
+        set_home(cmd, &mirror.home, cfg!(windows));
         cmd.env(PRIVATE_HOME_ENV, "1");
     }
     Ok(())
@@ -262,13 +262,14 @@ pub(crate) const PRIVATE_HOME_ENV: &str = "FERMUT_PRIVATE_HOME";
 /// (not just removing them) matters: an exported `XDG_CONFIG_HOME` would
 /// otherwise stay shared. On Windows Python resolves `~` from `USERPROFILE`
 /// (it ignores `HOME`), and click/typer's `get_app_dir` reads `APPDATA` /
-/// `LOCALAPPDATA`, so those move too.
-fn set_home(cmd: &mut std::process::Command, home: &Path) {
+/// `LOCALAPPDATA`, so those move too. `windows` is a parameter, not a
+/// `cfg!`, so the Windows branch is testable on any host.
+fn set_home(cmd: &mut std::process::Command, home: &Path, windows: bool) {
     cmd.env("HOME", home);
     for (var, rel) in XDG_DIRS {
         cmd.env(var, home.join(rel));
     }
-    if cfg!(windows) {
+    if windows {
         cmd.env("USERPROFILE", home);
         for (var, rel) in WINDOWS_DIRS {
             cmd.env(var, home.join(rel));
@@ -1367,16 +1368,36 @@ mod tests {
             Some(std::ffi::OsStr::new("1"))
         );
         assert_ne!(var(&on, "HOME"), var(&env_of(&b, true), "HOME"));
-        if cfg!(windows) {
-            assert_eq!(var(&on, "USERPROFILE"), Some(a.home.clone().into()));
-            assert_eq!(
-                var(&on, "APPDATA"),
-                Some(a.home.join(r"AppData\Roaming").into())
-            );
-        }
         let off = env_of(&a, false);
         assert_eq!(var(&off, "HOME"), None, "inherits the real home");
         assert_eq!(var(&off, crate::runner::PRIVATE_HOME_ENV), None);
+    }
+
+    /// Windows moves `USERPROFILE` and the AppData dirs too; elsewhere they
+    /// stay untouched.
+    #[test]
+    fn set_home_moves_windows_dirs_only_on_windows() {
+        let home = std::path::Path::new("/h");
+        let env_of = |windows: bool| {
+            let mut cmd = std::process::Command::new("true");
+            super::set_home(&mut cmd, home, windows);
+            cmd.get_envs()
+                .map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string())))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        let win = env_of(true);
+        let get = |k: &str| win.get(std::ffi::OsStr::new(k)).cloned().flatten();
+        assert_eq!(get("HOME"), Some(home.into()));
+        assert_eq!(get("USERPROFILE"), Some(home.into()));
+        assert_eq!(get("APPDATA"), Some(home.join(r"AppData\Roaming").into()));
+        assert_eq!(
+            get("LOCALAPPDATA"),
+            Some(home.join(r"AppData\Local").into())
+        );
+        let unix = env_of(false);
+        for k in ["USERPROFILE", "APPDATA", "LOCALAPPDATA"] {
+            assert!(!unix.contains_key(std::ffi::OsStr::new(k)), "{k} set");
+        }
     }
 
     /// Python on Windows takes `~` from `USERPROFILE`, not `HOME`; the

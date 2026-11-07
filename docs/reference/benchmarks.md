@@ -143,10 +143,11 @@ Coverage is used whenever a `.coverage` DB exists: auto-discovered at
 the project root, or passed with `--coverage .coverage`. `fermut run`
 doesn't create one; `fermut coverage` (or `fermut baseline`) does, and
 the benchmark harness runs that step for fermut (the `cov_prep` column).
-Without a DB, every mutant runs the full suite. Mutmut has no
-equivalent, so its per-mutant cost is the full suite — which is also why
-it wins on a tiny-suite repo like markupsafe, where the full suite is
-already cheap.
+Without a DB, every mutant runs the full suite. mutmut selects tests
+too, per mutated function rather than per line, and has no separate
+coverage phase — which is why it wins on a tiny-suite repo like
+markupsafe, where fermut's one-time coverage and `ty` overhead doesn't
+pay off.
 
 ### The `ty` filter { #ty-filter }
 
@@ -177,9 +178,9 @@ broken out separately: it's part of the `mutation` column above.
 
 ### mutmut and cosmic-ray — cold + warm
 
-Neither tool has a coverage filter, so both run the full suite per
-mutant. mutmut copies the tree to `mutants/` and caches verdicts;
-cosmic-ray drives a sqlite session.
+cosmic-ray has no coverage filter, so it runs the full suite per mutant
+and drives a sqlite session. mutmut copies the tree to `mutants/`, runs
+the tests that reach each mutated function, and caches verdicts.
 
 This table is from the June 2026 session (mutmut 3.6; cosmic-ray wasn't
 re-run). Read it for the **tool-failure notes** and cosmic-ray's scaling;

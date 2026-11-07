@@ -98,7 +98,15 @@ struct Fingerprints {
     sources: BTreeMap<String, String>,
 }
 
-pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
+/// What a [`coverage`] call left behind: the database path, and whether pytest
+/// passed (a failed run leaves partial coverage and doesn't advance the
+/// baseline). The CLI only warns on failure; `fermut_coverage` reports it.
+pub(crate) struct Refreshed {
+    pub(crate) path: PathBuf,
+    pub(crate) passed: bool,
+}
+
+pub(crate) fn coverage(opts: CoverageArgs) -> Result<Refreshed> {
     let loaded = LoadedConfig::load(&opts.path)?;
     let base_dir = loaded.base_dir.clone();
 
@@ -186,7 +194,10 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
             );
         }
         report_done(&loaded, &db_path, Done::Full);
-        return Ok(());
+        return Ok(Refreshed {
+            path: db_path,
+            passed: ran_ok,
+        });
     }
     let prior = prior.unwrap_or_default();
 
@@ -196,7 +207,10 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
              Nothing to do.",
             display_rel(&db_path, &base_dir)
         );
-        return Ok(());
+        return Ok(Refreshed {
+            path: db_path,
+            passed: true,
+        });
     };
     let IncrementalPlan {
         changed_sources,
@@ -341,7 +355,10 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<()> {
             pruned_files,
         },
     );
-    Ok(())
+    Ok(Refreshed {
+        path: db_path,
+        passed: ran_ok,
+    })
 }
 
 /// What an incremental refresh has to do, derived from the fingerprint diff and

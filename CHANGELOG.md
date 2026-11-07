@@ -24,6 +24,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   and JSON reports still carry absolute paths.
 
 ### Fixed
+- The verdict cache ignored a `conftest.py` above the tests root (a repo-root
+  one with `tests/` as the tests root), so editing a fixture there kept stale
+  verdicts. Every such `conftest.py` is now part of the test fingerprint;
+  caches in projects that have one re-run once.
 - `fermut init` picked the `unittest` runner when pytest was installed only in
   the project's `.venv` and the venv wasn't activated. It now looks in the
   venv, as `doctor` and `run` do.

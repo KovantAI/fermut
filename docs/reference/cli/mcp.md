@@ -30,10 +30,11 @@ exposes the same JSON shapes the CLI subcommands emit.
 |--------------------------|--------------------------------------|------------------------------------------------------------------|
 | `fermut_doctor`          | [`doctor`](doctor.md)                | `path?`                                                          |
 | `fermut_baseline`        | [`baseline`](baseline.md)            | `path?`, `full?`, `sample?`, `top?`                              |
-| `fermut_run`             | [`run`](run.md)                      | `path?`, `tests?`, `coverage?`, `since?`, `diff_only?`, `jobs?`, `timeout?`, `max_time?`, `python?`, `report_path?` |
+| `fermut_coverage`        | [`coverage`](coverage.md)            | `path?`, `full?`, `python?`                                      |
+| `fermut_run`             | [`run`](run.md)                      | `path?`, `tests?`, `coverage?`, `since?`, `diff_only?`, `jobs?`, `timeout?`, `max_time?`, `python?`, `report_path?`, `history_path?` |
 | `fermut_next`            | [`next`](next.md)                    | `report` (required), `limit?`, `max_tokens?`                     |
 | `fermut_explain`         | [`explain`](explain.md)              | `report` (required), `target` (required), `context?`, `tests?`, `coverage?` |
-| `fermut_score`           | [`score`](score.md)                  | `path?`, `baseline?`, `branch?`                                  |
+| `fermut_score`           | [`score`](score.md)                  | `path?`, `baseline?`, `branch?`, `history_path?`                 |
 | `fermut_list_survivors`  | [`show`](show.md) (list mode)        | `report` (required)                                              |
 
 `fermut_explain` runs the heuristic path only (no LLM call) — the agent is
@@ -43,8 +44,16 @@ context, coverage signal, and pytest skeleton, and writes the test itself.
 any check failed); run it before `fermut_run` to catch a missing pytest /
 coverage / ty early.
 
+`fermut_coverage` is incremental: it re-runs only the test files an edit
+invalidated, so call it after every edit. Stale coverage makes `fermut_run`
+drop per-test selection for the whole run (slower, lower score). It returns
+`isError: true` when pytest fails, since the database is then partial.
+
 `fermut_run` writes its JSON report (default `<project>/.fermut/last.json`)
-and appends to the history log, so a typical loop is:
+and appends to a **scratch** history, `<project>/.fermut/agent-history.jsonl`,
+which `fermut_score` reads by default. The agent's iterations stay out of the
+project's shared `history.jsonl` trend; pass `history_path` to either tool to
+use another log. A typical loop is:
 
 1. `fermut_doctor` → confirm the environment is ready. On a new project,
    `fermut_baseline` instead gives a graded first look (it runs doctor
@@ -52,7 +61,7 @@ and appends to the history log, so a typical loop is:
 2. `fermut_run` → mutate, get the summary + `report_path`.
 3. `fermut_next` on that `report_path` → the highest-value survivor to fix.
 4. `fermut_explain` on that survivor → hint + killing-test skeleton.
-5. write the test, `fermut_run` again.
+5. write the test, `fermut_coverage`, then `fermut_run` again.
 6. `fermut_score` → the reward delta vs the prior run.
 
 ## Why no `fermut_autofix` / `fermut_suggest` tool { #no-generation-tools }

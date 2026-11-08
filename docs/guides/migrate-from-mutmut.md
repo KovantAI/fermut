@@ -65,9 +65,10 @@ to the same fermut output.
   `runner` command; a pure 3.x config gets none, and fermut's default
   runner (pytest) applies.
 - **`type_check_command` is configurable in 3.x** (mypy, pyright,
-  any process that prints diagnostics). fermut has no slot for an
-  external type checker — it embeds `ty` directly — so the key lands
-  in manual review with a pointer at `--no-ty-filter`.
+  pyrefly or ty, run once over mutmut's `mutants/` tree). fermut has no
+  slot for an external type checker — it embeds `ty` and checks each
+  mutant on its own, on by default — so the key lands in manual review
+  with a pointer at `--no-ty-filter`.
 
 If your project was on 1.x/2.x and the team has been gradually
 porting keys to 3.x in the same `[tool.mutmut]` block, the migrator
@@ -130,9 +131,14 @@ the line with `# fermut: ignore[op]`.
 
 mutmut reads from `setup.cfg` `[mutmut]` or `pyproject.toml`
 `[tool.mutmut]`. fermut reads from `fermut.toml` or
-`pyproject.toml` `[tool.fermut]`. Run `fermut init` to detect your
-layout and write a starter — it does **not** read your mutmut block,
-so you don't have to clean up first.
+`pyproject.toml` `[tool.fermut]`.
+
+**Use `fermut migrate mutmut`, not `fermut init`.** `migrate` reads your
+mutmut block and translates it (the mapping below); `init` ignores it and
+detects the layout from scratch, for projects with no config to carry
+over. Run one, not both: each refuses to overwrite an existing fermut
+config without `--force`. Once `migrate` has written the fermut config,
+delete the mutmut block.
 
 Common-key mapping:
 
@@ -315,6 +321,30 @@ coverage = ".coverage"
 Two things came along for free: `--diff-only` (no mutmut equivalent)
 and the sticky PR comment. The full workflow template is in
 **[CI recipes → GitHub Actions](integrations.md#github-actions)**.
+
+### Replacing a mutmut nightly
+
+A nightly `mutmut run` over the whole tree maps to a full fermut sweep.
+Three things decide how long it takes:
+
+- **Keep the verdict cache between nights.** mutmut keeps its results in
+  `mutants/`; fermut keeps them in `.fermut/cache.json`. CI runners start
+  empty, so persist it, or every night runs cold. The packaged
+  [`sweep` + `trend` actions](github-action.md#sharded-full-sweep) cache
+  verdicts, coverage and history for you; for a hand-written job, see the
+  [nightly recipe](integrations.md#pr-gate-nightly).
+- **Shard it.** `--shard i/n` splits mutants across a CI matrix with no
+  coordination, and `fermut merge` combines the reports and refuses a
+  missing shard. mutmut has no equivalent.
+- **Start with the default operators.** fermut's defaults already cover
+  ~99% of the lines mutmut mutates ([parity](../reference/parity.md)).
+  `--experimental` adds operators mutmut doesn't have, so it's more work,
+  not a like-for-like replacement. Add it once the default run is green.
+
+Scores aren't comparable across tools (different operators, and fermut
+skips uncovered lines instead of counting them as survivors), so reset
+your score thresholds from fermut's first full run rather than carrying
+mutmut's over.
 
 ## Where next
 

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use std::process::ExitCode;
 
 /// Worker-thread stack size. The mutation visitor walks the Python AST
 /// recursively, and the platform default main-thread stack (~1 MiB on
@@ -8,7 +9,12 @@ use clap::Parser;
 /// CI. Run the whole CLI on a thread with a generous stack instead.
 const STACK_SIZE: usize = 256 * 1024 * 1024;
 
-fn main() -> Result<()> {
+/// Exit code for a run that broke (bad config, red baseline, git or I/O
+/// failure), distinct from `1`, a gate that failed on a finished run. `2` is
+/// clap's usage error.
+const EXIT_RUNTIME_ERROR: u8 = 3;
+
+fn main() -> ExitCode {
     // A panic is a fermut bug, never the user's project: say where to report it.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -19,12 +25,20 @@ fn main() -> Result<()> {
             fermut::ISSUES_URL
         );
     }));
-    std::thread::Builder::new()
+    let outcome = std::thread::Builder::new()
         .stack_size(STACK_SIZE)
         .spawn(run)
         .expect("spawn worker thread")
         .join()
-        .expect("worker thread panicked")
+        .expect("worker thread panicked");
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            // Same rendering `fn main() -> Result` gives: message + cause chain.
+            eprintln!("Error: {e:?}");
+            ExitCode::from(EXIT_RUNTIME_ERROR)
+        }
+    }
 }
 
 fn run() -> Result<()> {

@@ -26,6 +26,11 @@
 //! - `fermut_list_survivors` — survivors + timeouts from a report.
 //! - `fermut_doctor` — environment/config preflight before a run.
 //! - `fermut_baseline` — day-one coverage-vs-mutation baseline + grade.
+//! - `fermut_coverage` — build/refresh `.coverage` (incremental) after edits.
+//!
+//! `fermut_run` and `fermut_score` default to a scratch history
+//! ([`AGENT_HISTORY`]) instead of the project's shared `history.jsonl`, so an
+//! agent's noisy iterations don't land in the team's trend.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -41,6 +46,10 @@ use crate::report::Report;
 /// server and client negotiate, and echoing the client's is the most
 /// compatible choice.
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// Default history log for MCP callers, under the project's `.fermut/`. Same
+/// file the agent guide tells CLI agents to pass via `--history-path`.
+const AGENT_HISTORY: &str = "agent-history.jsonl";
 
 #[derive(Deserialize)]
 struct Request {
@@ -203,7 +212,7 @@ fn tool_definitions() -> Value {
     json!([
         {
             "name": "fermut_run",
-            "description": "Run mutation testing on a Python project and return the score summary. Writes a JSON report (consumed by fermut_next / fermut_list_survivors) and appends to the run history (consumed by fermut_score).",
+            "description": "Run mutation testing on a Python project and return the score summary. Writes a JSON report (consumed by fermut_next / fermut_list_survivors) and appends to a scratch run history (consumed by fermut_score), not the project's shared trend. Run fermut_coverage first after editing source or tests: stale coverage drops per-test selection for the whole run.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -216,7 +225,8 @@ fn tool_definitions() -> Value {
                     "timeout": {"type": "integer", "description": "Per-mutant pytest timeout in seconds."},
                     "max_time": {"type": "integer", "description": "Wall-clock ceiling (seconds) on the testing phase. Highest-value mutants (covered first) run before the deadline; the rest are recorded skipped/`time-budget` and excluded from the score. Bounds testing only, not baseline/generation/ty. Use for a predictable inner-loop latency cap on large suites."},
                     "python": {"type": "string", "description": "Python interpreter path or virtualenv dir to run pytest with (`<python> -m pytest`); avoids relying on PATH. Auto-discovers a venv when omitted."},
-                    "report_path": {"type": "string", "description": "Where to write the JSON report. Defaults to <project>/.fermut/last.json."}
+                    "report_path": {"type": "string", "description": "Where to write the JSON report. Defaults to <project>/.fermut/last.json."},
+                    "history_path": {"type": "string", "description": "History log to append this run to. Defaults to the scratch <project>/.fermut/agent-history.jsonl; pass <project>/.fermut/history.jsonl to record into the shared trend."}
                 }
             }
         },
@@ -250,13 +260,14 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "fermut_score",
-            "description": "Emit the agent reward signal for the latest run: mutation score, delta vs a baseline run, and the new-survivor / newly-killed mutant-id diff. Reads .fermut/history.jsonl.",
+            "description": "Emit the agent reward signal for the latest run: mutation score, delta vs a baseline run, and the new-survivor / newly-killed mutant-id diff. Reads the same scratch history fermut_run writes (.fermut/agent-history.jsonl) unless history_path is given.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Project root to resolve history from. Defaults to '.'."},
                     "baseline": {"type": "integer", "description": "Compare against the entry this many branch-comparable runs back. Default 1."},
-                    "branch": {"type": "string", "description": "Restrict current/baseline selection to this git branch."}
+                    "branch": {"type": "string", "description": "Restrict current/baseline selection to this git branch."},
+                    "history_path": {"type": "string", "description": "History log to read. Defaults to <project>/.fermut/agent-history.jsonl (where fermut_run writes)."}
                 }
             }
         },
@@ -293,6 +304,18 @@ fn tool_definitions() -> Value {
                     "top": {"type": "integer", "description": "How many worst-offender files to list. Defaults to 3."}
                 }
             }
+        },
+        {
+            "name": "fermut_coverage",
+            "description": "Build or refresh the .coverage database that drives per-mutant test selection. Incremental: re-runs only the test files a source or test edit invalidated (by content hash), so it's cheap; call it after every edit, before fermut_run. Returns the database path; isError when pytest failed (coverage left partial).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Project root. Defaults to '.'."},
+                    "full": {"type": "boolean", "description": "Re-run the whole suite instead of refreshing incrementally."},
+                    "python": {"type": "string", "description": "Python interpreter path or virtualenv dir to run pytest with. Auto-discovers a venv when omitted."}
+                }
+            }
         }
     ])
 }
@@ -319,6 +342,7 @@ fn tools_call(params: &Value) -> Result<Value, RpcError> {
         "fermut_list_survivors" => tool_list_survivors(&args),
         "fermut_doctor" => tool_doctor(&args),
         "fermut_baseline" => tool_baseline(&args),
+        "fermut_coverage" => tool_coverage(&args),
         other => return Err(RpcError::invalid_params(format!("unknown tool: {other}"))),
     };
 
@@ -465,7 +489,7 @@ fn tool_score(args: &Value) -> Result<Value> {
         .map(|n| n as usize)
         .unwrap_or(1);
     let branch = str_arg(args, "branch");
-    let history_path = crate::history::default_history_path(&crate::history::resolve_root(&path));
+    let history_path = history_arg(args, &path);
     match super::score::compute_score(&history_path, baseline, branch)? {
         Some(report) => Ok(serde_json::to_value(report)?),
         None => Err(anyhow::anyhow!(
@@ -473,6 +497,35 @@ fn tool_score(args: &Value) -> Result<Value> {
             history_path.display()
         )),
     }
+}
+
+/// `history_path` if given, else the project's scratch [`AGENT_HISTORY`].
+fn history_arg(args: &Value, project: &std::path::Path) -> PathBuf {
+    str_arg(args, "history_path")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            crate::history::resolve_root(project)
+                .join(".fermut")
+                .join(AGENT_HISTORY)
+        })
+}
+
+fn tool_coverage(args: &Value) -> Result<Value> {
+    let refreshed = super::coverage::coverage(super::coverage::CoverageArgs {
+        path: PathBuf::from(str_arg(args, "path").unwrap_or(".")),
+        source: None,
+        tests: None,
+        full: args.get("full").and_then(Value::as_bool).unwrap_or(false),
+        output: None,
+        python: str_arg(args, "python").map(PathBuf::from),
+        pytest_args: Vec::new(),
+    })?;
+    anyhow::ensure!(
+        refreshed.passed,
+        "pytest failed while measuring coverage; {} is partial (details on stderr)",
+        refreshed.path.display()
+    );
+    Ok(json!({"coverage_path": refreshed.path.display().to_string()}))
 }
 
 fn tool_list_survivors(args: &Value) -> Result<Value> {
@@ -524,6 +577,7 @@ fn tool_run(args: &Value) -> Result<Value> {
     let timeout = args.get("timeout").and_then(Value::as_u64);
     let max_time = args.get("max_time").and_then(Value::as_u64);
     let python = str_arg(args, "python").map(PathBuf::from);
+    let history_path = Some(history_arg(args, &path));
 
     let filter = super::super::FilterArgs {
         ops: None,
@@ -550,6 +604,7 @@ fn tool_run(args: &Value) -> Result<Value> {
             python,
             max_time,
             filter,
+            history_path,
             ..Default::default()
         },
     )?;
@@ -616,6 +671,7 @@ mod tests {
             "fermut_list_survivors",
             "fermut_doctor",
             "fermut_baseline",
+            "fermut_coverage",
         ] {
             assert!(names.contains(&expected), "missing tool {expected}");
         }
@@ -821,6 +877,43 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn history_defaults_to_scratch_log_and_honors_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pyproject.toml"), "[project]\nname='x'\n").unwrap();
+        let root = crate::history::resolve_root(tmp.path());
+        assert_eq!(
+            history_arg(&json!({}), tmp.path()),
+            root.join(".fermut").join("agent-history.jsonl")
+        );
+        assert_eq!(
+            history_arg(&json!({"history_path": "h.jsonl"}), tmp.path()),
+            PathBuf::from("h.jsonl")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn coverage_with_failing_pytest_is_tool_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("fermut.toml"), "").unwrap();
+        std::fs::create_dir(root.join("tests")).unwrap();
+        std::fs::write(root.join("tests/test_a.py"), "def test_a(): pass\n").unwrap();
+        let py = root.join("python");
+        std::fs::write(&py, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let result = tools_call(&json!({
+            "name": "fermut_coverage",
+            "arguments": {"path": root.display().to_string(), "python": py.display().to_string()}
+        }))
+        .unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("pytest failed"), "got: {text}");
     }
 
     #[test]

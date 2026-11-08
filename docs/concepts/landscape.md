@@ -51,12 +51,12 @@ bottom for what fermut still doesn't do that the others do.
 |----------------------------------|-----------------------------------------------------------------------------------------|-----------------------------------------------------|-----------------------------------------------------------|
 | Language                         | Rust (mutator) + Python (test runner)                                                    | Python (everything)                                  | Python (everything)                                        |
 | Parser                           | [`ruff_python_parser`](https://github.com/astral-sh/ruff)                                | `parso`                                              | `ast` (stdlib)                                            |
-| Type-aware filter                | :material-check:{ .yes } [`ty`](https://github.com/astral-sh/ty) pre-filter, on by default, in-process | :material-check:{ .yes } optional `mypy` pre-check (opt-in; pays mypy startup cost on each invocation, so typically off in CI loops) | :material-close:{ .no }                                                          |
+| Type-aware filter                | :material-check:{ .yes } [`ty`](https://github.com/astral-sh/ty) pre-filter, on by default, in-process | :material-check:{ .yes } optional `type_check_command` (opt-in; mypy, pyright, pyrefly or ty run as a subprocess over its trampolined `mutants/` tree, errors mapped back to mutated functions) | :material-close:{ .no }                                                          |
 | Operator catalogue (stable)      | 30                                                                                       | ~17 (mutmut's "default")                             | ~20 (configurable; cosmic-ray ships several "subjects")    |
 | Inline ignore markers            | :material-check:{ .yes } `# fermut: ignore[op-name]`                                                            | :material-check:{ .yes } `# pragma: no mutate`                              | :material-close:{ .no } (use config exclusions)                                  |
 | Docstring auto-skip              | :material-check:{ .yes }                                                                                        | :material-check:{ .yes }                                                    | depends on subject                                         |
 | Diff-only mode                   | :material-check:{ .yes } `--diff-only main`                                                                     | partial (`mutmut run path`)                          | partial (manual filtering)                                 |
-| Coverage-based test selection    | :material-check:{ .yes } reads coverage.py's `.coverage` SQLite directly (auto-discovered at project root; per-test contexts via `--cov-context=test`) | :material-close:{ .no }                                                    | :material-close:{ .no }                                                          |
+| Coverage-based test selection    | :material-check:{ .yes } reads coverage.py's `.coverage` SQLite directly (auto-discovered at project root; per-test contexts via `--cov-context=test`) | :material-check:{ .yes } per mutated **function**: a stats run records which tests reach each function; opt-in `mutate_only_covered_lines` skips uncovered lines | :material-close:{ .no }                                                          |
 | Hypothesis seed pinning          | :material-check:{ .yes } `--hypothesis-seed`                                                                    | :material-close:{ .no }                                                    | :material-close:{ .no }                                                          |
 | Result cache                     | :material-check:{ .yes } `(mutant.id, ast_hash(file), scope)` keyed (AST-structural: code edits re-run the file; byte-offset ids mean even comment edits re-run mutants below them)        | :material-check:{ .yes } keyed on source-line hash                          | :material-check:{ .yes } (database-backed)                                       |
 | Distributed execution            | :material-check:{ .yes } `--shard i/n` (zero-coordination, GHA matrix)                                          | :material-close:{ .no }                                                    | :material-check:{ .yes } celery / sql worker pool                                  |
@@ -161,11 +161,14 @@ Mixed but competitive. fermut is faster on **typer** at a similar
 score, and out-scores mutmut on **pyjwt** at similar speed. The two tie
 on time on **more-itertools**, where mutmut scores higher. mutmut wins
 on **markupsafe** — a tiny suite where the full-suite-per-mutant cost is
-already cheap and fermut's ty + coverage overhead doesn't pay off. The coverage filter (run
-only the tests crossing each mutated line) is the lever: uncovered-line
-mutants are *skipped*, not counted as survivors, which both cuts
-wall-clock and lifts the score. Coverage is used whenever a `.coverage` DB with per-test contexts is at the project root (or `--coverage` points at one);
-mutmut has no equivalent. Scores across tools are **not directly
+already cheap and fermut's ty + coverage overhead doesn't pay off. Both tools run only
+the tests that reach a mutant, at different granularity: mutmut per
+mutated *function* (from its stats run), fermut per mutated *line* (from
+coverage.py's per-test contexts), and fermut skips uncovered-line mutants
+by default instead of counting them as survivors (mutmut's
+`mutate_only_covered_lines` is opt-in). fermut's selection is used
+whenever a `.coverage` DB with per-test contexts is at the project root
+(or `--coverage` points at one). Scores across tools are **not directly
 comparable**.
 
 fermut's per-mutant cache answers an unchanged re-run without running
@@ -187,10 +190,10 @@ Migrators on other codebases can still confirm locally:
 `fermut migrate {mutmut,cosmic-ray}` translates the config, then diff the two
 tools' survivor lists (the `benchmarks/parity/` harness automates exactly this).
 
-mutmut runs above use the default invocation (no mypy pre-check)
-for an apples-to-apples comparison — the mypy pre-check is opt-in
-and not how most mutmut users invoke it. fermut's ty filter is on
-by default and runs in-process.
+mutmut runs above use the default invocation (no `type_check_command`,
+no `mutate_only_covered_lines`) — both are opt-in and not how most mutmut
+users invoke it. fermut's ty filter is on by default and checks each
+mutant in-process.
 
 Across 9 benchmarked libraries the ty filter dropped 28–39% of
 covered mutants before they cost a pytest run

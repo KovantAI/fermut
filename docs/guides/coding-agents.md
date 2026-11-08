@@ -321,7 +321,8 @@ repo is expected — it isn't skipping the check.
 `fermut mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)
 server over stdio, so an agent calls fermut as native tools
 (`fermut_doctor`, `fermut_baseline`, `fermut_run`, `fermut_next`,
-`fermut_explain`, `fermut_score`, `fermut_list_survivors`) instead of
+`fermut_explain`, `fermut_score`, `fermut_list_survivors`,
+`fermut_coverage`) instead of
 shelling out and parsing JSON. See the
 **[`fermut mcp` reference](../reference/cli/mcp.md)** for the tool list
 and error model.

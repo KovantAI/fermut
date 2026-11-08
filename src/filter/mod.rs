@@ -164,18 +164,7 @@ pub(crate) fn run_filter_with_timeout(mut cmd: Command) -> Result<Option<Output>
     // Own process group so the kill reaches any children the tool spawned.
     with_new_process_group(&mut cmd);
 
-    // ETXTBSY: a freshly written tool script can still be held open for write
-    // by a sibling thread's fork-before-exec child; it clears in milliseconds.
-    let mut tries = 0;
-    let mut child = loop {
-        match cmd.spawn() {
-            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 10 => {
-                tries += 1;
-                std::thread::sleep(Duration::from_millis(10 * tries));
-            }
-            r => break r.context("spawning filter subprocess")?,
-        }
-    };
+    let mut child = retry_etxtbsy(|| cmd.spawn()).context("spawning filter subprocess")?;
     match child
         .wait_timeout(FILTER_SUBPROCESS_TIMEOUT)
         .context("waiting on filter subprocess")?
@@ -193,6 +182,22 @@ pub(crate) fn run_filter_with_timeout(mut cmd: Command) -> Result<Option<Output>
             kill_group(&mut child);
             let _ = child.wait();
             Ok(None)
+        }
+    }
+}
+
+/// Retry `spawn` on ETXTBSY: a freshly written tool script can still be held
+/// open for write by a sibling thread's fork-before-exec child; it clears in
+/// milliseconds. Gives up after 10 retries.
+fn retry_etxtbsy<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut tries = 0u32;
+    loop {
+        match spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 10 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            r => return r,
         }
     }
 }
@@ -630,6 +635,49 @@ mod filter_timeout_tests {
             "non-timeout exit must yield Some, not a bypass"
         );
         assert!(!out.unwrap().status.success());
+    }
+
+    fn busy() -> std::io::Error {
+        std::io::ErrorKind::ExecutableFileBusy.into()
+    }
+
+    #[test]
+    fn etxtbsy_retries_until_success() {
+        let mut calls = 0;
+        let r = retry_etxtbsy(|| {
+            calls += 1;
+            if calls < 4 {
+                Err(busy())
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(r.unwrap(), 4);
+    }
+
+    #[test]
+    fn etxtbsy_gives_up_after_ten_retries() {
+        let mut calls = 0;
+        let r: std::io::Result<()> = retry_etxtbsy(|| {
+            calls += 1;
+            Err(busy())
+        });
+        assert_eq!(
+            r.unwrap_err().kind(),
+            std::io::ErrorKind::ExecutableFileBusy
+        );
+        assert_eq!(calls, 11, "one attempt plus ten retries");
+    }
+
+    #[test]
+    fn other_spawn_errors_are_not_retried() {
+        let mut calls = 0;
+        let r: std::io::Result<()> = retry_etxtbsy(|| {
+            calls += 1;
+            Err(std::io::ErrorKind::NotFound.into())
+        });
+        assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(calls, 1);
     }
 }
 

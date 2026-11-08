@@ -164,7 +164,18 @@ pub(crate) fn run_filter_with_timeout(mut cmd: Command) -> Result<Option<Output>
     // Own process group so the kill reaches any children the tool spawned.
     with_new_process_group(&mut cmd);
 
-    let mut child = cmd.spawn().context("spawning filter subprocess")?;
+    // ETXTBSY: a freshly written tool script can still be held open for write
+    // by a sibling thread's fork-before-exec child; it clears in milliseconds.
+    let mut tries = 0;
+    let mut child = loop {
+        match cmd.spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 10 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(10 * tries));
+            }
+            r => break r.context("spawning filter subprocess")?,
+        }
+    };
     match child
         .wait_timeout(FILTER_SUBPROCESS_TIMEOUT)
         .context("waiting on filter subprocess")?

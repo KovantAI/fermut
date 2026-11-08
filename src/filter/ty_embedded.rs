@@ -668,7 +668,10 @@ mod tests {
             .insert(file.clone(), "y = 2\n".into());
 
         assert_eq!(sys.read_to_string(&file).unwrap(), "y = 2\n");
-        assert_eq!(sys.canonicalize_path(&file).unwrap(), file);
+        assert_eq!(
+            sys.canonicalize_path(&file).unwrap(),
+            sys.inner.canonicalize_path(&file).unwrap()
+        );
         assert!(sys.is_same_file(&file, &file).unwrap());
         assert!(sys.read_to_notebook(&root.join("missing.ipynb")).is_err());
         let virt = SystemVirtualPath::new("untitled:1");

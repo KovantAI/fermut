@@ -95,7 +95,8 @@ mod tests {
     fn write_kill_sets(dir: &std::path::Path) -> PathBuf {
         let src = dir.join("a.py");
         std::fs::write(&src, "x = 1\n").unwrap();
-        let s = src.display();
+        // JSON-escape Windows backslashes.
+        let s = src.display().to_string().replace('\\', "\\\\");
         let ks = dir.join("ks.jsonl");
         std::fs::write(
             &ks,

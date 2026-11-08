@@ -1730,7 +1730,9 @@ mod tests {
             absolutize(rel.clone()),
             std::env::current_dir().unwrap().join(rel)
         );
-        assert_eq!(absolutize(PathBuf::from("/abs/p")), PathBuf::from("/abs/p"));
+        // `/abs/p` is drive-relative on Windows, so anchor on a real absolute path.
+        let abs = std::env::temp_dir().join("abs/p");
+        assert_eq!(absolutize(abs.clone()), abs);
     }
 
     #[test]

@@ -18,6 +18,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 - `fermut migrate mutmut` translates mutmut 3's `do_not_mutate` to
   `exclude` and `do_not_mutate_patterns` to `ignore_patterns`, and flags
   `only_mutate` for manual review.
+- `run` always writes `.fermut/last.json`, and `show`, `next`, `explain`,
+  `suggest` and `autofix` read it when no report path is given.
+  `fermut results` is an alias for `show`, so `mutmut results` /
+  `mutmut show <id>` map to `fermut results` / `fermut show <id>`.
 - MCP `fermut_coverage` tool: builds or incrementally refreshes `.coverage`,
   like `fermut coverage`, and reports a failed pytest as a tool error.
 - MCP `fermut_run` and `fermut_score` take a `history_path` argument.

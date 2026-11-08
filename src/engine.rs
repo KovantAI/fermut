@@ -2864,12 +2864,345 @@ mod tests {
         assert_eq!(sample_for_audit(hits(7), 1.0).len(), 7);
     }
 
+    // ---- audits, persist, file analysis -----------------------------------
+
+    /// Runner whose `audit` verdict is chosen by mutant id (`none`, `err`,
+    /// `kill`, anything else survives); a full `run` always survives.
+    struct AuditByIdRunner {
+        runs: AtomicUsize,
+        records: Vec<crate::kill_order::KillRecord>,
+    }
+
+    impl AuditByIdRunner {
+        fn new() -> Self {
+            Self {
+                runs: AtomicUsize::new(0),
+                records: Vec::new(),
+            }
+        }
+    }
+
+    impl Runner for AuditByIdRunner {
+        fn run(&self, m: &Arc<Mutant>) -> Result<MutantOutcome> {
+            self.runs.fetch_add(1, Ordering::Relaxed);
+            Ok(MutantOutcome::survived(m.clone()))
+        }
+        fn baseline(&self) -> Result<runner::BaselineStatus> {
+            unreachable!()
+        }
+        fn audit(&self, m: &Arc<Mutant>, _killer: &str) -> Result<Option<MutantOutcome>> {
+            match m.id.as_str() {
+                "none" => Ok(None),
+                "err" => anyhow::bail!("audit blew up"),
+                "kill" => Ok(Some(MutantOutcome::killed(m.clone()))),
+                _ => Ok(Some(MutantOutcome::survived(m.clone()))),
+            }
+        }
+        fn take_kill_records(&self) -> Vec<crate::kill_order::KillRecord> {
+            self.records.clone()
+        }
+    }
+
+    /// One mutant per audit verdict, each "killed" by `TEST_A`, plus the
+    /// matching killer hits.
+    fn audit_fixture() -> (Vec<Arc<Mutant>>, Vec<MutantOutcome>, Vec<KillerHit>) {
+        let mutants: Vec<Arc<Mutant>> = ["none", "err", "kill", "survive"]
+            .iter()
+            .map(|id| {
+                let mut m = arith_mutant("x + 0", "+", "-");
+                m.id = (*id).into();
+                Arc::new(m)
+            })
+            .collect();
+        let outcomes = mutants
+            .iter()
+            .map(|m| MutantOutcome::killed_by(m.clone(), Some(TEST_A.into())))
+            .collect();
+        let hits = mutants
+            .iter()
+            .map(|m| KillerHit {
+                mutant: m.clone(),
+                killer: TEST_A.into(),
+            })
+            .collect();
+        (mutants, outcomes, hits)
+    }
+
+    /// Build an `EvalCtx` over empty cache/hash state and hand it to `f`.
+    fn with_ctx<R>(
+        cfg: &Config,
+        runner: &dyn Runner,
+        deadline: Option<Instant>,
+        hits: Vec<KillerHit>,
+        f: impl FnOnce(&EvalCtx) -> R,
+    ) -> R {
+        let cache = Mutex::new(Cache::default());
+        let killer_hits = Mutex::new(hits);
+        let stats = CacheStats::default();
+        let empty_hashes = HashMap::new();
+        let empty_maps = HashMap::new();
+        let empty_sources = HashMap::new();
+        let tree = TestTree::default();
+        let ctx = EvalCtx {
+            cfg,
+            filters: &[],
+            runner,
+            cache: &cache,
+            file_hashes: &empty_hashes,
+            scope_maps: &empty_maps,
+            scope_prefix: "",
+            test_tree: &tree,
+            equiv: None,
+            file_sources: &empty_sources,
+            deadline,
+            stats: &stats,
+            killer_hits: &killer_hits,
+        };
+        f(&ctx)
+    }
+
+    fn is_killed(o: &MutantOutcome) -> bool {
+        matches!(o, MutantOutcome::Killed { .. })
+    }
+
+    #[test]
+    fn audit_inferred_reruns_kills_that_do_not_reproduce() {
+        let cfg = Config {
+            inferred_audit_rate: 1.0,
+            ..base_test_config()
+        };
+        let runner = AuditByIdRunner::new();
+        let (mutants, mut outcomes, hits) = audit_fixture();
+        let failed = with_ctx(&cfg, &runner, None, Vec::new(), |ctx| {
+            audit_inferred(&cfg, ctx, &mutants, &mut outcomes, hits).unwrap()
+        });
+        // An erroring audit and a surviving one both fail; a runner that
+        // can't audit (`None`) and a reproduced kill don't.
+        assert_eq!(failed, 2);
+        assert_eq!(runner.runs.load(Ordering::Relaxed), 2, "failures re-run");
+        let killed: Vec<bool> = outcomes.iter().map(is_killed).collect();
+        assert_eq!(killed, [true, false, true, false]);
+    }
+
+    #[test]
+    fn audit_inferred_is_skipped_past_the_deadline() {
+        let cfg = Config {
+            inferred_audit_rate: 1.0,
+            ..base_test_config()
+        };
+        let runner = AuditByIdRunner::new();
+        let (mutants, mut outcomes, hits) = audit_fixture();
+        let past = Instant::now() - Duration::from_secs(1);
+        let failed = with_ctx(&cfg, &runner, Some(past), Vec::new(), |ctx| {
+            audit_inferred(&cfg, ctx, &mutants, &mut outcomes, hits).unwrap()
+        });
+        assert_eq!(failed, 0);
+        assert_eq!(runner.runs.load(Ordering::Relaxed), 0);
+        assert!(outcomes.iter().all(is_killed));
+    }
+
+    #[test]
+    fn audit_killer_hits_counts_errors_as_disagreements_and_skips_unauditable() {
+        let cfg = Config {
+            cache_audit_rate: 1.0,
+            ..base_test_config()
+        };
+        let runner = AuditByIdRunner::new();
+        let (mutants, mut outcomes, hits) = audit_fixture();
+        let (audited, dropped) = with_ctx(&cfg, &runner, None, hits, |ctx| {
+            audit_killer_hits(&cfg, ctx, &mutants, &mut outcomes).unwrap();
+            (
+                ctx.stats.audited.load(Ordering::Relaxed),
+                ctx.stats.dropped.load(Ordering::Relaxed),
+            )
+        });
+        assert_eq!(audited, 3, "`None` is not an audit");
+        assert_eq!(dropped, 2, "error + survivor");
+        let killed: Vec<bool> = outcomes.iter().map(is_killed).collect();
+        assert_eq!(killed, [true, false, true, false]);
+    }
+
+    #[test]
+    fn audit_killer_hits_is_skipped_past_the_deadline() {
+        let cfg = Config {
+            cache_audit_rate: 1.0,
+            ..base_test_config()
+        };
+        let runner = AuditByIdRunner::new();
+        let (mutants, mut outcomes, hits) = audit_fixture();
+        let past = Instant::now() - Duration::from_secs(1);
+        let audited = with_ctx(&cfg, &runner, Some(past), hits, |ctx| {
+            audit_killer_hits(&cfg, ctx, &mutants, &mut outcomes).unwrap();
+            ctx.stats.audited.load(Ordering::Relaxed)
+        });
+        assert_eq!(audited, 0);
+        assert_eq!(runner.runs.load(Ordering::Relaxed), 0);
+        assert!(outcomes.iter().all(is_killed));
+    }
+
+    #[test]
+    fn erroring_filter_admits_the_mutant() {
+        struct Broken;
+        impl Filter for Broken {
+            fn name(&self) -> &'static str {
+                "broken"
+            }
+            fn admits(&self, _m: &Mutant) -> Result<bool> {
+                anyhow::bail!("filter crashed")
+            }
+        }
+        let cfg = base_test_config();
+        let filters: Vec<Box<dyn Filter>> = vec![Box::new(Broken)];
+        let m = Arc::new(arith_mutant("x + 0", "+", "-"));
+        with_ctx(&cfg, &KillRunner, None, Vec::new(), |ctx| {
+            let ctx = EvalCtx {
+                filters: &filters,
+                ..*ctx
+            };
+            assert!(precheck(&ctx, &m).is_none(), "an erroring filter admits");
+            assert!(is_killed(&evaluate(&ctx, &m)));
+        });
+    }
+
+    /// Bookkeeping IO failures (cache, kill-order, kill-sets, history,
+    /// dominator store) warn but never sink the run: `persist` still returns
+    /// the report and the history entry.
+    #[test]
+    fn persist_survives_every_bookkeeping_write_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("not-a-dir");
+        std::fs::write(&blocker, "").unwrap();
+        let bad = |name: &str| blocker.join(name);
+        let garbage = tmp.path().join("dominators.json");
+        std::fs::write(&garbage, "{not json").unwrap();
+        let cfg = Config {
+            source_root: tmp.path().to_path_buf(),
+            cache: true,
+            cache_path: bad("cache.json"),
+            smart_order: true,
+            kill_order_path: bad("kill-order.json"),
+            record_kill_sets: Some(bad("kill-sets.jsonl")),
+            history: true,
+            history_path: bad("history.jsonl"),
+            dominators_path: garbage,
+            max_time_secs: Some(1),
+            ..base_test_config()
+        };
+        let runner = AuditByIdRunner {
+            records: vec![crate::kill_order::KillRecord {
+                file: "t.py".into(),
+                operator: "arith".into(),
+                nodeid: TEST_A.into(),
+            }],
+            ..AuditByIdRunner::new()
+        };
+        let m = Arc::new(arith_mutant("x + 0", "+", "-"));
+        let outcomes = vec![
+            MutantOutcome::killed(m.clone()),
+            MutantOutcome::skipped(m, TIME_BUDGET_FILTER),
+        ];
+        let (report, entry) = persist(
+            &cfg,
+            Instant::now(),
+            &runner,
+            &Mutex::new(Cache::default()),
+            &CacheStats::default(),
+            Some(Instant::now()),
+            outcomes,
+        );
+        assert_eq!(report.outcomes.len(), 2);
+        assert_eq!(report.dominator_score, None, "broken store is ignored");
+        assert!(entry.is_some(), "entry flows back despite the append error");
+        assert!(!bad("history.jsonl").exists());
+    }
+
+    #[test]
+    fn analyze_unique_files_degrades_per_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let at = |name: &str, body: &[u8]| {
+            let p = tmp.path().join(name);
+            std::fs::write(&p, body).unwrap();
+            let mut m = arith_mutant("x + 0", "+", "-");
+            m.file = p;
+            Arc::new(m)
+        };
+        let good = at("good.py", b"x + 0\n");
+        let broken = at("broken.py", b"def (:\n");
+        let binary = at("binary.py", b"\xff\xfe x + 0\n");
+        let mut missing = arith_mutant("x + 0", "+", "-");
+        missing.file = tmp.path().join("missing.py");
+        let missing = Arc::new(missing);
+        let all = [
+            good.clone(),
+            broken.clone(),
+            binary.clone(),
+            missing.clone(),
+        ];
+        let a = analyze_unique_files(&all, true, true);
+
+        assert!(!a.hashes.contains_key(&missing.file), "unreadable: no hash");
+        for m in [&good, &broken, &binary] {
+            assert!(a.hashes.contains_key(&m.file), "{}", m.file.display());
+        }
+        assert!(a.scope_maps.contains_key(&good.file));
+        assert!(!a.scope_maps.contains_key(&broken.file), "unparseable");
+        assert!(a.sources.contains_key(&broken.file));
+        assert!(!a.sources.contains_key(&binary.file), "not utf-8");
+
+        // Scope mode keys the cache on the enclosing scope when a map exists,
+        // and falls back to the file hash when it doesn't.
+        let cfg = Config {
+            cache_scope: CacheScope::Scope,
+            ..base_test_config()
+        };
+        let scoped = mutant_identity_hash(&cfg, &good, &a.hashes, &a.scope_maps);
+        assert_eq!(
+            scoped,
+            Some(a.scope_maps[&good.file].scope_hash_for(good.range))
+        );
+        assert_eq!(
+            mutant_identity_hash(&cfg, &broken, &a.hashes, &a.scope_maps),
+            a.hashes.get(&broken.file).cloned()
+        );
+    }
+
+    #[test]
+    fn hypothesis_seed_is_part_of_the_scope_prefix() {
+        let seeded = |s| Config {
+            hypothesis_seed: s,
+            ..base_test_config()
+        };
+        let none = compute_scope_prefix(&seeded(None));
+        let one = compute_scope_prefix(&seeded(Some(1)));
+        assert_ne!(none, one);
+        assert_ne!(one, compute_scope_prefix(&seeded(Some(2))));
+        assert_eq!(one, compute_scope_prefix(&seeded(Some(1))));
+    }
+
+    #[test]
+    fn red_baseline_mentions_private_home_only_when_on() {
+        let ms = vec![Arc::new(arith_mutant("return x + 0", "+", "-"))];
+        let msg = |private_home| {
+            let cfg = Config {
+                verify_baseline: true,
+                private_home,
+                ..base_test_config()
+            };
+            preflight_baseline(&cfg, &RedBaselineRunner, &ms)
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(msg(true).contains("--no-private-home"));
+        assert!(!msg(false).contains("--no-private-home"));
+    }
+
     // ---- audit / persist error paths ---------------------------------------
 
     /// Runner whose `run` survives and whose `audit` always errors.
     struct ErrAuditRunner {
         runs: AtomicUsize,
     }
+
     impl Runner for ErrAuditRunner {
         fn run(&self, m: &Arc<Mutant>) -> Result<MutantOutcome> {
             self.runs.fetch_add(1, Ordering::Relaxed);
@@ -3027,29 +3360,10 @@ mod tests {
         assert!(matches!(outs[0], MutantOutcome::Killed { .. }));
     }
 
-    #[test]
-    fn erroring_filter_admits_the_mutant() {
-        struct Boom;
-        impl Filter for Boom {
-            fn name(&self) -> &'static str {
-                "boom"
-            }
-            fn admits(&self, _m: &Mutant) -> Result<bool> {
-                anyhow::bail!("filter exploded")
-            }
-        }
-        let cfg = base_test_config();
-        let filters: Vec<Box<dyn Filter>> = vec![Box::new(Boom)];
-        let m = Arc::new(arith_mutant("return x + 0", "+", "-"));
-        let out = with_bare_ctx(&cfg, &KillRunner, &filters, None, vec![], |ctx| {
-            evaluate(ctx, &m)
-        });
-        assert!(matches!(out, MutantOutcome::Killed { .. }), "{out:?}");
-    }
-
     /// Runner that hands back one kill record and one kill-set, so `persist`
     /// has something to write.
     struct RecordingRunner;
+
     impl Runner for RecordingRunner {
         fn run(&self, _m: &Arc<Mutant>) -> Result<MutantOutcome> {
             unreachable!()

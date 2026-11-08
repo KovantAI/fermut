@@ -237,11 +237,15 @@ For everything else, see the
 ## 3. Inspect survivors
 
 ```sh
-fermut show baseline.json            # list survivors (default)
-fermut show baseline.json --all      # list every outcome
-fermut show baseline.json 42         # detail view for outcome #42
-fermut show baseline.json my-mutant  # match by substring of mutant id
+fermut show                          # list survivors of the last run (default)
+fermut show --all                    # list every outcome
+fermut show 42                       # detail view for outcome #42
+fermut show my-mutant                # match by substring of mutant id
+fermut show baseline.json 42         # read a saved --json report instead
 ```
+
+Every `run` writes `.fermut/last.json`; `show` (alias `results`), `next`,
+`explain`, `suggest` and `autofix` read it when no report is given.
 
 Each mutant has a stable identifier called its
 [`mutant.id`](../concepts/glossary.md#mutant-id) — it follows the grammar

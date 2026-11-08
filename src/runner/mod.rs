@@ -1629,31 +1629,109 @@ mod tests {
         assert_eq!(f_of_1_2(), Some(0), "restored original runs from its .pyc");
     }
 
-    /// Only the two required methods: everything else is the trait default.
-    struct Minimal;
-    impl super::Runner for Minimal {
-        fn run(&self, m: &std::sync::Arc<Mutant>) -> anyhow::Result<crate::report::MutantOutcome> {
-            Ok(crate::report::MutantOutcome::killed(m.clone()))
-        }
-        fn baseline(&self) -> anyhow::Result<super::BaselineStatus> {
-            Ok(super::BaselineStatus::Passed {
-                wall: std::time::Duration::ZERO,
-            })
-        }
-    }
-
+    /// The trait defaults are what test doubles and the unittest runner get:
+    /// no deselection, no learned kills or kill-sets, no single-test audit.
     #[test]
     fn runner_trait_defaults_are_inert() {
-        use super::Runner;
-        let mut r = Minimal;
+        use super::{BaselineStatus, Runner};
+        use crate::report::MutantOutcome;
+        struct Bare;
+        impl Runner for Bare {
+            fn run(&self, m: &std::sync::Arc<Mutant>) -> anyhow::Result<MutantOutcome> {
+                Ok(MutantOutcome::killed(m.clone()))
+            }
+            fn baseline(&self) -> anyhow::Result<BaselineStatus> {
+                Ok(BaselineStatus::Passed {
+                    wall: std::time::Duration::ZERO,
+                })
+            }
+        }
+        let mut r = Bare;
         let m = std::sync::Arc::new(make_mutant("a.py".into(), 0, 1, "y"));
         r.prepare(std::slice::from_ref(&m)).unwrap();
         r.set_timeout(std::time::Duration::from_secs(1));
-        r.set_memory_cap(1);
-        assert!(r.baseline_deselection().is_none());
+        r.set_memory_cap(1 << 20);
+        assert_eq!(r.baseline_deselection(), None);
         assert!(r.take_kill_records().is_empty());
         assert!(r.take_kill_sets().is_empty());
-        assert!(r.audit(&m, "t::k").unwrap().is_none(), "can't audit");
+        assert!(r.audit(&m, "tests/test_a.py::test_a").unwrap().is_none());
+    }
+
+    #[test]
+    fn mirror_without_project_marker_roots_at_the_tests_parent() {
+        // No pyproject.toml/setup.cfg anywhere up the temp path: the tests
+        // dir's parent is the project.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(root.join("app.py"), "x = 1\n").unwrap();
+        if super::find_project_root(&root).is_some() {
+            return; // a marker above the temp dir; nothing to test here
+        }
+        let mirror = Mirror::build(&root.join("tests"), IsolationMode::Copy).unwrap();
+        assert_eq!(fs::read(mirror.root.join("app.py")).unwrap(), b"x = 1\n");
+        assert!(mirror.tests.ends_with("tests"));
+    }
+
+    #[test]
+    fn time_mirror_build_builds_and_drops_the_mirror() {
+        let (_tmp, _root, tests, _src) = fake_project();
+        let elapsed = super::time_mirror_build(&tests, IsolationMode::Copy).unwrap();
+        assert!(elapsed > std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn patch_guard_restore_failure_does_not_panic() {
+        // The mirror file's directory is gone: both restore attempts fail and
+        // drop only logs (a panic in drop during unwinding would abort).
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("gone/app.py");
+        drop(PatchGuard {
+            path: path.clone(),
+            original: Some(b"x = 1\n".to_vec()),
+        });
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn precompile_is_best_effort() {
+        let (_tmp, root, _tests, _src) = fake_project();
+        // An interpreter that exits non-zero, and one that can't be spawned.
+        super::precompile(&root, std::path::Path::new("false"));
+        super::precompile(&root, &root.join("no-such-python"));
+        assert!(!root.join("__pycache__").exists());
+    }
+
+    #[test]
+    fn clone_file_error_names_both_paths_and_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("missing.py");
+        let dst = tmp.path().join("out.py");
+        for mode in [IsolationMode::Copy, IsolationMode::Hardlink] {
+            let err = super::clone_file(&src, &dst, mode).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(msg.contains("missing.py -> "), "{msg}");
+            assert!(msg.contains(&format!("(mode={mode})")), "{msg}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn baseline_spawn_failure_other_than_not_found_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("not-executable");
+        fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
+        let err = super::run_baseline_with_timeout(
+            std::process::Command::new(&script),
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("spawning baseline test process"),
+            "{err}"
+        );
     }
 
     #[test]

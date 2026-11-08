@@ -162,6 +162,7 @@ pub fn run(opts: RunOpts) -> Result<()> {
     let cfg = build_config(path, cfg_args)?;
     let want_annotations = annotate || std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true");
     let fmt = format.into();
+    let last_report = crate::cli::last_report_path(&cfg.source_root);
     // The closure receives the *prior* history (entries that
     // existed before this run started) so the markdown trend
     // block plots "this run vs every earlier run" without
@@ -173,6 +174,12 @@ pub fn run(opts: RunOpts) -> Result<()> {
         report.print(fmt);
         if want_annotations {
             report.print_github_annotations();
+        }
+        // Always kept, so `show` / `next` / `explain` work without `--json`
+        // (the `mutmut results` workflow). Best-effort: a read-only tree
+        // mustn't fail the run.
+        if let Err(e) = report.write_json(&last_report) {
+            tracing::warn!("could not write {}: {e:#}", last_report.display());
         }
         if let Some(p) = &sinks.json {
             report.write_json(p)?;
@@ -433,6 +440,149 @@ mod tests {
         assert!(!note.contains("and the gate fails"));
     }
 
+    fn hist_entry(ts: &str, sha: Option<&str>, score: f64) -> HistoryEntry {
+        let mut e: HistoryEntry = serde_json::from_value(serde_json::json!({
+            "timestamp": ts, "mutation_score": score, "killed": 1,
+            "survived": 0, "timed_out": 0, "skipped": 0, "errored": 0
+        }))
+        .unwrap();
+        e.git_sha = sha.map(str::to_string);
+        e
+    }
+
+    #[test]
+    fn same_run_requires_timestamp_sha_and_exact_score() {
+        let a = hist_entry("t1", Some("abc"), 80.0);
+        assert!(same_run(&a, &a.clone()));
+        assert!(!same_run(&a, &hist_entry("t2", Some("abc"), 80.0)));
+        assert!(!same_run(&a, &hist_entry("t1", Some("def"), 80.0)));
+        assert!(!same_run(&a, &hist_entry("t1", None, 80.0)));
+        assert!(!same_run(&a, &hist_entry("t1", Some("abc"), 80.000_001)));
+    }
+
+    #[test]
+    fn load_prior_excluding_strips_only_a_matching_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("history.jsonl");
+        let older = hist_entry("t1", None, 70.0);
+        let current = hist_entry("t2", None, 80.0);
+        crate::history::append(&p, &older).unwrap();
+        // Append failed: the tail is an earlier run and stays in the window.
+        let prior = load_prior_excluding(&p, &current);
+        assert_eq!(prior.len(), 1);
+        assert_eq!(prior[0].timestamp, "t1");
+        // Append succeeded: the tail is this run and is dropped.
+        crate::history::append(&p, &current).unwrap();
+        let prior = load_prior_excluding(&p, &current);
+        assert_eq!(prior.len(), 1);
+        assert_eq!(prior[0].timestamp, "t1");
+        // Missing history file → empty window, not an error.
+        assert!(load_prior_excluding(&tmp.path().join("nope.jsonl"), &current).is_empty());
+    }
+
+    /// Absolute path of a `python3` on PATH with pytest importable; tests
+    /// needing a real suite skip without it (same gate as the MCP tests).
+    fn python_with_pytest() -> Option<PathBuf> {
+        let out = std::process::Command::new("python3")
+            .args(["-c", "import sys, pytest; print(sys.executable)"])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+    }
+
+    fn run_opts(root: &Path, py: &Path, no_history: bool) -> RunOpts {
+        RunOpts {
+            path: root.to_path_buf(),
+            cfg_args: RunConfigArgs {
+                tests: Some(root.join("tests")),
+                jobs: Some(1),
+                timeout: Some(30),
+                python: Some(py.to_path_buf()),
+                history_path: Some(root.join("history.jsonl")),
+                no_history,
+                ..Default::default()
+            },
+            annotate: true,
+            watch: false,
+            format: Format::Json,
+            sinks: ReportSinks {
+                json: Some(root.join("out/r.json")),
+                junit: Some(root.join("out/r.xml")),
+                html: Some(root.join("out/r.html")),
+                markdown: Some(root.join("out/r.md")),
+            },
+            trend: true,
+            trend_branch: Some("main".into()),
+            fail_on_regression: Some(0.0),
+            // Keeps the regression gate from calling process::exit in-test.
+            no_fail: true,
+        }
+    }
+
+    #[test]
+    fn run_writes_every_sink_and_evaluates_regression_gate() {
+        let Some(py) = python_with_pytest() else {
+            eprintln!("skipping: python3 with pytest not available");
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("fermut.toml"), "").unwrap();
+        // `adult` is tested; `double` is not, so the run has survivors and a
+        // score below 100.
+        std::fs::write(
+            root.join("calc.py"),
+            "def adult(x):\n    return x >= 18\n\ndef double(x):\n    return x * 2\n",
+        )
+        .unwrap();
+        std::fs::create_dir(root.join("tests")).unwrap();
+        std::fs::write(
+            root.join("tests/test_calc.py"),
+            "from calc import adult\n\ndef test_adult():\n    assert adult(18)\n    assert not adult(17)\n",
+        )
+        .unwrap();
+
+        run(run_opts(root, &py, false)).unwrap();
+        for f in ["r.json", "r.xml", "r.html", "r.md"] {
+            assert!(root.join("out").join(f).is_file(), "{f} written");
+        }
+        let report = crate::report::load(&root.join("out/r.json")).unwrap();
+        assert!(report.counts().survived > 0, "double() survivors expected");
+        let hist = root.join("history.jsonl");
+        let first = crate::history::load(&hist).unwrap();
+        assert_eq!(first.len(), 1);
+
+        // Rewrite the anchor as a perfect run so the second run regresses
+        // against it; `--no-fail` keeps the tripped gate from exiting.
+        let mut perfect = first[0].clone();
+        perfect.mutation_score = 100.0;
+        perfect.timestamp = "2000-01-01T00:00:00Z".into();
+        std::fs::write(
+            &hist,
+            format!("{}\n", serde_json::to_string(&perfect).unwrap()),
+        )
+        .unwrap();
+        // Plain markdown (no trend block) on this run.
+        let mut opts = run_opts(root, &py, false);
+        opts.trend = false;
+        opts.trend_branch = None;
+        run(opts).unwrap();
+        let after = crate::history::load(&hist).unwrap();
+        assert_eq!(after.len(), 2);
+        assert!(crate::history::regression_against(&after[..1], &after[1]).unwrap() > 0.0);
+
+        // --no-history: the regression gate can't evaluate and nothing is
+        // appended.
+        // Trend block over all branches this time.
+        let mut opts = run_opts(root, &py, true);
+        opts.trend_branch = None;
+        run(opts).unwrap();
+        assert_eq!(crate::history::load(&hist).unwrap().len(), 2);
+    }
+
     fn entry(ts: &str, score: f64) -> HistoryEntry {
         let mut e = HistoryEntry::from_report(
             &Report::new(vec![crate::report::MutantOutcome::killed(
@@ -475,91 +625,5 @@ mod tests {
         let prior = load_prior_excluding(&path, &current);
         assert_eq!(prior.len(), 1);
         assert_eq!(prior[0].timestamp, "t1");
-    }
-
-    /// Tiny pytest project: `add` is fully pinned, `big`'s `>` boundary is not,
-    /// so every run leaves a survivor (score < 100).
-    fn pytest_project() -> tempfile::TempDir {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"calc\"\n").unwrap();
-        std::fs::create_dir(root.join(".git")).unwrap();
-        std::fs::create_dir(root.join("src")).unwrap();
-        std::fs::create_dir(root.join("tests")).unwrap();
-        std::fs::write(
-            root.join("fermut.toml"),
-            "source_root = \"src\"\ntests = \"tests\"\nty_filter = false\njobs = 1\n\
-             ops = [\"arith-op-swap\", \"boundary-shift\"]\n",
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("src/calc.py"),
-            "def add(a, b):\n    return a + b\n\n\ndef big(x):\n    return x > 10\n",
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("tests/test_calc.py"),
-            "import calc\n\n\ndef test_add():\n    assert calc.add(2, 3) == 5\n\n\n\
-             def test_big():\n    assert calc.big(20)\n",
-        )
-        .unwrap();
-        tmp
-    }
-
-    fn opts(root: &Path, cfg_args: RunConfigArgs) -> RunOpts {
-        RunOpts {
-            path: root.join("src"),
-            cfg_args,
-            annotate: true,
-            watch: false,
-            format: Format::Json,
-            sinks: ReportSinks {
-                json: Some(root.join("out.json")),
-                junit: Some(root.join("out.xml")),
-                html: Some(root.join("out.html")),
-                markdown: Some(root.join("out.md")),
-            },
-            trend: true,
-            trend_branch: None,
-            fail_on_regression: Some(1.0),
-            // Survivors would otherwise `process::exit(1)` the test binary.
-            no_fail: true,
-        }
-    }
-
-    #[test]
-    #[ignore = "requires pytest on PATH"]
-    fn run_writes_every_sink_and_evaluates_regression_gate() {
-        let tmp = pytest_project();
-        let root = tmp.path();
-        let history = root.join(".fermut/history.jsonl");
-
-        run(opts(root, RunConfigArgs::default())).unwrap();
-        for f in ["out.json", "out.xml", "out.html", "out.md"] {
-            assert!(root.join(f).is_file(), "{f} not written");
-        }
-        let first = crate::history::load(&history).unwrap();
-        assert_eq!(first.len(), 1);
-        assert!(first[0].mutation_score < 100.0, "fixture leaves a survivor");
-
-        // Inflate the prior run's score so the next run reads as a regression;
-        // the trend block now has a prior entry to plot against.
-        let mut seeded = first[0].clone();
-        seeded.mutation_score = 100.0;
-        std::fs::remove_file(&history).unwrap();
-        crate::history::append(&history, &seeded).unwrap();
-        let mut o = opts(root, RunConfigArgs::default());
-        o.trend_branch = Some("main".into());
-        run(o).unwrap();
-        assert_eq!(crate::history::load(&history).unwrap().len(), 2);
-
-        // --fail-on-regression with history off: warned, still exits Ok under
-        // --no-fail, and nothing is appended.
-        let hist_off = RunConfigArgs {
-            no_history: true,
-            ..Default::default()
-        };
-        run(opts(root, hist_off)).unwrap();
-        assert_eq!(crate::history::load(&history).unwrap().len(), 2);
     }
 }

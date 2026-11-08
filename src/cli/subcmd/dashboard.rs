@@ -868,6 +868,116 @@ mod tests {
         let html = render_dashboard(&entries, 10, None, Path::new("/tmp/h.jsonl"));
         assert!(!html.contains("class='streak"));
     }
+
+    #[test]
+    fn dashboard_limit_windows_flat_delta_down_streak_and_git_variants() {
+        // Four regressing runs (90 → 80 → 70 → 70) with limit 3: the oldest is
+        // cut from the window but still counted in the header total.
+        let mut es: Vec<HistoryEntry> = [90.0, 80.0, 75.0, 75.0]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| entry(&format!("2026-01-0{}T00:00:00Z", i + 1), *s, Some(&["a"])))
+            .collect();
+        es[1].git_sha = Some("abc123".into()); // sha only
+        es[2].git_branch = Some("dev".into()); // branch only
+        es[3].git_branch = Some("main".into());
+        es[3].git_sha = Some("def456".into());
+        es[3].duration_ms = Some(2500);
+        let html = render_dashboard(&es, 3, None, Path::new("/tmp/h.jsonl"));
+        assert!(html.contains("4 total entries"));
+        assert!(html.contains("History (last 3)"));
+        assert!(!html.contains("2026-01-01T00"), "oldest run windowed out");
+        // 75 → 75 is a flat delta pill.
+        assert!(html.contains("class='delta flat'>+0.0 pts"));
+        assert!(html.contains("· 2.5s"));
+        assert!(html.contains("main@def456"));
+        assert!(html.contains("<td class='git'>abc123</td>"));
+        assert!(html.contains("<td class='git'>dev</td>"));
+
+        // Strictly regressing → down delta pill + regressing streak chip.
+        let down: Vec<HistoryEntry> = [90.0, 80.0, 70.0]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| entry(&format!("2026-02-0{}T00:00:00Z", i + 1), *s, Some(&["a"])))
+            .collect();
+        let html = render_dashboard(&down, 10, None, Path::new("/tmp/h.jsonl"));
+        assert!(html.contains("class='delta down'>-10.0 pts"));
+        assert!(html.contains("class='streak down'"));
+        assert!(html.contains("regressing 2 runs"));
+    }
+
+    #[test]
+    fn dashboard_summary_git_variants_and_chronic_age() {
+        // A survivor present in five consecutive runs is badged chronic.
+        let mut es: Vec<HistoryEntry> = (1..=5)
+            .map(|i| entry(&format!("2026-01-0{i}T00:00:00Z"), 80.0, Some(&["x"])))
+            .collect();
+        es[4].git_sha = Some("abc123".into());
+        let html = render_dashboard(&es, 10, None, Path::new("/tmp/h.jsonl"));
+        assert!(html.contains("<span class='age chronic'>age 5</span>"));
+        assert!(html.contains("<span class='aux'>· abc123</span>"));
+        es[4].git_sha = None;
+        es[4].git_branch = Some("main".into());
+        let html = render_dashboard(&es, 10, None, Path::new("/tmp/h.jsonl"));
+        assert!(html.contains("<span class='aux'>· main</span>"));
+    }
+
+    #[test]
+    fn dashboard_attaches_report_diff_to_matching_survivor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("m.py");
+        std::fs::write(&src, "x = a + b\n").unwrap();
+        let id = "m.py@1:arith-op-swap:+->-";
+        let report_json = serde_json::json!({"outcomes": [{
+            "status": "survived",
+            "mutant": {"id": id, "file": src, "operator": "arith-op-swap",
+                       "range": [6, 7], "original": "+", "replacement": "-", "line": 1}
+        }]});
+        let report_path = tmp.path().join("report.json");
+        std::fs::write(&report_path, report_json.to_string()).unwrap();
+        let hist = tmp.path().join("history.jsonl");
+        history::append(
+            &hist,
+            &entry("2026-01-01T00:00:00Z", 50.0, Some(&[id, "other"])),
+        )
+        .unwrap();
+        let out = tmp.path().join("dash.html");
+        dashboard(DashboardArgs {
+            path: tmp.path().to_path_buf(),
+            history_path: Some(hist),
+            output: out.clone(),
+            report: Some(report_path),
+            limit: 10,
+            open: false,
+        })
+        .unwrap();
+        let html = std::fs::read_to_string(&out).unwrap();
+        // Matched survivor: header with operator + original → replacement, and
+        // an inline unified diff of the mutated line.
+        assert!(html.contains("arith-op-swap"));
+        assert!(html.contains("<code>+</code> → <code>-</code>"));
+        assert!(html.contains("<details class='diff'>"));
+        assert!(html.contains("+x = a - b"));
+        // Unmatched survivor falls back to the "pass --report" hint.
+        assert!(html.contains("<code>other</code>"));
+    }
+
+    #[test]
+    fn dashboard_errors_on_unreadable_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hist = tmp.path().join("history.jsonl");
+        history::append(&hist, &entry("2026-01-01T00:00:00Z", 50.0, Some(&[]))).unwrap();
+        let err = dashboard(DashboardArgs {
+            path: tmp.path().to_path_buf(),
+            history_path: Some(hist),
+            output: tmp.path().join("dash.html"),
+            report: Some(tmp.path().join("missing.json")),
+            limit: 10,
+            open: false,
+        });
+        assert!(err.is_err());
+        assert!(!tmp.path().join("dash.html").exists());
+    }
 }
 
 #[derive(clap::Args, Debug)]

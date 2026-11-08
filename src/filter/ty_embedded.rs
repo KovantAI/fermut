@@ -646,4 +646,64 @@ mod tests {
             "overlay verdict must match on-disk verdict for identical content"
         );
     }
+
+    #[test]
+    fn directory_path_counts_zero_errors() {
+        // A directory canonicalizes fine but is not a project file:
+        // count_errors must log and return 0 rather than erroring.
+        let tmp = fixture_project("x: int = 1\n");
+        let checker = EmbeddedTyChecker::new(tmp.path()).unwrap();
+        assert_eq!(checker.error_count(&tmp.path().join("src")).unwrap(), 0);
+    }
+
+    #[test]
+    fn overlay_system_delegates_to_disk_and_serves_overlays() {
+        let tmp = fixture_project("x = 1\n");
+        let root = canonical_system_path(tmp.path()).unwrap();
+        let file = root.join("src/mod.py");
+        let overlays: OverlayHandle = Arc::new(Mutex::new(OverlayState::default()));
+        let mut sys = OverlaySystem {
+            inner: OsSystem::new(&root),
+            overlays: Arc::clone(&overlays),
+        };
+
+        // No overlay: pure pass-through.
+        assert_eq!(sys.read_to_string(&file).unwrap(), "x = 1\n");
+        assert!(sys.path_exists(&file));
+        assert!(!sys.path_exists(&root.join("nope.py")));
+        assert!(sys.is_same_file(&file, &file).unwrap());
+        assert_eq!(sys.canonicalize_path(&file).unwrap(), file);
+        assert_eq!(sys.current_directory(), root.as_path());
+        assert!(sys.read_to_notebook(&file).is_err());
+        let virt = SystemVirtualPath::new("untitled:1");
+        assert!(sys.read_virtual_path_to_string(virt).is_err());
+        assert!(sys.read_virtual_path_to_notebook(virt).is_err());
+        let names: Vec<String> = sys
+            .read_directory(&root.join("src"))
+            .unwrap()
+            .map(|e| e.unwrap().path().file_name().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"mod.py".to_string()));
+        let _ = sys.walk_directory(&root);
+        let _ = sys.user_config_directory();
+        let _ = sys.cache_dir();
+        let _ = sys.which("definitely-not-a-binary-xyz");
+        assert!(sys.env_var("FERMUT_DEFINITELY_UNSET_VAR_XYZ").is_err());
+        assert!(sys.as_writable().is_some());
+        assert!(sys.as_any().downcast_ref::<OverlaySystem>().is_some());
+        assert!(sys.as_any_mut().downcast_mut::<OverlaySystem>().is_some());
+        let cloned = sys.dyn_clone();
+        assert_eq!(cloned.read_to_string(&file).unwrap(), "x = 1\n");
+
+        // Overlay installed: content and fabricated revision win.
+        {
+            let mut st = overlays.lock().unwrap();
+            st.content.insert(file.clone(), "y = 2\n".into());
+            st.bump(&file);
+        }
+        assert_eq!(sys.read_to_string(&file).unwrap(), "y = 2\n");
+        let meta = sys.path_metadata(&file).unwrap();
+        assert_eq!(meta.revision(), FileRevision::from(1u128));
+        assert_eq!(meta.file_type(), FileType::File);
+    }
 }

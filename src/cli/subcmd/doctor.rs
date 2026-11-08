@@ -1194,6 +1194,30 @@ mod tests {
         assert_eq!(c.status, Status::Fail);
         assert!(c.detail.contains("context` table"), "got: {}", c.detail);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_coverage_file_fails_when_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join(".coverage");
+        std::fs::write(&p, "x").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&p).is_ok() {
+            return; // running as root: permissions don't bite.
+        }
+        let c = check_coverage_file(tmp.path(), Path::new(".coverage"));
+        assert_eq!(c.status, Status::Fail);
+        assert!(c.detail.contains(".coverage"), "got: {}", c.detail);
+    }
+
+    #[test]
+    fn project_uses_hypothesis_detects_lockfile_mention() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!project_uses_hypothesis(tmp.path()));
+        std::fs::write(tmp.path().join("uv.lock"), "name = \"hypothesis\"\n").unwrap();
+        assert!(project_uses_hypothesis(tmp.path()));
+    }
 }
 
 #[derive(clap::Args, Debug)]

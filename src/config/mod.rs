@@ -333,3 +333,21 @@ impl Config {
             .unwrap_or_else(|| self.source_root.join("tests"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_names_match_cli_spellings() {
+        assert_eq!(CacheScope::File.to_string(), "file");
+        assert_eq!(CacheScope::Scope.to_string(), "scope");
+        assert_eq!(RunnerKind::Pytest.to_string(), "pytest");
+        assert_eq!(RunnerKind::Rstest.to_string(), "rstest");
+        assert_eq!(RunnerKind::Unittest.to_string(), "unittest");
+        assert_eq!(IsolationMode::Auto.to_string(), "auto");
+        assert_eq!(IsolationMode::Copy.to_string(), "copy");
+        assert_eq!(IsolationMode::Hardlink.to_string(), "hardlink");
+        assert_eq!(IsolationMode::Reflink.to_string(), "reflink");
+    }
+}

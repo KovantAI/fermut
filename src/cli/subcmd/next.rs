@@ -455,6 +455,77 @@ mod tests {
     use ruff_text_size::TextRange;
     use std::path::PathBuf;
 
+    fn write_report(outcomes: Vec<MutantOutcome>) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("last.json");
+        Report::new(outcomes).write_json(&path).unwrap();
+        (dir, path)
+    }
+
+    fn next_opts(report: PathBuf, max_tokens: Option<usize>, format: Format) -> NextOpts {
+        NextOpts {
+            report,
+            limit: None,
+            max_tokens,
+            format,
+        }
+    }
+
+    #[test]
+    fn next_rejects_max_tokens_with_human_format() {
+        let err = next(next_opts("unused.json".into(), Some(10), Format::Human))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("--max-tokens applies to JSON output only"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn next_human_renders_ranked_survivors_and_empty_report() {
+        let a = mutant("a.py", 0, Operator::CompareOpSwap, 1);
+        let mut sib = mutant("a.py", 10, Operator::CompareOpSwap, 2);
+        sib.id = "sib".into();
+        let b = mutant("b.py", 0, Operator::ArithOpSwap, 1);
+        let mut outcomes = vec![
+            MutantOutcome::survived(a),
+            MutantOutcome::survived(sib),
+            MutantOutcome::survived(b),
+            MutantOutcome::killed(mutant("c.py", 0, Operator::ArithOpSwap, 1)),
+        ];
+        // A `<` site where `>` subsumes `>=`.
+        outcomes.extend(
+            site_survivors("if a < b:\n    pass\n", &[">", ">="])
+                .into_iter()
+                .map(MutantOutcome::survived),
+        );
+        let (_d, path) = write_report(outcomes);
+        // No coverage skip in the report → the "no coverage selection" note.
+        let report = crate::report::load(&path).unwrap();
+        let (shown, total) = rank_report(&report, None, None);
+        assert_eq!(total, 3);
+        assert!(!shown[0].coverage_selected);
+        assert!(shown.iter().any(|e| !e.sibling_ids.is_empty()));
+        assert!(shown.iter().any(|e| !e.subsumed_ids.is_empty()));
+        next(next_opts(path, None, Format::Human)).unwrap();
+
+        let (_d, empty) = write_report(vec![]);
+        next(next_opts(empty, None, Format::Human)).unwrap();
+    }
+
+    #[test]
+    fn next_max_tokens_reports_omitted_clusters() {
+        let (_d, path) = write_report(vec![
+            MutantOutcome::survived(mutant("a.py", 0, Operator::CompareOpSwap, 1)),
+            MutantOutcome::survived(mutant("b.py", 0, Operator::ArithOpSwap, 1)),
+        ]);
+        let report = crate::report::load(&path).unwrap();
+        let (shown, total) = rank_report(&report, None, Some(1));
+        assert_eq!((shown.len(), total), (1, 2));
+        next(next_opts(path, Some(1), Format::Json)).unwrap();
+    }
+
     fn mutant(file: &str, offset: u32, op: Operator, line: u32) -> Mutant {
         Mutant {
             id: format!("{file}@{offset}:{}:x->y", op.name()),

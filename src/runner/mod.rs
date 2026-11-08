@@ -1628,4 +1628,84 @@ mod tests {
         }
         assert_eq!(f_of_1_2(), Some(0), "restored original runs from its .pyc");
     }
+
+    /// Only the two required methods: everything else is the trait default.
+    struct Minimal;
+    impl super::Runner for Minimal {
+        fn run(&self, m: &std::sync::Arc<Mutant>) -> anyhow::Result<crate::report::MutantOutcome> {
+            Ok(crate::report::MutantOutcome::killed(m.clone()))
+        }
+        fn baseline(&self) -> anyhow::Result<super::BaselineStatus> {
+            Ok(super::BaselineStatus::Passed {
+                wall: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    #[test]
+    fn runner_trait_defaults_are_inert() {
+        use super::Runner;
+        let mut r = Minimal;
+        let m = std::sync::Arc::new(make_mutant("a.py".into(), 0, 1, "y"));
+        r.prepare(std::slice::from_ref(&m)).unwrap();
+        r.set_timeout(std::time::Duration::from_secs(1));
+        r.set_memory_cap(1);
+        assert!(r.baseline_deselection().is_none());
+        assert!(r.take_kill_records().is_empty());
+        assert!(r.take_kill_sets().is_empty());
+        assert!(r.audit(&m, "t::k").unwrap().is_none(), "can't audit");
+    }
+
+    #[test]
+    fn mirror_without_project_root_uses_the_tests_parent() {
+        // No pyproject.toml/setup.cfg anywhere above: the tests dir's parent
+        // is the project root.
+        let tmp = tempfile::tempdir().unwrap();
+        let tests = tmp.path().join("tests");
+        fs::create_dir_all(&tests).unwrap();
+        fs::write(tmp.path().join("app.py"), "x = 1\n").unwrap();
+        if super::find_project_root(&tests).is_some() {
+            return; // a pyproject.toml above the temp dir; can't test here
+        }
+        let mirror = Mirror::build(&tests, IsolationMode::Copy).unwrap();
+        assert!(mirror.root.join("app.py").is_file());
+        assert!(super::time_mirror_build(&tests, IsolationMode::Copy).is_ok());
+    }
+
+    #[test]
+    fn patch_guard_without_original_and_with_unwritable_path_does_not_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gone = tmp.path().join("missing-dir").join("a.py");
+        // Nothing to restore.
+        drop(PatchGuard {
+            path: gone.clone(),
+            original: None,
+        });
+        // Both restore attempts fail (parent dir missing): logged, not raised.
+        drop(PatchGuard {
+            path: gone.clone(),
+            original: Some(b"x = 1\n".to_vec()),
+        });
+        assert!(!gone.exists());
+    }
+
+    #[test]
+    fn precompile_failure_is_best_effort() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `false` runs but exits non-zero: only costs the speedup.
+        super::precompile(tmp.path(), std::path::Path::new("false"));
+        assert!(!tmp.path().join("__pycache__").exists());
+    }
+
+    #[test]
+    fn copy_dir_all_reports_a_file_it_cannot_materialize() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        fs::write(src.path().join("a.py"), "x = 1\n").unwrap();
+        // A directory squatting on the target path makes the copy fail while
+        // the source still exists: that's a real error, not a mid-walk delete.
+        fs::create_dir_all(dst.path().join("a.py")).unwrap();
+        let err = copy_dir_all(src.path(), dst.path(), IsolationMode::Copy).unwrap_err();
+        assert!(format!("{err:#}").contains("materializing"), "{err:#}");
+    }
 }

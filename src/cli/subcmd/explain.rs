@@ -1310,6 +1310,204 @@ mod tests {
         assert_eq!(ctx.mutant_line, 3);
         assert_eq!(ctx.lines, vec!["b".to_string(), "c".into(), "d".into()]);
     }
+
+    fn opts_for(report: PathBuf, target: &str, root: &Path, format: Format) -> ExplainOpts {
+        ExplainOpts {
+            report,
+            target: target.into(),
+            context_lines: 1,
+            tests: None,
+            coverage: None,
+            llm: false,
+            model: None,
+            no_cache: false,
+            cache_path: None,
+            project_root: root.to_path_buf(),
+            format,
+        }
+    }
+
+    #[test]
+    fn explain_surfaces_skip_filter_and_error_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("calc.py");
+        std::fs::write(&src, "def f(x):\n    return x >= 1\n").unwrap();
+        let mut skipped = make_mutant(src.clone(), 2);
+        skipped.id = "skipped".into();
+        let mut errored = make_mutant(src.clone(), 2);
+        errored.id = "errored".into();
+        let report_path = tmp.path().join("last.json");
+        Report::new(vec![
+            MutantOutcome::skipped(skipped, "ty"),
+            MutantOutcome::error(errored, "boom".into()),
+        ])
+        .write_json(&report_path)
+        .unwrap();
+        // An explicit (missing) coverage file is reported, not dropped.
+        let mut o = opts_for(report_path.clone(), "skipped", tmp.path(), Format::Human);
+        o.coverage = Some(tmp.path().join("missing.coverage"));
+        let r = build_explain_report(&o).unwrap();
+        assert_eq!(r.filter.as_deref(), Some("ty"));
+        assert!(r.error.is_none());
+        assert_eq!(r.enclosing.as_ref().unwrap().name, "f");
+        assert!(r.coverage.as_ref().unwrap().error.is_some());
+        explain(o).unwrap();
+
+        let o = opts_for(report_path, "errored", tmp.path(), Format::Json);
+        let r = build_explain_report(&o).unwrap();
+        assert_eq!(r.error.as_deref(), Some("boom"));
+        assert!(r.filter.is_none());
+        explain(o).unwrap();
+    }
+
+    #[test]
+    fn coverage_signal_reports_uncovered_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("calc.py");
+        std::fs::write(&src, "x = 1\ny = 2\nz = 3\n").unwrap();
+        let db = tmp.path().join(".coverage");
+        write_cov_db(&db, &src, "tests/test_calc.py::test_f|run");
+        // Only line 2 is recorded; line 3 is not.
+        let sig = build_coverage_signal(&db, &make_mutant(src, 3)).unwrap();
+        assert!(!sig.covered);
+        assert!(sig.tests.is_empty());
+        assert!(sig.note.starts_with("no test executes"));
+    }
+
+    #[test]
+    fn call_llm_serves_a_cache_hit_without_a_client() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("calc.py");
+        std::fs::write(&src, "def f(x):\n    return x >= 1\n").unwrap();
+        let tests = tmp.path().join("tests");
+        std::fs::create_dir(&tests).unwrap();
+        std::fs::write(tests.join("test_a.py"), "def test_f():\n    f(1)\n").unwrap();
+        std::fs::write(tests.join("test_b.py"), "def test_g():\n    f(2)\n").unwrap();
+        std::fs::write(tests.join("test_c.py"), "def test_h():\n    f(3)\n").unwrap();
+        let m = make_mutant(src, 2);
+        let enc = enclosing_symbol(&m).unwrap();
+        // Rebuild the exact prompt key call_llm computes, then seed the cache.
+        let ctx = PromptContext {
+            source_snippet: render_source_snippet(&m, 1),
+            enclosing_symbol: Some(enc.name.clone()),
+            sample_tests: sample_tests_for_symbol(Some(&tests), Some(&enc.name)),
+            hint: None,
+        };
+        // At most 2 sample tests, one per file.
+        assert_eq!(ctx.sample_tests.len(), 2);
+        let req = build_explain_prompt(&m, &ctx, "model-x");
+        let key = cache_key(&m.id, &file_sha256(&m.file).unwrap(), &req.user);
+        let cache_path = tmp.path().join("llm-cache.json");
+        let mut cache = LlmCache::default();
+        cache.insert(key, "why\n```python\ndef test_k(): ...\n```\n".into());
+        cache.save(&cache_path).unwrap();
+
+        let opts = LlmCallOpts {
+            model: "model-x".into(),
+            no_cache: false,
+            cache_path,
+        };
+        let block = call_llm(&m, 1, Some(&tests), Some(&enc), &opts).unwrap();
+        assert!(block.cached);
+        assert_eq!(block.model, "model-x");
+        assert!(block.extracted_code.unwrap().contains("def test_k"));
+    }
+
+    #[test]
+    fn render_human_walks_every_optional_block() {
+        let mutant = MutantSummary {
+            id: "id".into(),
+            file: "calc.py".into(),
+            line: 2,
+            operator: "boundary".into(),
+            original: ">=".into(),
+            replacement: ">".into(),
+        };
+        let skeleton = || TestSkeleton {
+            name: "test_x".into(),
+            code: "def test_x():\n    ...\n".into(),
+        };
+        // Full report: filter, error, source, enclosing, >10 covering
+        // tests, >8 matches, cached LLM block.
+        render_human(&ExplainReport {
+            mutant,
+            status: "skipped".into(),
+            filter: Some("ty".into()),
+            error: Some("boom".into()),
+            source_context: SourceContext {
+                start_line: 1,
+                mutant_line: 2,
+                lines: vec!["def f(x):".into(), "    return x >= 1".into()],
+            },
+            enclosing: Some(EnclosingSummary {
+                kind: "def".into(),
+                name: "f".into(),
+            }),
+            hint: "h".into(),
+            coverage: Some(CoverageSignal {
+                covered: true,
+                tests: (0..12).map(|i| format!("t{i}")).collect(),
+                note: "n".into(),
+                error: None,
+            }),
+            test_matches: Some(TestMatchesSignal {
+                symbol: "f".into(),
+                matches: (0..9)
+                    .map(|i| TestMatch {
+                        file: "t.py".into(),
+                        line: i,
+                    })
+                    .collect(),
+            }),
+            skeleton: skeleton(),
+            llm: Some(LlmBlock {
+                model: "m".into(),
+                cached: true,
+                response: "r".into(),
+                extracted_code: None,
+            }),
+        });
+        // Sparse report: unreadable source, coverage load error, no matches.
+        let sparse = |coverage| ExplainReport {
+            mutant: MutantSummary {
+                id: "id".into(),
+                file: "calc.py".into(),
+                line: 2,
+                operator: "boundary".into(),
+                original: ">=".into(),
+                replacement: ">".into(),
+            },
+            status: "survived".into(),
+            filter: None,
+            error: None,
+            source_context: SourceContext {
+                start_line: 2,
+                mutant_line: 2,
+                lines: Vec::new(),
+            },
+            enclosing: None,
+            hint: "h".into(),
+            coverage: Some(coverage),
+            test_matches: Some(TestMatchesSignal {
+                symbol: "f".into(),
+                matches: Vec::new(),
+            }),
+            skeleton: skeleton(),
+            llm: None,
+        };
+        render_human(&sparse(CoverageSignal {
+            covered: false,
+            tests: Vec::new(),
+            note: "n".into(),
+            error: Some("bad db".into()),
+        }));
+        render_human(&sparse(CoverageSignal {
+            covered: false,
+            tests: Vec::new(),
+            note: "n".into(),
+            error: None,
+        }));
+    }
 }
 
 #[derive(clap::Args, Debug)]

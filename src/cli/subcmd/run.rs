@@ -432,4 +432,134 @@ mod tests {
         assert!(note.contains("exit suppressed by --no-fail"));
         assert!(!note.contains("and the gate fails"));
     }
+
+    fn entry(ts: &str, score: f64) -> HistoryEntry {
+        let mut e = HistoryEntry::from_report(
+            &Report::new(vec![crate::report::MutantOutcome::killed(
+                scoreless_mutant("k"),
+            )]),
+            Path::new("."),
+            None,
+            None,
+        );
+        e.timestamp = ts.into();
+        e.mutation_score = score;
+        e
+    }
+
+    #[test]
+    fn same_run_matches_on_timestamp_sha_and_score_bits() {
+        let a = entry("t1", 50.0);
+        assert!(same_run(&a, &a.clone()));
+        assert!(!same_run(&a, &entry("t2", 50.0)));
+        assert!(!same_run(&a, &entry("t1", 50.5)));
+        let mut other_sha = a.clone();
+        other_sha.git_sha = Some("deadbeef".into());
+        assert!(!same_run(&a, &other_sha));
+    }
+
+    #[test]
+    fn load_prior_excluding_drops_only_a_tail_equal_to_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("history.jsonl");
+        let (old, current) = (entry("t1", 80.0), entry("t2", 60.0));
+        // Missing file → empty prior, no panic.
+        assert!(load_prior_excluding(&path, &current).is_empty());
+        // Append failed: tail is an earlier run, kept.
+        crate::history::append(&path, &old).unwrap();
+        let prior = load_prior_excluding(&path, &current);
+        assert_eq!(prior.len(), 1);
+        assert_eq!(prior[0].timestamp, "t1");
+        // Append succeeded: tail is this run, stripped.
+        crate::history::append(&path, &current).unwrap();
+        let prior = load_prior_excluding(&path, &current);
+        assert_eq!(prior.len(), 1);
+        assert_eq!(prior[0].timestamp, "t1");
+    }
+
+    /// Tiny pytest project: `add` is fully pinned, `big`'s `>` boundary is not,
+    /// so every run leaves a survivor (score < 100).
+    fn pytest_project() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"calc\"\n").unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::create_dir(root.join("tests")).unwrap();
+        std::fs::write(
+            root.join("fermut.toml"),
+            "source_root = \"src\"\ntests = \"tests\"\nty_filter = false\njobs = 1\n\
+             ops = [\"arith-op-swap\", \"boundary-shift\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/calc.py"),
+            "def add(a, b):\n    return a + b\n\n\ndef big(x):\n    return x > 10\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("tests/test_calc.py"),
+            "import calc\n\n\ndef test_add():\n    assert calc.add(2, 3) == 5\n\n\n\
+             def test_big():\n    assert calc.big(20)\n",
+        )
+        .unwrap();
+        tmp
+    }
+
+    fn opts(root: &Path, cfg_args: RunConfigArgs) -> RunOpts {
+        RunOpts {
+            path: root.join("src"),
+            cfg_args,
+            annotate: true,
+            watch: false,
+            format: Format::Json,
+            sinks: ReportSinks {
+                json: Some(root.join("out.json")),
+                junit: Some(root.join("out.xml")),
+                html: Some(root.join("out.html")),
+                markdown: Some(root.join("out.md")),
+            },
+            trend: true,
+            trend_branch: None,
+            fail_on_regression: Some(1.0),
+            // Survivors would otherwise `process::exit(1)` the test binary.
+            no_fail: true,
+        }
+    }
+
+    #[test]
+    #[ignore = "requires pytest on PATH"]
+    fn run_writes_every_sink_and_evaluates_regression_gate() {
+        let tmp = pytest_project();
+        let root = tmp.path();
+        let history = root.join(".fermut/history.jsonl");
+
+        run(opts(root, RunConfigArgs::default())).unwrap();
+        for f in ["out.json", "out.xml", "out.html", "out.md"] {
+            assert!(root.join(f).is_file(), "{f} not written");
+        }
+        let first = crate::history::load(&history).unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(first[0].mutation_score < 100.0, "fixture leaves a survivor");
+
+        // Inflate the prior run's score so the next run reads as a regression;
+        // the trend block now has a prior entry to plot against.
+        let mut seeded = first[0].clone();
+        seeded.mutation_score = 100.0;
+        std::fs::remove_file(&history).unwrap();
+        crate::history::append(&history, &seeded).unwrap();
+        let mut o = opts(root, RunConfigArgs::default());
+        o.trend_branch = Some("main".into());
+        run(o).unwrap();
+        assert_eq!(crate::history::load(&history).unwrap().len(), 2);
+
+        // --fail-on-regression with history off: warned, still exits Ok under
+        // --no-fail, and nothing is appended.
+        let hist_off = RunConfigArgs {
+            no_history: true,
+            ..Default::default()
+        };
+        run(opts(root, hist_off)).unwrap();
+        assert_eq!(crate::history::load(&history).unwrap().len(), 2);
+    }
 }

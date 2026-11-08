@@ -775,6 +775,90 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_renders_down_and_flat_deltas_and_git_variants() {
+        let mut a = entry("2026-01-01T00:00:00Z", 90.0, Some(&["a"]));
+        a.git_sha = Some("abc".into());
+        let mut b = entry("2026-01-02T00:00:00Z", 80.0, Some(&["a"]));
+        b.git_branch = Some("main".into());
+        let mut c = entry("2026-01-03T00:00:00Z", 70.0, Some(&["a"]));
+        c.git_branch = Some("main".into());
+        c.git_sha = Some("def".into());
+        c.duration_ms = Some(2500);
+        let html = render_dashboard(
+            &[a.clone(), b.clone(), c],
+            10,
+            None,
+            Path::new("/tmp/h.jsonl"),
+        );
+        assert!(html.contains("class='delta down'"));
+        assert!(html.contains("regressing 2 runs"));
+        assert!(html.contains("class='streak down'"));
+        assert!(html.contains("· 2.5s"));
+        assert!(html.contains("main@def"));
+
+        // Flat delta + sha-only / branch-only summary git chip.
+        let mut flat = b.clone();
+        flat.mutation_score = 80.0;
+        flat.git_branch = None;
+        flat.git_sha = Some("only-sha".into());
+        let html = render_dashboard(&[b.clone(), flat], 10, None, Path::new("/tmp/h.jsonl"));
+        assert!(html.contains("class='delta flat'"));
+        assert!(html.contains("· only-sha</span>"));
+        let html = render_dashboard(&[a, b], 10, None, Path::new("/tmp/h.jsonl"));
+        assert!(html.contains("· main</span>"));
+    }
+
+    #[test]
+    fn dashboard_with_report_inlines_survivor_diff_and_chronic_age() {
+        use crate::mutator::{Mutant, Operator};
+        use ruff_text_size::TextRange;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("calc.py");
+        std::fs::write(&src, "x = a + b\n").unwrap();
+        let id = format!("{}@1:arith-op-swap:+->-", src.display());
+        let m = Mutant {
+            id: id.clone(),
+            file: src.clone(),
+            operator: Operator::ArithOpSwap,
+            range: TextRange::new(6u32.into(), 7u32.into()),
+            original: "+".into(),
+            replacement: "-".into(),
+            line: 1,
+            stmt_line: 1,
+            site: None,
+        };
+        let report_path = tmp.path().join("report.json");
+        Report::new(vec![MutantOutcome::survived(m)])
+            .write_json(&report_path)
+            .unwrap();
+        // Five consecutive runs with the same survivor → chronic age badge.
+        let hist = tmp.path().join("history.jsonl");
+        for day in 1..=5 {
+            let e = entry(
+                &format!("2026-01-0{day}T00:00:00Z"),
+                50.0,
+                Some(&[id.as_str()]),
+            );
+            history::append(&hist, &e).unwrap();
+        }
+        let out = tmp.path().join("dash.html");
+        dashboard(DashboardArgs {
+            path: tmp.path().to_path_buf(),
+            history_path: Some(hist),
+            output: out.clone(),
+            report: Some(report_path),
+            limit: 10,
+            open: false,
+        })
+        .unwrap();
+        let html = std::fs::read_to_string(&out).unwrap();
+        assert!(html.contains("age chronic"), "five-run survivor is chronic");
+        assert!(html.contains("<details class='diff'>"), "diff inlined");
+        assert!(html.contains("x = a - b"), "diff shows the mutated line");
+        assert!(!html.contains("Pass <code>--report"));
+    }
+
+    #[test]
     fn dashboard_streak_chip_omitted_when_no_streak() {
         // Two entries: not enough to call it a trend.
         let entries = vec![

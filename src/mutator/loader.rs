@@ -179,6 +179,32 @@ mod tests {
     }
 
     #[test]
+    fn non_utf8_encoding_declaration_skips_the_file() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        fs::write(root.join("a.py"), "x = 1 + 2\n").unwrap();
+        fs::write(root.join("b.py"), "# -*- coding: latin-1 -*-\nx = 1 + 2\n").unwrap();
+        let mutants = collect_from_tree(root, &[], &[]).unwrap();
+        assert!(!mutants.is_empty());
+        assert!(mutants.iter().all(|m| m.file.ends_with("a.py")));
+    }
+
+    #[test]
+    fn is_excluded_ignores_paths_outside_root() {
+        let set = build_globset(&["**".to_string()]).unwrap();
+        assert!(!is_excluded(
+            Path::new("/elsewhere/x.py"),
+            Path::new("/proj"),
+            &set
+        ));
+        assert!(is_excluded(
+            Path::new("/proj/x.py"),
+            Path::new("/proj"),
+            &set
+        ));
+    }
+
+    #[test]
     fn empty_excludes_is_noop() {
         let tmp = tempdir().unwrap();
         let root = tmp.path();

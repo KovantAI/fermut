@@ -202,6 +202,29 @@ mod tests {
     }
 
     #[test]
+    fn block_open_at_eof_runs_to_the_last_line() {
+        let m = build("if x:  # fermut: ignore-block\n    y = 1 + 2\n    z = 3\n");
+        assert!(m.is_ignored(2, Operator::ArithOpSwap));
+        assert!(m.is_ignored(3, Operator::NumberShift));
+    }
+
+    #[test]
+    fn line_ignore_inside_a_range_stays_ignore_all() {
+        let m = build(
+            "# fermut: ignore-start\nx = 1 + 2  # fermut: ignore\n# fermut: ignore-end\ny = 1\n",
+        );
+        assert!(m.is_ignored(2, Operator::ArithOpSwap));
+        assert!(!m.is_ignored(4, Operator::NumberShift));
+    }
+
+    #[test]
+    fn blank_names_in_op_list_are_skipped() {
+        let m = build("x = 1 + 2  # fermut: ignore[arith-op-swap, ]\n");
+        assert!(m.is_ignored(1, Operator::ArithOpSwap));
+        assert!(!m.is_ignored(1, Operator::NumberShift));
+    }
+
+    #[test]
     fn ignore_all_marker_marks_line() {
         let m = build("x = 1 + 2  # fermut: ignore\n");
         assert!(m.is_ignored(1, Operator::ArithOpSwap));

@@ -414,6 +414,107 @@ mod tests {
     }
 
     #[test]
+    fn every_grade_has_a_distinct_blurb() {
+        let all = [
+            Grade::Strong,
+            Grade::Ok,
+            Grade::Weak,
+            Grade::Smoke,
+            Grade::Na,
+        ];
+        let blurbs: std::collections::BTreeSet<_> = all.iter().map(|g| g.blurb()).collect();
+        assert_eq!(blurbs.len(), all.len());
+        assert!(Grade::Na.blurb().contains("nothing scored"));
+        assert!(Grade::Smoke.blurb().contains("smoke"));
+    }
+
+    fn sample_report(grade: Grade, line_coverage: Option<f64>, sampled: bool) -> BaselineReport {
+        BaselineReport {
+            line_coverage,
+            mutation_score: 54.0,
+            scored: 10,
+            quality_gap: 46.0,
+            untested_risk: line_coverage.map(|lc| 100.0 - lc),
+            grade,
+            killed: 5,
+            survived: 5,
+            sampled,
+            sample_fraction: if sampled { 0.1 } else { 1.0 },
+            worst_files: vec![FileSurvivors {
+                file: "a.py".into(),
+                survivors: 5,
+            }],
+        }
+    }
+
+    #[test]
+    fn print_human_handles_graded_and_na_reports() {
+        // Smoke-test both branches of the printer (graded with coverage +
+        // sample note, and N/A without coverage) — neither may panic.
+        print_human(&sample_report(Grade::Weak, Some(80.0), true));
+        print_human(&sample_report(Grade::Na, None, false));
+    }
+
+    #[test]
+    fn report_json_omits_absent_line_coverage() {
+        let v = serde_json::to_value(sample_report(Grade::Na, None, false)).unwrap();
+        assert_eq!(v["grade"], "na");
+        assert!(v.get("line_coverage").is_none());
+        assert!(v.get("untested_risk").is_none());
+        let v = serde_json::to_value(sample_report(Grade::Ok, Some(75.0), true)).unwrap();
+        assert_eq!(v["line_coverage"], 75.0);
+        assert_eq!(v["untested_risk"], 25.0);
+    }
+
+    #[cfg(unix)]
+    fn fake_interp(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("py");
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_line_coverage_parses_total_and_degrades_on_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ok = fake_interp(tmp.path(), "echo ' 87 '");
+        assert_eq!(read_line_coverage(&ok, tmp.path()), Some(87.0));
+        let bad = fake_interp(tmp.path(), "exit 1");
+        assert_eq!(read_line_coverage(&bad, tmp.path()), None);
+        let junk = fake_interp(tmp.path(), "echo nope");
+        assert_eq!(read_line_coverage(&junk, tmp.path()), None);
+        assert_eq!(
+            read_line_coverage(&tmp.path().join("missing"), tmp.path()),
+            None
+        );
+    }
+
+    #[test]
+    fn baseline_refuses_an_unhealthy_environment() {
+        // A configured tests dir that doesn't exist fails `doctor`, so
+        // baseline must bail before measuring anything.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        std::fs::write(
+            tmp.path().join("fermut.toml"),
+            "tests = \"missing_tests\"\n",
+        )
+        .unwrap();
+        let err = baseline(BaselineArgs {
+            path: tmp.path().to_path_buf(),
+            full: false,
+            sample: None,
+            top: 3,
+            format: Format::Json,
+            filter: Default::default(),
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("environment not ready"), "{err}");
+    }
+
+    #[test]
     fn round1_rounds_to_one_decimal() {
         assert!((round1(28.04) - 28.0).abs() < f64::EPSILON);
         assert!((round1(28.05) - 28.1).abs() < f64::EPSILON);

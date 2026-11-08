@@ -348,6 +348,26 @@ mod tests {
     }
 
     #[test]
+    fn config_hash_feeds_hypothesis_seed_and_order_insensitive_ignore_patterns() {
+        let base = config_hash(&cfg());
+        let seeded = config_hash(&Config {
+            hypothesis_seed: Some(7),
+            ..cfg()
+        });
+        assert_ne!(base, seeded);
+        let ab = config_hash(&Config {
+            ignore_patterns: vec!["a".into(), "b".into()],
+            ..cfg()
+        });
+        let ba = config_hash(&Config {
+            ignore_patterns: vec!["b".into(), "a".into()],
+            ..cfg()
+        });
+        assert_ne!(base, ab);
+        assert_eq!(ab, ba, "pattern order must not split history");
+    }
+
+    #[test]
     fn config_hash_distinguishes_scope_sample_exclude_parity() {
         let base = config_hash(&cfg());
 

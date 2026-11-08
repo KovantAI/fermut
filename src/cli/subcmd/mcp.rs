@@ -928,4 +928,90 @@ mod tests {
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("no history"), "got: {text}");
     }
+
+    fn call_tool(name: &str, args: Value) -> (bool, String) {
+        let r = tools_call(&json!({"name": name, "arguments": args})).unwrap();
+        (
+            r["isError"].as_bool().unwrap(),
+            r["content"][0]["text"].as_str().unwrap().to_string(),
+        )
+    }
+
+    #[test]
+    fn report_and_project_paths_reject_parent_dir_components() {
+        for (tool, args) in [
+            ("fermut_next", json!({"report": "../r.json"})),
+            (
+                "fermut_explain",
+                json!({"report": "a/../r.json", "target": "1"}),
+            ),
+            ("fermut_run", json!({"path": "../proj"})),
+        ] {
+            let (is_err, text) = call_tool(tool, args);
+            assert!(is_err, "{tool}");
+            assert!(text.contains("Invalid input"), "{tool}: {text}");
+        }
+    }
+
+    #[test]
+    fn run_surfaces_config_errors_as_tool_errors() {
+        // A malformed fermut.toml fails config building before any engine work.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "not = = valid\n").unwrap();
+        let (is_err, text) = call_tool(
+            "fermut_run",
+            json!({
+                "path": tmp.path().display().to_string(),
+                "tests": "tests",
+                "coverage": ".coverage",
+                "since": "main",
+                "jobs": 2,
+                "timeout": 5,
+                "max_time": 60,
+                "python": "python3",
+            }),
+        );
+        assert!(is_err);
+        assert!(text.contains("fermut.toml"), "got: {text}");
+    }
+
+    #[test]
+    fn score_returns_the_reward_signal_from_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let history = tmp.path().join("history.jsonl");
+        let entry = |ts: &str, score: f64| crate::history::HistoryEntry {
+            schema_version: crate::history::CURRENT_SCHEMA_V,
+            timestamp: ts.into(),
+            mutation_score: score,
+            killed: 1,
+            survived: 0,
+            timed_out: 0,
+            skipped: 0,
+            errored: 0,
+            equivalent: 0,
+            total: None,
+            duration_ms: None,
+            config_hash: None,
+            fermut_version: None,
+            git_sha: None,
+            git_branch: Some("main".into()),
+            survivor_ids: Some(Vec::new()),
+            baseline: false,
+            partial: false,
+        };
+        let body = [entry("t1", 80.0), entry("t2", 90.0)]
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&history, body).unwrap();
+        let (is_err, text) = call_tool(
+            "fermut_score",
+            json!({"history_path": history.display().to_string()}),
+        );
+        assert!(!is_err, "{text}");
+        let payload: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(payload["score"], 90.0);
+        assert_eq!(payload["delta"], 10.0);
+    }
 }

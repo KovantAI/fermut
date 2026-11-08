@@ -1533,7 +1533,11 @@ mod tests {
     }
 
     fn runner(smart_order: bool, coverage: Arc<CoverageContexts>) -> PytestRunner {
-        PytestRunner::new(PytestConfig {
+        PytestRunner::new(test_config(smart_order, coverage))
+    }
+
+    fn test_config(smart_order: bool, coverage: Arc<CoverageContexts>) -> PytestConfig {
+        PytestConfig {
             tests: PathBuf::from("tests"),
             timeout: Duration::from_secs(30),
             baseline_timeout: Duration::from_secs(300),
@@ -1553,7 +1557,7 @@ mod tests {
             key_base: PathBuf::from("."),
             plugin: false,
             baseline_ids: None,
-        })
+        }
     }
 
     #[test]
@@ -2124,5 +2128,81 @@ mod tests {
         assert_ids(sel, &["t::a", "t::b", "-rfE"], true);
         let sel = select_args(Some(&sids(&["t::only"])), false, true, &ko, "f", "op");
         assert_ids(sel, &["t::only"], false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_drops_the_hypothesis_seed_only_without_hypothesis() {
+        let with = |py: &str| {
+            let cfg = PytestConfig {
+                hypothesis_seed: Some(3),
+                python: Some(PathBuf::from(py)),
+                ..test_config(false, Arc::new(CoverageContexts::default()))
+            };
+            PytestRunner::new(cfg).hypothesis_seed
+        };
+        assert_eq!(with("false"), None, "import fails: seed dropped");
+        assert_eq!(with("true"), Some(3), "importable: seed kept");
+    }
+
+    /// No coverage selection: the whole tests dir is swept; recording kill-sets
+    /// drops `-x` and adds `-rfE`; the hypothesis seed is passed through.
+    #[test]
+    fn sweep_with_recording_and_seed_builds_the_full_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(proj.join("tests")).unwrap();
+        std::fs::write(proj.join("pyproject.toml"), "").unwrap();
+        let mut r = runner(false, Arc::new(CoverageContexts::default()));
+        r.tests = proj.join("tests");
+        r.hypothesis_seed = Some(9);
+        r.record_kill_sets = true;
+        let mirror = crate::runner::build_mirror(&r.tests, IsolationMode::Copy).unwrap();
+        let mc = r
+            .build_mutant_command(&mirror, &mutant_in(&proj), "foo.py", "op", None)
+            .unwrap();
+        let args: Vec<_> = mc.cmd.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("--hypothesis-seed=9")));
+        assert!(args.contains(&std::ffi::OsStr::new("-rfE")));
+        assert!(!args.contains(&std::ffi::OsStr::new("-x")));
+        assert!(args.contains(&mirror.tests.as_os_str()));
+        assert_eq!(mc.sole, None);
+    }
+
+    /// Too many `--select-tests` ids for argv: the baseline sweeps the whole
+    /// suite instead, still with the hypothesis seed.
+    #[cfg(unix)]
+    #[test]
+    fn baseline_falls_back_to_the_suite_when_ids_overflow_argv() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().canonicalize().unwrap().join("proj");
+        std::fs::create_dir_all(proj.join("tests")).unwrap();
+        std::fs::write(proj.join("pyproject.toml"), "").unwrap();
+        let argv = tmp.path().join("argv");
+        let py = tmp.path().join("python");
+        std::fs::write(
+            &py,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > '{}'\n",
+                argv.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = runner(false, breadth_ctx(&proj));
+        r.tests = proj.join("tests");
+        r.python = Some(py);
+        r.hypothesis_seed = Some(9);
+        let id = "tests/test_x.py::test_case".to_string();
+        r.baseline_ids = Some(vec![id.clone(); ARGV_BUDGET]);
+        assert!(matches!(
+            r.baseline().unwrap(),
+            BaselineStatus::Passed { .. }
+        ));
+        let out = std::fs::read_to_string(&argv).unwrap();
+        assert!(out.lines().any(|a| a == "--hypothesis-seed=9"), "{out}");
+        assert!(!out.lines().any(|a| a == id), "ids dropped: {out}");
+        assert!(out.lines().any(|a| a.ends_with("/tests")), "{out}");
     }
 }

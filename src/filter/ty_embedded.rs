@@ -672,7 +672,12 @@ mod tests {
         assert!(sys.path_exists(&file));
         assert!(!sys.path_exists(&root.join("nope.py")));
         assert!(sys.is_same_file(&file, &file).unwrap());
-        assert_eq!(sys.canonicalize_path(&file).unwrap(), file);
+        // Compare against the inner system: on Windows std canonicalize
+        // keeps the `\\?\` prefix while ty's strips it.
+        assert_eq!(
+            sys.canonicalize_path(&file).unwrap(),
+            sys.inner.canonicalize_path(&file).unwrap()
+        );
         assert_eq!(sys.current_directory(), root.as_path());
         assert!(sys.read_to_notebook(&file).is_err());
         let virt = SystemVirtualPath::new("untitled:1");

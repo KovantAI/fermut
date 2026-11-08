@@ -190,4 +190,36 @@ mod tests {
             .admits(&mutant(Path::new("/nonexistent/x.py"), "2"))
             .is_err());
     }
+
+    /// `new` resolves `ruff` from the project's `.venv/bin` ahead of PATH.
+    #[cfg(unix)]
+    #[test]
+    fn new_resolves_ruff_from_project_venv() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("VIRTUAL_ENV").is_some() {
+            return; // an active venv would shadow the fake `.venv`
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let bin = dir.path().join(".venv/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for exe in ["python", "ruff"] {
+            std::fs::write(bin.join(exe), "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(bin.join(exe), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let f = RuffFilter::new(dir.path()).unwrap();
+        assert_eq!(f.bin, bin.join("ruff"));
+        assert!(f.costly());
+    }
+
+    #[test]
+    fn new_without_ruff_names_the_install_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        if resolve_tool("ruff", dir.path()).is_some() {
+            return; // ruff on PATH or in an active venv: nothing to miss
+        }
+        let err = RuffFilter::new(dir.path()).err().unwrap().to_string();
+        assert!(err.contains("ruff binary not found"), "{err}");
+    }
 }

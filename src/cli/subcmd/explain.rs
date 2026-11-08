@@ -78,9 +78,10 @@ impl From<(ExplainArgs, PathBuf)> for ExplainOpts {
             cache_path,
             format,
         } = a;
+        let (report, target) = crate::cli::report_and_target(report, target);
         ExplainOpts {
             report,
-            target,
+            target: target.unwrap_or_default(),
             context_lines: context,
             tests: tests_or_default(tests, &project_root),
             coverage,
@@ -895,6 +896,7 @@ pub(crate) fn locate_outcome_impl<'a>(
     outcomes: &'a [MutantOutcome],
     target: &str,
 ) -> Result<&'a MutantOutcome> {
+    anyhow::ensure!(!target.is_empty(), "missing mutant selector (index or id)");
     if let Ok(idx) = target.parse::<usize>() {
         if idx >= 1 {
             return outcomes
@@ -939,8 +941,8 @@ mod tests {
         // so the caller controls it and the mapping is deterministic — including
         // the `context` → `context_lines` rename.
         let args = ExplainArgs {
-            report: PathBuf::from("r.json"),
-            target: "3".into(),
+            report: Some(PathBuf::from("r.json")),
+            target: Some("3".into()),
             context: 7,
             tests: None,
             coverage: None,
@@ -1299,6 +1301,179 @@ mod tests {
         assert!(skel.code.contains("def test_in_range_boundary()"));
     }
 
+    fn summary_report(
+        coverage: Option<CoverageSignal>,
+        test_matches: Option<TestMatchesSignal>,
+        llm: Option<LlmBlock>,
+    ) -> ExplainReport {
+        ExplainReport {
+            mutant: MutantSummary {
+                id: "x.py@0".into(),
+                file: "x.py".into(),
+                line: 2,
+                operator: "boundary-shift".into(),
+                original: ">=".into(),
+                replacement: ">".into(),
+            },
+            status: "error".into(),
+            filter: Some("coverage".into()),
+            error: Some("boom".into()),
+            source_context: SourceContext {
+                start_line: 1,
+                mutant_line: 2,
+                lines: vec!["def f(x):".into(), "    return x >= 1".into()],
+            },
+            enclosing: Some(EnclosingSummary {
+                kind: "def".into(),
+                name: "f".into(),
+            }),
+            hint: "hint".into(),
+            coverage,
+            test_matches,
+            skeleton: TestSkeleton {
+                name: "test_f".into(),
+                code: "def test_f():\n    ...\n".into(),
+            },
+            llm,
+        }
+    }
+
+    fn signal(covered: bool, n_tests: usize, error: Option<&str>) -> CoverageSignal {
+        CoverageSignal {
+            covered,
+            tests: (0..n_tests).map(|i| format!("t{i}")).collect(),
+            note: "note".into(),
+            error: error.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn render_human_handles_every_optional_block() {
+        // Exercises each renderer branch; output goes to stdout, so the
+        // assertion is that no combination panics (e.g. on slicing/widths).
+        let many = TestMatchesSignal {
+            symbol: "f".into(),
+            matches: (0..12)
+                .map(|i| TestMatch {
+                    file: "t.py".into(),
+                    line: i,
+                })
+                .collect(),
+        };
+        let none = TestMatchesSignal {
+            symbol: "f".into(),
+            matches: Vec::new(),
+        };
+        let llm = LlmBlock {
+            model: "m".into(),
+            cached: true,
+            response: "r".into(),
+            extracted_code: None,
+        };
+        render_human(&summary_report(
+            Some(signal(true, 12, None)),
+            Some(many),
+            Some(llm),
+        ));
+        render_human(&summary_report(
+            Some(signal(false, 0, None)),
+            Some(none),
+            None,
+        ));
+        render_human(&summary_report(
+            Some(signal(false, 0, Some("bad db"))),
+            None,
+            None,
+        ));
+        let mut unreadable = summary_report(None, None, None);
+        unreadable.source_context.lines.clear();
+        unreadable.enclosing = None;
+        render_human(&unreadable);
+        render_json(&unreadable).unwrap();
+    }
+
+    fn explain_opts(
+        report: PathBuf,
+        target: &str,
+        coverage: Option<PathBuf>,
+        format: Format,
+    ) -> ExplainOpts {
+        ExplainOpts {
+            report,
+            target: target.into(),
+            context_lines: 2,
+            tests: None,
+            coverage,
+            llm: false,
+            model: None,
+            no_cache: false,
+            cache_path: None,
+            project_root: PathBuf::from("."),
+            format,
+        }
+    }
+
+    #[test]
+    fn explain_reports_skipped_filter_error_message_and_uncovered_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("calc.py");
+        std::fs::write(&src, "def f(x):\n    return x >= 1\n\nY = 3\n").unwrap();
+        let db = tmp.path().join(".coverage");
+        write_cov_db(&db, &src, "tests/test_calc.py::test_f|run");
+        let report = tmp.path().join("r.json");
+        Report::new(vec![
+            MutantOutcome::skipped(make_mutant(src.clone(), 2), "ty"),
+            MutantOutcome::error(make_mutant(src.clone(), 4), "exploded".into()),
+        ])
+        .write_json(&report)
+        .unwrap();
+
+        let skipped =
+            build_explain_report(&explain_opts(report.clone(), "1", None, Format::Json)).unwrap();
+        assert_eq!(skipped.status, "skipped");
+        assert_eq!(skipped.filter.as_deref(), Some("ty"));
+        assert!(skipped.error.is_none());
+
+        let errored = build_explain_report(&explain_opts(
+            report.clone(),
+            "2",
+            Some(db.clone()),
+            Format::Json,
+        ))
+        .unwrap();
+        assert_eq!(errored.error.as_deref(), Some("exploded"));
+        assert!(errored.filter.is_none());
+        let cov = errored.coverage.unwrap();
+        assert!(!cov.covered, "line 4 is not in the DB");
+        assert!(cov.note.contains("no test executes"), "{}", cov.note);
+
+        // Both renderers run end to end through the public entry point.
+        explain(explain_opts(report.clone(), "1", None, Format::Human)).unwrap();
+        explain(explain_opts(report.clone(), "2", None, Format::Json)).unwrap();
+        // Index past the end is a clear error, not a panic.
+        let err = locate_outcome(&crate::report::load(&report).unwrap(), "9").unwrap_err();
+        assert!(err.to_string().contains("no outcome at index 9"), "{err}");
+    }
+
+    #[test]
+    fn line_past_eof_yields_empty_context_and_no_enclosing() {
+        let path = write_tmp("past_eof.py", "def f():\n    pass\n");
+        let m = make_mutant(path, 9);
+        let ctx = build_source_context(&m, 2);
+        assert!(ctx.lines.is_empty());
+        assert!(enclosing_symbol(&m).is_none());
+    }
+
+    #[test]
+    fn enclosing_symbol_skips_headers_without_an_identifier() {
+        // `def (`, `async def (`, `class :` have no name to extract; the scan
+        // walks past them to the real enclosing def.
+        let src = "def outer():\n  def (:\n   async def (:\n    class :\n     x = 1\n";
+        let path = write_tmp("encl_noident.py", src);
+        let sym = enclosing_symbol(&make_mutant(path, 5)).expect("found outer");
+        assert_eq!(sym.name, "outer");
+    }
+
     #[test]
     fn build_source_context_marks_mutant_line() {
         let src = "a\nb\nc\nd\ne\n";
@@ -1314,12 +1489,14 @@ mod tests {
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct ExplainArgs {
-    /// Path to a JSON report produced by `fermut run --json …`.
-    pub(crate) report: std::path::PathBuf,
+    /// JSON report from `fermut run`. Defaults to `.fermut/last.json`, which
+    /// every `run` writes.
+    #[arg(required = true)]
+    pub(crate) report: Option<std::path::PathBuf>,
 
     /// Mutant selector: 1-based index into the report, or substring of
     /// mutant id (matches `fermut show`'s selector grammar).
-    pub(crate) target: String,
+    pub(crate) target: Option<String>,
 
     /// Number of source lines to show on each side of the mutant line.
     #[arg(long, default_value_t = 5)]

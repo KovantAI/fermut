@@ -1284,6 +1284,253 @@ name = "celery4"
         assert!(!paths.iter().any(|p| p == &txt));
         assert!(!paths.iter().any(|p| p.starts_with(&hidden)));
     }
+
+    fn opts(source: MigrateSource, path: &Path) -> MigrateOpts {
+        MigrateOpts {
+            source,
+            path: path.to_path_buf(),
+            config: None,
+            pyproject: false,
+            force: false,
+            dry_run: false,
+            no_pragma_rewrite: false,
+        }
+    }
+
+    #[test]
+    fn migrate_mutmut_setup_cfg_writes_fermut_toml_and_rewrites_pragmas_under_source_root() {
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join("setup.cfg"),
+            "[mutmut]\npaths_to_mutate = src/\nbackup = False\n",
+        )
+        .unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir(&src).unwrap();
+        let inside = src.join("a.py");
+        fs::write(&inside, "x = 1  # pragma: no mutate\n").unwrap();
+        // Outside source_root: must not be rewritten.
+        let outside = tmp.path().join("b.py");
+        fs::write(&outside, "y = 1  # pragma: no mutate\n").unwrap();
+
+        migrate(opts(MigrateSource::Mutmut, tmp.path())).unwrap();
+
+        let cfg = fs::read_to_string(tmp.path().join("fermut.toml")).unwrap();
+        assert!(cfg.contains("source_root = \"src/\""), "{cfg}");
+        assert!(fs::read_to_string(&inside)
+            .unwrap()
+            .contains("# fermut: ignore"));
+        assert!(fs::read_to_string(&outside)
+            .unwrap()
+            .contains("# pragma: no mutate"));
+    }
+
+    #[test]
+    fn migrate_dry_run_writes_nothing() {
+        let tmp = tempdir().unwrap();
+        let py = tmp.path().join("pyproject.toml");
+        let original = "[tool.mutmut]\nunknown_knob = 1\n";
+        fs::write(&py, original).unwrap();
+        let src = tmp.path().join("a.py");
+        fs::write(&src, "x = 1  # pragma: no mutate\n").unwrap();
+        let mut o = opts(MigrateSource::Mutmut, tmp.path());
+        o.dry_run = true;
+        o.pyproject = true;
+        migrate(o).unwrap();
+        assert_eq!(fs::read_to_string(&py).unwrap(), original);
+        assert!(fs::read_to_string(&src)
+            .unwrap()
+            .contains("# pragma: no mutate"));
+        assert!(!tmp.path().join("fermut.toml").exists());
+    }
+
+    #[test]
+    fn migrate_cosmic_ray_writes_config() {
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join("cosmic-ray.toml"),
+            "[cosmic-ray]\nmodule-path = \"src\"\ntimeout = 10\n\n[cosmic-ray.distributor]\nname = \"http\"\n",
+        )
+        .unwrap();
+        migrate(opts(MigrateSource::CosmicRay, tmp.path())).unwrap();
+        let cfg = fs::read_to_string(tmp.path().join("fermut.toml")).unwrap();
+        assert!(cfg.contains("source_root = \"src\""));
+        assert!(cfg.contains("timeout = 10"));
+    }
+
+    #[test]
+    fn migrate_errors_when_no_config_found() {
+        let tmp = tempdir().unwrap();
+        let err = migrate(opts(MigrateSource::Mutmut, tmp.path())).unwrap_err();
+        assert!(err.to_string().contains("no mutmut config"), "{err}");
+        let err = migrate(opts(MigrateSource::CosmicRay, tmp.path())).unwrap_err();
+        assert!(err.to_string().contains("no cosmic-ray.toml"), "{err}");
+    }
+
+    #[test]
+    fn find_mutmut_table_falls_through_pyproject_without_tool_mutmut_to_setup_cfg() {
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join("pyproject.toml"),
+            "[project]\nname = \"x\"\n",
+        )
+        .unwrap();
+        fs::write(tmp.path().join("setup.cfg"), "[mutmut]\ntests_dir = t\n").unwrap();
+        let (p, tbl) = find_mutmut_table(tmp.path()).unwrap();
+        assert_eq!(p, tmp.path().join("setup.cfg"));
+        assert_eq!(tbl.get("tests_dir").map(String::as_str), Some("t"));
+        // setup.cfg without a [mutmut] section → error.
+        fs::write(tmp.path().join("setup.cfg"), "[other]\nx = 1\n").unwrap();
+        assert!(find_mutmut_table(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn load_table_at_reads_tool_mutmut_flat_toml_and_ini() {
+        let tmp = tempdir().unwrap();
+        let nested = tmp.path().join("nested.toml");
+        fs::write(&nested, "[tool.mutmut]\ntests_dir = \"t\"\n").unwrap();
+        let (_, tbl) = load_table_at(&nested).unwrap();
+        assert_eq!(tbl.get("tests_dir").map(String::as_str), Some("\"t\""));
+
+        let flat = tmp.path().join("flat.toml");
+        fs::write(&flat, "tests_dir = \"t\"\n").unwrap();
+        assert!(load_table_at(&flat).unwrap().1.contains_key("tests_dir"));
+
+        let ini = tmp.path().join("setup.cfg");
+        fs::write(&ini, "[mutmut]\ntests_dir: t\n").unwrap();
+        assert_eq!(
+            load_table_at(&ini)
+                .unwrap()
+                .1
+                .get("tests_dir")
+                .map(String::as_str),
+            Some("t")
+        );
+
+        let bad = tmp.path().join("bad.cfg");
+        fs::write(&bad, "[other]\n= = =\n").unwrap();
+        assert!(load_table_at(&bad).is_err());
+        assert!(load_table_at(&tmp.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn translate_cosmic_ray_rejects_file_without_cosmic_ray_table() {
+        let tmp = tempdir().unwrap();
+        let cfg = tmp.path().join("cr.toml");
+        fs::write(&cfg, "[other]\nx = 1\n").unwrap();
+        let err = translate_cosmic_ray(tmp.path(), Some(&cfg)).unwrap_err();
+        assert!(err.to_string().contains("no [cosmic-ray] table"), "{err}");
+    }
+
+    #[test]
+    fn normalize_excludes_handles_equal_prefix_and_missing_root() {
+        let mut tx = Translation::default();
+        tx.config.exclude = vec!["src".into()];
+        normalize_excludes_against_source_root(&mut tx);
+        assert_eq!(tx.config.exclude, vec!["src"]); // no source_root: untouched
+        assert!(tx.notes.is_empty());
+
+        tx.config.source_root = Some(PathBuf::from("/"));
+        normalize_excludes_against_source_root(&mut tx);
+        assert!(tx.notes.is_empty()); // empty prefix: bail
+
+        tx.config.source_root = Some(PathBuf::from("src/"));
+        normalize_excludes_against_source_root(&mut tx);
+        assert!(tx.notes.iter().any(|n| n.contains("equals source_root")));
+    }
+
+    #[test]
+    fn cosmic_ray_misc_keys() {
+        let mut tx = Translation::default();
+        let tbl = |s: &str| -> toml::Value { toml::from_str(s).unwrap() };
+        translate_cosmic_ray_key("timeout", &toml::Value::Integer(7), &mut tx);
+        assert_eq!(tx.config.timeout, Some(7));
+        translate_cosmic_ray_key("timeout", &toml::Value::Integer(-3), &mut tx);
+        assert_eq!(tx.config.timeout, Some(0));
+        translate_cosmic_ray_key("timeout", &toml::Value::Float(1.2), &mut tx);
+        assert_eq!(tx.config.timeout, Some(2));
+
+        translate_cosmic_ray_key("distributor", &tbl("name = \"http\""), &mut tx);
+        assert!(tx.notes.last().unwrap().contains("`http`"));
+        translate_cosmic_ray_key("execution-engine", &tbl("name = \"local\""), &mut tx);
+        assert!(tx.notes.last().unwrap().contains("local"));
+        translate_cosmic_ray_key("execution-engine", &tbl("x = 1"), &mut tx);
+        assert!(tx.notes.last().unwrap().contains("(unset)"));
+
+        for (method, want) in [
+            ("symlink", "hardlink"),
+            ("hardlink", "hardlink"),
+            ("weird", "auto"),
+        ] {
+            translate_cosmic_ray_key("cloning", &tbl(&format!("method = \"{method}\"")), &mut tx);
+            assert_eq!(tx.config.isolation, Some(want));
+        }
+        translate_cosmic_ray_key("cloning", &tbl("x = 1"), &mut tx);
+        assert_eq!(tx.config.isolation, Some("copy"));
+
+        for k in ["python-version", "interceptors", "badge", "mystery"] {
+            translate_cosmic_ray_key(k, &toml::Value::Boolean(true), &mut tx);
+        }
+        let keys: Vec<&str> = tx.unmapped.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["python-version", "interceptors", "badge", "mystery"]);
+        assert!(tx.unmapped[3].1.contains("true"));
+    }
+
+    #[test]
+    fn mutmut_misc_keys() {
+        let mut tx = Translation::default();
+        translate_mutmut_key("use-coverage", "false", &mut tx);
+        assert!(tx.config.coverage.is_none());
+        for k in ["also_copy", "simple_output", "mypy", "post_mutation"] {
+            translate_mutmut_key(k, "x", &mut tx);
+        }
+        let keys: Vec<&str> = tx.unmapped.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            ["also_copy", "simple_output", "mypy", "post_mutation"]
+        );
+    }
+
+    #[test]
+    fn ini_parser_folds_continuation_lines() {
+        let text = "[mutmut]\npaths_to_mutate =\n    src/\n    lib/\n";
+        let tbl = parse_ini_section(text, "mutmut").unwrap();
+        assert_eq!(
+            tbl.get("paths_to_mutate").map(String::as_str),
+            Some(" src/ lib/")
+        );
+    }
+
+    #[test]
+    fn path_helpers_edge_cases() {
+        assert_eq!(first_path("[1, 2]"), None);
+        assert_eq!(first_path("[not toml"), None);
+        assert_eq!(first_path("\"\""), None);
+        assert_eq!(first_path("'src'"), Some(PathBuf::from("src")));
+        assert!(!extra_paths_present("[not toml"));
+        assert!(!extra_paths_present("[\"a\"]"));
+        assert!(extra_paths_present("[\"a\", \"b\"]"));
+        assert_eq!(parse_string_list("[1]"), None);
+        assert_eq!(as_bool("off"), Some(false));
+        assert_eq!(as_bool("maybe"), None);
+    }
+
+    #[test]
+    fn migrate_args_convert_to_opts() {
+        let a = MigrateArgs {
+            from: crate::cli::MigrateSourceCli::CosmicRay,
+            path: PathBuf::from("p"),
+            config: Some(PathBuf::from("c")),
+            pyproject: true,
+            force: true,
+            dry_run: true,
+            no_pragma_rewrite: true,
+        };
+        let o: MigrateOpts = a.into();
+        assert_eq!(o.source, MigrateSource::CosmicRay);
+        assert_eq!(o.config, Some(PathBuf::from("c")));
+        assert!(o.pyproject && o.force && o.dry_run && o.no_pragma_rewrite);
+    }
 }
 
 #[derive(clap::Args, Debug)]

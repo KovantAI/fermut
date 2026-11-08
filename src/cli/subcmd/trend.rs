@@ -787,6 +787,113 @@ mod tests {
 
         assert!(trend(strict_opts(p)).is_ok());
     }
+
+    fn write_history(entries: &[HistoryEntry]) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("history.jsonl");
+        for e in entries {
+            crate::history::append(&p, e).unwrap();
+        }
+        (tmp, p)
+    }
+
+    #[test]
+    fn trend_filters_by_branch_and_date_then_renders_both_formats() {
+        let (_tmp, p) = write_history(&[
+            entry("2026-01-01T00:00:00Z", 70.0, Some("main")),
+            entry("2026-01-02T00:00:00Z", 75.0, Some("dev")),
+            entry("2026-01-03T00:00:00Z", 80.0, Some("main")),
+            entry("2026-01-05T00:00:00Z", 60.0, Some("main")),
+        ]);
+        let mut opts = strict_opts(p);
+        opts.branch = Some("main".into());
+        opts.since = Some("2026-01-01".into());
+        opts.until = Some("2026-01-04".into());
+        opts.all = false;
+        opts.limit = 1;
+        // A 10-pt rise passes any non-negative regression threshold.
+        opts.fail_on_regression = Some(0.0);
+        assert!(trend(opts.clone()).is_ok());
+        opts.format = Format::Human;
+        opts.group_by = Some(TrendGroupBy::File);
+        assert!(trend(opts.clone()).is_ok());
+        // A regression smaller than the threshold does not exit.
+        opts.until = None; // includes the 80 → 60 drop
+        opts.fail_on_regression = Some(50.0);
+        assert!(trend(opts).is_ok());
+    }
+
+    #[test]
+    fn trend_with_no_matching_entries_is_ok_in_both_formats() {
+        let (_tmp, p) = write_history(&[entry("2026-01-01T00:00:00Z", 70.0, Some("main"))]);
+        let mut opts = strict_opts(p);
+        opts.branch = Some("nope".into());
+        assert!(trend(opts.clone()).is_ok());
+        opts.format = Format::Human;
+        assert!(trend(opts).is_ok());
+    }
+
+    #[test]
+    fn trend_rejects_malformed_date_bounds() {
+        let (_tmp, p) = write_history(&[entry("2026-01-01T00:00:00Z", 70.0, None)]);
+        let mut opts = strict_opts(p.clone());
+        opts.since = Some("yesterday".into());
+        assert!(trend(opts).unwrap_err().to_string().contains("--since"));
+        let mut opts = strict_opts(p);
+        opts.until = Some("tomorrow".into());
+        assert!(trend(opts).unwrap_err().to_string().contains("--until"));
+    }
+
+    #[test]
+    fn survivor_diff_expands_new_persistent_and_killed() {
+        // "old" survives all three runs (persistent, age 3), "gone" is killed
+        // in the latest run, "new" appears only in the latest run.
+        let mut a = entry("t1", 80.0, None);
+        a.survivor_ids = Some(vec!["src/a.py@1:old".into(), "src/a.py@2:gone".into()]);
+        let mut b = a.clone();
+        b.timestamp = "t2".into();
+        let mut c = entry("t3", 80.0, None);
+        c.survivor_ids = Some(vec!["src/a.py@1:old".into(), "src/b.py@1:new".into()]);
+        let entries = vec![a, b, c];
+        let ages = crate::history::survivor_age_map(&entries);
+        assert_eq!(ages.get("src/a.py@1:old").copied(), Some(3));
+        // Wiring smoke for the expanded diff + grouping paths.
+        print_survivor_diff(&entries, true);
+        print_survivor_diff(&entries, false);
+        print_grouping(&entries, TrendGroupBy::File);
+        // An identical pair has an empty diff → silent early return.
+        print_survivor_diff(&entries[..2], true);
+    }
+
+    #[test]
+    fn print_human_renders_regressing_streak_and_partial_git_cells() {
+        // Strictly falling scores → negative deltas + a "regressing" streak;
+        // git cells cover sha-only, branch+sha and no-git rows.
+        let mut es: Vec<HistoryEntry> = [90.0, 80.0, 70.0]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| entry(&format!("2026-01-0{}T00:00:00Z", i + 1), *s, None))
+            .collect();
+        es[0].git_sha = Some("abc".into());
+        es[1].git_branch = Some("main".into());
+        es[1].git_sha = Some("def".into());
+        assert!(matches!(
+            crate::history::trailing_streak(&es),
+            Some((StreakDir::Down, _))
+        ));
+        print_human(
+            &es,
+            Path::new("/tmp/h.jsonl"),
+            TrendScale::Fixed,
+            false,
+            None,
+        );
+        // Grouping is silent on an empty window or an empty survivor list.
+        print_grouping(&[], TrendGroupBy::File);
+        let mut none = entry("t", 100.0, None);
+        none.survivor_ids = Some(vec![]);
+        print_grouping(&[none], TrendGroupBy::File);
+    }
 }
 
 #[derive(clap::Args, Debug)]

@@ -164,7 +164,7 @@ pub(crate) fn run_filter_with_timeout(mut cmd: Command) -> Result<Option<Output>
     // Own process group so the kill reaches any children the tool spawned.
     with_new_process_group(&mut cmd);
 
-    let mut child = cmd.spawn().context("spawning filter subprocess")?;
+    let mut child = retry_etxtbsy(|| cmd.spawn()).context("spawning filter subprocess")?;
     match child
         .wait_timeout(FILTER_SUBPROCESS_TIMEOUT)
         .context("waiting on filter subprocess")?
@@ -182,6 +182,22 @@ pub(crate) fn run_filter_with_timeout(mut cmd: Command) -> Result<Option<Output>
             kill_group(&mut child);
             let _ = child.wait();
             Ok(None)
+        }
+    }
+}
+
+/// Retry `spawn` on ETXTBSY: a freshly written tool script can still be held
+/// open for write by a sibling thread's fork-before-exec child; it clears in
+/// milliseconds. Gives up after 10 retries.
+fn retry_etxtbsy<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut tries = 0u32;
+    loop {
+        match spawn() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 10 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            r => return r,
         }
     }
 }
@@ -512,6 +528,71 @@ mod chain_order_tests {
     }
 
     #[test]
+    fn is_subsequence_rejects_out_of_order() {
+        assert!(!is_subsequence(&["ty", "ruff"], CANONICAL_ORDER));
+    }
+
+    fn git(cwd: &std::path::Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git on PATH")
+            .status
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    /// Every filter on, including the git-, ruff- and ty-backed ones: the
+    /// chain is exactly CANONICAL_ORDER. A fake `.venv` supplies `ruff`.
+    #[cfg(unix)]
+    #[test]
+    fn full_chain_matches_canonical_order() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("VIRTUAL_ENV").is_some() {
+            return; // an active venv would shadow the fake `.venv` ruff
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.email", "t@t"]);
+        git(root, &["config", "user.name", "t"]);
+        std::fs::write(root.join("f.py"), "a = 1\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        let bin = root.join(".venv/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for exe in ["python", "ruff"] {
+            std::fs::write(bin.join(exe), "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(bin.join(exe), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        let mut cfg = empty_config();
+        cfg.source_root = root.to_path_buf();
+        cfg.ops_allow = Some(HashSet::from([Operator::ArithOpSwap]));
+        cfg.shard = Some((1, 2));
+        cfg.sample_ratio = Some(0.5);
+        cfg.diff_base = Some("main".into());
+        cfg.since = Some("HEAD".into());
+        cfg.coverage = Some(Arc::new(CoverageContexts::default()));
+        cfg.ruff_filter = true;
+        cfg.ty_filter = true;
+        cfg.jobs = Some(1);
+        cfg.tce = true;
+        assert_eq!(names(&cfg), CANONICAL_ORDER);
+    }
+
+    #[test]
+    fn diff_base_outside_git_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = empty_config();
+        cfg.source_root = tmp.path().to_path_buf();
+        cfg.diff_base = Some("main".into());
+        assert!(build_chain(&cfg).is_err());
+    }
+
+    #[test]
     fn canonical_order_has_no_duplicates() {
         let mut seen = HashSet::new();
         for name in CANONICAL_ORDER {
@@ -555,6 +636,49 @@ mod filter_timeout_tests {
         );
         assert!(!out.unwrap().status.success());
     }
+
+    fn busy() -> std::io::Error {
+        std::io::ErrorKind::ExecutableFileBusy.into()
+    }
+
+    #[test]
+    fn etxtbsy_retries_until_success() {
+        let mut calls = 0;
+        let r = retry_etxtbsy(|| {
+            calls += 1;
+            if calls < 4 {
+                Err(busy())
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(r.unwrap(), 4);
+    }
+
+    #[test]
+    fn etxtbsy_gives_up_after_ten_retries() {
+        let mut calls = 0;
+        let r: std::io::Result<()> = retry_etxtbsy(|| {
+            calls += 1;
+            Err(busy())
+        });
+        assert_eq!(
+            r.unwrap_err().kind(),
+            std::io::ErrorKind::ExecutableFileBusy
+        );
+        assert_eq!(calls, 11, "one attempt plus ten retries");
+    }
+
+    #[test]
+    fn other_spawn_errors_are_not_retried() {
+        let mut calls = 0;
+        let r: std::io::Result<()> = retry_etxtbsy(|| {
+            calls += 1;
+            Err(std::io::ErrorKind::NotFound.into())
+        });
+        assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(calls, 1);
+    }
 }
 
 #[cfg(test)]
@@ -571,6 +695,31 @@ mod patched_tempfile_tests {
             _ => return false,
         }
         chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    #[test]
+    fn module_name_check_rejects_leading_digit_and_hyphen() {
+        assert!(!is_valid_module_name("1mod"));
+        assert!(!is_valid_module_name("my-mod"));
+        assert!(is_valid_module_name("_my_mod2"));
+    }
+
+    #[test]
+    fn default_trait_methods_are_cheap_and_uncached() {
+        let f = experimental::ExperimentalFilter::new(true);
+        let m = Mutant {
+            id: "t".into(),
+            file: "x.py".into(),
+            operator: Operator::ArithOpSwap,
+            range: ruff_text_size::TextRange::new(0u32.into(), 1u32.into()),
+            original: "+".into(),
+            replacement: "-".into(),
+            line: 1,
+            stmt_line: 1,
+            site: None,
+        };
+        assert!(!f.costly());
+        assert_eq!(f.cached_verdict(&m), None);
     }
 
     #[test]

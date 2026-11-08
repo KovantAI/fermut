@@ -106,6 +106,9 @@ fn env_flag_enabled(name: &str) -> bool {
 pub struct AnthropicClient {
     api_key: String,
     agent: ureq::Agent,
+    /// Messages endpoint. Always [`API_URL`] in production; a field so unit
+    /// tests can point the client at a local stub server.
+    url: String,
 }
 
 impl AnthropicClient {
@@ -114,7 +117,11 @@ impl AnthropicClient {
         // pool, TLS context, and timeout config don't get rebuilt per
         // request. Timeouts apply to every request issued through this agent.
         let agent: ureq::Agent = agent_config().into();
-        Self { api_key, agent }
+        Self {
+            api_key,
+            agent,
+            url: API_URL.to_string(),
+        }
     }
 }
 
@@ -188,7 +195,7 @@ impl LlmClient for AnthropicClient {
             // arrives as `Ok(response)` (body intact) rather than an error.
             let resp = self
                 .agent
-                .post(API_URL)
+                .post(&self.url)
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", API_VERSION)
                 .send_json(&payload);
@@ -535,5 +542,155 @@ mod tests {
         );
         let mut over = ureq::Body::builder().data(b"hello world".to_vec());
         assert!(read_capped_string(&mut over, 3).is_err());
+    }
+
+    // --- `complete()` over a local HTTP stub: request shape, status policy,
+    // and error mapping, without a real API key or network.
+
+    /// Serve one scripted raw HTTP response per accepted connection, in order,
+    /// and hand back every request received (head + body) as text.
+    fn stub_server(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/messages", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for resp in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut req = String::new();
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap();
+                    }
+                    req.push_str(&line);
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                }
+                let mut body = vec![0u8; len];
+                reader.read_exact(&mut body).unwrap();
+                req.push_str(&String::from_utf8(body).unwrap());
+                seen.push(req);
+                stream.write_all(resp.as_bytes()).unwrap();
+            }
+            seen
+        });
+        (url, handle)
+    }
+
+    fn http(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn stub_client(url: String) -> AnthropicClient {
+        let mut c = AnthropicClient::new("sk-test-key".into());
+        c.url = url;
+        c
+    }
+
+    #[test]
+    fn complete_sends_auth_headers_and_wire_body_and_returns_text() {
+        let (url, server) = stub_server(vec![http(
+            "200 OK",
+            r#"{"content":[{"type":"text","text":"def test_x(): pass"}]}"#,
+        )]);
+        let req = LlmRequest::new("SYS_PROMPT", "USER_PROMPT").with_model("claude-test");
+        let out = stub_client(url).complete(&req).unwrap();
+        assert_eq!(out, "def test_x(): pass");
+        let seen = server.join().unwrap();
+        assert_eq!(seen.len(), 1);
+        let r = seen[0].to_ascii_lowercase();
+        assert!(r.starts_with("post /v1/messages"), "{r}");
+        assert!(r.contains("x-api-key: sk-test-key"), "{r}");
+        assert!(
+            r.contains(&format!("anthropic-version: {API_VERSION}")),
+            "{r}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(&seen[0][seen[0].find("\r\n\r\n").unwrap() + 4..]).unwrap();
+        assert_eq!(body["model"], "claude-test");
+        assert_eq!(body["system"], "SYS_PROMPT");
+        assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"], "USER_PROMPT");
+    }
+
+    #[test]
+    fn complete_4xx_is_terminal_and_surfaces_the_body() {
+        let (url, server) = stub_server(vec![http("401 Unauthorized", "bad key")]);
+        let err = stub_client(url)
+            .complete(&LlmRequest::new("s", "u"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("returned 401: bad key"), "{err}");
+        assert_eq!(server.join().unwrap().len(), 1, "4xx must not retry");
+    }
+
+    #[test]
+    fn complete_retries_a_5xx_then_succeeds() {
+        let (url, server) = stub_server(vec![
+            http("503 Service Unavailable", "overloaded"),
+            http("200 OK", r#"{"content":[{"type":"text","text":"ok"}]}"#),
+        ]);
+        let out = stub_client(url)
+            .complete(&LlmRequest::new("s", "u"))
+            .unwrap();
+        assert_eq!(out, "ok");
+        assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn complete_maps_a_malformed_success_body_to_a_parse_error() {
+        let (url, server) = stub_server(vec![http("200 OK", "not json")]);
+        let err = stub_client(url)
+            .complete(&LlmRequest::new("s", "u"))
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("parse Anthropic Messages response"),
+            "{err:#}"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn complete_does_not_retry_a_post_send_transport_error() {
+        // Server reads the request then hangs up without a response: the
+        // request may have been processed, so no retry (a 2nd accept would
+        // be refused after the stub exits, after a >= 1s backoff).
+        let (url, server) = stub_server(vec![String::new()]);
+        let start = std::time::Instant::now();
+        let err = stub_client(url)
+            .complete(&LlmRequest::new("s", "u"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("transport error"), "{err}");
+        // A retry would back off >= 1s before the next attempt.
+        assert!(start.elapsed() < Duration::from_secs(1), "retried: {err}");
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn complete_retries_connection_refused_then_gives_up() {
+        // Bind then drop: the port is closed, so every attempt is refused
+        // pre-send (retryable) until MAX_ATTEMPTS is exhausted.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        let start = std::time::Instant::now();
+        let err = stub_client(format!("http://{addr}/v1/messages"))
+            .complete(&LlmRequest::new("s", "u"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("transport error"), "{err}");
+        // Two backoffs (1s + 2s) prove both retries happened.
+        assert!(start.elapsed() >= Duration::from_secs(3), "{err}");
     }
 }

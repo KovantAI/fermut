@@ -1647,4 +1647,112 @@ mod tests {
             Some(100.0)
         );
     }
+
+    #[test]
+    fn cli_diff_only_overrides_config_since() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "since = \"HEAD~1\"\n").unwrap();
+        let mut f = empty_filter();
+        f.diff_only = Some("main".into());
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
+        assert_eq!(cfg.diff_base.as_deref(), Some("main"));
+        assert!(cfg.since.is_none());
+    }
+
+    #[test]
+    fn config_with_both_diff_only_and_since_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("fermut.toml"),
+            "diff_only = \"main\"\nsince = \"HEAD~1\"\n",
+        )
+        .unwrap();
+        let err = call(tmp.path().to_path_buf(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mutually exclusive"), "{err}");
+    }
+
+    #[test]
+    fn stale_auto_discovered_coverage_is_ignored_with_a_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("pyproject.toml"), "").unwrap();
+        let db = root.join(".coverage");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("CREATE TABLE coverage_schema (version integer)", [])
+            .unwrap();
+        drop(conn);
+        set_mtime(&db, 1000);
+        let src = root.join("m.py");
+        std::fs::write(&src, "x = 1\n").unwrap();
+        set_mtime(&src, 2000);
+        let mut cfg = None;
+        let log = logged(|| cfg = Some(call(root.clone(), None).unwrap()));
+        assert!(log.contains("ignoring auto-discovered coverage"), "{log}");
+        let cfg = cfg.unwrap();
+        assert!(cfg.coverage_path.is_none());
+        assert!(cfg.coverage.is_none());
+    }
+
+    #[test]
+    fn select_tests_without_coverage_warns_and_runs_full_suite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sel = tmp.path().join("sel.txt");
+        std::fs::write(&sel, "tests/test_a.py::t\n").unwrap();
+        let mut f = empty_filter();
+        f.select_tests = Some(sel);
+        let mut cfg = None;
+        let log =
+            logged(|| cfg = Some(call_with_filter(tmp.path().to_path_buf(), None, f).unwrap()));
+        assert!(log.contains("--select-tests needs coverage data"), "{log}");
+        let cfg = cfg.unwrap();
+        assert!(cfg.coverage.is_none() && cfg.coverage_unselected.is_none());
+    }
+
+    #[test]
+    fn no_cache_audit_and_cli_shard_are_taken_verbatim() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "shard = \"2/3\"\n").unwrap();
+        let mut args = run_args(empty_filter());
+        args.no_cache_audit = true;
+        args.cache_audit_rate = Some(0.5);
+        args.shard = Some((1, 4));
+        let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
+        assert_eq!(cfg.cache_audit_rate, 0.0);
+        assert_eq!(cfg.shard, Some((1, 4)), "CLI shard beats config");
+    }
+
+    #[test]
+    fn absolutize_anchors_missing_relative_paths_at_cwd() {
+        let rel = PathBuf::from("fermut-no-such-dir/x");
+        assert_eq!(
+            absolutize(rel.clone()),
+            std::env::current_dir().unwrap().join(rel)
+        );
+        // `/abs/p` is drive-relative on Windows, so anchor on a real absolute path.
+        let abs = std::env::temp_dir().join("abs/p");
+        assert_eq!(absolutize(abs.clone()), abs);
+    }
+
+    #[test]
+    fn isolation_env_parses_case_insensitively() {
+        let p = |s: &str| parse_isolation_env(s.to_string());
+        assert_eq!(p(" Auto "), Some(IsolationMode::Auto));
+        assert_eq!(p("copy"), Some(IsolationMode::Copy));
+        assert_eq!(p("HARDLINK"), Some(IsolationMode::Hardlink));
+        assert_eq!(p("reflink"), Some(IsolationMode::Reflink));
+        assert_eq!(p("symlink"), None);
+    }
+
+    #[test]
+    fn merge_op_list_cli_beats_file_and_empty_file_list_is_none() {
+        let file = Some(vec!["arith-op-swap".to_string()]);
+        let got = merge_op_list(Some(vec!["number-shift".into(), " ".into()]), &file)
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, HashSet::from([Operator::NumberShift]));
+        assert!(merge_op_list(None, &Some(vec![])).unwrap().is_none());
+        assert!(merge_op_list(Some(vec!["bogus".into()]), &None).is_err());
+    }
 }

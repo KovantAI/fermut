@@ -205,4 +205,96 @@ mod tests {
         drain_debounce(&rx);
         assert!(start.elapsed() < DEBOUNCE, "must not block for full window");
     }
+
+    fn tiny_project(root: &Path) {
+        std::fs::write(root.join("fermut.toml"), "").unwrap();
+        std::fs::write(root.join("calc.py"), "def adult(x):\n    return x >= 18\n").unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(
+            root.join("tests/test_calc.py"),
+            "from calc import adult\n\ndef test_adult():\n    assert adult(18)\n    assert not adult(17)\n",
+        )
+        .unwrap();
+    }
+
+    fn config(root: &Path, python: Option<PathBuf>, no_history: bool) -> Config {
+        crate::cli::build_config::build_config(
+            root.to_path_buf(),
+            crate::cli::RunConfigArgs {
+                tests: Some(root.join("tests")),
+                jobs: Some(1),
+                timeout: Some(30),
+                python,
+                history_path: Some(root.join("history.jsonl")),
+                no_history,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn load_prior_reads_history_only_when_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        tiny_project(tmp.path());
+        let entry: HistoryEntry = serde_json::from_value(serde_json::json!({
+            "timestamp": "t1", "mutation_score": 50.0, "killed": 1,
+            "survived": 1, "timed_out": 0, "skipped": 0, "errored": 0
+        }))
+        .unwrap();
+        history::append(&tmp.path().join("history.jsonl"), &entry).unwrap();
+        assert_eq!(load_prior(&config(tmp.path(), None, false)).len(), 1);
+        assert!(load_prior(&config(tmp.path(), None, true)).is_empty());
+    }
+
+    #[test]
+    fn watch_loop_surfaces_initial_run_failure_without_calling_back() {
+        // A broken interpreter fails the initial run; the loop must return
+        // that error instead of entering the (endless) watch phase.
+        let tmp = tempfile::tempdir().unwrap();
+        tiny_project(tmp.path());
+        let cfg = config(tmp.path(), Some(tmp.path().join("no-such-python")), true);
+        let called = std::cell::Cell::new(false);
+        let res = watch_loop(&cfg, |_, _| {
+            called.set(true);
+            Ok(())
+        });
+        assert!(res.is_err());
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn watch_loop_reports_initial_run_then_fails_if_root_vanishes() {
+        // The initial report is delivered with the pre-run history snapshot;
+        // if the source root is gone by the time the watcher attaches, the
+        // loop returns an error rather than spinning on a dead watch.
+        let out = std::process::Command::new("python3")
+            .args(["-c", "import sys, pytest; print(sys.executable)"])
+            .stderr(std::process::Stdio::null())
+            .output();
+        let Some(py) = out
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()))
+        else {
+            eprintln!("skipping: python3 with pytest not available");
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        std::fs::create_dir(&root).unwrap();
+        tiny_project(&root);
+        let cfg = config(&root, Some(py), true);
+        let calls = std::cell::Cell::new(0);
+        let res = watch_loop(&cfg, |report, prior| {
+            calls.set(calls.get() + 1);
+            assert!(!report.outcomes.is_empty());
+            assert!(prior.is_empty(), "history disabled → empty snapshot");
+            std::fs::remove_dir_all(&cfg.source_root).unwrap();
+            Ok(())
+        });
+        assert_eq!(calls.get(), 1);
+        let err = format!("{:#}", res.unwrap_err());
+        assert!(err.contains("watching"), "got: {err}");
+    }
 }

@@ -81,7 +81,9 @@ impl From<NextArgs> for NextOpts {
             format,
         } = a;
         NextOpts {
-            report,
+            report: report.unwrap_or_else(|| {
+                crate::cli::last_report_path(&crate::cli::current_project_root())
+            }),
             limit: if all { None } else { Some(limit) },
             max_tokens,
             format,
@@ -643,6 +645,108 @@ mod tests {
         assert_eq!(kept.len(), 2);
     }
 
+    /// Report file with two boundary siblings (one cluster), a `<` site whose
+    /// `>` subsumes `>=`, and one killed mutant — no coverage skip.
+    fn write_report(dir: &std::path::Path) -> PathBuf {
+        let mut outcomes: Vec<MutantOutcome> = vec![
+            MutantOutcome::survived(mutant("a.py", 10, Operator::BoundaryShift, 1)),
+            MutantOutcome::survived(mutant("a.py", 20, Operator::BoundaryShift, 2)),
+            MutantOutcome::killed(mutant("b.py", 5, Operator::ArithOpSwap, 1)),
+        ];
+        outcomes.extend(
+            site_survivors("if a < b:\n    pass\n", &[">", ">="])
+                .into_iter()
+                .map(MutantOutcome::survived),
+        );
+        let path = dir.join("r.json");
+        Report::new(outcomes).write_json(&path).unwrap();
+        path
+    }
+
+    fn opts(
+        report: PathBuf,
+        limit: Option<usize>,
+        max_tokens: Option<usize>,
+        format: Format,
+    ) -> NextOpts {
+        NextOpts {
+            report,
+            limit,
+            max_tokens,
+            format,
+        }
+    }
+
+    #[test]
+    fn rank_report_max_tokens_overrides_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = crate::report::load(&write_report(tmp.path())).unwrap();
+        let (all, total) = rank_report(&report, None, None);
+        assert_eq!(all.len(), total);
+        assert_eq!(total, 2, "boundary cluster + folded `<` site");
+        // A zero budget still keeps the single best target, ignoring limit.
+        let (shown, total) = rank_report(&report, Some(5), Some(0));
+        assert_eq!((shown.len(), total), (1, 2));
+        assert!(!shown[0].coverage_selected, "no coverage skip in report");
+    }
+
+    #[test]
+    fn coverage_skip_marks_entries_coverage_selected() {
+        let report = Report::new(vec![
+            MutantOutcome::survived(mutant("a.py", 10, Operator::BoundaryShift, 1)),
+            MutantOutcome::skipped(mutant("a.py", 40, Operator::BoundaryShift, 9), "coverage"),
+        ]);
+        let (shown, _) = rank_report(&report, None, None);
+        assert!(shown[0].coverage_selected);
+    }
+
+    #[test]
+    fn next_renders_human_and_budgeted_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_report(tmp.path());
+        // Human: clusters with siblings, subsumed ids, and the no-coverage note.
+        next(opts(path.clone(), None, None, Format::Human)).unwrap();
+        // JSON under a budget that drops entries (the stderr notice path).
+        next(opts(path, None, Some(0), Format::Json)).unwrap();
+        // An empty report renders the "nothing to fix" line.
+        let empty = tmp.path().join("empty.json");
+        Report::new(vec![]).write_json(&empty).unwrap();
+        next(opts(empty, Some(1), None, Format::Human)).unwrap();
+    }
+
+    #[test]
+    fn next_rejects_zero_limit_and_human_token_budget() {
+        let p = PathBuf::from("unused.json");
+        let err = next(opts(p.clone(), Some(0), None, Format::Json)).unwrap_err();
+        assert!(err.to_string().contains("--limit"), "{err}");
+        let err = next(opts(p, None, Some(10), Format::Human)).unwrap_err();
+        assert!(err.to_string().contains("--max-tokens"), "{err}");
+    }
+
+    #[test]
+    fn next_args_default_report_and_all_clears_limit() {
+        let o: NextOpts = NextArgs {
+            report: None,
+            limit: 3,
+            all: true,
+            max_tokens: None,
+            format: Format::Json,
+        }
+        .into();
+        assert_eq!(
+            o.report,
+            crate::cli::last_report_path(&crate::cli::current_project_root())
+        );
+        assert_eq!(o.limit, None);
+    }
+
+    #[test]
+    fn zero_denominator_reports_zero_gain() {
+        let m = mutant("a.py", 1, Operator::ArithOpSwap, 1);
+        let ranked = rank(&[&m], 0);
+        assert_eq!((ranked[0].min_gain_pts, ranked[0].max_gain_pts), (0.0, 0.0));
+    }
+
     #[test]
     fn ranking_is_deterministic_regardless_of_input_order() {
         let m1 = mutant("a.py", 10, Operator::BoundaryShift, 1);
@@ -658,8 +762,9 @@ mod tests {
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct NextArgs {
-    /// Path to a JSON report produced by `fermut run --json …`.
-    pub(crate) report: std::path::PathBuf,
+    /// JSON report from `fermut run`. Defaults to `.fermut/last.json`, which
+    /// every `run` writes.
+    pub(crate) report: Option<std::path::PathBuf>,
 
     /// Number of ranked survivors to emit. Defaults to 1 — the single
     /// best next target.

@@ -9,6 +9,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Added
+- `run` always writes `.fermut/last.json`, and `show`, `next`, `explain`,
+  `suggest` and `autofix` read it when no report path is given.
+  `fermut results` is an alias for `show`, so `mutmut results` /
+  `mutmut show <id>` map to `fermut results` / `fermut show <id>`.
 - MCP `fermut_coverage` tool: builds or incrementally refreshes `.coverage`,
   like `fermut coverage`, and reports a failed pytest as a tool error.
 - MCP `fermut_run` and `fermut_score` take a `history_path` argument.

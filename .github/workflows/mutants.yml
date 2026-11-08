@@ -36,6 +36,12 @@ jobs:
           # Pinned: mutants.toml rejects unknown keys, so a renamed config key
           # in a new release would fail every PR.
           tool: cargo-mutants@27.1.0
+      # Tests that drive a real pytest suite skip without it, which leaves
+      # every mutant in those paths (e.g. `run`) MISSED.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: pip install --require-hashes -r .github/requirements/e2e.txt
 
       # The prefixes are load-bearing: cargo-mutants matches `a/`…`b/`, and a
       # git with diff.mnemonicPrefix or diff.noprefix makes --in-diff match

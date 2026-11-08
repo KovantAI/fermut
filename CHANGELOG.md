@@ -42,6 +42,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   `end` into one-line `# fermut: ignore` markers. Whole regions that had been
   excluded under mutmut were mutated after migrating. These now map to the
   region markers.
+- `none-to-value` turned `x is None` into `x is ""`, which compiles with a
+  `SyntaxWarning`. Under pytest's `filterwarnings = error` that fails the
+  import, so the mutant was killed whatever the tests did (werkzeug: 54 of 149
+  such kills). In `is` / `is not` comparisons it now emits `x is str()`, the
+  same empty-string object without the warning. Scores on projects that turn
+  warnings into errors drop to their honest value, those mutants re-run once
+  (new ids), and schemata now serves them instead of falling back.
 - The verdict cache ignored a `conftest.py` above the tests root (a repo-root
   one with `tests/` as the tests root), so editing a fixture there kept stale
   verdicts. Every such `conftest.py` is now part of the test fingerprint;

@@ -206,4 +206,25 @@ mod sentinel_tests {
             Some("rb\"XXfooXX\"")
         );
     }
+
+    #[test]
+    fn unrecognized_literals_are_rejected() {
+        use super::swap_string_case;
+        for bad in ["abc", "1", "\"\"\""] {
+            assert_eq!(wrap_with_sentinel(bad), None, "{bad}");
+            assert_eq!(swap_string_case(bad, true), None, "{bad}");
+        }
+        assert_eq!(swap_string_case("'a\\n'", true), None);
+        assert_eq!(swap_string_case("'abc'", true).as_deref(), Some("'ABC'"));
+    }
+
+    #[test]
+    fn augop_lexemes_cover_every_operator() {
+        use super::augop_lexeme;
+        use ruff_python_ast::Operator::*;
+        assert_eq!(augop_lexeme(Pow), "**=");
+        assert_eq!(augop_lexeme(MatMult), "@=");
+        assert_eq!(augop_lexeme(LShift), "<<=");
+        assert_eq!(augop_lexeme(RShift), ">>=");
+    }
 }

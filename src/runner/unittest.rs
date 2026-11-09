@@ -683,4 +683,48 @@ mod tests {
             MutantOutcome::TimedOut { .. }
         ));
     }
+
+    #[test]
+    fn hint_rejects_an_invalid_glob() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hint = zero_collection_hint(tmp.path(), "test[.py");
+        assert!(hint.contains("is not a valid glob"), "got: {hint}");
+    }
+
+    /// Stand-in interpreter that exits with `code` for every invocation.
+    #[cfg(unix)]
+    fn exiting_python(dir: &Path, code: i32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let py = dir.join(format!("python-exit-{code}"));
+        fs::write(&py, format!("#!/bin/sh\nexit {code}\n")).unwrap();
+        fs::set_permissions(&py, fs::Permissions::from_mode(0o755)).unwrap();
+        py
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_tests_ran_exit_is_an_error_not_a_kill() {
+        let (dir, calc) = project();
+        let py = exiting_python(dir.path(), 5);
+        let r = runner_timeout(dir.path().join("tests"), py, Duration::from_secs(30));
+        let o = r
+            .run(&Arc::new(mutant(calc, "return 1", "return 2")))
+            .unwrap();
+        match o {
+            MutantOutcome::Error { ref message, .. } => {
+                assert!(message.contains("no tests ran"), "{message}");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn count_tests_is_none_when_the_probe_fails() {
+        let (dir, _calc) = project();
+        let py = exiting_python(dir.path(), 1);
+        let tests = dir.path().join("tests");
+        let mirror = crate::runner::build_mirror(&tests, IsolationMode::Copy).unwrap();
+        assert_eq!(runner(tests, py, None).count_tests(&mirror), None);
+    }
 }

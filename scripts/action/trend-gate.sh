@@ -21,6 +21,9 @@ if [ -n "$REGRESSION" ]; then
           --fail-on-regression "$REGRESSION" 2>&1 >/dev/null)
   rc=$?
   set -e
+  if [ "$rc" = 3 ]; then
+    die "fermut trend broke: ${msg:-exit 3}"
+  fi
   if [ "$rc" != 0 ]; then
     gate_fail "${msg:-fermut trend exited $rc} — score $SCORE% (${DELTA} pts vs the previous run)."
   fi

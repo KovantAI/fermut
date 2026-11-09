@@ -100,4 +100,16 @@ mod tests {
         assert_eq!(v2["status"], "survived");
         assert!(v2["kill_set"].as_array().unwrap().is_empty());
     }
+
+    #[test]
+    fn unwritable_parent_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        let err = write_jsonl(&blocker.join("sub/ks.jsonl"), &[]).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("creating kill-set dir"),
+            "{err:#}"
+        );
+    }
 }

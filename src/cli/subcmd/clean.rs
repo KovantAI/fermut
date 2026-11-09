@@ -136,6 +136,51 @@ mod tests {
         assert!(outside.exists());
         assert!(!cache_dir.exists());
     }
+    #[test]
+    fn removes_subdirs_and_reports_nothing_when_only_history_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join(".fermut");
+        fs::create_dir_all(cache_dir.join("mirrors/w0")).unwrap();
+        let history = cache_dir.join("history.jsonl");
+        fs::write(&history, "{}\n").unwrap();
+
+        clean_cache(tmp.path(), &history).unwrap();
+        assert!(!cache_dir.join("mirrors").exists());
+        assert!(history.exists());
+
+        // Second pass: only history remains → nothing removed, dir kept.
+        clean_cache(tmp.path(), &history).unwrap();
+        assert!(history.exists());
+    }
+
+    #[test]
+    fn run_honors_cli_history_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().join(".fermut");
+        fs::create_dir_all(&cache_dir).unwrap();
+        let keep = cache_dir.join("custom.jsonl");
+        fs::write(&keep, "{}\n").unwrap();
+        fs::write(cache_dir.join("cache.bin"), "x").unwrap();
+        run(CleanArgs {
+            path: tmp.path().to_path_buf(),
+            history_path: Some(keep.clone()),
+        })
+        .unwrap();
+        assert!(keep.exists());
+        assert!(!cache_dir.join("cache.bin").exists());
+    }
+
+    #[test]
+    fn resolve_history_path_reads_config_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("fermut.toml"),
+            "history_path = \".fermut/mine.jsonl\"\n",
+        )
+        .unwrap();
+        let got = resolve_history_path(tmp.path(), None).unwrap();
+        assert!(got.ends_with(".fermut/mine.jsonl"), "{}", got.display());
+    }
 }
 
 #[derive(clap::Args, Debug)]

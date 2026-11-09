@@ -201,6 +201,16 @@ mod tests {
     }
 
     #[test]
+    fn html_labels_inferred_kills_and_hung_timeouts() {
+        let h = read(&Report::new(vec![
+            MutantOutcome::killed_inferred(make_mutant(), "t::k".into(), "dom".into()),
+            MutantOutcome::timed_out_in(make_mutant(), Some("t::<slow>".into())),
+        ]));
+        assert!(h.contains("<i>inferred from a dominator, not run</i>"));
+        assert!(h.contains("timed out in <code>t::&lt;slow&gt;</code>"));
+    }
+
+    #[test]
     fn html_headlines_counts_score_and_inlines_css() {
         let r = Report::new(vec![
             MutantOutcome::killed(make_mutant()),

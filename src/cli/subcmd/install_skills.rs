@@ -8,7 +8,7 @@
 //!
 //! Default target is `.claude/skills/` under the current directory (Claude
 //! Code's project skills, committed so teammates get them too); `--user` writes
-//! `~/.claude/skills/`, `--agents` writes `.agents/skills/` (Codex and other
+//! `~/.claude/skills/`, `--agents` writes `.agents/skills/` (Codex, Cursor, other
 //! Agent Skills readers), and `--dir` names any directory. An installed skill
 //! whose files differ from the bundled copy is left alone unless `--force`;
 //! `--force` overwrites the shipped files but never deletes files the user
@@ -49,7 +49,7 @@ pub(crate) struct InstallSkillsArgs {
     #[arg(long)]
     pub(crate) user: bool,
 
-    /// Write `.agents/skills/` instead of `.claude/skills/`, for Codex and
+    /// Write `.agents/skills/` instead of `.claude/skills/`, for Codex, Cursor and
     /// other agents that read the Agent Skills layout.
     #[arg(long)]
     pub(crate) agents: bool,
@@ -309,5 +309,16 @@ mod tests {
             target_dir(cwd, None, false, true).unwrap(),
             cwd.join(".agents/skills")
         );
+    }
+
+    #[test]
+    fn target_dir_user_uses_home() {
+        let cwd = Path::new("/proj");
+        if let Some(home) = home_dir() {
+            assert_eq!(
+                target_dir(cwd, None, true, true).unwrap(),
+                home.join(".agents/skills")
+            );
+        }
     }
 }

@@ -45,6 +45,7 @@ pub fn collect(path: &Path, source: &str) -> Result<Vec<Mutant>> {
         annotation_ranges: Vec::new(),
         stmt_line: 0,
         truth_positions: HashSet::new(),
+        identity_operands: HashSet::new(),
     };
     for stmt in &module.body {
         collector.visit_stmt(stmt);
@@ -171,6 +172,11 @@ struct Collector<'a> {
     /// child, so `emit_boolop` can tell whether `a and b` → `a` is a
     /// truth-preserving operand drop. See `region`.
     truth_positions: HashSet<TextRange>,
+    /// Ranges of `is` / `is not` operands. `x is ""` compiles with a
+    /// `SyntaxWarning`, an import error under `filterwarnings = error` that
+    /// kills the mutant whatever the tests do; none-to-value there uses the
+    /// same empty-string object spelled `str()` instead.
+    identity_operands: HashSet<TextRange>,
 }
 
 /// Region tag for a mutant of a single-op ordering compare `orig` → `repl`.
@@ -761,6 +767,10 @@ impl<'a> Collector<'a> {
         let modelled = c.ops.len() == 1 && region::is_ordering(cmpop_lexeme(c.ops[0]));
         let start = c.range().start();
         for (i, op) in c.ops.iter().enumerate() {
+            if matches!(op, ast::CmpOp::Is | ast::CmpOp::IsNot) {
+                self.identity_operands
+                    .extend([c.operands[i].range(), c.operands[i + 1].range()]);
+            }
             let lex = cmpop_lexeme(*op);
             let tag = |repl: &str| {
                 if modelled {
@@ -1170,7 +1180,12 @@ impl<'ast, 'a> SourceOrderVisitor<'ast> for Collector<'a> {
                 // Does code distinguish `None` from a value? Replacing it with a
                 // non-None sentinel flips `is None` / `or default` / optional
                 // logic. `""` mirrors mutmut's None replacement.
-                self.push(Operator::NoneToValue, expr.range(), "\"\"");
+                let value = if self.identity_operands.contains(&expr.range()) {
+                    "str()"
+                } else {
+                    "\"\""
+                };
+                self.push(Operator::NoneToValue, expr.range(), value);
             }
             Expr::Call(c) => self.emit_call(c),
             // Parity: value-position attribute / subscript reads → None. Only
@@ -1216,6 +1231,36 @@ mod operator_emission_tests {
 
     fn contains(source: &str, op: Operator) -> bool {
         ops_for(source).contains(&op)
+    }
+
+    #[test]
+    fn optional_drop_only_on_optional_names_and_attrs() {
+        let ms = collect(Path::new("t.py"), "x: typing.Optional[int] = 1\n").unwrap();
+        assert!(ms
+            .iter()
+            .any(|m| m.operator == Operator::OptionalTypeDrop && m.replacement == "int"));
+        // A subscript on a call is neither a name nor an attribute.
+        assert!(!contains("x: f()[int] = 1\n", Operator::OptionalTypeDrop));
+    }
+
+    #[test]
+    fn two_tuple_with_starred_keeps_the_plain_element() {
+        let ms = collect(Path::new("t.py"), "x = (a, *b)\n").unwrap();
+        assert!(
+            !ms.iter().any(|m| m.operator == Operator::PositionalDrop),
+            "dropping either element would leave a lone starred expr"
+        );
+        // A list may shrink to the starred element.
+        assert!(contains("x = [a, *b]\n", Operator::PositionalDrop));
+    }
+
+    #[test]
+    fn float_zero_and_huge_floats_skip_no_op_mutants() {
+        let zero: Vec<_> = collect(Path::new("t.py"), "x = 0.0\n").unwrap();
+        assert!(!zero.iter().any(|m| m.operator == Operator::NumberToZero));
+        let huge: Vec<_> = collect(Path::new("t.py"), "x = 1e16\n").unwrap();
+        assert!(!huge.iter().any(|m| m.operator == Operator::NumberShift));
+        assert!(huge.iter().any(|m| m.operator == Operator::NumberToZero));
     }
 
     #[test]
@@ -1723,6 +1768,18 @@ def f(brand, color, origin, a, b, c, xs, n, d):
             Operator::NoneToValue
         ));
         assert!(contains("if x is None:\n    pass\n", Operator::NoneToValue));
+    }
+
+    #[test]
+    fn none_to_value_in_identity_compare_compiles_without_warning() {
+        let src = "if x is None or None is not y:\n    pass\nz = None\n";
+        let repls: Vec<String> = collect(Path::new("t.py"), src)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.operator == Operator::NoneToValue)
+            .map(|m| m.replacement.to_string())
+            .collect();
+        assert_eq!(repls, ["str()", "str()", "\"\""]);
     }
 
     #[test]

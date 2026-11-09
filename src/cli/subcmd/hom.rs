@@ -141,8 +141,9 @@ pub(crate) fn run(args: HomArgs) -> Result<()> {
 
     // 2. Regenerate the FOM catalogue and join by id — the catalogue carries the
     //    ranges/replacements the JSONL omits.
-    let catalogue = mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)
-        .context("regenerating FOM catalogue")?;
+    let catalogue =
+        mutator::collect_from_tree(&cfg.source_root, &cfg.exclude, &cfg.ignore_patterns)
+            .context("regenerating FOM catalogue")?;
     // Cache each file's function spans once so the same-function gate is a cheap
     // lookup per mutant rather than a re-parse.
     let mut spans_by_file: HashMap<PathBuf, Vec<TextRange>> = HashMap::new();
@@ -623,5 +624,54 @@ def outer():
             map.get("a").unwrap(),
             &vec!["t1".to_string(), "t2".to_string()]
         );
+    }
+
+    #[test]
+    fn load_kill_sets_skips_blank_lines_and_names_a_bad_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("ks.jsonl");
+        std::fs::write(
+            &p,
+            "\n   \n{\"mutant_id\":\"a\",\"status\":\"killed\",\"kill_set\":[\"t\"]}\n",
+        )
+        .unwrap();
+        assert_eq!(load_kill_sets(&p).unwrap().len(), 1);
+
+        std::fs::write(&p, "\n{not json}\n").unwrap();
+        let err = load_kill_sets(&p).unwrap_err();
+        assert!(err.to_string().contains("line 2"), "{err}");
+        assert!(load_kill_sets(&tmp.path().join("missing.jsonl")).is_err());
+    }
+
+    #[test]
+    fn open_writer_creates_parent_dirs_and_errors_when_parent_is_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("a").join("b").join("out.jsonl");
+        {
+            use std::io::Write;
+            let mut w = open_writer(&p).unwrap();
+            writeln!(w, "x").unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "x\n");
+
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        let err = open_writer(&blocker.join("out.jsonl")).unwrap_err();
+        assert!(err.to_string().contains("creating HOM output dir"), "{err}");
+    }
+
+    #[test]
+    fn rel_file_strips_source_root_or_keeps_path() {
+        assert_eq!(
+            rel_file(Path::new("/r/src/m.py"), Path::new("/r")),
+            "src/m.py"
+        );
+        assert_eq!(rel_file(Path::new("/x/m.py"), Path::new("/r")), "/x/m.py");
+    }
+
+    #[test]
+    fn print_summary_handles_no_results() {
+        // Zero runs must not divide by zero.
+        print_summary(&[], 0, 0, 0, Path::new("out.jsonl"), "same-function");
     }
 }

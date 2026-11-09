@@ -877,4 +877,21 @@ mod tests {
         std::fs::write(&p, raw.to_string()).unwrap();
         assert!(DominatorStore::load(&p).is_err());
     }
+
+    #[test]
+    fn store_load_errors_on_unreadable_path_and_save_on_blocked_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A directory exists but is not a readable file: an error, not None.
+        let err = DominatorStore::load(tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("reading"), "{err}");
+
+        let blocker = tmp.path().join("file");
+        std::fs::write(&blocker, "").unwrap();
+        let store = DominatorStore::new(analyze(&[]), Path::new("ks"), BTreeMap::new());
+        let err = store
+            .save(&blocker.join("dominators.json"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("creating"), "{err}");
+    }
 }

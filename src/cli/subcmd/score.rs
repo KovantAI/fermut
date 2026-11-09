@@ -556,6 +556,28 @@ mod tests {
         ]);
         assert!(score(opts(path)).is_ok());
     }
+
+    #[test]
+    fn score_human_format_renders_every_delta_shape() {
+        let human = |path| ScoreArgs {
+            format: Format::Human,
+            ..opts(path)
+        };
+        // No comparable prior run.
+        let (_d1, single) = write_history(&[entry("t1", 80.0, Some("main"), &["a"])]);
+        assert!(score(human(single)).is_ok());
+        // Regression with new survivors listed.
+        let (_d2, regressed) = write_history(&[
+            entry("t1", 85.0, Some("main"), &["a"]),
+            entry("t2", 80.0, Some("main"), &["a", "b"]),
+        ]);
+        assert!(score(human(regressed)).is_ok());
+        // Baseline without survivor ids: score-delta-only note.
+        let mut base = entry("t1", 80.0, Some("main"), &[]);
+        base.survivor_ids = None;
+        let (_d3, partial) = write_history(&[base, entry("t2", 85.0, Some("main"), &["a"])]);
+        assert!(score(human(partial)).is_ok());
+    }
 }
 
 #[derive(clap::Args, Debug)]

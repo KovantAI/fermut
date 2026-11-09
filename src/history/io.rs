@@ -190,6 +190,15 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn load_surfaces_non_notfound_read_errors() {
+        // A directory where the file should be is a real I/O error, not
+        // "no history yet".
+        let tmp = tempdir().unwrap();
+        let err = load_with_stats(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("reading"), "{err}");
+    }
+
+    #[test]
     fn append_then_load_roundtrips_entries() {
         let tmp = tempdir().unwrap();
         let p = tmp.path().join("history.jsonl");

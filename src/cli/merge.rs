@@ -1054,6 +1054,53 @@ mod tests {
         let merged = combine_outcomes(reports.into_iter().map(Ok)).unwrap();
         assert_eq!(labels(&merged), vec![("a", "killed")]);
     }
+
+    #[test]
+    fn same_verdict_compares_payloads_per_status() {
+        use MutantOutcome as O;
+        let m = || mutant("a");
+        assert!(same_verdict(&O::survived(m()), &O::survived(m())));
+        assert!(same_verdict(&O::timed_out(m()), &O::timed_out(m())));
+        assert!(same_verdict(&O::skipped(m(), "ty"), &O::skipped(m(), "ty")));
+        assert!(!same_verdict(
+            &O::skipped(m(), "ty"),
+            &O::skipped(m(), "ruff")
+        ));
+        assert!(same_verdict(
+            &O::error(m(), "boom".into()),
+            &O::error(m(), "boom".into())
+        ));
+        assert!(!same_verdict(
+            &O::error(m(), "boom".into()),
+            &O::error(m(), "bang".into())
+        ));
+        let eq = |r: &str, s: &str| O::equivalent(m(), r, s);
+        assert!(same_verdict(&eq("r", "s"), &eq("r", "s")));
+        assert!(!same_verdict(&eq("r", "s"), &eq("r2", "s")));
+        assert!(!same_verdict(&eq("r", "s"), &eq("r", "s2")));
+        assert!(!same_verdict(&O::killed(m()), &O::survived(m())));
+    }
+
+    #[test]
+    fn parse_shard_spec_accepts_valid_and_rejects_bad_specs() {
+        assert_eq!(parse_shard_spec("1/1"), Ok((1, 1)));
+        assert_eq!(parse_shard_spec("3/4"), Ok((3, 4)));
+        assert!(parse_shard_spec("3")
+            .unwrap_err()
+            .contains("expected `i/n`"));
+        assert!(parse_shard_spec("x/4").is_err());
+        assert!(parse_shard_spec("1/y").is_err());
+        assert_eq!(
+            parse_shard_spec("1/0").unwrap_err(),
+            "shard total must be >= 1"
+        );
+        assert!(parse_shard_spec("0/4")
+            .unwrap_err()
+            .contains("out of range"));
+        assert!(parse_shard_spec("5/4")
+            .unwrap_err()
+            .contains("out of range"));
+    }
 }
 
 #[derive(clap::Args, Debug)]

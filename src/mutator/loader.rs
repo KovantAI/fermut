@@ -15,8 +15,20 @@ use super::Mutant;
 /// `exclude` is a list of glob patterns matched against paths relative to
 /// `root`. Matching files (and directories — pruned before descent) are
 /// skipped, so excluded subtrees never reach the parser.
-pub fn collect_from_tree(root: &Path, exclude: &[String]) -> Result<Vec<Mutant>> {
+///
+/// `ignore_patterns` are regexes matched against each source line; mutants on
+/// a matching line are dropped, like a `# fermut: ignore` on that line.
+pub fn collect_from_tree(
+    root: &Path,
+    exclude: &[String],
+    ignore_patterns: &[String],
+) -> Result<Vec<Mutant>> {
     let excludes = build_globset(exclude)?;
+    let patterns = if ignore_patterns.is_empty() {
+        None
+    } else {
+        Some(regex::RegexSet::new(ignore_patterns).context("invalid ignore_patterns regex")?)
+    };
     let mut out = Vec::new();
     let walker = WalkDir::new(root)
         .into_iter()
@@ -37,6 +49,15 @@ pub fn collect_from_tree(root: &Path, exclude: &[String]) -> Result<Vec<Mutant>>
             continue;
         }
         let mut mutants = visitor::collect(path, source)?;
+        if let Some(set) = &patterns {
+            let lines: Vec<&str> = source.lines().collect();
+            mutants.retain(|m| {
+                !(m.line as usize)
+                    .checked_sub(1)
+                    .and_then(|i| lines.get(i))
+                    .is_some_and(|l| set.is_match(l))
+            });
+        }
         out.append(&mut mutants);
     }
     Ok(out)
@@ -134,7 +155,7 @@ mod tests {
         fs::write(root.join("alembic/env.py"), "x = 1 + 2\n").unwrap();
         fs::write(root.join("alembic/versions/001.py"), "x = 1 + 2\n").unwrap();
 
-        let mutants = collect_from_tree(root, &["alembic/**".to_string()]).unwrap();
+        let mutants = collect_from_tree(root, &["alembic/**".to_string()], &[]).unwrap();
         for m in &mutants {
             let s = m.file.to_string_lossy();
             assert!(!s.contains("alembic"), "alembic leaked: {s}");
@@ -150,7 +171,7 @@ mod tests {
         fs::write(root.join("pkg/core.py"), "x = 1 + 2\n").unwrap();
         fs::write(root.join("pkg/migrations/0001.py"), "x = 1 + 2\n").unwrap();
 
-        let mutants = collect_from_tree(root, &["**/migrations/*.py".to_string()]).unwrap();
+        let mutants = collect_from_tree(root, &["**/migrations/*.py".to_string()], &[]).unwrap();
         for m in &mutants {
             let s = m.file.to_string_lossy();
             assert!(!s.contains("migrations"), "migrations leaked: {s}");
@@ -158,18 +179,54 @@ mod tests {
     }
 
     #[test]
+    fn non_utf8_encoding_declaration_skips_the_file() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        fs::write(root.join("a.py"), "x = 1 + 2\n").unwrap();
+        fs::write(root.join("b.py"), "# -*- coding: latin-1 -*-\nx = 1 + 2\n").unwrap();
+        let mutants = collect_from_tree(root, &[], &[]).unwrap();
+        assert!(!mutants.is_empty());
+        assert!(mutants.iter().all(|m| m.file.ends_with("a.py")));
+    }
+
+    #[test]
+    fn is_excluded_ignores_paths_outside_root() {
+        let set = build_globset(&["**".to_string()]).unwrap();
+        assert!(!is_excluded(
+            Path::new("/elsewhere/x.py"),
+            Path::new("/proj"),
+            &set
+        ));
+        assert!(is_excluded(
+            Path::new("/proj/x.py"),
+            Path::new("/proj"),
+            &set
+        ));
+    }
+
+    #[test]
     fn empty_excludes_is_noop() {
         let tmp = tempdir().unwrap();
         let root = tmp.path();
         fs::write(root.join("a.py"), "x = 1 + 2\n").unwrap();
-        let mutants = collect_from_tree(root, &[]).unwrap();
+        let mutants = collect_from_tree(root, &[], &[]).unwrap();
         assert!(!mutants.is_empty());
     }
 
     #[test]
     fn invalid_glob_errors() {
         let tmp = tempdir().unwrap();
-        let err = collect_from_tree(tmp.path(), &["[unterminated".to_string()]).unwrap_err();
+        let err = collect_from_tree(tmp.path(), &["[unterminated".to_string()], &[]).unwrap_err();
         assert!(err.to_string().contains("invalid exclude glob"));
+    }
+
+    #[test]
+    fn ignore_patterns_drop_matching_lines() {
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        fs::write(root.join("a.py"), "x = 1 + 2\nlog.debug(1 + 2)\n").unwrap();
+        let mutants = collect_from_tree(root, &[], &[r"log\.debug\(".to_string()]).unwrap();
+        assert!(!mutants.is_empty());
+        assert!(mutants.iter().all(|m| m.line == 1), "line 2 leaked");
     }
 }

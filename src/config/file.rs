@@ -112,6 +112,10 @@ pub struct FileConfig {
     /// collection. Examples: `"alembic/**"`, `"tests/integration/**"`,
     /// `"**/migrations/*.py"`.
     pub exclude: Option<Vec<String>>,
+    /// Regexes matched against each source line; mutants on a matching line
+    /// are dropped, as if the line carried `# fermut: ignore`. mutmut 3's
+    /// `do_not_mutate_patterns`.
+    pub ignore_patterns: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]

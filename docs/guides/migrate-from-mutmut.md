@@ -65,9 +65,10 @@ to the same fermut output.
   `runner` command; a pure 3.x config gets none, and fermut's default
   runner (pytest) applies.
 - **`type_check_command` is configurable in 3.x** (mypy, pyright,
-  any process that prints diagnostics). fermut has no slot for an
-  external type checker — it embeds `ty` directly — so the key lands
-  in manual review with a pointer at `--no-ty-filter`.
+  pyrefly or ty, run once over mutmut's `mutants/` tree). fermut has no
+  slot for an external type checker — it embeds `ty` and checks each
+  mutant on its own, on by default — so the key lands in manual review
+  with a pointer at `--no-ty-filter`.
 
 If your project was on 1.x/2.x and the team has been gradually
 porting keys to 3.x in the same `[tool.mutmut]` block, the migrator
@@ -89,34 +90,55 @@ migrate. (Tracking issue welcome if this hits you in practice.)
 mutmut and fermut both support inline skip markers, but the spelling
 differs:
 
-| mutmut                  | fermut                                       |
-|-------------------------|----------------------------------------------|
-| `# pragma: no mutate`   | `# fermut: ignore`                           |
-| (line-level only)       | `# fermut: ignore[arith-op-swap]` (op-scoped) |
-| (no module-level form)  | no file marker — list the file in `exclude`  |
+| mutmut                         | fermut                                        |
+|--------------------------------|-----------------------------------------------|
+| `# pragma: no mutate`          | `# fermut: ignore`                            |
+| `# pragma: no mutate start` / `end` (3.x) | `# fermut: ignore-start` / `ignore-end` |
+| `# pragma: no mutate block` (3.x) | `# fermut: ignore-block`                   |
+| `do_not_mutate_patterns` (3.x) | `ignore_patterns` (same regexes)              |
+| `do_not_mutate` (3.x)          | `exclude` (globs re-rooted under `source_root`) |
+| (no operator scope)            | `# fermut: ignore[arith-op-swap]` (op-scoped) |
 
 fermut's marker is also operator-scopable — `# fermut: ignore[arith-op-swap]`
 silences only that operator on the line, where mutmut's pragma is
 all-or-nothing. See **[Inline ignore](../reference/operators/inline-ignore.md)**.
 
-A one-liner that covers most repos:
+`fermut migrate mutmut` does all of the above: it rewrites the pragmas
+in place (region forms included) and writes `exclude` /
+`ignore_patterns` into the generated config. Review the diff before
+committing; mutmut pragmas occasionally land on lines where the fermut
+marker wants a narrower operator scope.
 
-```sh
-rg -l '# pragma: no mutate' \
-    | xargs sd '# pragma: no mutate' '# fermut: ignore'
-```
+### Your known-equivalent mutants
 
-(Or `sed -i` — your call. Review the diff before committing; mutmut
-pragmas occasionally land on lines where the equivalent fermut marker
-wants a narrower operator scope.)
+mutmut has no "equivalent" status and no list of them: a team marks a
+mutant it has judged equivalent with `# pragma: no mutate` on the line,
+a `do_not_mutate_patterns` regex, or a `do_not_mutate` file glob.
+The migrator carries all three over, so the mutants your team has
+already triaged stay suppressed under fermut, with no re-triage.
+
+If you instead kept the list outside mutmut (a spreadsheet of
+`mutmut show` ids, say), it doesn't port. A mutmut id
+(`module.x_function__mutmut_3`) is a per-function counter. A fermut id
+(`file@offset:op:orig->repl`) is a byte offset. Neither one maps onto
+the other. Re-check
+the survivors from fermut's first run instead. fermut's equivalence
+detector already settles many of them (see
+[Equivalent mutants](equivalent-mutants.md)), and for the rest, mark
+the line with `# fermut: ignore[op]`.
 
 ## Config
 
 mutmut reads from `setup.cfg` `[mutmut]` or `pyproject.toml`
 `[tool.mutmut]`. fermut reads from `fermut.toml` or
-`pyproject.toml` `[tool.fermut]`. Run `fermut init` to detect your
-layout and write a starter — it does **not** read your mutmut block,
-so you don't have to clean up first.
+`pyproject.toml` `[tool.fermut]`.
+
+**Use `fermut migrate mutmut`, not `fermut init`.** `migrate` reads your
+mutmut block and translates it (the mapping below); `init` ignores it and
+detects the layout from scratch, for projects with no config to carry
+over. Run one, not both: each refuses to overwrite an existing fermut
+config without `--force`. Once `migrate` has written the fermut config,
+delete the mutmut block.
 
 Common-key mapping:
 
@@ -130,6 +152,9 @@ Common-key mapping:
 | `pytest_add_cli_args` (3.x)         | `pytest_args`                                                    |
 | `backup`                            | n/a — fermut uses per-worker mirrors (see `isolation`)           |
 | `dict_synonyms`                     | n/a — see *What doesn't translate*                                |
+| `do_not_mutate` (3.x)               | `exclude` (patterns re-rooted under `source_root`)               |
+| `do_not_mutate_patterns` (3.x)      | `ignore_patterns`                                                |
+| `only_mutate` (3.x)                 | n/a — narrow `source_root` or list the rest in `exclude`         |
 | `also_copy`                         | n/a — worker mirror copies the source tree by default            |
 | `pre_mutation`                      | n/a — see *What doesn't translate*                                |
 | `post_mutation`                     | n/a — see *What doesn't translate*                                |
@@ -182,8 +207,8 @@ A side-by-side example:
 | `mutmut run --paths-to-mutate src/` | `fermut run src/`                               |
 | `mutmut run --use-coverage`         | `fermut run --coverage .coverage` (or a manual `--coverage coverage.json`) |
 | `mutmut run --mypy`                 | (default: `ty` pre-filter on; `--no-ty-filter` to disable) |
-| `mutmut results`                    | `fermut run --json report.json` then `fermut show report.json` |
-| `mutmut show <id>`                  | `fermut show report.json <id>`                  |
+| `mutmut results`                    | `fermut results` (reads `.fermut/last.json`, written by every `run`) |
+| `mutmut show <id>`                  | `fermut show <id>`                              |
 | `mutmut html`                       | `fermut run --html out.html`                    |
 | `mutmut junitxml`                   | `fermut run --junit out.xml`                    |
 | `mutmut stats`                      | `fermut trend` (per-run history, not aggregate) |
@@ -296,6 +321,30 @@ coverage = ".coverage"
 Two things came along for free: `--diff-only` (no mutmut equivalent)
 and the sticky PR comment. The full workflow template is in
 **[CI recipes → GitHub Actions](integrations.md#github-actions)**.
+
+### Replacing a mutmut nightly
+
+A nightly `mutmut run` over the whole tree maps to a full fermut sweep.
+Three things decide how long it takes:
+
+- **Keep the verdict cache between nights.** mutmut keeps its results in
+  `mutants/`; fermut keeps them in `.fermut/cache.json`. CI runners start
+  empty, so persist it, or every night runs cold. The packaged
+  [`sweep` + `trend` actions](github-action.md#sharded-full-sweep) cache
+  verdicts, coverage and history for you; for a hand-written job, see the
+  [nightly recipe](integrations.md#pr-gate-nightly).
+- **Shard it.** `--shard i/n` splits mutants across a CI matrix with no
+  coordination, and `fermut merge` combines the reports and refuses a
+  missing shard. mutmut has no equivalent.
+- **Start with the default operators.** fermut's defaults already cover
+  ~99% of the lines mutmut mutates ([parity](../reference/parity.md)).
+  `--experimental` adds operators mutmut doesn't have, so it's more work,
+  not a like-for-like replacement. Add it once the default run is green.
+
+Scores aren't comparable across tools (different operators, and fermut
+skips uncovered lines instead of counting them as survivors), so reset
+your score thresholds from fermut's first full run rather than carrying
+mutmut's over.
 
 ## Where next
 

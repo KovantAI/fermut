@@ -787,4 +787,80 @@ mod tests {
         let f = subprocess_filter_no_bin();
         assert!(f.ast_hash_for(Path::new("/nonexistent/m.py")).is_none());
     }
+
+    #[test]
+    fn probe_version_of_missing_binary_is_unknown() {
+        assert_eq!(probe_version("/nonexistent/fermut-ty-xyz"), "unknown");
+    }
+
+    #[test]
+    fn persist_failure_is_logged_not_propagated() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("file");
+        std::fs::write(&blocker, "x").unwrap();
+        let mut f = subprocess_filter_no_bin();
+        // Parent is a regular file → save fails; drop must not panic.
+        f.cache_path = Some(blocker.join("ty-cache.json"));
+        drop(f);
+        assert_eq!(std::fs::read_to_string(&blocker).unwrap(), "x");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unparseable_baseline_admits_without_caching() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("ty");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let src = dir.path().join("m.py");
+        std::fs::write(&src, "x = 1\n").unwrap();
+        let f = subprocess_filter(bin.to_str().unwrap(), dir.path().join("c.json"));
+        let m = dummy_mutant(&src);
+        assert!(
+            f.admits(&m).unwrap(),
+            "unknown baseline bypasses the filter"
+        );
+        assert!(lock_recover(&f.baseline).is_empty());
+        assert_eq!(f.cached_verdict(&m), None, "a bypass is never cached");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_build_failure_falls_back_to_subprocess() {
+        if env_disables_embedded() {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let venv_bin = dir.path().join(".venv").join("bin");
+        std::fs::create_dir_all(&venv_bin).unwrap();
+        std::fs::write(venv_bin.join("python"), "").unwrap();
+        let ty = fake_ty(dir.path());
+        std::fs::rename(&ty, venv_bin.join("ty")).unwrap();
+        std::fs::set_permissions(venv_bin.join("ty"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        // A missing project dir can't host an embedded checker.
+        let missing = dir.path().join("missing");
+        let f = TyFilter::with_cache_and_project(None, &missing, 1).unwrap();
+        assert!(f.embedded.is_none());
+        if std::env::var_os("VIRTUAL_ENV").is_none() {
+            assert_eq!(f.bin_version, "ty 9.9");
+        }
+    }
+
+    #[cfg(feature = "embedded-ty")]
+    #[test]
+    fn lazy_slot_build_failure_is_an_error() {
+        if env_disables_embedded() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("m.py"), "x = 1\n").unwrap();
+        let seed = EmbeddedTyChecker::new(dir.path()).unwrap();
+        let mut pool = EmbeddedPool::new(dir.path().join("missing"), 1, seed);
+        pool.slots[0] = Mutex::new(None);
+        let err = pool.with(|_| Ok(())).unwrap_err().to_string();
+        assert!(err.contains("lazily building"), "{err}");
+    }
 }

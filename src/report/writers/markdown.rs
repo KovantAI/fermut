@@ -342,6 +342,66 @@ mod tests {
         assert!(written.contains("first recorded run"));
     }
 
+    fn prior(score: f64, partial: bool) -> crate::history::HistoryEntry {
+        crate::history::HistoryEntry {
+            schema_version: crate::history::CURRENT_SCHEMA_V,
+            timestamp: "2026-05-01T00:00:00Z".into(),
+            mutation_score: score,
+            killed: 9,
+            survived: 1,
+            timed_out: 0,
+            skipped: 0,
+            errored: 0,
+            equivalent: 0,
+            total: Some(10),
+            duration_ms: None,
+            config_hash: None,
+            fermut_version: None,
+            git_sha: None,
+            git_branch: None,
+            survivor_ids: None,
+            baseline: false,
+            partial,
+        }
+    }
+
+    fn written_with(r: &Report, history: &[crate::history::HistoryEntry]) -> String {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        r.write_markdown_with_history(tmp.path(), history).unwrap();
+        std::fs::read_to_string(tmp.path()).unwrap()
+    }
+
+    #[test]
+    fn write_markdown_trend_reports_a_regression() {
+        let r = Report::new(vec![
+            MutantOutcome::killed(make_mutant()),
+            MutantOutcome::survived(make_mutant()),
+        ]);
+        let md = written_with(&r, &[prior(90.0, false)]);
+        assert!(md.contains("▼ -40.0 pts vs previous"), "{md}");
+    }
+
+    #[test]
+    fn write_markdown_trend_omitted_when_nothing_scored() {
+        // Scoreless current run and only a partial prior: nothing to plot.
+        let r = Report::new(vec![MutantOutcome::skipped(make_mutant(), "ty")]);
+        let md = written_with(&r, &[prior(10.0, true)]);
+        assert!(!md.contains("**Trend:**"), "{md}");
+    }
+
+    #[test]
+    fn write_markdown_names_the_test_a_timeout_hung_in() {
+        let r = Report::new(vec![MutantOutcome::timed_out_in(
+            make_mutant(),
+            Some("tests/t.py::test_`x`".into()),
+        )]);
+        let md = written_with(&r, &[]);
+        assert!(
+            md.contains(" — timed out in `tests/t.py::test_'x'`"),
+            "{md}"
+        );
+    }
+
     #[test]
     fn write_markdown_with_empty_history_skips_trend_block() {
         let r = Report::new(vec![MutantOutcome::killed(make_mutant())]);

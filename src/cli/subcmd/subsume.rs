@@ -170,4 +170,70 @@ mod tests {
         })
         .is_err());
     }
+
+    fn write_kill_set_lines(dir: &std::path::Path, lines: &[&str]) -> PathBuf {
+        let p = dir.join("kill-sets.jsonl");
+        std::fs::write(&p, lines.join("\n")).unwrap();
+        p
+    }
+
+    #[test]
+    fn run_writes_store_to_explicit_output_in_both_formats() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = write_kill_set_lines(
+            tmp.path(),
+            &[
+                r#"{"mutant_id":"a.py@1:x","status":"killed","kill_set":["t1"]}"#,
+                r#"{"mutant_id":"a.py@2:x","status":"killed","kill_set":["t1","t2"]}"#,
+                r#"{"mutant_id":"a.py@3:x","status":"killed","kill_set":[]}"#,
+                r#"{"mutant_id":"a.py@4:x","status":"timed_out"}"#,
+                r#"{"mutant_id":"a.py@5:x","status":"survived"}"#,
+            ],
+        );
+        for format in [Format::Human, Format::Json] {
+            let out = tmp.path().join(format!("{format:?}/dominators.json"));
+            run(SubsumeArgs {
+                kill_sets: ks.clone(),
+                output: Some(out.clone()),
+                format,
+            })
+            .unwrap();
+            let store = DominatorStore::load(&out).unwrap().unwrap();
+            assert_eq!(store.stats.records, 5);
+            assert_eq!(store.stats.killed, 2);
+            assert_eq!(store.stats.killed_unattributed, 1);
+            assert_eq!(store.stats.other, 1);
+            assert_eq!(store.stats.dominators, 1);
+            assert_eq!(store.stats.dominator_score, Some(50.0));
+        }
+    }
+
+    #[test]
+    fn run_with_nothing_killed_or_survived_has_no_dominator_score() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = write_kill_set_lines(
+            tmp.path(),
+            &[r#"{"mutant_id":"a.py@1:x","status":"error"}"#],
+        );
+        let out = tmp.path().join("dominators.json");
+        run(SubsumeArgs {
+            kill_sets: ks,
+            output: Some(out.clone()),
+            format: Format::Human,
+        })
+        .unwrap();
+        let store = DominatorStore::load(&out).unwrap().unwrap();
+        assert_eq!(store.stats.dominator_score, None);
+    }
+
+    #[test]
+    fn run_errors_on_missing_kill_sets() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(run(SubsumeArgs {
+            kill_sets: tmp.path().join("nope.jsonl"),
+            output: Some(tmp.path().join("d.json")),
+            format: Format::Json,
+        })
+        .is_err());
+    }
 }

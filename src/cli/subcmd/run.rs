@@ -582,4 +582,48 @@ mod tests {
         run(opts).unwrap();
         assert_eq!(crate::history::load(&hist).unwrap().len(), 2);
     }
+
+    fn entry(ts: &str, score: f64) -> HistoryEntry {
+        let mut e = HistoryEntry::from_report(
+            &Report::new(vec![crate::report::MutantOutcome::killed(
+                scoreless_mutant("k"),
+            )]),
+            Path::new("."),
+            None,
+            None,
+        );
+        e.timestamp = ts.into();
+        e.mutation_score = score;
+        e
+    }
+
+    #[test]
+    fn same_run_matches_on_timestamp_sha_and_score_bits() {
+        let a = entry("t1", 50.0);
+        assert!(same_run(&a, &a.clone()));
+        assert!(!same_run(&a, &entry("t2", 50.0)));
+        assert!(!same_run(&a, &entry("t1", 50.5)));
+        let mut other_sha = a.clone();
+        other_sha.git_sha = Some("deadbeef".into());
+        assert!(!same_run(&a, &other_sha));
+    }
+
+    #[test]
+    fn load_prior_excluding_drops_only_a_tail_equal_to_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("history.jsonl");
+        let (old, current) = (entry("t1", 80.0), entry("t2", 60.0));
+        // Missing file → empty prior, no panic.
+        assert!(load_prior_excluding(&path, &current).is_empty());
+        // Append failed: tail is an earlier run, kept.
+        crate::history::append(&path, &old).unwrap();
+        let prior = load_prior_excluding(&path, &current);
+        assert_eq!(prior.len(), 1);
+        assert_eq!(prior[0].timestamp, "t1");
+        // Append succeeded: tail is this run, stripped.
+        crate::history::append(&path, &current).unwrap();
+        let prior = load_prior_excluding(&path, &current);
+        assert_eq!(prior.len(), 1);
+        assert_eq!(prior[0].timestamp, "t1");
+    }
 }

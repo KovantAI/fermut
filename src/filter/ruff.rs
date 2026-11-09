@@ -222,4 +222,22 @@ mod tests {
         let err = RuffFilter::new(dir.path()).err().unwrap().to_string();
         assert!(err.contains("ruff binary not found"), "{err}");
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_resolves_venv_ruff_and_is_costly() {
+        let dir = tempfile::tempdir().unwrap();
+        let venv_bin = dir.path().join(".venv").join("bin");
+        std::fs::create_dir_all(&venv_bin).unwrap();
+        std::fs::write(venv_bin.join("python"), "").unwrap();
+        let ruff = fake_ruff(dir.path());
+        std::fs::rename(&ruff, venv_bin.join("ruff")).unwrap();
+        // An active VIRTUAL_ENV takes precedence over `.venv` discovery.
+        if std::env::var_os("VIRTUAL_ENV").is_some() {
+            return;
+        }
+        let f = RuffFilter::new(dir.path()).unwrap();
+        assert_eq!(f.bin, venv_bin.join("ruff"));
+        assert!(f.costly());
+    }
 }

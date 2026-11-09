@@ -773,6 +773,66 @@ mod tests {
     }
 
     #[test]
+    fn filters_that_match_nothing_render_empty_in_both_formats() {
+        let (_tmp, p) = write_history(&[
+            entry("2026-06-01T12:00:00Z", 50.0, Some("main")),
+            entry("2026-06-03T12:00:00Z", 60.0, Some("main")),
+        ]);
+        for format in [Format::Json, Format::Human] {
+            // Branch mismatch empties the set.
+            let mut o = strict_opts(p.clone());
+            o.format = format;
+            o.branch = Some("feature".into());
+            assert!(trend(o).is_ok());
+            // Since/until window between the two runs empties it too.
+            let mut o = strict_opts(p.clone());
+            o.format = format;
+            o.since = Some("2026-06-02".into());
+            o.until = Some("2026-06-02".into());
+            assert!(trend(o).is_ok());
+        }
+        // A bad bound is an error, not an empty result.
+        let mut o = strict_opts(p);
+        o.since = Some("last week".into());
+        assert!(trend(o).unwrap_err().to_string().contains("--since"));
+    }
+
+    #[test]
+    fn human_trend_with_diff_grouping_and_a_tolerated_regression() {
+        // A drop below the threshold renders and returns Ok (no exit).
+        let ids = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let mut a = entry("2026-06-01T12:00:00Z", 90.0, Some("main"));
+        a.config_hash = Some("aaa".into());
+        a.survivor_ids = ids(&["src/a.py@1:x->y", "src/a.py@9:gone"]);
+        let mut b = entry("2026-06-02T12:00:00Z", 80.0, Some("main"));
+        b.config_hash = Some("bbb".into()); // mixed hashes → note
+        b.git_sha = Some("abc123".into());
+        b.survivor_ids = ids(&["src/a.py@1:x->y", "src/a.py@9:gone"]);
+        let mut c = entry("2026-06-03T12:00:00Z", 70.0, Some("main"));
+        c.survivor_ids = ids(&["src/a.py@1:x->y", "src/b.py@2:new"]);
+        let (_tmp, p) = write_history(&[a, b, c]);
+        let mut o = strict_opts(p);
+        o.format = Format::Human;
+        o.branch = Some("main".into());
+        o.since = Some("2026-06-01".into());
+        o.until = Some("2026-06-30".into());
+        o.diff = true;
+        o.group_by = Some(TrendGroupBy::File);
+        o.fail_on_regression = Some(50.0);
+        assert!(trend(o).is_ok());
+    }
+
+    #[test]
+    fn print_grouping_is_silent_without_survivor_data() {
+        // No entries, no survivor ids, and an empty id list all return early.
+        print_grouping(&[], TrendGroupBy::File);
+        print_grouping(&[entry("t", 50.0, None)], TrendGroupBy::File);
+        let mut e = entry("t", 50.0, None);
+        e.survivor_ids = Some(vec![]);
+        print_grouping(&[e], TrendGroupBy::File);
+    }
+
+    #[test]
     fn strict_does_not_fail_on_a_newer_schema_line() {
         // A newer-schema line is readable by a newer binary and unrepairable by
         // this one — --strict must warn, not fail, or version skew wedges CI.

@@ -1733,4 +1733,57 @@ mod tests {
             "{err}"
         );
     }
+
+    #[test]
+    fn mirror_without_project_root_uses_the_tests_parent() {
+        // No pyproject.toml/setup.cfg anywhere above: the tests dir's parent
+        // is the project root.
+        let tmp = tempfile::tempdir().unwrap();
+        let tests = tmp.path().join("tests");
+        fs::create_dir_all(&tests).unwrap();
+        fs::write(tmp.path().join("app.py"), "x = 1\n").unwrap();
+        if super::find_project_root(&tests).is_some() {
+            return; // a pyproject.toml above the temp dir; can't test here
+        }
+        let mirror = Mirror::build(&tests, IsolationMode::Copy).unwrap();
+        assert!(mirror.root.join("app.py").is_file());
+        assert!(super::time_mirror_build(&tests, IsolationMode::Copy).is_ok());
+    }
+
+    #[test]
+    fn patch_guard_without_original_and_with_unwritable_path_does_not_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gone = tmp.path().join("missing-dir").join("a.py");
+        // Nothing to restore.
+        drop(PatchGuard {
+            path: gone.clone(),
+            original: None,
+        });
+        // Both restore attempts fail (parent dir missing): logged, not raised.
+        drop(PatchGuard {
+            path: gone.clone(),
+            original: Some(b"x = 1\n".to_vec()),
+        });
+        assert!(!gone.exists());
+    }
+
+    #[test]
+    fn precompile_failure_is_best_effort() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `false` runs but exits non-zero: only costs the speedup.
+        super::precompile(tmp.path(), std::path::Path::new("false"));
+        assert!(!tmp.path().join("__pycache__").exists());
+    }
+
+    #[test]
+    fn copy_dir_all_reports_a_file_it_cannot_materialize() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        fs::write(src.path().join("a.py"), "x = 1\n").unwrap();
+        // A directory squatting on the target path makes the copy fail while
+        // the source still exists: that's a real error, not a mid-walk delete.
+        fs::create_dir_all(dst.path().join("a.py")).unwrap();
+        let err = copy_dir_all(src.path(), dst.path(), IsolationMode::Copy).unwrap_err();
+        assert!(format!("{err:#}").contains("materializing"), "{err:#}");
+    }
 }

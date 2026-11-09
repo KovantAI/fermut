@@ -395,6 +395,11 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     for pat in &exclude {
         globset::Glob::new(pat).with_context(|| format!("invalid exclude glob: {pat:?}"))?;
     }
+    let ignore_patterns = file.ignore_patterns.clone().unwrap_or_default();
+    for pat in &ignore_patterns {
+        regex::Regex::new(pat)
+            .with_context(|| format!("invalid ignore_patterns regex: {pat:?}"))?;
+    }
     let runner = cli_runner.or(file.runner).unwrap_or_default();
     let schemata = resolve_schemata(cli_no_schemata, cli_schemata, file.schemata, runner)?;
     // Resolve the pytest interpreter: explicit `--python` / config `python`
@@ -511,6 +516,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         cache_scope,
         fail_under,
         exclude,
+        ignore_patterns,
         verify_baseline,
         private_home,
         baseline_timeout_secs,
@@ -1754,5 +1760,123 @@ mod tests {
         assert_eq!(got, HashSet::from([Operator::NumberShift]));
         assert!(merge_op_list(None, &Some(vec![])).unwrap().is_none());
         assert!(merge_op_list(Some(vec!["bogus".into()]), &None).is_err());
+    }
+
+    #[test]
+    fn cli_diff_only_sets_base_and_config_both_scopes_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut f = empty_filter();
+        f.diff_only = Some("main".into());
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
+        assert_eq!(cfg.diff_base.as_deref(), Some("main"));
+        assert!(cfg.since.is_none());
+
+        std::fs::write(
+            tmp.path().join("fermut.toml"),
+            "diff_only = \"main\"\nsince = \"HEAD~1\"\n",
+        )
+        .unwrap();
+        let err = call(tmp.path().to_path_buf(), None).unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"), "{err}");
+    }
+
+    #[test]
+    fn stale_auto_discovered_coverage_is_declined() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("pyproject.toml"), "[project]\nname='x'\n").unwrap();
+        let py = root.join("a.py");
+        std::fs::write(&py, "x = 1\n").unwrap();
+        let db = root.join(".coverage");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute("CREATE TABLE coverage_schema (version integer)", [])
+            .unwrap();
+        drop(conn);
+        set_mtime(&db, 1000);
+        set_mtime(&py, 2000);
+        let mut out = None;
+        let log = logged(|| out = Some(call(root.clone(), None).unwrap()));
+        let cfg = out.unwrap();
+        assert!(cfg.coverage_path.is_none());
+        assert!(cfg.coverage.is_none());
+        assert!(log.contains("ignoring auto-discovered coverage"), "{log}");
+    }
+
+    #[test]
+    fn shard_from_cli_beats_config_and_bad_config_shard_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let toml = tmp.path().join("fermut.toml");
+        std::fs::write(&toml, "shard = \"2/3\"\n").unwrap();
+        assert_eq!(
+            call(tmp.path().to_path_buf(), None).unwrap().shard,
+            Some((2, 3))
+        );
+        let mut args = run_args(empty_filter());
+        args.shard = Some((1, 2));
+        assert_eq!(
+            build_config(tmp.path().to_path_buf(), args).unwrap().shard,
+            Some((1, 2))
+        );
+        std::fs::write(&toml, "shard = \"4/3\"\n").unwrap();
+        let err = call(tmp.path().to_path_buf(), None).unwrap_err();
+        assert!(err.to_string().contains("out of range"), "{err}");
+    }
+
+    #[test]
+    fn invalid_ignore_pattern_regex_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("fermut.toml"),
+            "ignore_patterns = [\"(unclosed\"]\n",
+        )
+        .unwrap();
+        let err = call(tmp.path().to_path_buf(), None).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid ignore_patterns regex"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn no_cache_audit_zeroes_the_rate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut args = run_args(empty_filter());
+        args.no_cache_audit = true;
+        args.cache_audit_rate = Some(0.5);
+        let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
+        assert_eq!(cfg.cache_audit_rate, 0.0);
+    }
+
+    #[test]
+    fn op_lists_from_cli_and_empty_file_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut f = empty_filter();
+        f.ops = Some(vec!["arith-op-swap".into()]);
+        let cfg = call_with_filter(tmp.path().to_path_buf(), None, f).unwrap();
+        assert_eq!(cfg.ops_allow, Some(HashSet::from([Operator::ArithOpSwap])));
+        assert_eq!(merge_op_list(None, &Some(Vec::new())).unwrap(), None);
+        assert_eq!(merge_op_list(None, &None).unwrap(), None);
+        assert!(merge_op_list(Some(vec!["no-such-op".into()]), &None).is_err());
+    }
+
+    #[test]
+    fn parse_isolation_env_is_case_and_space_insensitive() {
+        assert_eq!(
+            parse_isolation_env(" Auto ".into()),
+            Some(IsolationMode::Auto)
+        );
+        assert_eq!(
+            parse_isolation_env("COPY".into()),
+            Some(IsolationMode::Copy)
+        );
+        assert_eq!(
+            parse_isolation_env("hardlink".into()),
+            Some(IsolationMode::Hardlink)
+        );
+        assert_eq!(
+            parse_isolation_env("reflink".into()),
+            Some(IsolationMode::Reflink)
+        );
+        assert_eq!(parse_isolation_env("bogus".into()), None);
     }
 }

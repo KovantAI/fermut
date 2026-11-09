@@ -297,4 +297,37 @@ mod tests {
         let err = format!("{:#}", res.unwrap_err());
         assert!(err.contains("watching"), "got: {err}");
     }
+
+    #[test]
+    #[ignore = "requires pytest on PATH"]
+    fn watch_loop_propagates_initial_report_error() {
+        // The initial run's handler error aborts before the (endless) watch
+        // loop starts, so this exercises setup without a file watcher.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"w\"\n").unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::create_dir(root.join("tests")).unwrap();
+        std::fs::write(
+            root.join("fermut.toml"),
+            "source_root = \"src\"\ntests = \"tests\"\nty_filter = false\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/m.py"), "def f(a):\n    return a + 1\n").unwrap();
+        std::fs::write(
+            root.join("tests/test_m.py"),
+            "import m\n\n\ndef test_f():\n    assert m.f(1) == 2\n",
+        )
+        .unwrap();
+        let cfg =
+            crate::cli::build_config::build_config(root.join("src"), Default::default()).unwrap();
+        let seen = std::cell::Cell::new(0usize);
+        let err = watch_loop(&cfg, |report: &Report, _prior: &[HistoryEntry]| {
+            seen.set(report.outcomes.len());
+            anyhow::bail!("stop after initial run")
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("stop after initial run"));
+        assert!(seen.get() > 0, "initial run produced outcomes");
+    }
 }

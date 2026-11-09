@@ -1381,6 +1381,238 @@ mod tests {
         let t = select_targets(&r, None, true).unwrap();
         assert!(t.is_empty());
     }
+
+    #[test]
+    fn opts_from_args_maps_fields_and_defaults_tests_dir() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("tests")).unwrap();
+        let args = SuggestArgs {
+            report: Some("r.json".into()),
+            target: Some("3".into()),
+            all_survivors: true,
+            apply: true,
+            out: Some("o.py".into()),
+            model: Some("m".into()),
+            tests: None,
+            context: 5,
+            sample_count: 7,
+            no_cache: true,
+            cache_path: Some("c.json".into()),
+            format: Format::Json,
+            parallel: 4,
+            triage: TriageMode::Audit,
+        };
+        let o = SuggestOpts::from((args, dir.path().to_path_buf()));
+        assert_eq!(o.report, PathBuf::from("r.json"));
+        assert_eq!(o.target.as_deref(), Some("3"));
+        assert!(o.all_survivors && o.apply && o.no_cache);
+        assert_eq!(o.out, Some(PathBuf::from("o.py")));
+        assert_eq!(o.model.as_deref(), Some("m"));
+        assert_eq!(o.tests, Some(dir.path().join("tests")));
+        assert_eq!((o.context_lines, o.sample_count, o.parallel), (5, 7, 4));
+        assert_eq!(o.cache_path, Some(PathBuf::from("c.json")));
+        assert_eq!(o.project_root, dir.path());
+        assert!(matches!(o.format, Format::Json));
+        assert!(matches!(o.triage, TriageMode::Audit));
+    }
+
+    #[test]
+    fn no_targets_is_ok_in_both_formats_and_writes_nothing() {
+        let dir = TempDir::new().unwrap();
+        let r = Report::new(vec![MutantOutcome::killed(make_mutant(
+            "k",
+            dir.path().join("a.py"),
+            1,
+        ))]);
+        let report_path = dir.path().join("report.json");
+        std::fs::write(&report_path, serde_json::to_string(&r).unwrap()).unwrap();
+        let out = dir.path().join("out.py");
+        for format in [Format::Json, Format::Human] {
+            run_with_mock(
+                report_path.clone(),
+                Some(out.clone()),
+                true,
+                1,
+                format,
+                dir.path().to_path_buf(),
+            )
+            .unwrap();
+        }
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn finalize_entry_reports_generation_error_and_missing_code_block() {
+        let m = make_mutant("m", "a.py".into(), 2);
+        let e = finalize_entry(
+            gen_result(m.clone(), PromptContext::empty(), Err(anyhow!("boom"))),
+            false,
+            None,
+            false,
+        );
+        assert_eq!(e.error.as_deref(), Some("boom"));
+        assert!(e.cached && e.response.is_none());
+
+        let e = finalize_entry(
+            gen_result(m, PromptContext::empty(), Ok("no code here".into())),
+            false,
+            None,
+            false,
+        );
+        assert_eq!(e.response.as_deref(), Some("no code here"));
+        assert!(e.extracted_code.is_none());
+        assert!(e.error.unwrap().contains("python code block"));
+    }
+
+    #[test]
+    fn finalize_entry_apply_appends_to_inferred_test_file() {
+        let dir = TempDir::new().unwrap();
+        let test_file = dir.path().join("test_a.py");
+        std::fs::write(&test_file, "# existing\n").unwrap();
+        let ctx = PromptContext {
+            enclosing_symbol: Some("f".into()),
+            sample_tests: vec![SampleTest {
+                path: test_file.display().to_string(),
+                body: String::new(),
+            }],
+            ..PromptContext::empty()
+        };
+        let m = make_mutant("m", "a.py".into(), 2);
+        let e = finalize_entry(
+            gen_result(m, ctx, Ok(CODE_RESPONSE.into())),
+            true,
+            None,
+            true,
+        );
+        assert_eq!(e.applied_to, Some(test_file.display().to_string()));
+        assert!(e.error.is_none());
+        let text = std::fs::read_to_string(&test_file).unwrap();
+        assert!(text.starts_with("# existing\n"));
+        assert!(text.contains("fermut suggest: kills mutation `<=` → `<` at a.py:2"));
+        assert!(text.contains("def test_k():"));
+    }
+
+    #[test]
+    fn finalize_entry_apply_falls_back_to_out_then_errors_without_it() {
+        let dir = TempDir::new().unwrap();
+        let out = dir.path().join("fallback.py");
+        let m = make_mutant("m", "a.py".into(), 2);
+        // No enclosing symbol → inference fails → `--out` fallback.
+        let e = finalize_entry(
+            gen_result(m.clone(), PromptContext::empty(), Ok(CODE_RESPONSE.into())),
+            true,
+            Some(&out),
+            true,
+        );
+        assert_eq!(e.applied_to, Some(out.display().to_string()));
+        assert!(std::fs::read_to_string(&out)
+            .unwrap()
+            .contains("def test_k():"));
+
+        // No fallback: the inference error surfaces, nothing applied.
+        let e = finalize_entry(
+            gen_result(m.clone(), PromptContext::empty(), Ok(CODE_RESPONSE.into())),
+            true,
+            None,
+            false,
+        );
+        assert!(e.applied_to.is_none());
+        assert!(e.error.unwrap().contains("enclosing symbol"));
+        assert_eq!(
+            e.extracted_code.as_deref(),
+            Some("def test_k():\n    assert f(1)\n")
+        );
+
+        // A symbol but no sample test file → the other inference error.
+        let ctx = PromptContext {
+            enclosing_symbol: Some("f".into()),
+            ..PromptContext::empty()
+        };
+        let e = finalize_entry(
+            gen_result(m, ctx, Ok(CODE_RESPONSE.into())),
+            true,
+            None,
+            false,
+        );
+        assert!(e
+            .error
+            .unwrap()
+            .contains("could not find a test file referencing `f`"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finalize_entry_surfaces_write_failures() {
+        let dir = TempDir::new().unwrap();
+        let real = dir.path().join("real.py");
+        std::fs::write(&real, "").unwrap();
+        let link = dir.path().join("link.py");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let m = make_mutant("m", "a.py".into(), 2);
+        let symlinked_sample = PromptContext {
+            enclosing_symbol: Some("f".into()),
+            sample_tests: vec![SampleTest {
+                path: link.display().to_string(),
+                body: String::new(),
+            }],
+            ..PromptContext::empty()
+        };
+        // --apply onto a symlinked test file, --apply's --out fallback, and
+        // plain --out: each refuses the symlink and reports it.
+        let cases: [(bool, PromptContext); 3] = [
+            (true, symlinked_sample),
+            (true, PromptContext::empty()),
+            (false, PromptContext::empty()),
+        ];
+        for (apply, ctx) in cases {
+            let e = finalize_entry(
+                gen_result(m.clone(), ctx, Ok(CODE_RESPONSE.into())),
+                apply,
+                Some(&link),
+                false,
+            );
+            assert!(e.applied_to.is_none());
+            assert!(e.error.unwrap().contains("symlink"));
+        }
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "");
+    }
+
+    #[test]
+    fn build_context_samples_dedupes_and_caps_tests_referencing_symbol() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("calc.py");
+        std::fs::write(&src, "def in_range(x):\n    return x <= 1\n").unwrap();
+        let tests = dir.path().join("tests");
+        std::fs::create_dir(&tests).unwrap();
+        // Two hits in one file must yield one sample.
+        std::fs::write(
+            tests.join("test_a.py"),
+            "def test_a():\n    in_range(1)\n    in_range(2)\n",
+        )
+        .unwrap();
+        std::fs::write(tests.join("test_b.py"), "def test_b():\n    in_range(3)\n").unwrap();
+        std::fs::write(tests.join("test_c.py"), "def test_c():\n    in_range(4)\n").unwrap();
+        let m = make_mutant("m", src, 2);
+
+        let ctx = build_context(&m, 1, Some(&tests), 2);
+        assert_eq!(ctx.enclosing_symbol.as_deref(), Some("in_range"));
+        assert_eq!(ctx.sample_tests.len(), 2, "capped at sample_count");
+        assert_ne!(ctx.sample_tests[0].path, ctx.sample_tests[1].path);
+        assert!(ctx.sample_tests[0].body.contains("in_range("));
+
+        // Unreadable tests dir → no samples, no error.
+        let ctx = build_context(&m, 1, Some(&dir.path().join("missing")), 2);
+        assert!(ctx.sample_tests.is_empty());
+    }
+
+    #[test]
+    fn append_to_test_file_errors_when_parent_is_a_file() {
+        let dir = TempDir::new().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        let err = append_to_test_file(&blocker.join("test_x.py"), "x").unwrap_err();
+        assert!(err.to_string().contains("creating"), "{err}");
+    }
 }
 
 #[derive(clap::Args, Debug)]

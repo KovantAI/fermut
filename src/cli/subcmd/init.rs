@@ -1361,6 +1361,196 @@ mod tests {
             "[project]\n\n[tool.fermut]\njobs = 1\n"
         );
     }
+
+    fn init_args(path: &Path) -> InitArgs {
+        InitArgs {
+            path: path.to_path_buf(),
+            pyproject: false,
+            force: false,
+            with_gha: false,
+            with_coverage: false,
+            profile: None,
+            list_profiles: false,
+            dry_run: false,
+        }
+    }
+
+    #[test]
+    fn run_list_profiles_writes_nothing() {
+        let tmp = tempdir().unwrap();
+        fs::write(tmp.path().join("pyproject.toml"), "").unwrap();
+        let mut a = init_args(tmp.path());
+        a.list_profiles = true;
+        run(a).unwrap();
+        assert!(!tmp.path().join("fermut.toml").exists());
+    }
+
+    #[test]
+    fn run_rejects_unknown_profile() {
+        let tmp = tempdir().unwrap();
+        let mut a = init_args(tmp.path());
+        a.profile = Some("bogus".into());
+        let err = run(a).unwrap_err().to_string();
+        assert!(err.contains("unknown profile `bogus`"));
+        assert!(!tmp.path().join("fermut.toml").exists());
+    }
+
+    #[test]
+    fn run_dry_run_with_gha_writes_nothing() {
+        let tmp = tempdir().unwrap();
+        fs::write(tmp.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let mut a = init_args(tmp.path());
+        a.dry_run = true;
+        a.with_gha = true;
+        a.pyproject = true;
+        a.profile = Some("nightly".into());
+        run(a).unwrap();
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("pyproject.toml")).unwrap(),
+            "[project]\n"
+        );
+        assert!(!tmp.path().join(".github").exists());
+    }
+
+    #[test]
+    fn run_writes_config_and_gha_then_refuses_without_force() {
+        let tmp = tempdir().unwrap();
+        fs::write(tmp.path().join("pyproject.toml"), "").unwrap();
+        let mut a = init_args(tmp.path());
+        a.with_gha = true;
+        a.with_coverage = true;
+        a.profile = Some("local".into());
+        run(a).unwrap();
+        let cfg = fs::read_to_string(tmp.path().join("fermut.toml")).unwrap();
+        assert!(cfg.contains("sample = 0.25"));
+        assert!(!cfg.contains("coverage = "));
+        let gha = tmp.path().join(".github/workflows/fermut.yml");
+        assert_eq!(fs::read_to_string(&gha).unwrap(), GHA_PR_GATE);
+
+        let mut a = init_args(tmp.path());
+        a.with_gha = true;
+        assert!(run(a).unwrap_err().to_string().contains("already exists"));
+        // write_gha guards independently of the config writer.
+        assert!(write_gha(&gha, false).is_err());
+        write_gha(&gha, true).unwrap();
+
+        // --force overwrites both; no profile + with_coverage wires coverage.
+        let mut a = init_args(tmp.path());
+        a.with_gha = true;
+        a.force = true;
+        a.with_coverage = true;
+        run(a).unwrap();
+        let cfg = fs::read_to_string(tmp.path().join("fermut.toml")).unwrap();
+        assert!(cfg.contains("coverage = \".coverage\""));
+    }
+
+    #[test]
+    fn print_helpers_handle_missing_tests_ty_and_coverage() {
+        // Pure stdout helpers: exercise the warning branches; must not panic.
+        let mut d = fake_detection();
+        d.tests = None;
+        d.ty_available = false;
+        let opts = InitOpts {
+            path: PathBuf::from("/proj"),
+            pyproject: false,
+            force: false,
+            with_gha: false,
+            with_coverage: true,
+            profile: Some(Profile::PrGate),
+            dry_run: true,
+        };
+        print_detection_summary(&d, &opts, RepoSize::Small);
+        print_next_steps(&d, true);
+        print_next_steps(&d, false);
+    }
+
+    #[test]
+    fn coverage_status_covers_every_profile() {
+        use CoverageDetection::{Absent, Present};
+        let cases = [
+            (
+                Absent,
+                false,
+                Some(Profile::PrGate),
+                "wired (profile pr-gate",
+            ),
+            (
+                Present,
+                false,
+                Some(Profile::Nightly),
+                "off (profile nightly",
+            ),
+            (Present, false, Some(Profile::Local), "off (profile local"),
+            (Present, false, Some(Profile::Library), "honors detected"),
+            (
+                Absent,
+                true,
+                Some(Profile::Library),
+                "library + --with-coverage",
+            ),
+            (Absent, false, Some(Profile::Library), "defers to project"),
+            (Present, false, None, "coverage detected"),
+            (Absent, true, None, "wired (--with-coverage"),
+            (Absent, false, None, "off (no coverage"),
+        ];
+        for (det, with, prof, want) in cases {
+            let got = coverage_status(det, with, prof);
+            assert!(got.contains(want), "{got:?} lacks {want:?}");
+        }
+    }
+
+    #[test]
+    fn detect_package_manager_other_lockfiles() {
+        for (file, want) in [
+            ("poetry.lock", PackageManager::Poetry),
+            ("pdm.lock", PackageManager::Pdm),
+            ("Pipfile", PackageManager::Pipenv),
+        ] {
+            let tmp = tempdir().unwrap();
+            fs::write(tmp.path().join(file), "").unwrap();
+            assert_eq!(detect_package_manager(tmp.path()), want);
+        }
+    }
+
+    #[test]
+    fn detect_source_root_falls_back_to_root() {
+        let tmp = tempdir().unwrap();
+        fs::write(tmp.path().join("loose.py"), "").unwrap();
+        fs::create_dir(tmp.path().join("tests")).unwrap();
+        fs::write(tmp.path().join("tests/__init__.py"), "").unwrap();
+        assert_eq!(detect_source_root(tmp.path()), tmp.path());
+    }
+
+    #[test]
+    fn render_config_large_repo_gets_op_subset() {
+        let mut d = fake_detection();
+        d.py_file_count = 1000;
+        let body = render_config(&d, false, None);
+        assert!(body.contains("ops = [\"arith-op-swap\""));
+    }
+
+    #[test]
+    fn is_toml_table_header_handles_quoted_keys() {
+        assert!(is_toml_table_header(r#"[a."b]c"]"#));
+        assert!(is_toml_table_header(r#"[a."q\"]"]"#));
+        assert!(is_toml_table_header("[a.'b]c']"));
+        assert!(is_toml_table_header("[[arr.x]]  # c"));
+        assert!(!is_toml_table_header("[a] = 1"));
+        assert!(!is_toml_table_header("[unclosed"));
+        assert!(!is_toml_table_header("key = 1"));
+    }
+
+    #[test]
+    fn write_pyproject_adds_newline_to_unterminated_file() {
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("pyproject.toml");
+        fs::write(&p, "[project]\nname = \"x\"").unwrap();
+        write_pyproject(&p, "jobs = 1\n", false).unwrap();
+        assert_eq!(
+            fs::read_to_string(&p).unwrap(),
+            "[project]\nname = \"x\"\n\n[tool.fermut]\njobs = 1\n"
+        );
+    }
 }
 
 #[derive(clap::Args, Debug)]

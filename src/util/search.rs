@@ -122,6 +122,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn grep_symbol_recurses_skips_hidden_and_respects_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for d in ["pkg/sub", ".hidden", "__pycache__"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("pkg/sub/a.py"), "x = 1\ny = foo()\nfoo\n").unwrap();
+        std::fs::write(root.join(".hidden/b.py"), "foo\n").unwrap();
+        std::fs::write(root.join("__pycache__/c.py"), "foo\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "foo\n").unwrap();
+        std::fs::write(root.join("bin.py"), [0xff, 0xfe, b'f']).unwrap();
+
+        let hits = grep_symbol(root, "foo", 10).unwrap();
+        // One hit per file (first matching line), hidden/cache dirs pruned.
+        assert_eq!(hits, vec![(root.join("pkg/sub/a.py"), 2)]);
+        assert!(grep_symbol(root, "foo", 0).unwrap().is_empty());
+        assert!(grep_symbol(&root.join("missing"), "foo", 5)
+            .unwrap()
+            .is_empty());
+
+        std::fs::write(root.join("pkg/z.py"), "foo\n").unwrap();
+        std::fs::write(root.join("pkg/sub/y.py"), "foo\n").unwrap();
+        assert_eq!(grep_symbol(root, "foo", 1).unwrap().len(), 1);
+        assert_eq!(grep_symbol(root, "foo", 10).unwrap().len(), 3);
+    }
+
+    #[test]
     fn contains_word_matches_whole_word_only() {
         assert!(contains_word("foo bar baz", "bar"));
         assert!(contains_word("bar", "bar"));

@@ -155,6 +155,31 @@ mod tests {
     }
 
     #[test]
+    fn default_matches_new() {
+        assert_eq!(
+            BytecodeIdentity::default().python,
+            BytecodeIdentity::new().python
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interpreter_exiting_nonzero_is_not_equivalent() {
+        // A fake interpreter that drains stdin, then fails.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake-python");
+        std::fs::write(&fake, "#!/bin/sh\ncat >/dev/null\nexit 1\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let fake = fake.to_str().unwrap();
+        assert!(!run_check(fake, "x = 1\n", "x = 2\n").unwrap());
+        let det = BytecodeIdentity::with_python(fake);
+        let source = "def f():\n    return None\n";
+        let m = mutant_at(source, "return None", "return");
+        assert_eq!(det.detect(&m, source), EquivVerdict::NotEquivalent);
+    }
+
+    #[test]
     fn return_none_vs_bare_return_is_bytecode_identical() {
         if !python_available() {
             eprintln!("skipping: python3 not available");

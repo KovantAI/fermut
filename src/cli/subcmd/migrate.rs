@@ -96,8 +96,11 @@ struct FermutConfig {
     coverage: Option<PathBuf>,
     isolation: Option<&'static str>,
     /// Glob patterns relative to `source_root`. Populated from cosmic-ray
-    /// `excluded-modules` (translated via [`normalize_exclude_pattern`]).
+    /// `excluded-modules` and mutmut `do_not_mutate` (normalized via
+    /// [`normalize_excludes_against_source_root`]).
     exclude: Vec<String>,
+    /// Line regexes. Populated from mutmut `do_not_mutate_patterns`.
+    ignore_patterns: Vec<String>,
 }
 
 pub fn migrate(opts: MigrateOpts) -> Result<()> {
@@ -213,6 +216,7 @@ fn translate_mutmut(project_root: &Path, explicit: Option<&Path>) -> Result<Tran
     for (key, value) in &table {
         translate_mutmut_key(key, value, &mut out);
     }
+    normalize_excludes_against_source_root(&mut out);
     Ok(out)
 }
 
@@ -328,6 +332,24 @@ fn translate_mutmut_key(key: &str, raw: &str, out: &mut Translation) {
         // Known mutmut keys without an equivalent — surface them so the
         // user knows what we dropped, with the *original* hyphen/underscore
         // spelling preserved.
+        "do_not_mutate" => match parse_string_list(raw) {
+            Some(globs) => out.config.exclude.extend(globs),
+            None => out.unmapped.push((
+                key.into(),
+                format!("expected a list of globs, got `{raw}`. Move them to `exclude` by hand."),
+            )),
+        },
+        "do_not_mutate_patterns" => match parse_string_list(raw) {
+            Some(pats) => out.config.ignore_patterns.extend(pats),
+            None => out.unmapped.push((
+                key.into(),
+                format!("expected a list of regexes, got `{raw}`. Move them to `ignore_patterns` by hand."),
+            )),
+        },
+        "only_mutate" => out.unmapped.push((
+            key.into(),
+            format!("fermut has no include list (value was `{raw}`); narrow `source_root` or list the rest in `exclude`."),
+        )),
         "backup" => out.unmapped.push((
             key.into(),
             "fermut writes per-worker mirrors; nothing to back up. Drop this key.".into(),
@@ -429,11 +451,11 @@ fn normalize_excludes_against_source_root(out: &mut Translation) {
             // Pattern matches source_root itself — meaningless under fermut's
             // collection root (would exclude everything). Surface it.
             warnings.push(format!(
-                "excluded-modules pattern `{pat}` equals source_root; review manually."
+                "exclude pattern `{pat}` equals source_root; review manually."
             ));
         } else if !pat.starts_with(&prefix) {
             warnings.push(format!(
-                "excluded-modules pattern `{pat}` does not sit under source_root `{prefix}/`; kept verbatim. Review if it still matches what you intended."
+                "exclude pattern `{pat}` does not sit under source_root `{prefix}/`; kept verbatim. Review if it still matches what you intended."
             ));
         }
     }
@@ -562,6 +584,7 @@ impl FermutConfig {
             && self.coverage.is_none()
             && self.isolation.is_none()
             && self.exclude.is_empty()
+            && self.ignore_patterns.is_empty()
     }
 }
 
@@ -661,13 +684,25 @@ fn render_fermut_body(c: &FermutConfig) -> String {
         }
         out.push_str("]\n");
     }
+    if !c.ignore_patterns.is_empty() {
+        // Regexes carry backslashes, so escape for a TOML basic string.
+        let quoted: Vec<String> = c
+            .ignore_patterns
+            .iter()
+            .map(|p| format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect();
+        out.push_str(&format!("ignore_patterns = [{}]\n", quoted.join(", ")));
+    }
     out
 }
 
 /// Rewrite `# pragma: no mutate` → `# fermut: ignore` in every `.py` file
-/// under `root`. Returns the list of (path, replacement-count) pairs that
+/// under `root`; the mutmut 3 region forms `… block` / `start` / `end` become
+/// `# fermut: ignore-block` / `ignore-start` / `ignore-end`. Returns the list of (path, replacement-count) pairs that
 /// changed. In `--dry-run` the files are not written.
 fn rewrite_pragmas(root: &Path, dry_run: bool) -> Result<Vec<(PathBuf, usize)>> {
+    let pragma = regex::Regex::new(r"# pragma: no mutate(?:[: \t]+(block|start|end)\b)?")
+        .expect("static regex");
     let mut touched = Vec::new();
     if !root.exists() {
         return Ok(touched);
@@ -697,10 +732,13 @@ fn rewrite_pragmas(root: &Path, dry_run: bool) -> Result<Vec<(PathBuf, usize)>> 
         if !text.contains("# pragma: no mutate") {
             continue;
         }
-        let next = text.replace("# pragma: no mutate", "# fermut: ignore");
-        let n = text.matches("# pragma: no mutate").count();
+        let n = pragma.find_iter(&text).count();
+        let next = pragma.replace_all(&text, |c: &regex::Captures| match c.get(1) {
+            Some(form) => format!("# fermut: ignore-{}", form.as_str()),
+            None => "# fermut: ignore".to_string(),
+        });
         if !dry_run {
-            fs::write(entry.path(), &next)
+            fs::write(entry.path(), next.as_bytes())
                 .with_context(|| format!("writing {}", entry.path().display()))?;
         }
         touched.push((entry.path().to_path_buf(), n));
@@ -985,6 +1023,64 @@ y = 2
     }
 
     #[test]
+    fn mutmut_3_skip_lists_translate_to_exclude_and_ignore_patterns() {
+        let mut tx = Translation::default();
+        translate_mutmut_key("source_paths", "[\"src/\"]", &mut tx);
+        translate_mutmut_key(
+            "do_not_mutate",
+            "[\"src/legacy/*\", \"src/gen.py\"]",
+            &mut tx,
+        );
+        // As `toml_table_to_strings` renders it: backslashes escaped.
+        translate_mutmut_key(
+            "do_not_mutate_patterns",
+            r#"["log\\.debug\\(", "^\\s*assert "]"#,
+            &mut tx,
+        );
+        translate_mutmut_key("only_mutate", "[\"src/core/*\"]", &mut tx);
+        normalize_excludes_against_source_root(&mut tx);
+        assert_eq!(tx.config.exclude, vec!["legacy/*", "gen.py"]);
+        assert_eq!(
+            tx.config.ignore_patterns,
+            vec![r"log\.debug\(", r"^\s*assert "]
+        );
+        assert_eq!(tx.unmapped.len(), 1);
+        assert_eq!(tx.unmapped[0].0, "only_mutate");
+
+        // The rendered body must parse back to the same regexes.
+        let body = render_fermut_body(&tx.config);
+        let parsed: toml::Value = toml::from_str(&body).unwrap();
+        let pats: Vec<&str> = parsed["ignore_patterns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(pats, vec![r"log\.debug\(", r"^\s*assert "]);
+    }
+
+    #[test]
+    fn pragma_rewrite_maps_region_forms() {
+        let tmp = tempdir().unwrap();
+        let a = tmp.path().join("a.py");
+        fs::write(
+            &a,
+            "# pragma: no mutate start\nx = 1\n# pragma: no mutate: end\n\
+             if x:  # pragma: no mutate block\n    y = 2  # pragma: no mutate\n\
+             z = 3  # pragma: no mutate blocked\n",
+        )
+        .unwrap();
+        let touched = rewrite_pragmas(tmp.path(), false).unwrap();
+        assert_eq!(touched[0].1, 5);
+        assert_eq!(
+            fs::read_to_string(&a).unwrap(),
+            "# fermut: ignore-start\nx = 1\n# fermut: ignore-end\n\
+             if x:  # fermut: ignore-block\n    y = 2  # fermut: ignore\n\
+             z = 3  # fermut: ignore blocked\n"
+        );
+    }
+
+    #[test]
     fn mutmut_3_type_check_command_surfaces_as_replaced_by_ty() {
         let mut tx = Translation::default();
         translate_mutmut_key(
@@ -1183,6 +1279,7 @@ name = "celery4"
             coverage: Some(PathBuf::from(".coverage")),
             isolation: Some("copy"),
             exclude: vec!["migrations/**".into(), "legacy/*.py".into()],
+            ignore_patterns: Vec::new(),
         };
         let body = render_fermut_body(&c);
         assert!(body.contains("source_root = \"src\""));
@@ -1530,6 +1627,289 @@ name = "celery4"
         assert_eq!(o.source, MigrateSource::CosmicRay);
         assert_eq!(o.config, Some(PathBuf::from("c")));
         assert!(o.pyproject && o.force && o.dry_run && o.no_pragma_rewrite);
+    }
+
+    #[test]
+    fn migrate_mutmut_setup_cfg_dry_run_writes_nothing() {
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join("setup.cfg"),
+            "[mutmut]\npaths_to_mutate = src/\nbackup = False\n",
+        )
+        .unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir(&src).unwrap();
+        let py = src.join("a.py");
+        let original = "x = 1  # pragma: no mutate\n";
+        fs::write(&py, original).unwrap();
+        let mut o = opts(MigrateSource::Mutmut, tmp.path());
+        o.dry_run = true;
+        o.pyproject = true;
+        migrate(o).unwrap();
+        assert!(!tmp.path().join("fermut.toml").exists());
+        assert!(!tmp.path().join("pyproject.toml").exists());
+        assert_eq!(fs::read_to_string(&py).unwrap(), original);
+    }
+
+    #[test]
+    fn migrate_mutmut_writes_fermut_toml_and_rewrites_pragmas() {
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join("pyproject.toml"),
+            "[tool.mutmut]\npaths_to_mutate = \"src/\"\n",
+        )
+        .unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir(&src).unwrap();
+        let py = src.join("a.py");
+        fs::write(&py, "x = 1  # pragma: no mutate\n").unwrap();
+        migrate(opts(MigrateSource::Mutmut, tmp.path())).unwrap();
+        let cfg = fs::read_to_string(tmp.path().join("fermut.toml")).unwrap();
+        assert!(cfg.contains("source_root = \"src/\""));
+        assert_eq!(
+            fs::read_to_string(&py).unwrap(),
+            "x = 1  # fermut: ignore\n"
+        );
+    }
+
+    #[test]
+    fn migrate_mutmut_empty_table_and_absolute_source_root() {
+        // Empty translation path + absolute source_root scan + no markers.
+        let tmp = tempdir().unwrap();
+        let cfg = tmp.path().join("m.toml");
+        fs::write(&cfg, "[tool.mutmut]\n").unwrap();
+        let mut o = opts(MigrateSource::Mutmut, tmp.path());
+        o.config = Some(cfg);
+        migrate(o).unwrap();
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("fermut.toml")).unwrap(),
+            ""
+        );
+
+        let abs = tmp.path().join("abs");
+        fs::create_dir(&abs).unwrap();
+        fs::write(abs.join("b.py"), "y = 2  # pragma: no mutate\n").unwrap();
+        let cfg2 = tmp.path().join("m2.toml");
+        fs::write(
+            &cfg2,
+            format!("paths_to_mutate = {:?}\n", abs.display().to_string()),
+        )
+        .unwrap();
+        let mut o = opts(MigrateSource::Mutmut, tmp.path());
+        o.config = Some(cfg2);
+        o.force = true;
+        migrate(o).unwrap();
+        assert!(fs::read_to_string(abs.join("b.py"))
+            .unwrap()
+            .contains("# fermut: ignore"));
+    }
+
+    #[test]
+    fn migrate_cosmic_ray_writes_config_and_skips_pragmas() {
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join("cosmic-ray.toml"),
+            "[cosmic-ray]\nmodule-path = \"src\"\ntimeout = 30\nbadge = 1\n",
+        )
+        .unwrap();
+        let py = tmp.path().join("a.py");
+        fs::write(&py, "x = 1  # pragma: no mutate\n").unwrap();
+        migrate(opts(MigrateSource::CosmicRay, tmp.path())).unwrap();
+        let cfg = fs::read_to_string(tmp.path().join("fermut.toml")).unwrap();
+        assert!(cfg.contains("source_root = \"src\""));
+        assert!(cfg.contains("timeout = 30"));
+        // cosmic-ray never touches pragmas.
+        assert!(fs::read_to_string(&py)
+            .unwrap()
+            .contains("# pragma: no mutate"));
+        assert_eq!(MigrateSource::CosmicRay.label(), "cosmic-ray");
+    }
+
+    #[test]
+    fn missing_configs_error_with_hint() {
+        let tmp = tempdir().unwrap();
+        // pyproject without [tool.mutmut], setup.cfg without [mutmut].
+        fs::write(
+            tmp.path().join("pyproject.toml"),
+            "[project]\nname = \"x\"\n",
+        )
+        .unwrap();
+        fs::write(tmp.path().join("setup.cfg"), "[flake8]\nx = 1\n").unwrap();
+        let err = find_mutmut_table(tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("no mutmut config found"));
+        assert!(err.contains("--config"));
+
+        let err = translate_cosmic_ray(tmp.path(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no cosmic-ray.toml"));
+
+        let cfg = tmp.path().join("cosmic-ray.toml");
+        fs::write(&cfg, "[other]\nx = 1\n").unwrap();
+        let err = translate_cosmic_ray(tmp.path(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("has no [cosmic-ray] table"));
+    }
+
+    #[test]
+    fn load_table_at_ini_fallback_and_parse_error() {
+        let tmp = tempdir().unwrap();
+        let ini = tmp.path().join("setup.cfg");
+        fs::write(&ini, "[mutmut]\npaths_to_mutate: src/\n").unwrap();
+        let (p, tbl) = load_table_at(&ini).unwrap();
+        assert_eq!(p, ini);
+        assert_eq!(tbl.get("paths_to_mutate").map(String::as_str), Some("src/"));
+
+        let junk = tmp.path().join("junk.cfg");
+        fs::write(&junk, "[[[ not toml\n").unwrap();
+        let err = load_table_at(&junk).unwrap_err().to_string();
+        assert!(err.contains("could not parse"));
+
+        assert!(load_table_at(&tmp.path().join("missing.toml")).is_err());
+    }
+
+    #[test]
+    fn find_mutmut_table_reads_setup_cfg() {
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join("setup.cfg"),
+            "[mutmut]\npaths_to_mutate = src/\n",
+        )
+        .unwrap();
+        let (p, tbl) = find_mutmut_table(tmp.path()).unwrap();
+        assert_eq!(p, tmp.path().join("setup.cfg"));
+        assert_eq!(tbl.get("paths_to_mutate").map(String::as_str), Some("src/"));
+    }
+
+    #[test]
+    fn mutmut_remaining_keys_translate_or_surface() {
+        let mut tx = Translation::default();
+        translate_mutmut_key("do_not_mutate", "\"x\"", &mut tx);
+        translate_mutmut_key("do_not_mutate_patterns", "\"y\"", &mut tx);
+        translate_mutmut_key("only_mutate", "[\"a\"]", &mut tx);
+        translate_mutmut_key("also_copy", "[\"b\"]", &mut tx);
+        translate_mutmut_key("simple_output", "true", &mut tx);
+        translate_mutmut_key("runner", "\"make test\"", &mut tx);
+        translate_mutmut_key("use_coverage", "false", &mut tx);
+        translate_mutmut_key("mutate_only_covered_lines", "maybe", &mut tx);
+        let keys: Vec<&str> = tx.unmapped.iter().map(|(k, _)| k.as_str()).collect();
+        for k in [
+            "do_not_mutate",
+            "do_not_mutate_patterns",
+            "only_mutate",
+            "also_copy",
+            "simple_output",
+            "runner",
+        ] {
+            assert!(keys.contains(&k), "{k} missing from {keys:?}");
+        }
+        assert!(tx.config.coverage.is_none());
+        assert!(tx.config.exclude.is_empty());
+        assert!(tx.config.ignore_patterns.is_empty());
+    }
+
+    #[test]
+    fn cosmic_ray_remaining_keys() {
+        let toml_src = r#"
+[cosmic-ray]
+timeout = 7
+python-version = "3.12"
+interceptors = ["spor"]
+badge = { label = "m" }
+mystery = 1
+
+[cosmic-ray.distributor]
+name = "http"
+
+[cosmic-ray.cloning]
+method = "git"
+"#;
+        let root: toml::Value = toml::from_str(toml_src).unwrap();
+        let cr = root.get("cosmic-ray").unwrap().as_table().unwrap();
+        let mut tx = Translation::default();
+        for (k, v) in cr {
+            translate_cosmic_ray_key(k, v, &mut tx);
+        }
+        assert_eq!(tx.config.timeout, Some(7));
+        assert_eq!(tx.config.isolation, Some("auto"));
+        let keys: Vec<&str> = tx.unmapped.iter().map(|(k, _)| k.as_str()).collect();
+        for k in ["python-version", "interceptors", "badge", "mystery"] {
+            assert!(keys.contains(&k), "{k} missing from {keys:?}");
+        }
+        assert!(tx.notes.iter().any(|n| n.contains("--shard i/n")));
+
+        let mut tx = Translation::default();
+        let local = toml::Value::try_from(BTreeMap::from([("name", "local")])).unwrap();
+        let other = toml::Value::try_from(BTreeMap::from([("name", "process")])).unwrap();
+        let sym = toml::Value::try_from(BTreeMap::from([("method", "symlink")])).unwrap();
+        translate_cosmic_ray_key("execution-engine", &local, &mut tx);
+        translate_cosmic_ray_key("execution-engine", &other, &mut tx);
+        translate_cosmic_ray_key("cloning", &sym, &mut tx);
+        assert!(tx
+            .notes
+            .iter()
+            .any(|n| n.contains("runs locally by default")));
+        assert!(tx.notes.iter().any(|n| n.contains("`process`")));
+        assert_eq!(tx.config.isolation, Some("hardlink"));
+    }
+
+    #[test]
+    fn normalize_excludes_edge_cases() {
+        // Empty prefix → untouched, no notes.
+        let mut tx = Translation::default();
+        tx.config.source_root = Some(PathBuf::from("/"));
+        tx.config.exclude = vec!["a/*".into()];
+        normalize_excludes_against_source_root(&mut tx);
+        assert_eq!(tx.config.exclude, vec!["a/*".to_string()]);
+        assert!(tx.notes.is_empty());
+
+        // Pattern equal to source_root → warning; prefix-but-not-dir → silent.
+        let mut tx = Translation::default();
+        tx.config.source_root = Some(PathBuf::from("src"));
+        tx.config.exclude = vec!["src".into(), "src2/*".into()];
+        normalize_excludes_against_source_root(&mut tx);
+        assert_eq!(tx.notes.len(), 1);
+        assert!(tx.notes[0].contains("equals source_root"));
+    }
+
+    #[test]
+    fn is_empty_tracks_every_field() {
+        let mut c = FermutConfig::default();
+        assert!(c.is_empty());
+        c.ignore_patterns.push("x".into());
+        assert!(!c.is_empty());
+        let c = FermutConfig {
+            isolation: Some("copy"),
+            ..Default::default()
+        };
+        assert!(!c.is_empty());
+        let c = FermutConfig {
+            exclude: vec!["x".into()],
+            ..Default::default()
+        };
+        assert!(!c.is_empty());
+    }
+
+    #[test]
+    fn pragma_rewrite_missing_root_and_unreadable_files() {
+        let tmp = tempdir().unwrap();
+        assert!(rewrite_pragmas(&tmp.path().join("nope"), false)
+            .unwrap()
+            .is_empty());
+        fs::write(tmp.path().join("bin.py"), [0xff, 0xfe, 0x00]).unwrap();
+        fs::write(tmp.path().join("plain.py"), "x = 1\n").unwrap();
+        assert!(rewrite_pragmas(tmp.path(), false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ini_continuation_lines_fold_into_value() {
+        let text = "[mutmut]\npaths_to_mutate =\n    src/,\n    lib/\n";
+        let tbl = parse_ini_section(text, "mutmut").unwrap();
+        assert_eq!(
+            tbl.get("paths_to_mutate").map(String::as_str),
+            Some(" src/, lib/")
+        );
     }
 }
 

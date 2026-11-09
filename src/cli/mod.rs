@@ -861,4 +861,34 @@ mod tests {
         assert!(Cli::try_parse_from(["fermut", "run", ".", "--smart-order"]).is_ok());
         assert!(Cli::try_parse_from(["fermut", "run", ".", "--no-smart-order"]).is_ok());
     }
+
+    #[test]
+    fn verbosity_flags_pick_the_log_directive() {
+        use clap::Parser;
+        if std::env::var_os("RUST_LOG").is_some() {
+            return; // RUST_LOG overrides the flags by design.
+        }
+        let directive = |argv: &[&str]| {
+            Cli::try_parse_from(argv)
+                .unwrap()
+                .tracing_filter()
+                .to_string()
+        };
+        assert_eq!(directive(&["fermut", "run"]), "fermut=info");
+        assert_eq!(directive(&["fermut", "-v", "run"]), "fermut=debug");
+        assert_eq!(directive(&["fermut", "-vvv", "run"]), "fermut=trace");
+        assert_eq!(directive(&["fermut", "-q", "-v", "run"]), "fermut=error");
+    }
+
+    #[test]
+    fn format_maps_onto_report_format() {
+        assert!(matches!(
+            ReportFormat::from(Format::Json),
+            ReportFormat::Json
+        ));
+        assert!(matches!(
+            ReportFormat::from(Format::Human),
+            ReportFormat::Human
+        ));
+    }
 }

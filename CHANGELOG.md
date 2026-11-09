@@ -9,6 +9,15 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Added
+- Region ignore markers: `# fermut: ignore-start` … `# fermut: ignore-end`,
+  and `# fermut: ignore-block`, which covers a compound statement's header
+  and body, or the rest of the enclosing block when the marker is on its own
+  line.
+- `ignore_patterns` config key: regexes matched against source lines. A
+  mutant on a matching line is dropped.
+- `fermut migrate mutmut` translates mutmut 3's `do_not_mutate` to
+  `exclude` and `do_not_mutate_patterns` to `ignore_patterns`, and flags
+  `only_mutate` for manual review.
 - `run` always writes `.fermut/last.json`, and `show`, `next`, `explain`,
   `suggest` and `autofix` read it when no report path is given.
   `fermut results` is an alias for `show`, so `mutmut results` /
@@ -33,6 +42,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   and JSON reports still carry absolute paths.
 
 ### Fixed
+- `fermut migrate mutmut` turned `# pragma: no mutate block` / `start` /
+  `end` into one-line `# fermut: ignore` markers. Whole regions that had been
+  excluded under mutmut were mutated after migrating. These now map to the
+  region markers.
 - `none-to-value` turned `x is None` into `x is ""`, which compiles with a
   `SyntaxWarning`. Under pytest's `filterwarnings = error` that fails the
   import, so the mutant was killed whatever the tests did (werkzeug: 54 of 149

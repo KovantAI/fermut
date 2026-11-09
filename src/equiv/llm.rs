@@ -501,5 +501,11 @@ mod tests {
     fn surround_clips_at_the_file_edges() {
         assert_eq!(surround("a\nb\nc\nd\ne\n", 1, 2), "a\nb\nc");
         assert!(surround("a\nb\nc\n", 99, 2).contains('c'));
+        assert_eq!(surround("", 1, 2), "");
+    }
+
+    #[test]
+    fn parse_verdict_rejects_close_brace_before_open() {
+        assert!(parse_verdict("} then {").is_none());
     }
 }

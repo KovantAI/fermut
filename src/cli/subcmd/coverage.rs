@@ -1871,6 +1871,103 @@ mod tests {
         assert!(full_rebuild_with_exit(0));
         assert!(!full_rebuild_with_exit(1));
     }
+
+    /// Stand-in interpreter that ignores its args and exits `code`.
+    #[cfg(unix)]
+    fn fake_python(path: &Path, code: u8) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, format!("#!/bin/sh\nexit {code}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn incremental_refresh_uncovered_change_then_failed_rerun() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        std::fs::write(
+            base.join("fermut.toml"),
+            "source_root = \"src\"\ntests = \"tests\"\ncoverage = \".coverage\"\n",
+        )
+        .unwrap();
+        let db = make_db_with_files(base);
+        write_sources(base, false);
+        std::fs::write(base.join("src/baz.py"), "b = 1\n").unwrap();
+        std::fs::create_dir(base.join("tests")).unwrap();
+        std::fs::write(base.join("tests/test_foo.py"), "def test_t(): pass\n").unwrap();
+        let py = base.join("python");
+        fake_python(&py, 0);
+        let args = |full: bool| CoverageArgs {
+            path: base.to_path_buf(),
+            source: None,
+            tests: None,
+            full,
+            output: None,
+            python: Some(py.clone()),
+            pytest_args: vec!["-q".into()],
+        };
+
+        // 1. Forced full rebuild seeds the baseline.
+        assert!(coverage(args(true)).unwrap().passed);
+        let seeded = load_fingerprints(&db).unwrap();
+        assert!(seeded.sources.contains_key("src/baz.py"));
+
+        // 2. A source no DB context covers changes: nothing to re-run, but the
+        //    baseline advances so it isn't re-detected forever.
+        std::fs::write(base.join("src/baz.py"), "b = 2\n").unwrap();
+        assert!(coverage(args(false)).unwrap().passed);
+        let advanced = load_fingerprints(&db).unwrap();
+        assert_ne!(advanced.sources["src/baz.py"], seeded.sources["src/baz.py"]);
+
+        // 3. Both DB-recorded sources deleted: prune is skipped (all missing →
+        //    likely a moved checkout) and their surviving coverer re-runs; the
+        //    re-run fails, so the baseline must NOT advance.
+        std::fs::remove_file(base.join("src/foo.py")).unwrap();
+        std::fs::remove_file(base.join("src/bar.py")).unwrap();
+        fake_python(&py, 1);
+        assert!(!coverage(args(false)).unwrap().passed);
+        let kept = load_fingerprints(&db).unwrap();
+        assert!(
+            kept.sources.contains_key("src/foo.py"),
+            "baseline not advanced"
+        );
+        let conn = Connection::open(&db).unwrap();
+        assert_eq!(
+            count(&conn, "SELECT count(*) FROM file"),
+            2,
+            "prune skipped"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_rebuild_measures_source_outside_project_root() {
+        let proj = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root = proj.path();
+        std::fs::write(root.join("fermut.toml"), "").unwrap();
+        std::fs::create_dir(root.join("tests")).unwrap();
+        std::fs::write(outside.path().join("m.py"), "x = 1\n").unwrap();
+        let py = root.join("python");
+        fake_python(&py, 0);
+        // No `.coverage` yet → the plain "run full suite" path.
+        let out = coverage(CoverageArgs {
+            path: root.to_path_buf(),
+            source: Some(outside.path().to_path_buf()),
+            tests: Some(root.join("tests")),
+            full: false,
+            output: None,
+            python: Some(py),
+            pytest_args: vec![],
+        })
+        .unwrap();
+        assert!(out.passed);
+        let fp = load_fingerprints(&root.join(".coverage")).unwrap();
+        assert!(
+            fp.sources.is_empty(),
+            "outside-root sources have no rel key"
+        );
+    }
 }
 
 #[derive(clap::Args, Debug)]

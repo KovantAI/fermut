@@ -395,6 +395,7 @@ mod chain_order_tests {
             cache_scope: CacheScope::File,
             fail_under: None,
             exclude: Vec::new(),
+            ignore_patterns: Vec::new(),
             verify_baseline: false,
             private_home: true,
             baseline_timeout_secs: 300,
@@ -601,6 +602,91 @@ mod chain_order_tests {
                 "duplicate filter name in CANONICAL_ORDER: {name}"
             );
         }
+    }
+    /// Every filter, including the git/ruff/ty/tce ones, in a throwaway
+    /// git repo with a fake venv `ruff` — the full chain stays canonical.
+    #[cfg(unix)]
+    #[test]
+    fn full_chain_with_system_deps_is_canonical() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "user.email", "t@t"]);
+        git(&root, &["config", "user.name", "t"]);
+        std::fs::write(
+            root.join("pyproject.toml"),
+            "[project]\nname = \"fx\"\nversion = \"0\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("m.py"), "x = 1\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "base"]);
+        let venv_bin = root.join(".venv").join("bin");
+        std::fs::create_dir_all(&venv_bin).unwrap();
+        std::fs::write(venv_bin.join("python"), "").unwrap();
+        std::fs::write(venv_bin.join("ruff"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(
+            venv_bin.join("ruff"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        let mut cfg = empty_config();
+        cfg.source_root = root.clone();
+        cfg.diff_base = Some("HEAD".into());
+        cfg.since = Some("HEAD".into());
+        cfg.coverage_unselected = Some(Arc::new(CoverageContexts::default()));
+        cfg.coverage = Some(Arc::new(CoverageContexts::default()));
+        // The venv `ruff` only wins when no VIRTUAL_ENV overrides discovery.
+        cfg.ruff_filter = std::env::var_os("VIRTUAL_ENV").is_none();
+        cfg.ty_filter = !super::ty::env_disables_embedded();
+        cfg.tce = true;
+
+        let chain = build_chain(&cfg).unwrap();
+        let got: Vec<&str> = chain.iter().map(|f| f.name()).collect();
+        let mut want = vec![
+            "experimental",
+            "parity",
+            "profile",
+            "diff-only",
+            "since",
+            "coverage",
+            "selection",
+        ];
+        if cfg.ruff_filter {
+            want.push("ruff");
+        }
+        if cfg.ty_filter {
+            want.push("ty");
+        }
+        want.push("tce");
+        assert_eq!(got, want);
+        // The default `cached_verdict` is "unknown" for pure filters.
+        let m = crate::mutator::Mutant {
+            id: "t".into(),
+            file: root.join("m.py"),
+            operator: Operator::NumberShift,
+            range: ruff_text_size::TextRange::default(),
+            original: "1".into(),
+            replacement: "2".into(),
+            line: 1,
+            stmt_line: 1,
+            site: None,
+        };
+        assert_eq!(chain[0].cached_verdict(&m), None);
+    }
+
+    #[test]
+    fn diff_base_outside_a_repo_fails_the_build() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = empty_config();
+        cfg.source_root = tmp.path().to_path_buf();
+        cfg.diff_base = Some("main".into());
+        assert!(build_chain(&cfg).is_err());
+        cfg.diff_base = None;
+        cfg.since = Some("HEAD".into());
+        assert!(build_chain(&cfg).is_err());
     }
 }
 

@@ -80,4 +80,26 @@ mod tests {
     fn xml_escape_handles_specials() {
         assert_eq!(xml_escape("a<b&c>\"d'e"), "a&lt;b&amp;c&gt;&quot;d&apos;e");
     }
+
+    #[test]
+    fn write_all_writes_every_configured_sink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = |n: &str| Some(tmp.path().join(n));
+        let sinks = ReportSinks {
+            json: p("r.json"),
+            junit: p("r.xml"),
+            html: p("r.html"),
+            markdown: p("r.md"),
+        };
+        assert!(sinks.any());
+        assert!(!ReportSinks::default().any());
+        let report = Report::new(vec![crate::report::MutantOutcome::survived(
+            crate::report::testing::make_mutant(),
+        )]);
+        sinks.write_all(&report).unwrap();
+        for n in ["r.json", "r.xml", "r.html", "r.md"] {
+            let body = std::fs::read_to_string(tmp.path().join(n)).unwrap();
+            assert!(!body.is_empty(), "{n} empty");
+        }
+    }
 }

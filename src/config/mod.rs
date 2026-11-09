@@ -136,6 +136,9 @@ pub struct Config {
     /// mutation collection. Matching files and directories are pruned before
     /// parsing, so they never produce mutants. Empty = no exclusions.
     pub exclude: Vec<String>,
+    /// Regexes matched against each source line; mutants on a matching line
+    /// are dropped at collection. Empty = none.
+    pub ignore_patterns: Vec<String>,
     /// Run the unmutated test suite once before mutating and abort if it
     /// isn't green. A red suite makes every covered mutant exit non-zero and
     /// be counted "killed", inflating the score toward 100%. Default on;
@@ -337,6 +340,19 @@ mod tests {
 
     #[test]
     fn enum_display_matches_config_spelling() {
+        assert_eq!(CacheScope::File.to_string(), "file");
+        assert_eq!(CacheScope::Scope.to_string(), "scope");
+        assert_eq!(RunnerKind::Pytest.to_string(), "pytest");
+        assert_eq!(RunnerKind::Rstest.to_string(), "rstest");
+        assert_eq!(RunnerKind::Unittest.to_string(), "unittest");
+        assert_eq!(IsolationMode::Auto.to_string(), "auto");
+        assert_eq!(IsolationMode::Copy.to_string(), "copy");
+        assert_eq!(IsolationMode::Hardlink.to_string(), "hardlink");
+        assert_eq!(IsolationMode::Reflink.to_string(), "reflink");
+    }
+
+    #[test]
+    fn display_names_match_cli_spellings() {
         assert_eq!(CacheScope::File.to_string(), "file");
         assert_eq!(CacheScope::Scope.to_string(), "scope");
         assert_eq!(RunnerKind::Pytest.to_string(), "pytest");

@@ -126,4 +126,39 @@ mod tests {
             .write_junit(std::path::Path::new("/no/such/dir/j.xml"))
             .is_err());
     }
+
+    #[test]
+    fn every_outcome_kind_maps_to_its_junit_element() {
+        let m = make_mutant;
+        let r = Report::new(vec![
+            MutantOutcome::killed(m()),
+            MutantOutcome::survived(m()),
+            MutantOutcome::timed_out(m()),
+            MutantOutcome::skipped(m(), "ty<x>"),
+            MutantOutcome::error(m(), "boom & \"bang\"".into()),
+            MutantOutcome::equivalent(m(), "x+0", "arith-zero"),
+        ]);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        r.write_junit(tmp.path()).unwrap();
+        let xml = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(xml.contains(
+            "<testsuites name=\"fermut\" tests=\"6\" failures=\"1\" errors=\"1\" skipped=\"2\">"
+        ));
+        assert_eq!(xml.matches("<testcase ").count(), 6);
+        assert!(xml.contains("<failure message=\"mutant timed out\"/>"));
+        assert!(xml.contains("<skipped message=\"filtered by ty&lt;x&gt;\"/>"));
+        assert!(xml.contains("<error message=\"boom &amp; &quot;bang&quot;\"/>"));
+        assert!(xml.contains("<skipped message=\"equivalent mutant (arith-zero): x+0\"/>"));
+        // Killed mutants carry no child element.
+        assert!(xml.contains("+-&gt;-\"></testcase>"), "{xml}");
+    }
+
+    #[test]
+    fn unwritable_path_is_an_error() {
+        let r = Report::new(vec![]);
+        let err = r
+            .write_junit(std::path::Path::new("/nonexistent/dir/out.xml"))
+            .unwrap_err();
+        assert!(err.to_string().contains("writing"), "{err}");
+    }
 }

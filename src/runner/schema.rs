@@ -1668,6 +1668,126 @@ done"#
     }
 
     #[test]
+    fn each_runner_tells_the_schema_how_to_serve_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "").unwrap();
+        let mirror = super::super::build_mirror(&dir.join("tests"), IsolationMode::Copy).unwrap();
+        let json = Path::new("schema.json");
+        let m = some_mutant();
+
+        let mut runner = fake_runner(&dir);
+        let py = &mut runner.inner;
+        py.hypothesis_seed = Some(7);
+        py.extra_args = vec!["-k".into(), "x".into()];
+        let os = |v: &[&std::ffi::OsStr]| v.iter().map(|s| s.to_os_string()).collect::<Vec<_>>();
+        assert_eq!(
+            py.serve_args(&mirror, json),
+            os(&[
+                "serve".as_ref(),
+                mirror.root.as_os_str(),
+                json.as_os_str(),
+                "--tb=no".as_ref(),
+                "-q".as_ref(),
+                "--hypothesis-seed=7".as_ref(),
+                "-k".as_ref(),
+                "x".as_ref(),
+                mirror.tests.as_os_str(),
+            ])
+        );
+        assert_eq!(SchemaInner::timeout(py), Duration::from_secs(30));
+        assert_eq!(
+            py.selection(&m, Some("t.py::k")),
+            Some(vec!["t.py::k".into()])
+        );
+        assert!(!py.schema_env().rstest);
+        py.exe = "rstest";
+        assert!(py.schema_env().rstest, "rstest's vendored pytest");
+        assert!(!py.record_all());
+        py.record_kill_sets = true;
+        assert!(py.record_all(), "a kill set needs every failing test");
+
+        let ut = unittest_runner();
+        assert_eq!(
+            ut.serve_args(&mirror, json),
+            os(&[
+                "serve-unittest".as_ref(),
+                mirror.root.as_os_str(),
+                json.as_os_str(),
+                mirror.tests.as_os_str(),
+                ut.pattern.as_ref(),
+            ])
+        );
+        assert_eq!(SchemaInner::timeout(&ut), Duration::from_secs(1));
+        assert_eq!(ut.selection(&m, None), None, "the whole suite");
+        assert_eq!(ut.selection(&m, Some("t.T.k")), Some(vec!["t.T.k".into()]));
+        assert!(!ut.record_all());
+    }
+
+    #[test]
+    fn a_served_kill_records_its_kill_set_only_when_asked_and_recording() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut runner = fake_runner(&tmp.path().canonicalize().unwrap());
+        let py = &mut runner.inner;
+        let m = some_mutant();
+        let mut kill = served(Some(1), None);
+        kill.result.failures = vec!["t.py::a".into()];
+        for (record_kill_sets, record, recorded) in
+            [(false, true, 0), (true, false, 0), (true, true, 1)]
+        {
+            py.record_kill_sets = record_kill_sets;
+            let o = py.served_outcome(&m, &kill, record);
+            assert_eq!(o.status_label(), "killed");
+            assert_eq!(
+                py.take_kill_sets().len(),
+                recorded,
+                "record_kill_sets={record_kill_sets} record={record}"
+            );
+        }
+    }
+
+    /// A schemata runner serving one mutant (index 5) from a fake template
+    /// that answers it with `done` and a no-mutant run with a pass.
+    fn serving(dir: &std::path::Path, done: &str) -> (SchemaRunner<PytestRunner>, Arc<Mutant>) {
+        let script = format!(
+            r#"echo '{{"ready":true}}'
+while read req; do
+  idof "$req"; reply '{{"pid":0}}'
+  case "$req" in
+    *'"idx":5'*) reply '{done}' ;;
+    *) reply '{{"status":0}}' ;;
+  esac
+done"#
+        );
+        let mut schema = fake_schema(dir, &script);
+        let mutant = some_mutant();
+        schema.index.insert(mutant.id.clone(), 5);
+        let runner = fake_runner(&dir.canonicalize().unwrap());
+        assert!(runner.schema.set(Some(schema)).is_ok());
+        (runner, mutant)
+    }
+
+    #[test]
+    fn an_audit_stands_on_a_usable_fork_and_falls_back_otherwise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (runner, m) = serving(
+            tmp.path(),
+            r#"{"status":256,"failed":["t.py::a"],"ran":["t.py::a"]}"#,
+        );
+        let o = runner.audit(&m, "t.py::a").unwrap();
+        assert_eq!(o.map(|o| o.status_label()), Some("killed"));
+
+        // A broken child: the spawn path answers, and it can't run here.
+        let tmp = tempfile::tempdir().unwrap();
+        let (runner, m) = serving(tmp.path(), r#"{"status":768,"error":"Traceback"}"#);
+        assert!(
+            !matches!(runner.audit(&m, "t.py::a"), Ok(Some(_))),
+            "not scored from the fork"
+        );
+    }
+
+    #[test]
     fn helper_failure_carries_its_exit_status_and_stderr() {
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", "cat >/dev/null; echo 'bad input' >&2; exit 3"]);

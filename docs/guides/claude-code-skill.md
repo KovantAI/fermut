@@ -1,17 +1,17 @@
 # Agent skill & plugin
 
 fermut ships an [Agent Skill](https://agentskills.io),
-`fermut-mutation-testing`, that teaches a coding agent (Claude Code, Codex
-and others) the whole mutation-testing loop: check the environment, build
-coverage, run fermut, triage survivors, and write the tests that kill them.
+`fermut-mutation-testing`, that teaches a coding agent (Claude Code, Codex,
+Cursor and others) the whole mutation-testing loop: check the environment,
+build coverage, run fermut, triage survivors, and write the tests that kill them.
 This page covers installing it and what to expect from it. For the loop
 itself and the JSON it reads, see **[Coding agents](coding-agents.md)**.
 
 ## Install the skill
 
 This playbook ships as an [Agent Skill](https://agentskills.io),
-`fermut-mutation-testing`, that lets a coding agent (Claude Code, Codex, and
-others) drive the loop below for you. A skill only loads from a place the
+`fermut-mutation-testing`, that lets a coding agent (Claude Code, Codex,
+Cursor and others) drive the loop below for you. A skill only loads from a place the
 agent looks, so installing the `fermut` package doesn't give you the skill by
 itself. Pick one of the two ways below.
 
@@ -31,7 +31,7 @@ Run the command again after upgrading fermut to refresh it.
 |------|-----------|
 | (none) | `./.claude/skills/` (Claude Code, this project) |
 | `--user` | `~/.claude/skills/` (Claude Code, every project) |
-| `--agents` | `./.agents/skills/` (Codex and other Agent Skills readers) |
+| `--agents` | `./.agents/skills/` (Codex, Cursor and other Agent Skills readers) |
 | `--user --agents` | `~/.agents/skills/` |
 | `--dir DIR` | `DIR/<skill>/` |
 
@@ -92,6 +92,14 @@ add this to the project's `.claude/settings.json`:
 }
 ```
 
+### Cursor
+
+Cursor loads Agent Skills from `.agents/skills/` and `.cursor/skills/`, and
+for compatibility from `.claude/skills/` too, so `fermut install-skills` works
+as is. The Claude Code plugin doesn't apply to Cursor; register the MCP server
+in `.cursor/mcp.json` instead, see
+**[Coding agents → MCP](coding-agents.md#mcp-server)**.
+
 ### Using the skill
 
 The agent picks the skill when your request matches it: "are my tests any
@@ -115,7 +123,8 @@ good", "get the mutation score above 80%", "kill the survivors in
   agent in.
 - **Match the agent to the directory.** Claude Code reads `.claude/skills/`.
   Codex and other Agent Skills readers use `.agents/skills/`, so install with
-  `--agents` for them.
+  `--agents` for them. Cursor reads both (plus `.cursor/skills/`), so either
+  works.
 
 ## What the skill does
 

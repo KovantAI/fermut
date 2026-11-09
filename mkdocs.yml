@@ -85,6 +85,7 @@ nav:
       - First steps: getting-started/first-steps.md
       - Features: getting-started/features.md
       - Getting help: getting-started/getting-help.md
+      - Evaluating fermut for your team: getting-started/evaluating.md
   - Guides:
       - guides/index.md
       - Local use:

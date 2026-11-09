@@ -364,4 +364,18 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn unknown_events_and_begin_without_nodeid_are_ignored() {
+        let r = RunResult::parse(
+            r#"{"v":1,"ev":"start","pytest":"9.2.0","pid":1}
+{"ev":"begin","pid":1}
+{"ev":"something_new","nodeid":"t.py::x","pid":1}
+"#,
+        )
+        .unwrap();
+        assert!(r.began.is_empty());
+        assert!(r.failures.is_empty());
+        assert_eq!(r.unfinished, None);
+    }
 }

@@ -20,7 +20,7 @@ fermut 0.7.0 skills in /path/to/project/.claude/skills. Claude Code picks up pro
 |---------------|---------------------------------------------------------------------|
 | (none)        | Write `./.claude/skills/`.                                          |
 | `--user`      | Write `~/.claude/skills/` (`~/.agents/skills/` with `--agents`).    |
-| `--agents`    | Write `.agents/skills/`, the layout Codex and other agents read.    |
+| `--agents`    | Write `.agents/skills/`, the layout Codex and Cursor read.          |
 | `--dir <DIR>` | Write `DIR/<skill>/`; overrides `--user` / `--agents`.              |
 | `--force`     | Overwrite an installed skill that differs from the bundled copy.    |
 

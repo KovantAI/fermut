@@ -81,3 +81,14 @@ pub(crate) fn kill_pgid(pid: u32) {
         libc::kill(-pid, libc::SIGKILL);
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    #[test]
+    fn kill_pgid_refuses_non_leader_pids() {
+        // kill(-0) would SIGKILL this test process's own group; surviving
+        // these calls is the assertion.
+        super::kill_pgid(0);
+        super::kill_pgid(u32::MAX);
+    }
+}

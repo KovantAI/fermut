@@ -9,11 +9,29 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Added
+- Region ignore markers: `# fermut: ignore-start` … `# fermut: ignore-end`,
+  and `# fermut: ignore-block`, which covers a compound statement's header
+  and body, or the rest of the enclosing block when the marker is on its own
+  line.
+- `ignore_patterns` config key: regexes matched against source lines. A
+  mutant on a matching line is dropped.
+- `fermut migrate mutmut` translates mutmut 3's `do_not_mutate` to
+  `exclude` and `do_not_mutate_patterns` to `ignore_patterns`, and flags
+  `only_mutate` for manual review.
+- `run` always writes `.fermut/last.json`, and `show`, `next`, `explain`,
+  `suggest` and `autofix` read it when no report path is given.
+  `fermut results` is an alias for `show`, so `mutmut results` /
+  `mutmut show <id>` map to `fermut results` / `fermut show <id>`.
 - MCP `fermut_coverage` tool: builds or incrementally refreshes `.coverage`,
   like `fermut coverage`, and reports a failed pytest as a tool error.
 - MCP `fermut_run` and `fermut_score` take a `history_path` argument.
 
 ### Changed
+- **Breaking:** a runtime error (bad config, red baseline, git or I/O
+  failure, a failed `merge` check) now exits `3` instead of `1`, so CI can
+  tell a broken run from a failed gate. `1` still means the gate failed
+  (survivors, `--fail-under`, `--fail-on-regression`); `2` is a usage error.
+  The GitHub action fails a run that exits `3` even with `blocking: false`.
 - MCP `fermut_run` appends to `.fermut/agent-history.jsonl` instead of the
   shared `.fermut/history.jsonl`, and `fermut_score` reads it, so agent
   iterations stay out of the project trend. Pass `history_path` for the old
@@ -24,6 +42,17 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   and JSON reports still carry absolute paths.
 
 ### Fixed
+- `fermut migrate mutmut` turned `# pragma: no mutate block` / `start` /
+  `end` into one-line `# fermut: ignore` markers. Whole regions that had been
+  excluded under mutmut were mutated after migrating. These now map to the
+  region markers.
+- `none-to-value` turned `x is None` into `x is ""`, which compiles with a
+  `SyntaxWarning`. Under pytest's `filterwarnings = error` that fails the
+  import, so the mutant was killed whatever the tests did (werkzeug: 54 of 149
+  such kills). In `is` / `is not` comparisons it now emits `x is str()`, the
+  same empty-string object without the warning. Scores on projects that turn
+  warnings into errors drop to their honest value, those mutants re-run once
+  (new ids), and schemata now serves them instead of falling back.
 - The verdict cache ignored a `conftest.py` above the tests root (a repo-root
   one with `tests/` as the tests root), so editing a fixture there kept stale
   verdicts. Every such `conftest.py` is now part of the test fingerprint;

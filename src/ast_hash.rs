@@ -393,6 +393,25 @@ pub(crate) fn function_spans(source: &str) -> Vec<TextRange> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn analyze_file_returns_scope_map_and_source_when_asked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("m.py");
+        let src = "def f():\n    return 1\n";
+        std::fs::write(&path, src).unwrap();
+        let a = analyze_file(&path, true, true).unwrap();
+        assert_eq!(a.source.as_deref(), Some(src));
+        assert_eq!(a.ast_hash, hash_file_ast(&path).unwrap());
+        let map = a.scope_map.expect("parsed file yields a scope map");
+        let in_f = TextRange::new(20u32.into(), 21u32.into());
+        assert_ne!(map.scope_hash_for(in_f), a.ast_hash);
+        // Unparseable source: no scope map, but the source is still returned.
+        std::fs::write(&path, "def (:\n").unwrap();
+        let bad = analyze_file(&path, true, true).unwrap();
+        assert!(bad.scope_map.is_none());
+        assert_eq!(bad.source.as_deref(), Some("def (:\n"));
+    }
+
     fn h(src: &str) -> String {
         hash_ast_source(src).expect("parse")
     }

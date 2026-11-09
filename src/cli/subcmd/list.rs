@@ -59,7 +59,8 @@ pub(crate) fn run(opts: ListArgs) -> Result<()> {
             ..Default::default()
         },
     )?;
-    let mutants = crate::mutator::collect_from_tree(&cfg.source_root, &cfg.exclude)?;
+    let mutants =
+        crate::mutator::collect_from_tree(&cfg.source_root, &cfg.exclude, &cfg.ignore_patterns)?;
     let chain = filter::build_chain(&cfg)?;
     let mut kept = 0usize;
     for m in &mutants {
@@ -70,4 +71,24 @@ pub(crate) fn run(opts: ListArgs) -> Result<()> {
     }
     println!("\n{kept} mutant(s) total");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_propagates_config_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("fermut.toml"), "jobs = \"many\"\n").unwrap();
+        let err = run(ListArgs {
+            path: tmp.path().to_path_buf(),
+            no_ty_filter: true,
+            ruff_filter: false,
+            tce: false,
+            filter: FilterArgs::default(),
+        })
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("fermut.toml"), "{err:#}");
+    }
 }

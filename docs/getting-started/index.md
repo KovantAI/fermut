@@ -11,6 +11,8 @@ it can do.
   operators, filters, cache, CI hooks, reports.
 - **[Getting help](getting-help.md)** — `fermut doctor`,
   troubleshooting pointers, where to open an issue.
+- **[Evaluating fermut for your team](evaluating.md)** — who maintains
+  it, release cadence and stability, CI cost, noise, reporting progress.
 
 New to mutation testing as a concept? Read
 **[Mutation testing concepts](../concepts/mutation-testing.md)** for

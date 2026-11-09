@@ -528,6 +528,45 @@ mod tests {
     }
 
     #[test]
+    fn tmp_sibling_handles_bare_and_rootless_paths() {
+        let pid = std::process::id();
+        assert_eq!(
+            tmp_sibling(Path::new("x.json")),
+            PathBuf::from(format!("x.json.tmp.{pid}"))
+        );
+        assert_eq!(
+            tmp_sibling(Path::new("/")),
+            PathBuf::from(format!("cache.tmp.{pid}"))
+        );
+        assert_eq!(
+            tmp_sibling(Path::new("/a/b.json")),
+            PathBuf::from(format!("/a/b.json.tmp.{pid}"))
+        );
+    }
+
+    #[test]
+    fn atomic_write_rename_failure_cleans_up_tmp() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A non-empty directory at the target makes the rename fail.
+        let target = tmp.path().join("cache.json");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("keep"), "x").unwrap();
+        let err = atomic_write(&target, "{}").unwrap_err();
+        assert!(format!("{err:#}").contains("renaming"), "{err:#}");
+        assert!(!tmp_sibling(&target).exists(), "tmp debris left behind");
+        assert!(target.join("keep").exists());
+    }
+
+    #[test]
+    fn load_or_quarantine_unreadable_path_is_default_and_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Reading a directory fails with something other than NotFound.
+        let c: Cache = load_or_quarantine(tmp.path());
+        assert!(c.entries.is_empty());
+        assert!(tmp.path().is_dir());
+    }
+
+    #[test]
     fn tmp_sibling_lives_next_to_target() {
         let p = Path::new("/tmp/proj/.fermut/cache.json");
         let tmp = tmp_sibling(p);

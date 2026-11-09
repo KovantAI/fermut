@@ -187,6 +187,17 @@ fn hash_with_shard(cfg: &Config, shard: Option<(u32, u32)>) -> String {
             feed(&mut h, g.as_bytes());
         }
     }
+    // Same for line patterns. Fed only when set, so existing hashes are
+    // unchanged.
+    if !cfg.ignore_patterns.is_empty() {
+        let mut pats = cfg.ignore_patterns.clone();
+        pats.sort();
+        h.update(b"|ignore_patterns=");
+        h.update((pats.len() as u64).to_le_bytes());
+        for p in pats {
+            feed(&mut h, p.as_bytes());
+        }
+    }
     // Sharding partitions the mutant set (`ShardFilter`, a hash modulo): a
     // `--shard i/n` run scores over 1/n of the universe, not comparable to a
     // full run. Index + total both matter — different shards test different
@@ -301,6 +312,7 @@ mod tests {
             cache_scope: CacheScope::File,
             fail_under: None,
             exclude: Vec::new(),
+            ignore_patterns: Vec::new(),
             verify_baseline: false,
             private_home: true,
             baseline_timeout_secs: 300,
@@ -334,6 +346,26 @@ mod tests {
             config_hash(&cfg()),
             "c29d34cf6454f0a0d75c3a752c654fb4603818a70b88ea7d3ff25fe2e24d45c8"
         );
+    }
+
+    #[test]
+    fn config_hash_feeds_hypothesis_seed_and_order_insensitive_ignore_patterns() {
+        let base = config_hash(&cfg());
+        let seeded = config_hash(&Config {
+            hypothesis_seed: Some(7),
+            ..cfg()
+        });
+        assert_ne!(base, seeded);
+        let ab = config_hash(&Config {
+            ignore_patterns: vec!["a".into(), "b".into()],
+            ..cfg()
+        });
+        let ba = config_hash(&Config {
+            ignore_patterns: vec!["b".into(), "a".into()],
+            ..cfg()
+        });
+        assert_ne!(base, ab);
+        assert_eq!(ab, ba, "pattern order must not split history");
     }
 
     #[test]

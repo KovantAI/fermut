@@ -335,7 +335,9 @@ yourself in Claude Code:
 claude mcp add fermut -- fermut mcp
 ```
 
-Or in a client config that takes a server map:
+Or in a client config that takes a server map. For Cursor, put this in
+`.cursor/mcp.json` at the project root (this project only) or
+`~/.cursor/mcp.json` (every project):
 
 ```json
 {

@@ -193,6 +193,14 @@ mod tests {
     }
 
     #[test]
+    fn default_is_a_costly_tce_filter() {
+        let f = TceFilter::default();
+        assert_eq!(f.name(), "tce");
+        assert!(f.costly());
+        assert!(lock_recover(&f.sources).is_empty());
+    }
+
+    #[test]
     fn source_is_read_once_per_file() {
         if !python_available() {
             eprintln!("skipping: python3 not available");

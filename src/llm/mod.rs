@@ -136,3 +136,68 @@ pub struct LlmCallOpts {
 
 /// Default max tokens for completions. Tests are small; this is plenty.
 pub const DEFAULT_MAX_TOKENS: u32 = 2048;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opts(no_cache: bool, cache_path: std::path::PathBuf) -> LlmCallOpts {
+        LlmCallOpts {
+            model: DEFAULT_MODEL.into(),
+            no_cache,
+            cache_path,
+        }
+    }
+
+    #[test]
+    fn complete_cached_surfaces_a_client_construction_error() {
+        let cell: ClientCell = OnceLock::new();
+        let _ = cell.set(Err("no key".into()));
+        let (r, cached) = complete_cached(
+            &LlmRequest::new("s", "u"),
+            "k".into(),
+            &opts(true, "unused.json".into()),
+            &cell,
+            &Mutex::new(LlmCache::default()),
+        );
+        assert_eq!(r.unwrap_err().to_string(), "no key");
+        assert!(!cached);
+    }
+
+    #[test]
+    fn complete_cached_keeps_the_response_when_persisting_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        let cell: ClientCell = OnceLock::new();
+        let _ = cell.set(Ok(Arc::new(client::MockClient) as Arc<dyn LlmClient>));
+        let cache = Mutex::new(LlmCache::default());
+        // The cache file's parent is a regular file, so the save fails.
+        let (r, cached) = complete_cached(
+            &LlmRequest::new("s", "u"),
+            "k".into(),
+            &opts(false, blocker.join("cache.json")),
+            &cell,
+            &cache,
+        );
+        assert!(r.unwrap().contains("mock LLM response"));
+        assert!(!cached);
+        assert!(
+            cache.lock().unwrap().lookup("k").is_some(),
+            "kept in memory"
+        );
+    }
+
+    #[test]
+    fn session_loads_the_cache_unless_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.json");
+        let mut c = LlmCache::default();
+        c.insert("k".into(), "v".into());
+        c.save(&path).unwrap();
+        let s = LlmSession::new(opts(false, path.clone()));
+        assert_eq!(s.cache.lock().unwrap().lookup("k"), Some("v"));
+        let s = LlmSession::new(opts(true, path));
+        assert_eq!(s.cache.lock().unwrap().len(), 0);
+    }
+}

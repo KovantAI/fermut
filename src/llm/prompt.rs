@@ -281,6 +281,23 @@ mod tests {
     }
 
     #[test]
+    fn extract_first_code_block_keeps_an_unterminated_block() {
+        let block = extract_first_code_block("```python\ndef t():\n    pass").unwrap();
+        assert_eq!(block, "def t():\n    pass\n");
+        assert!(extract_first_code_block("```python\n").is_none());
+    }
+
+    #[test]
+    fn snippet_without_trailing_newline_still_closes_its_fence() {
+        let ctx = PromptContext {
+            source_snippet: "return x <= 1".into(),
+            ..PromptContext::empty()
+        };
+        let p = build_suggest_prompt(&mutant(), &ctx, "x");
+        assert!(p.user.contains("return x <= 1\n```\n"), "{}", p.user);
+    }
+
+    #[test]
     fn cache_key_changes_with_any_input() {
         let a = cache_key("m1", "sha-a", "prompt-a");
         let b = cache_key("m1", "sha-a", "prompt-b");

@@ -42,6 +42,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   and JSON reports still carry absolute paths.
 
 ### Fixed
+- On pytest 9.2+, mutants whose tests take a long string parameter holding
+  the project path could be reported as errored (`pytest exit 4`) instead
+  of killed or survived. pytest 9.2 ids a parameter over 100 characters by
+  name instead of by value, so the id coverage recorded in the project could
+  differ from the one in fermut's copy. fermut now gives such a parameter the
+  id it has in the project (werkzeug from a deep checkout: 506 errored → 0).
 - `fermut migrate mutmut` turned `# pragma: no mutate block` / `start` /
   `end` into one-line `# fermut: ignore` markers. Whole regions that had been
   excluded under mutmut were mutated after migrating. These now map to the

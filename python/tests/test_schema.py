@@ -877,3 +877,21 @@ def test_cap_memory_is_a_no_op_unset_or_off_linux(rlimit, monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     schema.cap_memory()
     assert rlimit.calls == []
+
+
+def test_rstest_runs_on_its_vendored_pytest(tmp_path, monkeypatch):
+    vendor = tmp_path / "rstest_worker" / "_vendor"
+    vendor.mkdir(parents=True)
+    (tmp_path / "rstest_worker" / "__init__.py").write_text("")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    schema.use_rstest_pytest()
+    schema.use_rstest_pytest()
+    assert sys.path[0] == str(vendor)
+    assert sys.path.count(str(vendor)) == 1
+
+
+def test_rstest_without_its_worker_refuses(monkeypatch):
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    with pytest.raises(ImportError, match="rstest_worker"):
+        schema.use_rstest_pytest()

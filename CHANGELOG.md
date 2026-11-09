@@ -9,6 +9,8 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Added
+- `--schemata` works with `--runner rstest` (opt-in; the default stays off
+  for rstest). The template runs on rstest's vendored pytest.
 - Region ignore markers: `# fermut: ignore-start` … `# fermut: ignore-end`,
   and `# fermut: ignore-block`, which covers a compound statement's header
   and body, or the rest of the enclosing block when the marker is on its own
@@ -42,6 +44,8 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   and JSON reports still carry absolute paths.
 
 ### Fixed
+- The rstest runner precompiles and keys its cache on the `python` beside the
+  `rstest` binary it runs, not on the interpreter behind a `pytest` on `PATH`.
 - `fermut migrate mutmut` turned `# pragma: no mutate block` / `start` /
   `end` into one-line `# fermut: ignore` markers. Whole regions that had been
   excluded under mutmut were mutated after migrating. These now map to the

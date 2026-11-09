@@ -51,7 +51,7 @@ pub struct PytestRunner {
     /// (rstest: the binary beside it); `None` → bare `<exe>` from `PATH`.
     pub(super) python: Option<PathBuf>,
     /// Framework executable / module name: `pytest` or the `rstest` drop-in.
-    exe: &'static str,
+    pub(super) exe: &'static str,
     /// Smart test ordering on. When set, coverage-selected ids are reordered —
     /// the cold-start breadth prior (fewest of the mutated file's lines) first,
     /// then any learned `(file, operator)` killer lifted ahead of that — and

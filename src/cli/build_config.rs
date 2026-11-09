@@ -554,8 +554,8 @@ fn resolve_max_memory(cli_no: bool, cli: Option<u64>, file: Option<&str>) -> Res
     })
 }
 
-/// Schemata is on by default wherever it can run (rstest: opt-in only, until
-/// its parity with a normal run is measured). `--no-schemata` /
+/// Schemata is on by default wherever it can run (rstest and unittest: opt-in
+/// only, until their parity with a normal run is measured). `--no-schemata` /
 /// `schemata = false` turn it off; `--schemata` / `schemata = true` demand it,
 /// so an unsupported runner or platform is an error rather than a silent
 /// normal run.
@@ -579,14 +579,9 @@ fn resolve_schemata(
     }
 }
 
-/// Schemata forks a warm pytest process: pytest or rstest (a pytest suite on
-/// rstest's vendored pytest), and `fork` only exists on Unix.
-fn check_schemata(runner: RunnerKind) -> Result<()> {
-    if runner == RunnerKind::Unittest {
-        anyhow::bail!(
-            "`--schemata` works with the pytest and rstest runners only (runner is {runner:?})"
-        );
-    }
+/// Schemata forks a warm test process (pytest, rstest's vendored pytest, or
+/// unittest), and `fork` only exists on Unix.
+fn check_schemata(_runner: RunnerKind) -> Result<()> {
     if !cfg!(unix) {
         anyhow::bail!("`--schemata` needs fork(), which this platform doesn't have");
     }
@@ -1232,17 +1227,18 @@ mod tests {
         // Default: on with pytest on Unix, quietly off elsewhere.
         assert_eq!(on(false, false, None, py), Some(cfg!(unix)));
         assert_eq!(on(false, false, None, ut), Some(false));
-        // rstest is opt-in: off by default, on when asked for.
+        // rstest and unittest are opt-in: off by default, on when asked for.
         assert_eq!(on(false, false, None, rs), Some(false));
         assert_eq!(on(false, true, None, rs), cfg!(unix).then_some(true));
+        assert_eq!(on(false, true, None, ut), cfg!(unix).then_some(true));
+        assert_eq!(on(false, false, Some(true), ut), cfg!(unix).then_some(true));
         // Off wins over config and is fine with any runner.
         assert_eq!(on(true, false, Some(true), py), Some(false));
         assert_eq!(on(false, false, Some(false), py), Some(false));
         assert_eq!(on(true, false, None, ut), Some(false));
-        // Asked for explicitly: an unsupported runner is an error, not a fallback.
+        // Asked for explicitly: an unsupported platform is an error, not a
+        // fallback.
         assert_eq!(on(false, true, Some(false), py), cfg!(unix).then_some(true));
-        assert_eq!(on(false, true, None, ut), None);
-        assert_eq!(on(false, false, Some(true), ut), None);
     }
 
     #[test]

@@ -5,6 +5,7 @@ interpreter; stdlib only (plus pytest, which the pytest runner already needs).
 
     python _fermut_schema.py schematize <mirror_root>   < mutants.json
     python _fermut_schema.py serve <mirror_root> <schema.json> [pytest args...]
+    python _fermut_schema.py serve-unittest <mirror_root> <schema.json> <tests> <pattern>
 
 schematize
     stdin: [{"id", "file", "start", "end", "replacement"}] — file relative to
@@ -37,9 +38,10 @@ schematize
     stdout: {"mutants": {id: {"idx": n} | {"fallback": why}},
              "functions": {realpath: [[co_firstlineno, lo, hi], ...]}}
 
-serve
-    The template: one pytest session that imports and collects the suite
-    once, then forks one child per request. Protocol on the original
+serve, serve-unittest
+    The template: one pytest session (or `unittest discover -s <tests> -p
+    <pattern>`) that imports and collects the suite once, then forks one
+    child per request. Protocol on the original
     stdin/stdout (fds 0/1 are redirected to /dev/null for pytest's output),
     one JSON object per line:
 
@@ -56,6 +58,9 @@ serve
     carry its `id`.
 
     `unfinished` is the test a child was in when it was killed (a timeout).
+    Exit codes are pytest's under both runners: 0 passed, 1 failed, 4 an id
+    that wasn't collected, 5 nothing ran; a unittest child interrupted by
+    KeyboardInterrupt dies of SIGINT, as a cold `python -m unittest` does.
 
     `unsafe`: index ranges of switched functions that already ran in the
     template (SUT import, conftest, collection). Whatever they built from the
@@ -432,11 +437,10 @@ def schematize(mirror_root, mutants):
 
 
 class Template:
-    def __init__(self, mirror_root, schema_path, pytest_args):
+    def __init__(self, mirror_root, schema_path):
         self.mirror_root = mirror_root
         self.active_dir = active_dir(mirror_root)
         os.makedirs(self.active_dir, exist_ok=True)
-        self.pytest_args = pytest_args
         with open(schema_path) as f:
             functions = json.load(f)["functions"]
         self.switched = {
@@ -543,7 +547,7 @@ class Template:
             (allowed if t.daemon and third_party else refused).append(desc)
         return allowed, refused
 
-    def run(self):
+    def run_pytest(self, pytest_args):
         os.chdir(self.mirror_root)
         setattr(builtins, ACTIVE, 0)
         self.trace()
@@ -556,44 +560,59 @@ class Template:
         class Plugin:
             @pytest.hookimpl(tryfirst=True)
             def pytest_runtestloop(self, session):
-                template.untrace()
-                allowed, refused = template.threads()
-                if refused:
-                    # A thread running project code keeps calling switched
-                    # functions in the template after `unsafe` was sent, and a
-                    # non-daemon one is something the suite waits on.
-                    template.send(
-                        {
-                            "ready": False,
-                            "error": "threads running in the template: "
-                            + ", ".join(refused),
-                        }
-                    )
-                    os._exit(0)
-                template.allowed_threads = allowed
-                if session.testsfailed:
+                template.ready(
+                    PytestDriver(template, session),
                     # Collection errors: a cold run would stop here too.
-                    template.send(
-                        {
-                            "ready": False,
-                            "error": f"{session.testsfailed} errors during collection",
-                        }
-                    )
-                    os._exit(0)
-                template.serve(session)
-                os._exit(0)
+                    session.testsfailed
+                    and f"{session.testsfailed} errors during collection",
+                )
 
-        rc = pytest.main(list(self.pytest_args), plugins=[Plugin()])
+        rc = pytest.main(list(pytest_args), plugins=[Plugin()])
         # Only reached when pytest stopped before the test loop (collection
         # errors, usage errors): the caller falls back to spawning.
         self.untrace()
-        self.send(
-            {"ready": False, "error": f"pytest exited {int(rc)} before the test loop"}
+        self.refuse(f"pytest exited {int(rc)} before the test loop")
+
+    def run_unittest(self, tests, pattern):
+        """`python -m unittest discover -s <tests> -p <pattern>`, up to the
+        point where it would start running tests."""
+        os.chdir(self.mirror_root)
+        # `python -m` puts the working directory first on sys.path; this
+        # script's own directory is there instead.
+        sys.path[0] = os.getcwd()
+        setattr(builtins, ACTIVE, 0)
+        self.trace()
+        import unittest
+
+        loader = unittest.TestLoader()
+        items = list(flatten(loader.discover(tests, pattern)))
+        # Import errors (each also a `_FailedTest` item): a cold run would
+        # fail the baseline there anyway.
+        broken = len(loader.errors)
+        self.ready(
+            UnittestDriver(items), broken and f"{broken} errors during collection"
         )
+
+    def refuse(self, error):
+        self.send({"ready": False, "error": error})
         os._exit(0)
 
-    def serve(self, session):
-        by_id = {item.nodeid: item for item in session.items}
+    def ready(self, driver, error=None):
+        """Collected: refuse, or serve `driver`'s suite. Never returns."""
+        self.untrace()
+        allowed, refused = self.threads()
+        if refused:
+            # A thread running project code keeps calling switched functions
+            # in the template after `unsafe` was sent, and a non-daemon one is
+            # something the suite waits on.
+            self.refuse("threads running in the template: " + ", ".join(refused))
+        self.allowed_threads = allowed
+        if error:
+            self.refuse(error)
+        self.serve(driver)
+        os._exit(0)
+
+    def serve(self, driver):
         freeze_macos_proxies()
         # Children gc-collect at session end (see `child`); frozen, the
         # collected suite isn't rescanned on every one of those passes.
@@ -631,7 +650,7 @@ class Template:
                     *lines, pending = pending.split(b"\n")
                     for line in filter(None, lines):
                         req = json.loads(line)
-                        r, pid = self.fork(session, by_id, req)
+                        r, pid = self.fork(driver, req)
                         timeout = req.get("timeout")
                         running[pid] = Run(req.get("id"), pid, r, timeout)
                         sel.register(r, selectors.EVENT_READ, pid)
@@ -676,7 +695,9 @@ class Template:
                 pass
             _, status = os.waitpid(c.pid, 0)
         if end:
-            status = end["code"] << 8  # raw wait status of exit(code)
+            # Raw wait status of exit(code), or of death by signal -code.
+            code = end["code"]
+            status = code << 8 if code >= 0 else -code
         # Answer first: cleanup must not eat into the caller's deadline.
         self.send(
             {"id": c.id, "status": status, "timed_out": timed_out, **summarize(c.buf)}
@@ -694,13 +715,13 @@ class Template:
     def active_file(self, pid):
         return os.path.join(self.active_dir, str(pid))
 
-    def fork(self, session, by_id, req):
+    def fork(self, driver, req):
         """Fork a child for `req`; returns its event pipe's read end and pid."""
         r, w = os.pipe()
         pid = os.fork()
         if pid == 0:
             os.close(r)
-            self.child(session, by_id, req, w)
+            self.child(driver, req, w)
         os.close(w)
         # Also set from this side: the caller may kill the group as soon as
         # it reads the pid, possibly before the child ran its own setpgid.
@@ -719,7 +740,7 @@ class Template:
     def fake_user(self, pid):
         return f"f{pid:0{len(self.user) - 1}d}"
 
-    def child(self, session, by_id, req, w):
+    def child(self, driver, req, w):
         """Runs in the forked child; never returns. Streams events to `w` as
         they happen, so a child killed mid-test still names the test it hung
         in."""
@@ -739,14 +760,7 @@ class Template:
             # Python's own handler, as in a cold run: SIG_DFL would turn a
             # test's self-sent SIGINT (trio) into a dead child.
             signal.signal(signal.SIGINT, signal.default_int_handler)
-            # Private basetemp: siblings sharing pytest-of-<user> would prune
-            # each other's tmp_path. Seeded so pytest-<N> has cold digits.
-            user = self.fake_user(os.getpid())
-            os.makedirs(
-                os.path.join(self.child_temp(os.getpid()), f"pytest-{self.seed - 1}"),
-                exist_ok=True,
-            )
-            os.environ["USER"] = os.environ["LOGNAME"] = user
+            driver.child_start()
             if os.environ.get(PRIVATE_HOME_ENV) == "1":
                 # Siblings run at once: one shared private home would race
                 # like the real one (an app dir one test removes under
@@ -762,18 +776,12 @@ class Template:
             with open(self.active_file(os.getpid()), "w") as f:
                 f.write(str(req["idx"]))
             try:
-                code = self.run_items(session, by_id, req, emit)
+                code = driver.run_items(req, emit)
             except KeyboardInterrupt:
-                # Escaped a test (a mutant that raises it): pytest stops and
-                # exits 2, "interrupted", which fermut scores as a kill.
-                code = 2
-            # A cold run's session end: pytest >= 8.4 gc-collects there and
-            # fails the run on a leaked resource's unraisable warning (click:
-            # a mutant that never closes a file). Exit 1, as pytest would.
-            try:
-                session.config._ensure_unconfigure()
-            except BaseException:  # noqa: BLE001
-                code = code or 1
+                # Escaped a test (a mutant that raises it): whatever a cold
+                # run does then (see the drivers).
+                code = driver.interrupted()
+            code = driver.session_end(code)
             # A cold run's interpreter exit: run threading's atexit hooks
             # (executors stop their workers), then wait on every non-daemon
             # thread a test left running. One that never ends hangs the
@@ -787,35 +795,83 @@ class Template:
             try:
                 emit(ev="end", code=code)
             finally:  # even if the pipe is gone: never return into the template
+                if code < 0:  # die of signal -code, as the cold run would
+                    signal.signal(-code, signal.SIG_DFL)
+                    os.kill(os.getpid(), -code)
                 os._exit(code)
 
-    def run_items(self, session, by_id, req, emit):
+
+def pick(items, by_id, req):
+    """The items `req` asks for: slice `chunk` = (k, n) of the suite (the
+    no-mutant check, split across workers), its `ids`, or every item. None
+    when an id wasn't collected."""
+    if req.get("chunk"):
+        k, n = req["chunk"]
+        return items[k * len(items) // n : (k + 1) * len(items) // n]
+    ids = req.get("ids")
+    if ids is None:
+        return list(items)
+    picked = [by_id.get(i) for i in dict.fromkeys(ids)]
+    return None if None in picked else picked
+
+
+def resume(items, after, name):
+    """Resume a slice past test `after`, whose fork crashed (macOS: system
+    frameworks aren't fork-safe); the caller records that test."""
+    if after:
+        names = [name(i) for i in items]
+        if after in names:
+            return items[names.index(after) + 1 :]
+    return items
+
+
+class PytestDriver:
+    """Runs a forked child's selection the way a cold `pytest [-x] <ids>`
+    would."""
+
+    def __init__(self, template, session):
+        self.template, self.session = template, session
+        self.by_id = {item.nodeid: item for item in session.items}
+
+    def child_start(self):
+        # Private basetemp: siblings sharing pytest-of-<user> would prune
+        # each other's tmp_path. Seeded so pytest-<N> has cold digits.
+        t = self.template
+        user = t.fake_user(os.getpid())
+        os.makedirs(
+            os.path.join(t.child_temp(os.getpid()), f"pytest-{t.seed - 1}"),
+            exist_ok=True,
+        )
+        os.environ["USER"] = os.environ["LOGNAME"] = user
+
+    def interrupted(self):
+        # pytest stops and exits 2, "interrupted", which fermut scores as a
+        # kill.
+        return 2
+
+    def session_end(self, code):
+        # A cold run's session end: pytest >= 8.4 gc-collects there and fails
+        # the run on a leaked resource's unraisable warning (click: a mutant
+        # that never closes a file). Exit 1, as pytest would.
+        try:
+            self.session.config._ensure_unconfigure()
+        except BaseException:  # noqa: BLE001
+            code = code or 1
+        return code
+
+    def run_items(self, req, emit):
         """Exit code a cold `pytest [-x] <ids>` would give."""
-        ids = req.get("ids")
-        if req.get("chunk"):
-            # Slice k of n of the suite: the no-mutant check, split across
-            # templates.
-            k, n = req["chunk"]
-            all_items = session.items
-            items = all_items[k * len(all_items) // n : (k + 1) * len(all_items) // n]
-        elif ids is None:
-            items = list(session.items)
-        else:
-            items = [by_id.get(i) for i in dict.fromkeys(ids)]
-            if None in items:
-                return 4  # pytest: "not found"
+        session = self.session
+        items = pick(session.items, self.by_id, req)
+        if items is None:
+            return 4  # pytest: "not found"
         # A cold run reorders its selection (fixtures.py groups items by
         # parametrized higher-scope fixtures); skipping that moves module and
         # session teardowns and can flip order-dependent tests.
         session.config.hook.pytest_collection_modifyitems(
             session=session, config=session.config, items=items
         )
-        if req.get("after"):
-            # Resume a slice past a test whose fork crashed (macOS: system
-            # frameworks aren't fork-safe); the caller records that test.
-            ran = [item.nodeid for item in items]
-            if req["after"] in ran:
-                items = items[ran.index(req["after"]) + 1 :]
+        items = resume(items, req.get("after"), lambda item: item.nodeid)
         if not items:
             return 0 if req.get("chunk") else 5  # an empty slice checks nothing
         failed, stop_first = [], not req.get("all")
@@ -842,6 +898,108 @@ class Template:
                 teardown_all(session)
                 break
         return 1 if failed else 0
+
+
+class UnittestDriver:
+    """Runs a forked child's selection the way a cold `python -m unittest
+    discover -f` would: one flat suite in discovery order, so `TestSuite.run`
+    still sets up and tears down classes and modules around their tests."""
+
+    def __init__(self, items):
+        self.items = items
+        self.by_id = {t.id(): t for t in items}
+
+    def child_start(self):
+        pass
+
+    def interrupted(self):
+        # unittest doesn't catch it: the interpreter exits and dies of
+        # SIGINT. Exit 2 would be a usage error to fermut.
+        return -signal.SIGINT
+
+    def session_end(self, code):
+        return code
+
+    def run_items(self, req, emit):
+        """Exit code a cold `python -m unittest discover [-f]` would give
+        (pytest's codes: 4 an unknown id, 5 nothing ran)."""
+        import unittest
+        import unittest.main as program
+
+        items = pick(self.items, self.by_id, req)
+        if items is None:
+            return 4
+        items = resume(items, req.get("after"), lambda t: t.id())
+        if not items:
+            return 0 if req.get("chunk") else 5
+        timed = hasattr(unittest.TestResult, "addDuration")  # 3.12+
+
+        class Listen(unittest.TextTestResult):
+            def startTest(self, test):
+                emit(ev="begin", nodeid=test.id())
+                self.started = time.perf_counter()
+                super().startTest(test)
+
+            def stopTest(self, test):
+                super().stopTest(test)
+                if not timed:
+                    emit(ev="dur", dur=time.perf_counter() - self.started)
+
+            def addDuration(self, test, elapsed):
+                super().addDuration(test, elapsed)
+                emit(ev="dur", dur=elapsed)
+
+            def failed_in(self, test):
+                if not isinstance(test, unittest.TestCase):
+                    # A class or module fixture failed (`_ErrorHolder`): no
+                    # test began. Naming it among the tests run makes a
+                    # kill's confirmation ask for an id that wasn't collected,
+                    # so the kill goes to the spawn path.
+                    emit(ev="begin", nodeid=test.id())
+                emit(ev="fail", nodeid=test.id())
+
+            def addError(self, test, err):
+                self.failed_in(test)
+                super().addError(test, err)
+
+            def addFailure(self, test, err):
+                self.failed_in(test)
+                super().addFailure(test, err)
+
+            def addUnexpectedSuccess(self, test):
+                self.failed_in(test)
+                super().addUnexpectedSuccess(test)
+
+            def addSubTest(self, test, subtest, err):
+                if err is not None:
+                    self.failed_in(test)
+                super().addSubTest(test, subtest, err)
+
+        with open(os.devnull, "w") as out:
+            result = unittest.TextTestRunner(
+                stream=out,
+                failfast=not req.get("all"),
+                resultclass=Listen,
+                # As TestProgram: `default` unless -W was given.
+                warnings=None if sys.warnoptions else "default",
+            ).run(unittest.TestSuite(items))
+        if not result.wasSuccessful():
+            return 1
+        none = getattr(program, "_NO_TESTS_EXITCODE", None)  # 3.12+
+        if none and result.testsRun == 0 and not result.skipped:
+            return none
+        return 0
+
+
+def flatten(suite):
+    """The test cases in `suite`, in run order."""
+    import unittest
+
+    for t in suite:
+        if isinstance(t, unittest.TestSuite):
+            yield from flatten(t)
+        else:
+            yield t
 
 
 def cap_memory():
@@ -984,7 +1142,10 @@ def main(argv):
         json.dump(schematize(argv[2], json.load(sys.stdin)), sys.stdout)
         return 0
     if cmd == "serve":
-        Template(argv[2], argv[3], argv[4:]).run()
+        Template(argv[2], argv[3]).run_pytest(argv[4:])
+        return 0
+    if cmd == "serve-unittest":
+        Template(argv[2], argv[3]).run_unittest(argv[4], argv[5])
         return 0
     sys.stderr.write(__doc__)
     return 2

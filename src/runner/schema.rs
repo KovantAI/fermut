@@ -1,4 +1,5 @@
-//! Schemata mode for the pytest runner (on by default on Unix; `--no-schemata`).
+//! Schemata mode for the pytest runner (on by default on Unix; `--no-schemata`),
+//! and opt-in for rstest and unittest (`--schemata`).
 //!
 //! Instead of splicing one mutant into a mirror and starting pytest per
 //! mutant, every function-body mutant is compiled into one *schema* up front:
@@ -11,8 +12,8 @@
 //! order, and the verdict goes through the same classification as the spawn
 //! path.
 //!
-//! Anything the schema can't serve safely runs on the wrapped
-//! [`PytestRunner`] exactly as without `--schemata`: mutants outside function
+//! Anything the schema can't serve safely runs on the wrapped runner
+//! ([`SchemaInner`]) exactly as without `--schemata`: mutants outside function
 //! bodies, ones that would warn at compile time, functions that already ran
 //! inside the template (their results may have been stored before the fork),
 //! a template that failed to start or died, a child that broke itself, and
@@ -20,9 +21,10 @@
 //! The baseline is always the cold, spawn-path run.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::ExitStatusExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -36,9 +38,11 @@ use tracing::{debug, info, warn};
 use super::pytest::{run_timing, PytestRunner};
 use super::pytest_result::RunResult;
 use super::python::pytest_interpreter;
+use super::unittest::UnittestRunner;
 use super::{configure_mirror_cmd, precompile, BaselineStatus, Mirror, Runner};
+use crate::config::IsolationMode;
 use crate::mutator::Mutant;
-use crate::report::MutantOutcome;
+use crate::report::{MutantOutcome, Timing};
 use crate::sync::lock_recover;
 
 /// The helper script, written next to the schema mirror.
@@ -53,8 +57,172 @@ const FORK_TIMEOUT: Duration = Duration::from_secs(30);
 /// the template is wedged.
 const REAP_GRACE: Duration = Duration::from_secs(5);
 
-pub struct SchemaRunner {
-    inner: PytestRunner,
+/// What the schema needs from the runner it wraps: how to start its template,
+/// what a mutant's fork runs, and how a served run becomes a verdict.
+pub(crate) trait SchemaInner: Runner {
+    fn schema_env(&self) -> SchemaEnv;
+    /// The per-mutant timeout, read per request: set after the baseline.
+    fn timeout(&self) -> Duration;
+    /// The helper's arguments after its script path: the command, the
+    /// mirror root, `schema_json`, then the runner's own.
+    fn serve_args(&self, mirror: &Mirror, schema_json: &Path) -> Vec<OsString>;
+    /// The tests a fork runs for `mutant`, in order (`None`: all of them),
+    /// as the spawn path would select them; `only` narrows to one.
+    fn selection(&self, mutant: &Arc<Mutant>, only: Option<&str>) -> Option<Vec<String>>;
+    /// Whether a run that ended with `status` killed the mutant. A kill must
+    /// be confirmed with no mutant active before it stands.
+    fn killed(&self, status: ExitStatus) -> bool;
+    /// The outcome the spawn path would have given for `served`.
+    fn served_outcome(&self, mutant: &Arc<Mutant>, served: &Served, record: bool) -> MutantOutcome;
+    /// Run every selected test even past a failure.
+    fn record_all(&self) -> bool {
+        false
+    }
+}
+
+/// How the template runs, fixed when the schema is built.
+pub(crate) struct SchemaEnv {
+    tests: PathBuf,
+    isolation: IsolationMode,
+    python: PathBuf,
+    private_home: bool,
+    mem_cap: Option<u64>,
+    baseline_timeout: Duration,
+    /// The template runs on rstest's vendored pytest.
+    rstest: bool,
+}
+
+impl SchemaInner for PytestRunner {
+    fn schema_env(&self) -> SchemaEnv {
+        SchemaEnv {
+            tests: self.tests.clone(),
+            isolation: self.isolation,
+            python: pytest_interpreter(self.python.as_deref()),
+            private_home: self.private_home,
+            mem_cap: self.mem_cap,
+            baseline_timeout: self.baseline_timeout,
+            rstest: self.exe == "rstest",
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    fn serve_args(&self, mirror: &Mirror, schema_json: &Path) -> Vec<OsString> {
+        let mut args: Vec<OsString> = vec![
+            "serve".into(),
+            mirror.root.clone().into(),
+            schema_json.into(),
+            "--tb=no".into(),
+            "-q".into(),
+        ];
+        if let Some(seed) = self.hypothesis_seed {
+            args.push(format!("--hypothesis-seed={seed}").into());
+        }
+        args.extend(self.extra_args.iter().map(Into::into));
+        args.push(mirror.tests.clone().into());
+        args
+    }
+
+    fn selection(&self, mutant: &Arc<Mutant>, only: Option<&str>) -> Option<Vec<String>> {
+        let (key_file, key_op) = self.kill_key(mutant);
+        self.coverage_ids(mutant, only).map(|ids| {
+            if self.smart_order {
+                self.kill_order.order(&ids, &key_file, key_op)
+            } else {
+                ids
+            }
+        })
+    }
+
+    /// A failing test (1) or one interrupting the run (2).
+    fn killed(&self, status: ExitStatus) -> bool {
+        matches!(status.code(), Some(1 | 2))
+    }
+
+    fn served_outcome(&self, mutant: &Arc<Mutant>, served: &Served, record: bool) -> MutantOutcome {
+        let (key_file, key_op) = self.kill_key(mutant);
+        let waited = (served.status, None);
+        if record && self.record_kill_sets {
+            self.record_kill_set(
+                mutant,
+                &waited,
+                Some(&served.result),
+                false,
+                &key_file,
+                key_op,
+            );
+        }
+        self.classify_run(
+            mutant,
+            waited,
+            Some(&served.result),
+            false,
+            None,
+            &key_file,
+            key_op,
+        )
+        .with_timing(run_timing(served.wall, Some(&served.result)))
+    }
+
+    fn record_all(&self) -> bool {
+        self.record_kill_sets
+    }
+}
+
+/// unittest never narrows per mutant: each fork runs the whole suite,
+/// failfast, as `python -m unittest discover -f` does.
+impl SchemaInner for UnittestRunner {
+    fn schema_env(&self) -> SchemaEnv {
+        SchemaEnv {
+            tests: self.tests.clone(),
+            isolation: self.isolation,
+            python: self.python.clone(),
+            private_home: self.private_home,
+            mem_cap: self.mem_cap,
+            baseline_timeout: self.baseline_timeout,
+            rstest: false,
+        }
+    }
+
+    fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    fn serve_args(&self, mirror: &Mirror, schema_json: &Path) -> Vec<OsString> {
+        vec![
+            "serve-unittest".into(),
+            mirror.root.clone().into(),
+            schema_json.into(),
+            mirror.tests.clone().into(),
+            self.pattern.clone().into(),
+        ]
+    }
+
+    fn selection(&self, _mutant: &Arc<Mutant>, only: Option<&str>) -> Option<Vec<String>> {
+        only.map(|k| vec![k.to_string()])
+    }
+
+    /// A failing test (1), or a KeyboardInterrupt the interpreter died of.
+    fn killed(&self, status: ExitStatus) -> bool {
+        status.code() == Some(1) || status.signal() == Some(libc::SIGINT)
+    }
+
+    fn served_outcome(&self, mutant: &Arc<Mutant>, served: &Served, _: bool) -> MutantOutcome {
+        let outcome = match served.status {
+            None => MutantOutcome::timed_out_in(mutant.clone(), served.result.unfinished.clone()),
+            Some(status) => super::unittest::verdict(mutant, status.code()),
+        };
+        outcome.with_timing(Timing {
+            duration_ms: u64::try_from(served.wall.as_millis()).unwrap_or(u64::MAX),
+            test_ms: None,
+        })
+    }
+}
+
+pub struct SchemaRunner<R> {
+    inner: R,
     /// Mutants handed over by [`Runner::prepare`]; the schema is built from
     /// them on the first `run`, so a fully cached run never pays for it.
     mutants: Mutex<Vec<Arc<Mutant>>>,
@@ -131,8 +299,8 @@ struct SchematizeEntry {
     fallback: Option<String>,
 }
 
-impl SchemaRunner {
-    pub fn new(inner: PytestRunner) -> Self {
+impl<R: SchemaInner> SchemaRunner<R> {
+    pub fn new(inner: R) -> Self {
         Self {
             inner,
             mutants: Mutex::new(Vec::new()),
@@ -182,7 +350,8 @@ impl SchemaRunner {
     }
 
     fn build_schema(&self, mutants: &[Arc<Mutant>]) -> Result<Schema> {
-        let mirror = Mirror::build(&self.inner.tests, self.inner.isolation)?;
+        let env = self.inner.schema_env();
+        let mirror = Mirror::build(&env.tests, env.isolation)?;
         let script = mirror.plugin_dir.join("_fermut_schema.py");
         std::fs::write(&script, SCRIPT_SOURCE)
             .with_context(|| format!("writing {}", script.display()))?;
@@ -202,10 +371,10 @@ impl SchemaRunner {
                 "replacement": m.replacement,
             }));
         }
-        let python = pytest_interpreter(self.inner.python.as_deref());
+        let python = env.python;
         let mut cmd = Command::new(&python);
         cmd.arg(&script).arg("schematize").arg(&mirror.root);
-        configure_mirror_cmd(&mut cmd, &mirror, self.inner.private_home)?;
+        configure_mirror_cmd(&mut cmd, &mirror, env.private_home)?;
         let out = run_with_stdin(cmd, &serde_json::to_vec(&input)?)?;
         let parsed: SchematizeOutput =
             serde_json::from_slice(&out).context("parsing the schematize output")?;
@@ -246,27 +415,17 @@ impl SchemaRunner {
             serde_json::to_vec(&serde_json::json!({"functions": parsed.functions}))?,
         )
         .with_context(|| format!("writing {}", schema_json.display()))?;
-        let mut serve_args: Vec<std::ffi::OsString> = vec![
-            script.clone().into(),
-            "serve".into(),
-            mirror.root.clone().into(),
-            schema_json.clone().into(),
-        ];
-        serve_args.extend(["--tb=no".into(), "-q".into()]);
-        if let Some(seed) = self.inner.hypothesis_seed {
-            serve_args.push(format!("--hypothesis-seed={seed}").into());
-        }
-        serve_args.extend(self.inner.extra_args.iter().map(Into::into));
-        serve_args.push(mirror.tests.clone().into());
+        let mut serve_args = vec![script.into()];
+        serve_args.extend(self.inner.serve_args(&mirror, &schema_json));
         Ok(Schema {
             mirror: Arc::new(mirror),
             index,
             serve_args,
             python,
-            rstest: self.inner.exe == "rstest",
-            mem_cap: self.inner.mem_cap,
-            private_home: self.inner.private_home,
-            ready_timeout: self.inner.baseline_timeout,
+            rstest: env.rstest,
+            mem_cap: env.mem_cap,
+            private_home: env.private_home,
+            ready_timeout: env.baseline_timeout,
             // One slice per worker: built inside the run's rayon pool.
             verified: Chunks::new(rayon::current_num_threads()),
             template: OnceLock::new(),
@@ -280,14 +439,7 @@ impl SchemaRunner {
     fn serve(&self, mutant: &Arc<Mutant>, only: Option<&str>, all: bool) -> Option<Served> {
         let schema = self.schema()?;
         let idx = *schema.index.get(&mutant.id)?;
-        let (key_file, key_op) = self.inner.kill_key(mutant);
-        let ids = self.inner.coverage_ids(mutant, only).map(|ids| {
-            if self.inner.smart_order {
-                self.inner.kill_order.order(&ids, &key_file, key_op)
-            } else {
-                ids
-            }
-        });
+        let ids = self.inner.selection(mutant, only);
         if schema.verified.failed() {
             return None;
         }
@@ -310,12 +462,9 @@ impl SchemaRunner {
             if template.is_unsafe(idx) {
                 return Ok(None);
             }
-            let mut served = template.request(idx, ids.as_deref(), all, self.inner.timeout)?;
-            // A kill or a hang must be the mutant's doing: a failing test (1),
-            // one interrupting the run (2), or a timeout inside a test.
-            if matches!(served.status.and_then(|s| s.code()), Some(1 | 2))
-                || hung_in_a_test(&served)
-            {
+            let mut served = template.request(idx, ids.as_deref(), all, self.inner.timeout())?;
+            // A kill or a hang must be the mutant's doing.
+            if served.status.is_some_and(|s| self.inner.killed(s)) || hung_in_a_test(&served) {
                 served.unconfirmed = !self.confirm(template, &served.ran);
             }
             Ok(Some(served))
@@ -337,7 +486,7 @@ impl SchemaRunner {
             return ok;
         }
         let ok = matches!(
-            template.request(0, Some(ran), false, self.inner.timeout),
+            template.request(0, Some(ran), false, self.inner.timeout()),
             Ok(s) if s.error.is_none() && s.status.is_some_and(|st| st.success())
         );
         if !ok {
@@ -384,36 +533,9 @@ impl SchemaRunner {
         }
         Ok(normal)
     }
-
-    /// Turn a served run into the outcome the spawn path would have produced.
-    fn outcome(&self, mutant: &Arc<Mutant>, served: Served, record: bool) -> MutantOutcome {
-        let (key_file, key_op) = self.inner.kill_key(mutant);
-        let waited = (served.status, None);
-        if record && self.inner.record_kill_sets {
-            self.inner.record_kill_set(
-                mutant,
-                &waited,
-                Some(&served.result),
-                false,
-                &key_file,
-                key_op,
-            );
-        }
-        self.inner
-            .classify_run(
-                mutant,
-                waited,
-                Some(&served.result),
-                false,
-                None,
-                &key_file,
-                key_op,
-            )
-            .with_timing(run_timing(served.wall, Some(&served.result)))
-    }
 }
 
-impl Drop for SchemaRunner {
+impl<R> Drop for SchemaRunner<R> {
     fn drop(&mut self) {
         let (served, spawned) = (*self.served.get_mut(), *self.spawned.get_mut());
         if served + spawned > 0 {
@@ -595,7 +717,7 @@ fn crash_signal(status: ExitStatus) -> bool {
     )
 }
 
-impl Runner for SchemaRunner {
+impl<R: SchemaInner> Runner for SchemaRunner<R> {
     fn prepare(&self, mutants: &[Arc<Mutant>]) -> Result<()> {
         *lock_recover(&self.mutants) = mutants.to_vec();
         Ok(())
@@ -610,7 +732,7 @@ impl Runner for SchemaRunner {
     }
 
     fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
-        let all = self.inner.record_kill_sets;
+        let all = self.inner.record_all();
         match self.serve(mutant, None, all) {
             Some(served) if usable(&served) => {
                 self.served.fetch_add(1, Ordering::Relaxed);
@@ -622,7 +744,7 @@ impl Runner for SchemaRunner {
                 if (survived || timed_out) && self.audit_pick(&mutant.id) {
                     return self.audit_normal(mutant, served);
                 }
-                Ok(self.outcome(mutant, served, true))
+                Ok(self.inner.served_outcome(mutant, &served, true))
             }
             _ => {
                 self.spawned.fetch_add(1, Ordering::Relaxed);
@@ -633,7 +755,9 @@ impl Runner for SchemaRunner {
 
     fn audit(&self, mutant: &Arc<Mutant>, killer: &str) -> Result<Option<MutantOutcome>> {
         match self.serve(mutant, Some(killer), false) {
-            Some(served) if usable(&served) => Ok(Some(self.outcome(mutant, served, false))),
+            Some(served) if usable(&served) => {
+                Ok(Some(self.inner.served_outcome(mutant, &served, false)))
+            }
             _ => self.inner.audit(mutant, killer),
         }
     }
@@ -685,7 +809,7 @@ fn run_with_stdin(mut cmd: Command, input: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// One forked run, as the template reported it.
-struct Served {
+pub(crate) struct Served {
     /// `None` when it timed out (the child was killed).
     status: Option<ExitStatus>,
     result: RunResult,
@@ -1040,6 +1164,60 @@ mod tests {
         );
     }
 
+    fn unittest_runner() -> UnittestRunner {
+        UnittestRunner::new(
+            "tests".into(),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            IsolationMode::Copy,
+            true,
+            "python".into(),
+            None,
+        )
+    }
+
+    fn some_mutant() -> Arc<Mutant> {
+        Arc::new(Mutant {
+            id: "src/m.py@1:op:a->b".into(),
+            file: "m.py".into(),
+            operator: crate::mutator::Operator::ArithOpSwap,
+            range: ruff_text_size::TextRange::default(),
+            original: "+".into(),
+            replacement: "-".into(),
+            line: 1,
+            stmt_line: 1,
+            site: None,
+        })
+    }
+
+    #[test]
+    fn a_unittest_fork_scores_like_python_m_unittest() {
+        let (r, m) = (unittest_runner(), some_mutant());
+        let label = |s: &Served| r.served_outcome(&m, s, true).status_label();
+        assert_eq!(label(&served(Some(0), None)), "survived");
+        assert_eq!(label(&served(Some(1), None)), "killed");
+        assert_eq!(label(&served(Some(5), None)), "error", "no tests ran");
+        let mut sigint = served(None, None);
+        sigint.status = Some(ExitStatus::from_raw(libc::SIGINT));
+        assert_eq!(label(&sigint), "killed", "died of a KeyboardInterrupt");
+        let mut hung = served(None, None);
+        hung.result.unfinished = Some("t.T.test_loops".into());
+        let o = r.served_outcome(&m, &hung, true);
+        assert_eq!(o.hung_in(), Some("t.T.test_loops"));
+    }
+
+    #[test]
+    fn kills_that_need_confirming_follow_each_runners_exit_codes() {
+        let code = |c: i32| ExitStatus::from_raw(c << 8);
+        let sigint = ExitStatus::from_raw(libc::SIGINT);
+        let (ut, schema) = (unittest_runner(), fake_runner(Path::new("/nonexistent")));
+        let py = &schema.inner;
+        assert!(ut.killed(code(1)) && ut.killed(sigint));
+        assert!(!ut.killed(code(0)) && !ut.killed(code(2)) && !ut.killed(code(5)));
+        assert!(py.killed(code(1)) && py.killed(code(2)));
+        assert!(!py.killed(code(0)) && !py.killed(code(4)) && !py.killed(sigint));
+    }
+
     #[test]
     fn unsafe_ranges_are_inclusive() {
         let ranges = [(3, 5), (9, 9)];
@@ -1126,7 +1304,7 @@ done"#,
         );
     }
 
-    fn fake_runner(dir: &std::path::Path) -> SchemaRunner {
+    fn fake_runner(dir: &std::path::Path) -> SchemaRunner<PytestRunner> {
         SchemaRunner::new(PytestRunner::new(super::super::pytest::PytestConfig {
             tests: dir.join("tests"),
             timeout: Duration::from_secs(30),
@@ -1310,7 +1488,7 @@ done"#
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().canonicalize().unwrap();
         std::fs::create_dir_all(dir.join("tests")).unwrap();
-        let picks = |runner: &SchemaRunner| -> Vec<bool> {
+        let picks = |runner: &SchemaRunner<PytestRunner>| -> Vec<bool> {
             (0..4000)
                 .map(|i| runner.audit_pick(&format!("src/m.py@{i}:op:a->b")))
                 .collect()
@@ -1382,7 +1560,10 @@ done"#
     /// A schemata runner serving one mutant (index 5) from a fake template
     /// that hangs it in `t.py::loops` and answers a no-mutant run with
     /// `no_mutant`. The spawn path can't run anything (`python = /bin/false`).
-    fn hanging(dir: &std::path::Path, no_mutant: &str) -> (SchemaRunner, Arc<Mutant>) {
+    fn hanging(
+        dir: &std::path::Path,
+        no_mutant: &str,
+    ) -> (SchemaRunner<PytestRunner>, Arc<Mutant>) {
         let script = format!(
             r#"echo '{{"ready":true}}'
 while read req; do
@@ -1394,17 +1575,7 @@ while read req; do
 done"#
         );
         let mut schema = fake_schema(dir, &script);
-        let mutant = Arc::new(Mutant {
-            id: "src/m.py@1:op:a->b".into(),
-            file: dir.join("m.py"),
-            operator: crate::mutator::Operator::ArithOpSwap,
-            range: ruff_text_size::TextRange::default(),
-            original: "+".into(),
-            replacement: "-".into(),
-            line: 1,
-            stmt_line: 1,
-            site: None,
-        });
+        let mutant = some_mutant();
         schema.index.insert(mutant.id.clone(), 5);
         let mut runner = fake_runner(&dir.canonicalize().unwrap());
         runner.set_timeout(Duration::from_millis(200));

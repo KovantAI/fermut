@@ -434,4 +434,28 @@ INTERNALERROR> SystemExit: 2
             root
         ));
     }
+
+    #[test]
+    fn anomaly_messages_cover_every_label() {
+        assert_eq!(
+            anomaly_message(TestTool::Pytest, 9),
+            "pytest exit 9: anomalous exit (not a kill)"
+        );
+        assert_eq!(
+            anomaly_message(TestTool::Unittest, 5),
+            "unittest exit 5: no tests ran (not a kill)"
+        );
+        assert_eq!(
+            anomaly_message(TestTool::Unittest, 9),
+            "unittest exit 9: anomalous exit (not a kill)"
+        );
+    }
+
+    #[test]
+    fn frame_path_drops_cur_dir_components() {
+        assert_eq!(
+            frame_path("./pkg/./m.py:3: in <module>", Path::new("/proj")),
+            Some(PathBuf::from("/proj/pkg/m.py"))
+        );
+    }
 }

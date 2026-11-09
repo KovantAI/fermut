@@ -308,4 +308,10 @@ mod tests {
         let r = TextRange::new(TextSize::from(0), TextSize::from(1));
         assert_eq!(adjacent_tokens(src, r), ("", "x"));
     }
+
+    #[test]
+    fn adjacent_tokens_out_of_bounds_range_is_empty() {
+        let r = TextRange::new(TextSize::from(5), TextSize::from(9));
+        assert_eq!(adjacent_tokens("a + b", r), ("", ""));
+    }
 }

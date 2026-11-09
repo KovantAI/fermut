@@ -90,8 +90,9 @@ fn locate_outcome<'a>(report: &'a Report, target: &str) -> Result<&'a MutantOutc
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct ShowArgs {
-    /// Path to a JSON report produced by `fermut run --json …`.
-    pub(crate) report: std::path::PathBuf,
+    /// JSON report from `fermut run`. Defaults to `.fermut/last.json`, which
+    /// every `run` writes.
+    pub(crate) report: Option<std::path::PathBuf>,
 
     /// Optional mutant selector: 1-based index, or substring of mutant id.
     /// Omit to print a summary list of survivors.
@@ -109,6 +110,7 @@ pub(crate) fn run(args: ShowArgs) -> Result<()> {
         target,
         all,
     } = args;
+    let (report, target) = crate::cli::report_and_target(report, target);
     show(&report, target.as_deref(), all)
 }
 
@@ -140,7 +142,7 @@ mod tests {
 
         show(&path, None, false).unwrap();
         run(ShowArgs {
-            report: path.clone(),
+            report: Some(path.clone()),
             target: None,
             all: true,
         })

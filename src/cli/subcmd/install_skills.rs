@@ -310,4 +310,15 @@ mod tests {
             cwd.join(".agents/skills")
         );
     }
+
+    #[test]
+    fn target_dir_user_uses_home() {
+        let cwd = Path::new("/proj");
+        if let Some(home) = home_dir() {
+            assert_eq!(
+                target_dir(cwd, None, true, true).unwrap(),
+                home.join(".agents/skills")
+            );
+        }
+    }
 }

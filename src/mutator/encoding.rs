@@ -98,5 +98,7 @@ mod tests {
             Some("utf-8")
         );
         assert_eq!(extract_encoding_name("x = 1"), None);
+        assert_eq!(extract_encoding_name("# coding utf-8"), None);
+        assert_eq!(extract_encoding_name("# coding: ,;"), None);
     }
 }

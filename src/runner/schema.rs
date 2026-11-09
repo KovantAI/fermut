@@ -1021,6 +1021,10 @@ mod tests {
             "the child broke itself"
         );
         assert!(
+            !usable(&served(Some(3), Some("Traceback ..."))),
+            "still unusable once the first failure was warned about"
+        );
+        assert!(
             !usable(&served(Some(4), None)),
             "ids the template didn't collect"
         );
@@ -1494,5 +1498,17 @@ done"#
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", "cat"]);
         assert_eq!(run_with_stdin(cmd, b"echo").unwrap(), b"echo");
+    }
+
+    #[test]
+    fn recv_names_a_silent_and_an_exited_template() {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let err = recv(&rx, Duration::from_millis(10)).unwrap_err();
+        assert!(err.to_string().contains("no answer within"), "{err}");
+        tx.send("hi".into()).unwrap();
+        assert_eq!(recv(&rx, Duration::from_millis(10)).unwrap(), "hi");
+        drop(tx);
+        let err = recv(&rx, Duration::from_millis(10)).unwrap_err();
+        assert!(err.to_string().contains("exited"), "{err}");
     }
 }

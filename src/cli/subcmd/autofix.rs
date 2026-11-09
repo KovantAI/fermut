@@ -79,6 +79,7 @@ impl From<AutofixArgs> for AutofixOpts {
             format,
             triage,
         } = a;
+        let (report, target) = crate::cli::report_and_target(report, target);
         AutofixOpts {
             report,
             target,
@@ -952,6 +953,384 @@ mod tests {
         assert!(err.is_err());
     }
 
+    /// Baseline passes, but evaluating the mutant errors.
+    struct RunErrRunner;
+
+    impl Runner for RunErrRunner {
+        fn run(&self, _: &std::sync::Arc<Mutant>) -> Result<MutantOutcome> {
+            Err(anyhow::anyhow!("mirror exploded"))
+        }
+        fn baseline(&self) -> Result<BaselineStatus> {
+            Ok(BaselineStatus::Passed {
+                wall: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    #[test]
+    fn verification_error_reverts_and_reports_the_error() {
+        let (dir, m, test_file) = fixture();
+        let before = std::fs::read_to_string(&test_file).unwrap();
+        let tests_dir = dir.path().join("tests");
+        let mut c = core(&RunErrRunner, &tests_dir, false);
+        c.log = true;
+        let report = run_autofix(&c, std::slice::from_ref(&m));
+        let e = &report.entries[0];
+        assert_eq!(e.outcome, OUTCOME_ERROR);
+        assert!(!e.kept);
+        assert_eq!(
+            e.detail.as_deref(),
+            Some("verification error: mirror exploded")
+        );
+        assert_eq!(std::fs::read_to_string(&test_file).unwrap(), before);
+    }
+
+    #[test]
+    fn logging_paths_keep_outcomes_unchanged() {
+        // fixed + kept-failed with `log` on: same entries as the quiet runs.
+        let (dir, m, _) = fixture();
+        let tests_dir = dir.path().join("tests");
+        let fixed = mock(true, true);
+        let mut c = core(&fixed, &tests_dir, false);
+        c.log = true;
+        assert_eq!(
+            run_autofix(&c, std::slice::from_ref(&m)).entries[0].outcome,
+            OUTCOME_FIXED
+        );
+        let survives = mock(true, false);
+        let mut c = core(&survives, &tests_dir, true);
+        c.log = true;
+        let e = &run_autofix(&c, std::slice::from_ref(&m)).entries[0];
+        assert_eq!((e.outcome, e.kept), (OUTCOME_STILL_SURVIVES, true));
+    }
+
+    #[test]
+    fn triage_skip_with_logging_still_skips() {
+        let (dir, m, _) = fixture();
+        let runner = mock(true, true);
+        let tests_dir = dir.path().join("tests");
+        let (mut c, _client) = triaging(&runner, &tests_dir, TriageMode::Skip, JUDGED_EQUIVALENT);
+        c.log = true;
+        let report = run_autofix(&c, std::slice::from_ref(&m));
+        assert_eq!(report.entries[0].outcome, OUTCOME_LIKELY_EQUIVALENT);
+    }
+
+    #[test]
+    fn no_inferable_target_is_an_error_entry() {
+        let (dir, m, _) = fixture();
+        // A tests dir that never mentions the symbol → nothing to infer.
+        let empty_tests = dir.path().join("empty_tests");
+        std::fs::create_dir(&empty_tests).unwrap();
+        let runner = mock(true, true);
+        let c = core(&runner, &empty_tests, false);
+        let e = &run_autofix(&c, std::slice::from_ref(&m)).entries[0];
+        assert_eq!(e.outcome, OUTCOME_ERROR);
+        assert!(e
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("could not find a test file"));
+    }
+
+    #[test]
+    fn failed_revert_reports_test_still_on_disk() {
+        let dir = TempDir::new().unwrap();
+        let runner = mock(true, true);
+        let mut c = core(&runner, dir.path(), false);
+        c.log = true;
+        // Restoring bytes onto a directory fails.
+        let e = revert_or_keep(
+            &c,
+            MutantSummary {
+                id: "m".into(),
+                file: "a.py".into(),
+                line: 1,
+                operator: "o".into(),
+                original: "<".into(),
+                replacement: "<=".into(),
+            },
+            Snapshot::Existing(b"x".to_vec()),
+            dir.path(),
+            Some("a".into()),
+            Rejection {
+                outcome: OUTCOME_SUITE_RED,
+                reason: "suite red",
+                extra: None,
+            },
+        );
+        assert!(e.kept, "could not revert, so the test is still there");
+        assert!(e
+            .detail
+            .unwrap()
+            .starts_with("suite red; ALSO failed to revert:"));
+    }
+
+    #[test]
+    fn snapshot_absent_restore_errors_when_path_cannot_be_removed() {
+        let dir = TempDir::new().unwrap();
+        // `remove_file` on a directory is an error other than NotFound.
+        let err = Snapshot::Absent.restore(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("removing"), "{err}");
+    }
+
+    #[test]
+    fn render_human_audit_without_equivalent_verdicts_omits_precision() {
+        let report = AutofixReport {
+            triage_audit: Some(TriageAudit {
+                judged_equivalent: 0,
+                killed_anyway: 0,
+            }),
+            model: DEFAULT_MODEL.into(),
+            fixed: 0,
+            failed: 0,
+            likely_equivalent: 0,
+            entries: Vec::new(),
+        };
+        let human = render_human(&report);
+        assert!(
+            human.contains("triage: 0 judged equivalent, 0 of them killed anyway\n"),
+            "{human}"
+        );
+        assert!(!human.contains("precision"));
+    }
+
+    #[test]
+    fn from_args_passes_run_shape_through() {
+        let o = AutofixOpts::from(AutofixArgs {
+            report: Some("r.json".into()),
+            target: Some("m1".into()),
+            all_survivors: false,
+            path: "src".into(),
+            tests: Some("t".into()),
+            python: Some("py".into()),
+            out: Some("o.py".into()),
+            model: Some("claude-x".into()),
+            context: 4,
+            sample_count: 1,
+            timeout: Some(9),
+            no_cache: true,
+            cache_path: Some("c.json".into()),
+            keep_failed: true,
+            format: Format::Human,
+            triage: TriageMode::Skip,
+        });
+        assert_eq!(o.report, PathBuf::from("r.json"));
+        assert_eq!(o.target.as_deref(), Some("m1"));
+        assert_eq!(o.path, PathBuf::from("src"));
+        assert_eq!(o.tests, Some(PathBuf::from("t")));
+        assert_eq!(o.python, Some(PathBuf::from("py")));
+        assert_eq!(o.out, Some(PathBuf::from("o.py")));
+        assert_eq!(
+            (o.context_lines, o.sample_count, o.timeout),
+            (4, 1, Some(9))
+        );
+        assert!(o.no_cache && o.keep_failed && !o.all_survivors);
+        assert!(matches!(o.format, Format::Human));
+        assert_eq!(o.triage, TriageMode::Skip);
+    }
+
+    #[test]
+    fn autofix_with_no_survivors_reports_an_empty_run() {
+        let dir = TempDir::new().unwrap();
+        let report = crate::report::Report::new(vec![MutantOutcome::killed(mutant(
+            dir.path().join("calc.py"),
+        ))]);
+        let report_path = dir.path().join("report.json");
+        std::fs::write(&report_path, serde_json::to_string(&report).unwrap()).unwrap();
+        for format in [Format::Human, Format::Json] {
+            autofix(AutofixOpts {
+                report: report_path.clone(),
+                target: None,
+                all_survivors: true,
+                path: dir.path().into(),
+                tests: None,
+                python: None,
+                out: None,
+                model: None,
+                context_lines: 3,
+                sample_count: 1,
+                no_cache: true,
+                cache_path: None,
+                timeout: None,
+                keep_failed: false,
+                format,
+                triage: TriageMode::Off,
+            })
+            .unwrap();
+        }
+    }
+
+    /// Generation answers with prose, never a code block.
+    struct NoCode;
+    impl crate::llm::LlmClient for NoCode {
+        fn complete(&self, _: &crate::llm::client::LlmRequest) -> Result<String> {
+            Ok("I can't write that test.".into())
+        }
+    }
+
+    #[test]
+    fn generation_without_a_code_block_is_generation_failed() {
+        let (dir, m, test_file) = fixture();
+        let before = std::fs::read_to_string(&test_file).unwrap();
+        let runner = mock(true, true);
+        let tests_dir = dir.path().join("tests");
+        let mut c = core(&runner, &tests_dir, false);
+        c.log = true;
+        let _ = c.llm.client_cell.set(Ok(
+            std::sync::Arc::new(NoCode) as std::sync::Arc<dyn crate::llm::LlmClient>
+        ));
+        let report = run_autofix(&c, std::slice::from_ref(&m));
+        let e = &report.entries[0];
+        assert_eq!(e.outcome, OUTCOME_GENERATION_FAILED);
+        assert!(!e.kept && e.applied_to.is_none());
+        assert!(e.detail.as_ref().unwrap().contains("python code block"));
+        assert_eq!(report.failed, 1);
+        assert_eq!(std::fs::read_to_string(&test_file).unwrap(), before);
+    }
+
+    #[test]
+    fn no_discoverable_target_is_an_error_entry() {
+        let (dir, m, _test_file) = fixture();
+        let runner = mock(true, true);
+        // A tests dir that doesn't reference the symbol → nothing to infer.
+        let empty = dir.path().join("empty_tests");
+        std::fs::create_dir_all(&empty).unwrap();
+        let c = core(&runner, &empty, false);
+        let report = run_autofix(&c, std::slice::from_ref(&m));
+        assert_eq!(report.entries[0].outcome, OUTCOME_ERROR);
+        assert!(report.entries[0]
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("could not find a test file"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_failure_is_an_error_entry() {
+        let (dir, m, test_file) = fixture();
+        let runner = mock(true, true);
+        let tests_dir = dir.path().join("tests");
+        let link = tests_dir.join("test_link.py");
+        std::os::unix::fs::symlink(&test_file, &link).unwrap();
+        let mut c = core(&runner, &tests_dir, false);
+        c.out = Some(&link);
+        let report = run_autofix(&c, std::slice::from_ref(&m));
+        assert_eq!(report.entries[0].outcome, OUTCOME_ERROR);
+        assert!(report.entries[0]
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("symlink"));
+        assert!(!report.entries[0].kept);
+    }
+
+    /// Baseline errors (runner can't run at all).
+    struct ErrRunner;
+    impl Runner for ErrRunner {
+        fn run(&self, _: &std::sync::Arc<Mutant>) -> Result<MutantOutcome> {
+            unreachable!("baseline fails first")
+        }
+        fn baseline(&self) -> Result<BaselineStatus> {
+            Err(anyhow::anyhow!("pytest not found"))
+        }
+    }
+
+    #[test]
+    fn verification_error_reverts_and_logs() {
+        let (dir, m, test_file) = fixture();
+        let before = std::fs::read_to_string(&test_file).unwrap();
+        let tests_dir = dir.path().join("tests");
+        let mut c = core(&ErrRunner, &tests_dir, false);
+        c.log = true;
+        let report = run_autofix(&c, std::slice::from_ref(&m));
+        let e = &report.entries[0];
+        assert_eq!(e.outcome, OUTCOME_ERROR);
+        assert_eq!(
+            e.detail.as_deref(),
+            Some("verification error: pytest not found")
+        );
+        assert!(!e.kept);
+        assert_eq!(std::fs::read_to_string(&test_file).unwrap(), before);
+    }
+
+    #[test]
+    fn keep_failed_and_fixed_paths_log_without_changing_outcomes() {
+        let (dir, m, _test_file) = fixture();
+        let tests_dir = dir.path().join("tests");
+        let runner = mock(false, true);
+        let mut c = core(&runner, &tests_dir, true);
+        c.log = true;
+        let report = run_autofix(&c, std::slice::from_ref(&m));
+        assert_eq!(report.entries[0].outcome, OUTCOME_SUITE_RED);
+        assert!(report.entries[0].kept);
+        assert_eq!(
+            report.entries[0].detail.as_deref(),
+            Some("generated test fails on unmutated code: 1 failed")
+        );
+        let runner = mock(true, true);
+        let mut c = core(&runner, &tests_dir, false);
+        c.log = true;
+        assert_eq!(
+            run_autofix(&c, std::slice::from_ref(&m)).entries[0].outcome,
+            OUTCOME_FIXED
+        );
+    }
+
+    /// Replaces the appended test file with a directory during "baseline",
+    /// so the later revert can't restore it.
+    struct Clobber(PathBuf);
+    impl Runner for Clobber {
+        fn run(&self, m: &std::sync::Arc<Mutant>) -> Result<MutantOutcome> {
+            Ok(MutantOutcome::survived(m.clone()))
+        }
+        fn baseline(&self) -> Result<BaselineStatus> {
+            std::fs::remove_file(&self.0).unwrap();
+            std::fs::create_dir(&self.0).unwrap();
+            Ok(BaselineStatus::Passed {
+                wall: std::time::Duration::ZERO,
+            })
+        }
+    }
+
+    #[test]
+    fn failed_revert_reports_the_test_as_still_kept() {
+        let (dir, m, _test_file) = fixture();
+        let tests_dir = dir.path().join("tests");
+        // Absent snapshot: --out is created fresh, so revert = remove_file,
+        // which fails on the directory left in its place.
+        let out = tests_dir.join("test_new.py");
+        let runner = Clobber(out.clone());
+        let mut c = core(&runner, &tests_dir, false);
+        c.out = Some(&out);
+        c.log = true;
+        let report = run_autofix(&c, std::slice::from_ref(&m));
+        let e = &report.entries[0];
+        assert_eq!(e.outcome, OUTCOME_STILL_SURVIVES);
+        assert!(e.kept, "revert failed, so the test is still on disk");
+        assert!(e.detail.as_ref().unwrap().contains("ALSO failed to revert"));
+    }
+
+    #[test]
+    fn render_human_audit_with_no_equivalent_verdicts_omits_precision() {
+        let report = AutofixReport {
+            model: DEFAULT_MODEL.into(),
+            fixed: 0,
+            failed: 0,
+            likely_equivalent: 0,
+            triage_audit: Some(TriageAudit {
+                judged_equivalent: 0,
+                killed_anyway: 0,
+            }),
+            entries: Vec::new(),
+        };
+        let human = render_human(&report);
+        assert!(
+            human.ends_with("triage: 0 judged equivalent, 0 of them killed anyway\n"),
+            "{human}"
+        );
+    }
+
     #[test]
     fn snapshot_existing_revert_restores_bytes() {
         let dir = TempDir::new().unwrap();
@@ -966,8 +1345,9 @@ mod tests {
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct AutofixArgs {
-    /// Path to a JSON report produced by `fermut run --json …`.
-    pub(crate) report: std::path::PathBuf,
+    /// JSON report from `fermut run`. Defaults to `.fermut/last.json`, which
+    /// every `run` writes.
+    pub(crate) report: Option<std::path::PathBuf>,
 
     /// Mutant selector: 1-based index, or substring of mutant id.
     /// Omit when `--all-survivors` is set.

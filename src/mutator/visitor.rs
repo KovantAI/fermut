@@ -1234,6 +1234,36 @@ mod operator_emission_tests {
     }
 
     #[test]
+    fn optional_drop_only_on_optional_names_and_attrs() {
+        let ms = collect(Path::new("t.py"), "x: typing.Optional[int] = 1\n").unwrap();
+        assert!(ms
+            .iter()
+            .any(|m| m.operator == Operator::OptionalTypeDrop && m.replacement == "int"));
+        // A subscript on a call is neither a name nor an attribute.
+        assert!(!contains("x: f()[int] = 1\n", Operator::OptionalTypeDrop));
+    }
+
+    #[test]
+    fn two_tuple_with_starred_keeps_the_plain_element() {
+        let ms = collect(Path::new("t.py"), "x = (a, *b)\n").unwrap();
+        assert!(
+            !ms.iter().any(|m| m.operator == Operator::PositionalDrop),
+            "dropping either element would leave a lone starred expr"
+        );
+        // A list may shrink to the starred element.
+        assert!(contains("x = [a, *b]\n", Operator::PositionalDrop));
+    }
+
+    #[test]
+    fn float_zero_and_huge_floats_skip_no_op_mutants() {
+        let zero: Vec<_> = collect(Path::new("t.py"), "x = 0.0\n").unwrap();
+        assert!(!zero.iter().any(|m| m.operator == Operator::NumberToZero));
+        let huge: Vec<_> = collect(Path::new("t.py"), "x = 1e16\n").unwrap();
+        assert!(!huge.iter().any(|m| m.operator == Operator::NumberShift));
+        assert!(huge.iter().any(|m| m.operator == Operator::NumberToZero));
+    }
+
+    #[test]
     fn arith_op_swap_fires() {
         assert!(contains("x = a + b\n", Operator::ArithOpSwap));
         assert!(contains("x = a * b\n", Operator::ArithOpSwap));

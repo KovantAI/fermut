@@ -24,10 +24,10 @@ the project root. `--no-coverage` turns selection off entirely.
 incrementally when tests change; it runs
 `pytest --cov=src --cov-context=test`, which you can run yourself instead.
 
-**Freshness guard.** A `.coverage` older than sources or tests you've since
-edited is ignored if it was auto-discovered (the run proceeds without
-selection rather than skip mutants on changed lines), and used with a
-warning if you passed it explicitly. Regenerate it to clear the warning.
+**Freshness guard.** A stale auto-discovered `.coverage` is refreshed
+incrementally if `fermut coverage` wrote it, else ignored (the run proceeds
+without selection rather than skip mutants on changed lines). One you
+passed explicitly is used with a warning. Regenerate it to clear the warning.
 See [Coverage → Freshness guard](../../guides/coverage.md#freshness-guard).
 
 ## A subset of the suite (`--select-tests`)

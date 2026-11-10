@@ -232,11 +232,49 @@ pub(crate) fn build_config(
     // Freshness guard: a `.coverage` older than the source/tests it claims to
     // describe narrows each mutant's test set from stale data — mutants on
     // newly-added or edited lines get wrongly skipped (false survivors / vacuous
-    // 100%). Detect it by mtime and act on provenance.
-    if let Some(p) = &coverage_path {
-        if let Some(newer) =
-            newer_source_than_coverage(p, &source_root, tests.as_deref(), &project_root)
-        {
+    // 100%). Detect it by content (fingerprint sidecar) or mtime, and act on
+    // provenance.
+    let mut coverage_note = None;
+    if let Some(p) = coverage_path.clone() {
+        // Anchor the content check where `fermut coverage` would for this DB,
+        // so sidecar keys and the refresh below agree on the base dir.
+        let cov_path = p.parent().unwrap_or(&project_root).to_path_buf();
+        let cov_base =
+            LoadedConfig::load(&cov_path).map_or_else(|_| cov_path.clone(), |l| l.base_dir);
+        let tests_dir = tests.clone().unwrap_or_else(|| source_root.join("tests"));
+        let by_content = || {
+            crate::cli::subcmd::coverage::content_staleness(&p, &source_root, &tests_dir, &cov_base)
+        };
+        let mut content = by_content();
+        // An auto-discovered DB that `fermut coverage` manages refreshes
+        // incrementally in seconds; dropping it instead runs every mutant
+        // against the whole suite and scores uncovered lines as survivors.
+        if let (true, Some(Some(changed))) = (coverage_auto, &content) {
+            info!(
+                "coverage {} is stale ({} changed); refreshing it incrementally",
+                p.display(),
+                changed.display()
+            );
+            let refreshed = crate::cli::subcmd::coverage::coverage(
+                crate::cli::subcmd::coverage::CoverageArgs {
+                    path: cov_path.clone(),
+                    source: Some(source_root.clone()),
+                    tests: Some(tests_dir.clone()),
+                    full: false,
+                    output: Some(p.clone()),
+                    python: cli_python.clone(),
+                    pytest_args: Vec::new(),
+                },
+            );
+            match refreshed {
+                Ok(_) => content = by_content(),
+                Err(e) => warn!("refreshing coverage {} failed: {e:#}", p.display()),
+            }
+        }
+        let newer = content.unwrap_or_else(|| {
+            newer_source_than_coverage(&p, &source_root, tests.as_deref(), &project_root)
+        });
+        if let Some(newer) = newer {
             if coverage_auto {
                 warn!(
                     "ignoring auto-discovered coverage {} — it is older than e.g. {} \
@@ -248,6 +286,13 @@ pub(crate) fn build_config(
                     newer.display(),
                     src = source_root.display(),
                 );
+                coverage_note = Some(format!(
+                    "this run ignored stale coverage {} ({} changed), so every mutant ran \
+                     the whole suite and uncovered lines scored as survivors; run \
+                     `fermut coverage` and re-run",
+                    p.display(),
+                    newer.display(),
+                ));
                 coverage_path = None;
             } else {
                 warn!(
@@ -503,6 +548,7 @@ pub(crate) fn build_config(
         coverage_path,
         coverage,
         coverage_unselected,
+        coverage_note,
         hypothesis_seed,
         pytest_args,
         cache,
@@ -677,6 +723,21 @@ pub(crate) fn discover_coverage_db(project_root: &Path) -> Option<PathBuf> {
         }
         _ => None,
     }
+}
+
+/// One file that makes coverage `coverage` stale, or `None` when it is fresh.
+/// By content when `fermut coverage` left a fingerprint sidecar (a checkout
+/// restoring identical bytes isn't a change), else by mtime.
+pub(crate) fn stale_coverage_witness(
+    coverage: &Path,
+    source_root: &Path,
+    tests: Option<&Path>,
+    project_root: &Path,
+    base_dir: &Path,
+) -> Option<PathBuf> {
+    let tests_dir = tests.map_or_else(|| source_root.join("tests"), Path::to_path_buf);
+    crate::cli::subcmd::coverage::content_staleness(coverage, source_root, &tests_dir, base_dir)
+        .unwrap_or_else(|| newer_source_than_coverage(coverage, source_root, tests, project_root))
 }
 
 /// Freshness check for a coverage file: return the first `.py` whose mtime is
@@ -1862,6 +1923,70 @@ mod tests {
         assert!(cfg.coverage_path.is_none());
         assert!(cfg.coverage.is_none());
         assert!(log.contains("ignoring auto-discovered coverage"), "{log}");
+        let note = cfg.coverage_note.expect("dropped coverage leaves a note");
+        assert!(
+            note.contains("a.py") && note.contains("fermut coverage"),
+            "{note}"
+        );
+    }
+
+    /// A project with `m.py` + `tests/test_m.py` and an auto-discoverable
+    /// `.coverage` carrying `schema`, fingerprinted as of now, then `m.py`
+    /// edited so content says stale while mtime is left in the DB's favour.
+    fn sidecar_stale_project(schema: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("pyproject.toml"), "").unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(root.join("tests/test_m.py"), "def test(): pass\n").unwrap();
+        let src = root.join("m.py");
+        std::fs::write(&src, "x = 1\n").unwrap();
+        let db = root.join(".coverage");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(schema).unwrap();
+        drop(conn);
+        crate::cli::subcmd::coverage::seed_fingerprints(&db, &root.join("tests"), &root, &root);
+        std::fs::write(&src, "x = 2\n").unwrap();
+        set_mtime(&src, 1000);
+        set_mtime(&db, 2000);
+        (tmp, root)
+    }
+
+    #[test]
+    fn content_stale_auto_coverage_is_refreshed_and_kept() {
+        // No test covers m.py, so the incremental refresh needs no pytest: it
+        // just advances the baseline, and the DB is fresh again.
+        let (_tmp, root) = sidecar_stale_project(
+            "CREATE TABLE coverage_schema (version integer);
+             CREATE TABLE context (id integer primary key, context text, unique(context));
+             CREATE TABLE file (id integer primary key, path text, unique(path));
+             CREATE TABLE line_bits (file_id integer, context_id integer, numbits blob);
+             INSERT INTO context VALUES (1, 'tests/test_m.py::test|run');
+             INSERT INTO file VALUES (1, 'tests/test_m.py');
+             INSERT INTO line_bits VALUES (1, 1, x'02');",
+        );
+        let mut out = None;
+        let log = logged(|| out = Some(call(root.clone(), None).unwrap()));
+        assert!(log.contains("refreshing it incrementally"), "{log}");
+        assert!(!log.contains("ignoring auto-discovered coverage"), "{log}");
+        let cfg = out.unwrap();
+        assert_eq!(cfg.coverage_path, Some(root.join(".coverage")));
+        assert!(cfg.coverage_note.is_none());
+    }
+
+    #[test]
+    fn failed_refresh_of_stale_auto_coverage_drops_it_with_a_note() {
+        // No `file` table: the incremental plan can't read coverers and errors.
+        let (_tmp, root) = sidecar_stale_project("CREATE TABLE coverage_schema (version integer);");
+        let mut out = None;
+        let log = logged(|| out = Some(call(root.clone(), None).unwrap()));
+        assert!(log.contains("refreshing coverage"), "{log}");
+        assert!(log.contains("failed"), "{log}");
+        assert!(log.contains("ignoring auto-discovered coverage"), "{log}");
+        let cfg = out.unwrap();
+        assert!(cfg.coverage_path.is_none());
+        let note = cfg.coverage_note.expect("dropped coverage leaves a note");
+        assert!(note.contains("m.py"), "{note}");
     }
 
     #[test]

@@ -84,7 +84,15 @@ normal pytest run.
 `schemata = true` require it, so an unsupported setup is an error instead of a
 silent normal run. It needs:
 
-- the **pytest runner** (not rstest or unittest);
+- the **pytest runner**, or **rstest** when asked for (`--runner rstest
+  --schemata`; off by default there). Under rstest the template runs the
+  suite on rstest's own vendored pytest, as rstest does, on the `python`
+  beside the `rstest` binary. Or **unittest** when asked for (`--runner
+  unittest --schemata`; off by default there). The template runs
+  `unittest discover` once, and each fork runs the whole suite, stopping at
+  the first failure, as `python -m unittest discover -f` does. unittest
+  never narrows to covering tests, so a survivor still runs every test: the
+  fork saves the interpreter start, imports and discovery only;
 - **Unix** (it forks; on Windows every mutant runs the normal way);
 - a project interpreter of **Python 3.10 or newer**. Use `--python` /
   `python` when pytest runs under an interpreter other than the one behind

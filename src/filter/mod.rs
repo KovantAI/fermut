@@ -189,7 +189,9 @@ pub(crate) fn run_filter_with_timeout(mut cmd: Command) -> Result<Option<Output>
 /// Retry `spawn` on ETXTBSY: a freshly written tool script can still be held
 /// open for write by a sibling thread's fork-before-exec child; it clears in
 /// milliseconds. Gives up after 10 retries.
-fn retry_etxtbsy<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+pub(crate) fn retry_etxtbsy<T>(
+    mut spawn: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
     let mut tries = 0u32;
     loop {
         match spawn() {

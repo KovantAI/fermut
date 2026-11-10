@@ -50,19 +50,19 @@ use crate::report::{MutantOutcome, Timing};
 const DEFAULT_PATTERN: &str = "test*.py";
 
 pub struct UnittestRunner {
-    tests: PathBuf,
-    timeout: Duration,
+    pub(super) tests: PathBuf,
+    pub(super) timeout: Duration,
     /// Per-mutant memory cap in bytes, set after the baseline.
-    mem_cap: Option<u64>,
-    baseline_timeout: Duration,
-    isolation: IsolationMode,
+    pub(super) mem_cap: Option<u64>,
+    pub(super) baseline_timeout: Duration,
+    pub(super) isolation: IsolationMode,
     /// A private `HOME` per mirror (see [`super::configure_mirror_cmd`]).
-    private_home: bool,
+    pub(super) private_home: bool,
     /// Interpreter to run `-m unittest` with (resolved venv / `--python`, else
     /// a PATH-probed `python3`/`python`). Never a bare hardcoded `python`.
-    python: PathBuf,
+    pub(super) python: PathBuf,
     /// Glob for `unittest discover -p`. `None` → [`DEFAULT_PATTERN`].
-    pattern: String,
+    pub(super) pattern: String,
 }
 
 impl UnittestRunner {
@@ -150,6 +150,10 @@ impl Runner for UnittestRunner {
             mutant,
             |mirror| {
                 let mut cmd = self.discover_command(mirror)?;
+                // Stop at the first failure: any failure is the kill, and a
+                // schemata fork stops there too. The baseline still reports
+                // every failure.
+                cmd.arg("-f");
                 // Discard per-mutant output — only the exit status decides
                 // survived/killed. unittest writes its dots and tracebacks to
                 // stderr; left inherited, every killed mutant spews a traceback to
@@ -169,14 +173,7 @@ impl Runner for UnittestRunner {
                     // infrastructure fault, not a kill — scoring it as a kill would
                     // inflate the mutation score. Only a genuine failure/error
                     // (exit 1, including a mutant that broke import) counts.
-                    Some(status) => match classify_exit(TestTool::Unittest, status.code()) {
-                        ExitVerdict::Survived => Ok(MutantOutcome::survived(mutant.clone())),
-                        ExitVerdict::Killed => Ok(MutantOutcome::killed(mutant.clone())),
-                        ExitVerdict::Anomaly(code) => Ok(MutantOutcome::error(
-                            mutant.clone(),
-                            anomaly_message(TestTool::Unittest, code),
-                        )),
-                    },
+                    Some(status) => Ok(verdict(mutant, status.code())),
                     None => {
                         kill_group(&mut child);
                         let _ = child.wait();
@@ -219,6 +216,18 @@ impl Runner for UnittestRunner {
 
         let cmd = self.discover_command(&mirror)?;
         run_baseline_with_timeout(cmd, self.baseline_timeout)
+    }
+}
+
+/// The outcome a finished `python -m unittest` run gives `mutant`; `code`
+/// is `None` for a signal death.
+pub(super) fn verdict(mutant: &Arc<Mutant>, code: Option<i32>) -> MutantOutcome {
+    match classify_exit(TestTool::Unittest, code) {
+        ExitVerdict::Survived => MutantOutcome::survived(mutant.clone()),
+        ExitVerdict::Killed => MutantOutcome::killed(mutant.clone()),
+        ExitVerdict::Anomaly(code) => {
+            MutantOutcome::error(mutant.clone(), anomaly_message(TestTool::Unittest, code))
+        }
     }
 }
 

@@ -9,6 +9,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Added
+- `--schemata` works with `--runner rstest` (opt-in; the default stays off
+  for rstest). The template runs on rstest's vendored pytest.
+- `--schemata` works with `--runner unittest` (opt-in; the default stays off
+  for unittest). Each fork runs the whole suite failfast.
 - Region ignore markers: `# fermut: ignore-start` … `# fermut: ignore-end`,
   and `# fermut: ignore-block`, which covers a compound statement's header
   and body, or the rest of the enclosing block when the marker is on its own
@@ -40,8 +44,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   prints source paths relative to the current directory
   (`src/calculator.py:14@216`) instead of the full checkout path. Mutant ids
   and JSON reports still carry absolute paths.
+- The unittest runner stops each mutant's run at the first failure
+  (`unittest discover -f`). Verdicts don't change; a run that failed and then
+  hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- The rstest runner precompiles and keys its cache on the `python` beside the
+  `rstest` binary it runs, not on the interpreter behind a `pytest` on `PATH`.
 - On pytest 9.2+, mutants whose tests take a long string parameter holding
   the project path could be reported as errored (`pytest exit 4`) instead
   of killed or survived. pytest 9.2 ids a parameter over 100 characters by

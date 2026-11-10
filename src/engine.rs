@@ -1251,9 +1251,9 @@ fn compute_scope_prefix(cfg: &Config) -> String {
     h.update(runner_cache_tag(cfg.runner).as_bytes());
     h.update(b"|python=");
     let used = match cfg.runner {
-        RunnerKind::Pytest | RunnerKind::Rstest => {
-            crate::runner::python::pytest_interpreter(cfg.python.as_deref())
-        }
+        RunnerKind::Pytest => crate::runner::python::pytest_interpreter(cfg.python.as_deref()),
+        RunnerKind::Rstest => crate::runner::python::rstest_interpreter(cfg.python.as_deref())
+            .unwrap_or_else(|| crate::runner::python::interpreter(None)),
         RunnerKind::Unittest => crate::runner::python::interpreter(cfg.python.as_deref()),
     };
     h.update(crate::runner::python::interpreter_identity(&used).as_bytes());

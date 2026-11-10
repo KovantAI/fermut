@@ -228,6 +228,34 @@ pub(crate) fn pytest_interpreter(python: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| interpreter(None))
 }
 
+/// The interpreter rstest runs the suite on: the `python` beside the
+/// `rstest` binary fermut launches (beside `python` when there is one there,
+/// else the one on `PATH`; see `pytest::framework_command`). rstest is a
+/// native binary, so there's no shebang to read, and it needs its worker
+/// installed in the interpreter it runs. `python` when there's none.
+pub(crate) fn rstest_interpreter(python: Option<&Path>) -> Option<PathBuf> {
+    rstest_interpreter_in(python, std::env::var_os("PATH").as_deref())
+}
+
+fn rstest_interpreter_in(python: Option<&Path>, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let exe = |dir: &Path, name: &str| {
+        dir.join(name)
+            .with_extension(std::env::consts::EXE_EXTENSION)
+    };
+    let beside = python
+        .and_then(Path::parent)
+        .map(|d| exe(d, "rstest"))
+        .filter(|p| p.is_file());
+    let rstest = beside.or_else(|| {
+        let cwd = std::env::current_dir().ok()?;
+        which::which_in("rstest", path, cwd).ok()
+    });
+    rstest
+        .and_then(|r| Some(exe(r.parent()?, "python")))
+        .filter(|py| is_executable_file(py))
+        .or_else(|| python.map(Path::to_path_buf))
+}
+
 /// A stable name for interpreter `p`, for cache keys: the canonical directory
 /// it sits in plus the canonical file it resolves to. The directory keeps two
 /// venvs on the same base Python apart (their `bin/python` symlinks resolve
@@ -473,6 +501,44 @@ mod tests {
         // Flip the exec bit → `python` is now a runnable match.
         make_exe(&py);
         assert_eq!(interpreter_in(None, Some(&path)), PathBuf::from("python"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rstest_runs_on_the_python_beside_it() {
+        let root = tmp("rstest-interp");
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let rstest = bin.join("rstest");
+        fs::write(&rstest, "").unwrap();
+        make_exe(&rstest);
+        let path = std::ffi::OsString::from(&bin);
+        assert_eq!(rstest_interpreter_in(None, Some(&path)), None);
+        let py = bin.join("python");
+        fs::write(&py, "").unwrap();
+        make_exe(&py);
+        assert_eq!(rstest_interpreter_in(None, Some(&path)), Some(py.clone()));
+        // A project venv without rstest: rstest from PATH, and its python.
+        let venv = root.join("venv/bin");
+        fs::create_dir_all(&venv).unwrap();
+        let project = venv.join("python");
+        fs::write(&project, "").unwrap();
+        make_exe(&project);
+        assert_eq!(rstest_interpreter_in(Some(&project), Some(&path)), Some(py));
+        // rstest in the project venv: that one.
+        fs::write(venv.join("rstest"), "").unwrap();
+        assert_eq!(
+            rstest_interpreter_in(Some(&project), Some(&path)),
+            Some(project.clone())
+        );
+        // No rstest anywhere: the configured interpreter stands.
+        let empty = std::ffi::OsString::from(root.join("nowhere"));
+        fs::remove_file(venv.join("rstest")).unwrap();
+        assert_eq!(
+            rstest_interpreter_in(Some(&project), Some(&empty)),
+            Some(project)
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 

@@ -263,6 +263,147 @@ fn run_finds_known_survivor_with_rstest() {
 }
 
 #[test]
+#[cfg(unix)]
+#[ignore = "requires rstest on PATH; enable once env is set up"]
+fn schemata_under_rstest_gives_the_same_verdicts_as_a_normal_run() {
+    // The template runs the suite on rstest's vendored pytest (rstest doesn't
+    // install pytest), forked per mutant; verdicts must match rstest's own.
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    let run = |mode: &str| {
+        let out = Command::cargo_bin("fermut")
+            .unwrap()
+            .args(["run", "--runner", "rstest", "--no-ty-filter", "--no-cache"])
+            .args(["--no-history", "--fail-under", "0", "--jobs", "2", mode])
+            .arg(sample.join("src"))
+            .arg("--tests")
+            .arg(sample.join("tests"))
+            .env("RUST_LOG", "info")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let score = stdout.lines().find(|l| l.contains("score:")).unwrap();
+        (
+            score.to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    let (normal, _) = run("--no-schemata");
+    let (schemata, log) = run("--schemata");
+    assert_eq!(schemata, normal);
+    let served: u32 = log
+        .lines()
+        .find(|l| l.contains("mutants run from the schema"))
+        .and_then(|l| l.split("schemata: ").nth(1))
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no schemata summary in:\n{log}"));
+    assert!(served > 0, "no mutant was run from the schema:\n{log}");
+}
+
+#[test]
+#[cfg(unix)]
+#[ignore = "requires python on PATH"]
+fn schemata_under_unittest_gives_the_same_verdicts_as_a_normal_run() {
+    // The template runs `unittest discover` once and forks the whole suite,
+    // failfast, per mutant. The shapes: class and module fixtures (a kill in
+    // setUpClass has no test to confirm against, so it goes to the spawn
+    // path), subTest, expectedFailure, a hang, a module-level mutant (outside
+    // the schema), and an untested function.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write("pyproject.toml", "[project]\nname = \"x\"\n");
+    write("pkg/__init__.py", "");
+    write(
+        "pkg/m.py",
+        "LIMIT = 3\n\n\n\
+         def add(a, b):\n    return a + b\n\n\n\
+         def unused(x):\n    return x * 2\n\n\n\
+         def countdown(n):\n    while n > 0:\n        n = n - 1\n    return n\n\n\n\
+         def clamp(x):\n    if x > LIMIT:\n        return LIMIT\n    return x\n",
+    );
+    write("tests/__init__.py", "");
+    write(
+        "tests/test_m.py",
+        "import unittest\n\nfrom pkg.m import LIMIT, add, clamp, countdown\n\n\n\
+         def setUpModule():\n    assert LIMIT == 3\n\n\n\
+         def tearDownModule():\n    pass\n\n\n\
+         class Fixture(unittest.TestCase):\n    @classmethod\n    def setUpClass(cls):\n        \
+         cls.base = add(1, 1)\n\n    def test_base(self):\n        self.assertEqual(self.base, 2)\n\n\n\
+         class T(unittest.TestCase):\n    def tearDown(self):\n        pass\n\n    \
+         def test_add(self):\n        for a in range(3):\n            with self.subTest(a=a):\n                \
+         self.assertEqual(add(a, 1), a + 1)\n\n    \
+         @unittest.expectedFailure\n    def test_xfail(self):\n        self.assertEqual(add(2, 2), 5)\n\n    \
+         def test_countdown(self):\n        self.assertEqual(countdown(3), 0)\n\n    \
+         def test_clamp(self):\n        self.assertEqual(clamp(10), 3)\n        self.assertEqual(clamp(1), 1)\n",
+    );
+    let run = |mode: &str| {
+        let report = proj.join(format!("report{mode}.json"));
+        let out = Command::cargo_bin("fermut")
+            .unwrap()
+            .args([
+                "run",
+                "--runner",
+                "unittest",
+                "--no-ty-filter",
+                "--no-cache",
+            ])
+            .args(["--no-history", "--fail-under", "0", "--jobs", "2"])
+            .args(["--timeout", "5", mode, "--json"])
+            .arg(&report)
+            .arg(proj.join("pkg"))
+            .arg("--tests")
+            .arg(proj.join("tests"))
+            .env("RUST_LOG", "info")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+        let verdicts: std::collections::BTreeMap<String, String> = json["outcomes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|o| o["status"] != "skipped")
+            .map(|o| {
+                let id = o["mutant"]["id"].as_str().unwrap().to_string();
+                (id, o["status"].as_str().unwrap().to_string())
+            })
+            .collect();
+        (verdicts, String::from_utf8_lossy(&out.stderr).to_string())
+    };
+    let (normal, _) = run("--no-schemata");
+    let (schemata, log) = run("--schemata");
+    for status in ["killed", "survived", "timed_out"] {
+        assert!(
+            normal.values().any(|s| s == status),
+            "no {status} mutant: {normal:#?}"
+        );
+    }
+    assert_eq!(schemata, normal);
+    let served: u32 = log
+        .lines()
+        .find(|l| l.contains("mutants run from the schema"))
+        .and_then(|l| l.split("schemata: ").nth(1))
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no schemata summary in:\n{log}"));
+    assert!(served > 0, "no mutant was run from the schema:\n{log}");
+    assert!(log.contains("outside it (module"), "{log}");
+    assert!(
+        !log.contains("in a normal run; using"),
+        "audit disagreed:\n{log}"
+    );
+}
+
+#[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn import_breaking_mutant_is_killed_under_node_id_selection() {
     // A mutant that breaks a module's *import* must score as killed. With

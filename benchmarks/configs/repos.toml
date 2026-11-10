@@ -166,12 +166,24 @@ test_path = "tests"
 # pytest, pytest-timeout, watchdog. The serving/reloader/security tests fail
 # to collect without them. Large package (~15k LoC) — runs are heavy even
 # with the coverage filter.
-install_cmd = "pip install -e . && pip install pytest pytest-timeout cryptography cffi ephemeral-port-reserve watchdog"
+# coverage==7.17.0: 7.17.1+ with `--cov-context=test` builds a Path while
+# test_safe_join_windows_special has os.name patched to "nt" → WindowsPath
+# raises, and pytest INTERNALERRORs formatting the failure (no .coverage).
+install_cmd = "pip install -e . && pip install pytest pytest-timeout cryptography cffi ephemeral-port-reserve watchdog 'coverage==7.17.0' pytest-cov"
 # tests/test_serving.py starts live reloader servers that hang (with watchdog 7
 # the coverage run sat >30 min); same deselect as schemata/run10.sh.
 test_cmd = "pytest tests --deselect=tests/test_serving.py"
 loop_edit_file = "src/werkzeug/http.py"
 pytest_extra_args = ["--deselect=tests/test_serving.py"]
+# Fail mutmut 3.x's clean stats pass (it aborts on the first failure): its
+# trampolines show up where these tests introspect frames, locals and
+# wrapped callables.
+mutmut_deselect = [
+  "tests/test_debug.py::TestDebugHelpers::test_debug_dump",
+  "tests/test_datastructures.py::TestFileStorage::test_bytes_proper_sentinel[data0]",
+  "tests/test_datastructures.py::TestFileStorage::test_bytes_proper_sentinel[data1]",
+  "tests/test_local.py::test_proxy_wrapped",
+]
 
 [flask]
 url = "https://github.com/pallets/flask.git"
@@ -188,3 +200,64 @@ test_cmd = "pytest tests"
 loop_edit_file = "src/flask/app.py"
 # Fails its own baseline in this env (same deselect as schemata/run10.sh).
 pytest_extra_args = ["--deselect=tests/test_reqctx.py::test_bad_environ_raises_bad_request"]
+
+# --- application repos (#69 follow-up: app-shaped suites, DB fixtures) ---
+
+[healthchecks]
+url = "https://github.com/healthchecks/healthchecks.git"
+ref = "v5.0.3"
+# Django app, BSD-3. ~17k src LOC (no migrations/tests), ~24k test LOC, every
+# test a DB-backed Django TestCase on SQLite. Tests live inside the package
+# (hc/<app>/tests/).
+src_path = "hc"
+test_path = "hc"
+# Upstream runs `manage.py test`; both tools need pytest, so add pytest-django.
+# hc/settings.py applies its test overrides (MAILERS, fast hasher, blocking
+# email) only when sys.argv[1] == "test", so bench_settings.py (repo root,
+# outside the mutated package) re-applies them for pytest.
+# `touch setup.cfg`: fermut's find_project_root only stops at pyproject.toml /
+# setup.cfg; without one it walks up to benchmarks/pyproject.toml and mirrors
+# the wrong tree (fermut bug, pytest.ini isn't a root marker).
+install_cmd = '''pip install -r requirements.txt -r requirements-dev.txt pytest pytest-django 'coverage==7.17.0' pytest-cov && printf 'from hc.settings import *  # noqa\nSECRET_KEY = "bench"\nPASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]\nBLOCKING_EMAILS = True\nMAILERS = {"default": {"BACKEND": "django.core.mail.backends.smtp.EmailBackend", "OPTIONS": {}}}\n' > bench_settings.py && printf '[pytest]\nDJANGO_SETTINGS_MODULE = bench_settings\n' > pytest.ini && touch setup.cfg'''
+test_cmd = "pytest hc"
+loop_edit_file = "hc/api/models.py"
+# Scoped to hc/api (~4.2k LOC: check/ping/flip models, API views): the whole
+# package (54.8k mutants) runs ~1 h on fermut alone because each fork re-creates
+# the Django test DB. The full suite still runs (coverage picks per mutant).
+fermut_exclude = [
+  "**/tests/**", "**/migrations/**",
+  "accounts/**", "front/**", "integrations/**", "lib/**", "logs/**", "payments/**",
+  "__init__.py", "settings.py", "test.py", "urls.py", "wsgi.py",
+]
+# mutmut 3 copies source_paths + tests into mutants/; Django also needs the
+# root-level settings, pytest config and templates.
+mutmut_also_copy = ["bench_settings.py", "pytest.ini", "templates", "static", "manage.py", "CHANGELOG.md", "search.db"]
+
+[flaskbb]
+url = "https://github.com/flaskbb/flaskbb.git"
+ref = "v3.0.0"
+# Flask + SQLAlchemy forum, BSD-3. ~24k src LOC, ~11k test LOC, 809 tests,
+# ~45 s single-process; app-factory + SQLite fixtures.
+src_path = "flaskbb"
+test_path = "tests"
+install_cmd = "pip install -e . && pip install pytest pytest-mock pytest-xprocess freezegun responses 'coverage==7.17.0' pytest-cov"
+# pyproject addopts force `--numprocesses auto` (xdist; not installed, and
+# coverage contexts need one process). Replace addopts, keeping the repo's
+# strict markers and its own deprecation-as-error.
+test_cmd = "pytest tests -o 'addopts=--strict-markers --pythonwarnings=error::flaskbb.deprecation.FlaskBBDeprecation'"
+loop_edit_file = "flaskbb/forum/models.py"
+# test_flaskbbdomain_translations needs the compiled *.mo catalogues, which
+# `pip install -e .` builds but .gitignore lists; fermut's mirror honours
+# .gitignore and drops them (fermut gap). Deselected for both tools.
+pytest_extra_args = [
+  "-o", "addopts=--strict-markers --pythonwarnings=error::flaskbb.deprecation.FlaskBBDeprecation",
+  "--deselect=tests/unit/utils/test_translations.py::test_flaskbbdomain_translations",
+]
+# Scoped to flaskbb/forum (~3.7k LOC: topics, posts, forums models + views).
+fermut_exclude = [
+  "migrations/**",
+  "auth/**", "cli/**", "configs/**", "core/**", "display/**", "fixtures/**",
+  "management/**", "permissions/**", "plugins/**", "search/**", "settings/**",
+  "tokens/**", "upload/**", "user/**", "utils/**",
+  "__init__.py", "__main__.py", "_version.py", "app.py", "deprecation.py", "email.py", "exceptions.py", "extensions.py", "markup.py",
+]

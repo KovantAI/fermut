@@ -31,6 +31,11 @@ slower than the [benchmarks](../benchmarks.md), which are all
 Linux/macOS with schemata on. Schemata is built to give the same verdicts
 as the normal runner, so scores stay comparable; only time differs.
 
+For schemata speed on a Windows machine, run fermut inside
+[WSL2](https://learn.microsoft.com/windows/wsl/install): it is Linux, so
+schemata is on by default there. Verdicts match a native Windows run unless
+the code under test is platform-specific.
+
 **Memory cap.** Each mutant's run joins a Job Object that caps the memory
 of every process in it, test subprocesses included. Past the cap, Python
 raises `MemoryError` and the mutant counts as killed, as on Linux.

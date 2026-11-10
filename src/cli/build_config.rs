@@ -262,7 +262,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
                 },
             );
             match refreshed {
-                Ok(()) => content = by_content(),
+                Ok(_) => content = by_content(),
                 Err(e) => warn!("refreshing coverage {} failed: {e:#}", p.display()),
             }
         }

@@ -48,6 +48,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   `exclude` globs written relative to the project root (`src/...`) never
   matched and excluded files were mutated. Omitting the path still uses
   `source_root`.
+- `exclude` globs match whether written relative to the project root
+  (`src/generated/**`) or to `source_root` (`generated/**`), whichever root
+  the run walks. Before, only the walk root counted, so project-root globs
+  silently excluded nothing under `source_root = "src"`.
 - On pytest 9.2+, mutants whose tests take a long string parameter holding
   the project path could be reported as errored (`pytest exit 4`) instead
   of killed or survived. pytest 9.2 ids a parameter over 100 characters by

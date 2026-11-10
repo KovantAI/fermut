@@ -1140,6 +1140,7 @@ mod tests {
             survivor_ids: Some(Vec::new()),
             baseline: false,
             partial: false,
+            projects: Vec::new(),
         };
         let body = [entry("t1", 80.0), entry("t2", 90.0)]
             .iter()

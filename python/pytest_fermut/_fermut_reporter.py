@@ -35,6 +35,11 @@ coverage context is ``<module nodeid>|collect``, so source lines that run when
 the module imports them (module-level code, decorators, class bodies, default
 arguments) are linked to that module instead of the anonymous ``""`` context.
 
+With ``FERMUT_MIRROR_ROOT`` and ``FERMUT_PROJECT_ROOT`` set (fermut sets both
+for runs in its copy of the project), importing this module makes parametrize
+ids match the ones pytest gives in the real project; see
+``_stable_long_str_ids``. The schemata template imports it for that alone.
+
 Standard library only (``coverage`` is imported only in that mode, where it is
 already running); this file is embedded in the fermut binary and must run on
 every Python and pytest version fermut supports.
@@ -52,6 +57,53 @@ _collect_context = bool(os.environ.get("FERMUT_COLLECT_CONTEXT"))
 _fh = None
 # The session's rootdir, for ``internal_error`` (that hook gets no config).
 _root = None
+
+
+def _stable_long_str_ids():
+    """Give a parametrize value that holds the project path the id it has in
+    the real project, not one that depends on where fermut copied it.
+
+    pytest 9.2 ids a str/bytes value longer than 100 characters by argument
+    name and index (``parametrize_long_str_id_strategy``, default ``short``)
+    instead of by the value. A value built from a test file's path
+    (werkzeug: ``str(res_path)``) changes length with the copy's path, so it
+    can cross 100 on one side only: coverage recorded
+    ``test_from_directory[directory0-test.txt]``, the copy collects
+    ``test_from_directory[/tmp/.../res-test.txt]``, and pytest exits 4 on
+    the recorded id. Deciding on the value with the project path put back
+    gives the project's choice; a value id keeps the copy's path, which
+    fermut maps back to the project's like any other id.
+    """
+    mirror = os.environ.get("FERMUT_MIRROR_ROOT")
+    project = os.environ.get("FERMUT_PROJECT_ROOT")
+    if not mirror or not project or mirror == project:
+        return
+    try:
+        from _pytest.python import IdMaker, _ascii_escaped_by_config
+    except ImportError:
+        return
+    original = getattr(IdMaker, "_apply_long_str_strategy", None)
+    if original is None:  # pytest < 9.2: ids don't depend on length
+        return
+
+    def as_project(val):
+        if isinstance(val, bytes):
+            return val.replace(os.fsencode(mirror), os.fsencode(project))
+        return val.replace(mirror, project)
+
+    def apply(self, val, argname, idx):
+        in_project = as_project(val)
+        if in_project == val:
+            return original(self, val, argname, idx)
+        out = original(self, in_project, argname, idx)
+        if out is not None and out == _ascii_escaped_by_config(in_project, self.config):
+            return _ascii_escaped_by_config(val, self.config)
+        return out  # by argname and index, or a hash of the project's value
+
+    IdMaker._apply_long_str_strategy = apply
+
+
+_stable_long_str_ids()
 
 
 def _emit(event):

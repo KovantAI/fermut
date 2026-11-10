@@ -244,6 +244,11 @@ pub(crate) fn configure_mirror_cmd(
     // a passing suite at 14 workers, each a false kill. A mirror runs one
     // pytest at a time, so its own root can't race.
     cmd.env("PYTEST_DEBUG_TEMPROOT", &mirror.pytest_temproot);
+    // Both roots, so the reporter plugin can give a parametrize value holding
+    // the copy's path the id pytest gives it in the project (pytest 9.2 ids a
+    // value over 100 characters by name, so the path's length can change it).
+    cmd.env(MIRROR_ROOT_ENV, shown_path(&mirror.root));
+    cmd.env(PROJECT_ROOT_ENV, &mirror.project_shown);
     // A private home per mirror, same reason: tests that create and delete
     // an app dir under `~` (typer's `get_app_dir`) fail each other's runs
     // across workers, each failure a false kill, and write into the real
@@ -257,6 +262,11 @@ pub(crate) fn configure_mirror_cmd(
 
 /// Tells the schemata template to give each fork its own home.
 pub(crate) const PRIVATE_HOME_ENV: &str = "FERMUT_PRIVATE_HOME";
+
+/// The mirror's root and the real project's, as Python prints them; read by
+/// `_fermut_reporter` (see its `_stable_long_str_ids`).
+pub(crate) const MIRROR_ROOT_ENV: &str = "FERMUT_MIRROR_ROOT";
+pub(crate) const PROJECT_ROOT_ENV: &str = "FERMUT_PROJECT_ROOT";
 
 /// `HOME` and the XDG base dirs, all inside `home`. Setting the XDG dirs
 /// (not just removing them) matters: an exported `XDG_CONFIG_HOME` would
@@ -525,6 +535,8 @@ pub(crate) struct Mirror {
     /// from `getcwd()` and escapes the id; see [`id_path`]). Ids recorded in
     /// the real project embed it.
     project_real: String,
+    /// `project_root` resolved, as Python prints it (unescaped).
+    project_shown: String,
     /// `root` as it appears inside a node id, for mapping ids.
     root_shown: String,
     /// pytest's temp root for runs in this mirror (`PYTEST_DEBUG_TEMPROOT`),
@@ -611,11 +623,12 @@ impl Mirror {
         let module = plugin_dir.join(format!("{}.py", pytest_result::REPORTER_MODULE));
         std::fs::write(&module, pytest_result::REPORTER_SOURCE)
             .with_context(|| format!("writing {}", module.display()))?;
-        let project_real = id_path(
+        let project_shown = shown_path(
             &project_root
                 .canonicalize()
                 .unwrap_or_else(|_| project_root.clone()),
         );
+        let project_real = py_unicode_escape(&project_shown);
         let root_shown = id_path(&root);
         Ok(Self {
             _workdir: workdir,
@@ -623,6 +636,7 @@ impl Mirror {
             tests: tests_in_mirror,
             project_root,
             project_real,
+            project_shown,
             root_shown,
             pytest_temproot,
             home,

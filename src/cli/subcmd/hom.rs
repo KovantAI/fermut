@@ -47,8 +47,8 @@ use crate::runner::{apply_patch, configure_mirror_cmd, Mirror};
 #[derive(clap::Args, Debug)]
 pub(crate) struct HomArgs {
     /// Python source root (same target used for the Phase-0 run).
-    #[arg(default_value = ".")]
-    pub(crate) path: PathBuf,
+    /// Omitted: the config's `source_root`, else the current directory.
+    pub(crate) path: Option<PathBuf>,
 
     #[command(flatten)]
     pub(crate) cfg_args: RunConfigArgs,

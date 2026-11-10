@@ -42,6 +42,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   and JSON reports still carry absolute paths.
 
 ### Fixed
+- An explicit `.` path (`fermut run .`, `fermut list .`, `fermut hom .`, MCP
+  `fermut_run` with `path: "."`) now mutates the current directory. It was
+  read as "no path" and fell back to the config's `source_root`, so
+  `exclude` globs written relative to the project root (`src/...`) never
+  matched and excluded files were mutated. Omitting the path still uses
+  `source_root`.
 - On pytest 9.2+, mutants whose tests take a long string parameter holding
   the project path could be reported as errored (`pytest exit 4`) instead
   of killed or survived. pytest 9.2 ids a parameter over 100 characters by

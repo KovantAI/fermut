@@ -53,7 +53,15 @@ fn resolve_smart_order(cli_no: bool, cli_yes: bool, file: Option<bool>) -> bool 
 
 /// Merge the parsed `run` CLI args (`cli_path` positional + the flattened
 /// [`RunConfigArgs`]) with the loaded config file into a runtime `Config`.
-pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Config> {
+///
+/// `cli_path` is `None` only when no path was given; then the config's
+/// `source_root` applies. Any explicit path — `.` included — is the mutation
+/// root, so `exclude` globs written relative to the project root match.
+pub(crate) fn build_config(
+    cli_path: impl Into<Option<PathBuf>>,
+    args: RunConfigArgs,
+) -> Result<Config> {
+    let cli_path: Option<PathBuf> = cli_path.into();
     let RunConfigArgs {
         tests: cli_tests,
         jobs: cli_jobs,
@@ -104,7 +112,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     let cli_isolation: Option<IsolationMode> = cli_isolation.map(Into::into);
     let cli_cache_scope: Option<CacheScope> = cli_cache_scope.map(Into::into);
 
-    let loaded = LoadedConfig::load(&cli_path)?;
+    let loaded = LoadedConfig::load(cli_path.as_deref().unwrap_or(Path::new(".")))?;
     let file = &loaded.file;
 
     if loaded.source != ConfigSource::None {
@@ -115,15 +123,12 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         );
     }
 
-    let source_root = if cli_path == Path::new(".") {
-        // No explicit path on CLI — prefer config's source_root.
+    let source_root = cli_path.unwrap_or_else(|| {
         file.source_root
             .clone()
             .map(|p| loaded.resolve_path(p))
-            .unwrap_or(cli_path)
-    } else {
-        cli_path
-    };
+            .unwrap_or_else(|| PathBuf::from("."))
+    });
     // Mirror::build → find_project_root walks parents looking for
     // pyproject.toml / setup.cfg. With a relative `source_root` or `tests`
     // the walk's empty PathBuf can match a sibling marker in cwd and yield

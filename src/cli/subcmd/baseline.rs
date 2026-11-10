@@ -188,7 +188,7 @@ pub(crate) fn compute_baseline(args: BaselineArgs) -> Result<BaselineReport> {
         filter.coverage = Some(cov_db.clone());
     }
     let cfg = build_config(
-        args.path.clone(),
+        Some(args.path.clone()).filter(|p| p != std::path::Path::new(".")),
         crate::cli::RunConfigArgs {
             // engine must NOT append history; we write our own entry below
             // marked `baseline: true`, else the anchor would be an ordinary,

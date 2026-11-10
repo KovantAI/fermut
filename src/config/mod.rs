@@ -136,7 +136,8 @@ pub struct Config {
     /// by `score >= fail_under` instead of the default "any survivor fails".
     pub fail_under: Option<f64>,
     /// Glob patterns matched against paths relative to `source_root` during
-    /// mutation collection. Matching files and directories are pruned before
+    /// mutation collection. `build_config` has already added each glob
+    /// rebased from the project root and the configured `source_root`. Matching files and directories are pruned before
     /// parsing, so they never produce mutants. Empty = no exclusions.
     pub exclude: Vec<String>,
     /// Regexes matched against each source line; mutants on a matching line

@@ -596,7 +596,7 @@ fn tool_run(args: &Value) -> Result<Value> {
     // Build the runtime config the same way `fermut run` does, so a project's
     // fermut.toml is honored and only the explicitly-passed args override it.
     let cfg = crate::cli::build_config::build_config(
-        path,
+        str_arg(args, "path").map(PathBuf::from),
         crate::cli::RunConfigArgs {
             tests,
             jobs,

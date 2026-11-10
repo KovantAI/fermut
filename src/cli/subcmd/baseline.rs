@@ -188,7 +188,7 @@ pub(crate) fn compute_baseline(args: BaselineArgs) -> Result<BaselineReport> {
         filter.coverage = Some(cov_db.clone());
     }
     let cfg = build_config(
-        args.path.clone(),
+        Some(args.path.clone()).filter(|p| p != std::path::Path::new(".")),
         crate::cli::RunConfigArgs {
             // engine must NOT append history; we write our own entry below
             // marked `baseline: true`, else the anchor would be an ordinary,
@@ -258,14 +258,13 @@ pub(crate) fn compute_baseline(args: BaselineArgs) -> Result<BaselineReport> {
 /// any failure degrades to `None` and the mutation half of the report still
 /// stands.
 fn read_line_coverage(interp: &std::path::Path, path: &std::path::Path) -> Option<f64> {
-    let out = Command::new(interp)
-        .arg("-m")
-        .arg("coverage")
-        .arg("report")
-        .arg("--format=total")
-        .current_dir(path)
-        .output()
-        .ok()?;
+    let out = crate::filter::retry_etxtbsy(|| {
+        Command::new(interp)
+            .args(["-m", "coverage", "report", "--format=total"])
+            .current_dir(path)
+            .output()
+    })
+    .ok()?;
     if !out.status.success() {
         return None;
     }

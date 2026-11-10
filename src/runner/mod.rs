@@ -469,7 +469,11 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
         private_home: cfg.private_home,
         isolation,
         coverage: cfg.coverage.clone(),
-        python: cfg.python.clone(),
+        python: if exe == "rstest" {
+            python::rstest_interpreter(cfg.python.as_deref())
+        } else {
+            cfg.python.clone()
+        },
         exe,
         smart_order: cfg.smart_order,
         kill_order: kill_order.clone(),
@@ -491,20 +495,32 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
             let inner = pytest::PytestRunner::new(pytest_config("pytest"));
             Box::new(schema::SchemaRunner::new(inner))
         }
+        #[cfg(unix)]
+        RunnerKind::Rstest if cfg.schemata => {
+            let inner = pytest::PytestRunner::new(pytest_config("rstest"));
+            Box::new(schema::SchemaRunner::new(inner))
+        }
         RunnerKind::Pytest => pytest_compatible("pytest"),
         RunnerKind::Rstest => pytest_compatible("rstest"),
-        RunnerKind::Unittest => Box::new(unittest::UnittestRunner::new(
-            tests,
-            timeout,
-            baseline_timeout,
-            isolation,
-            cfg.private_home,
-            // Resolve the interpreter once: the configured `--python` when set,
-            // else a PATH-probed `python3`/`python`. `unittest` has no console
-            // script, so it's always `<interp> -m unittest`.
-            interpreter(cfg.python.as_deref()),
-            cfg.unittest_pattern.clone(),
-        )),
+        RunnerKind::Unittest => {
+            let inner = unittest::UnittestRunner::new(
+                tests,
+                timeout,
+                baseline_timeout,
+                isolation,
+                cfg.private_home,
+                // Resolve the interpreter once: the configured `--python` when
+                // set, else a PATH-probed `python3`/`python`. `unittest` has no
+                // console script, so it's always `<interp> -m unittest`.
+                interpreter(cfg.python.as_deref()),
+                cfg.unittest_pattern.clone(),
+            );
+            #[cfg(unix)]
+            if cfg.schemata {
+                return Box::new(schema::SchemaRunner::new(inner));
+            }
+            Box::new(inner)
+        }
     }
 }
 

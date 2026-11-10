@@ -433,7 +433,7 @@ def project_mutant(id_, file, needle, replacement, root):
 
 
 class Server:
-    def __init__(self, root, schema_path, occupy_profiler=False):
+    def __init__(self, root, schema_path, occupy_profiler=False, args=None):
         self.root = root
         # As fermut runs it: pytest's temp root inside the mirror's workdir.
         self.temproot = root / "pytest-temproot"
@@ -469,13 +469,8 @@ class Server:
                 sys.executable,
                 *launch,
                 str(HELPER),
-                "serve",
-                str(root),
-                str(schema_path),
-                "-q",
-                "-p",
-                "no:cacheprovider",
-                "tests",
+                *(args or ["serve", str(root), str(schema_path)]),
+                *([] if args else ["-q", "-p", "no:cacheprovider", "tests"]),
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -877,3 +872,150 @@ def test_cap_memory_is_a_no_op_unset_or_off_linux(rlimit, monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     schema.cap_memory()
     assert rlimit.calls == []
+
+
+def test_rstest_runs_on_its_vendored_pytest(tmp_path, monkeypatch):
+    vendor = tmp_path / "rstest_worker" / "_vendor"
+    vendor.mkdir(parents=True)
+    (tmp_path / "rstest_worker" / "__init__.py").write_text("")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    schema.use_rstest_pytest()
+    schema.use_rstest_pytest()
+    assert sys.path[0] == str(vendor)
+    assert sys.path.count(str(vendor)) == 1
+
+
+def test_rstest_without_its_worker_refuses(monkeypatch):
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    with pytest.raises(ImportError, match="rstest_worker"):
+        schema.use_rstest_pytest()
+
+
+# --- serve-unittest ----------------------------------------------------------
+
+UNITTEST_PROJECT = {
+    "pkg/__init__.py": "",
+    "pkg/core.py": textwrap.dedent(
+        """\
+        def add(a, b):
+            return a + b
+
+
+        def guard(n):
+            return int(n)
+        """
+    ),
+    "tests/__init__.py": "",
+    "tests/test_core.py": textwrap.dedent(
+        """\
+        import unittest
+
+        from pkg.core import add, guard
+
+
+        class T(unittest.TestCase):
+            @classmethod
+            def tearDownClass(cls):
+                open("torn-down", "w").close()
+
+            def test_add(self):
+                self.assertEqual(add(2, 3), 5)
+
+            def test_guard(self):
+                self.assertEqual(guard(1), 1)
+
+            def test_sub(self):
+                for i in range(2):
+                    with self.subTest(i=i):
+                        self.assertEqual(add(0, i), i)
+
+            @unittest.expectedFailure
+            def test_xfail(self):
+                self.assertEqual(add(2, 2), 5)
+
+
+        class WithFixture(unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                assert add(1, 1) == 2
+
+            def test_uses_fixture(self):
+                pass
+        """
+    ),
+}
+
+
+@pytest.fixture
+def served_unittest(tmp_path):
+    def start(extra=None):
+        for rel, text in {**UNITTEST_PROJECT, **(extra or {})}.items():
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel).write_text(text)
+        muts = [
+            project_mutant("add", "pkg/core.py", "a + b", "a - b", tmp_path),
+            project_mutant("plus1", "pkg/core.py", "a + b", "a + b + 1", tmp_path),
+            project_mutant(
+                "guard",
+                "pkg/core.py",
+                "return int(n)",
+                "raise KeyboardInterrupt",
+                tmp_path,
+            ),
+        ]
+        result = schema.schematize(str(tmp_path), muts)
+        (tmp_path / "schema.json").write_text(json.dumps(result))
+        args = ["serve-unittest", str(tmp_path), str(tmp_path / "schema.json")]
+        args += [str(tmp_path / "tests"), "test*.py"]
+        server = Server(tmp_path, tmp_path / "schema.json", args=args)
+        servers.append(server)
+        return server, {k: v["idx"] for k, v in result["mutants"].items()}
+
+    servers = []
+    yield start
+    for server in servers:
+        if server.proc.poll() is None:
+            server.close()
+
+
+def test_serve_unittest_runs_the_suite_like_a_cold_discover(served_unittest, tmp_path):
+    server, idx = served_unittest()
+    assert server.recv()["ready"] is True
+    # Failfast: the first failure ends the run, and tearDownClass still runs.
+    killed = server.run(idx["add"], None)
+    assert killed["exit"] == 1, killed
+    assert killed["failed"] == ["test_core.T.test_add"]
+    assert killed["ran"] == ["test_core.T.test_add"]
+    assert (tmp_path / "torn-down").exists()
+    assert server.run(0, None)["exit"] == 0
+    assert server.run(idx["add"], ["test_core.T.test_guard"])["exit"] == 0
+    assert server.run(idx["add"], ["test_core.T.nope"])["exit"] == 4
+    sub = server.run(idx["add"], ["test_core.T.test_sub"])
+    assert sub["exit"] == 1 and sub["failed"] == ["test_core.T.test_sub"]
+    # An expected failure that passes fails the run.
+    xfail = ["test_core.T.test_xfail"]
+    assert server.run(0, xfail)["exit"] == 0
+    assert server.run(idx["plus1"], xfail)["exit"] == 1
+    # A failing setUpClass: no test began, so it is named among those run,
+    # and a confirmation asking for it gets "not collected".
+    fixture = server.run(idx["add"], ["test_core.WithFixture.test_uses_fixture"])
+    holder = "setUpClass (test_core.WithFixture)"
+    assert fixture["exit"] == 1 and fixture["ran"] == [holder], fixture
+    assert server.run(0, [holder])["exit"] == 4
+    server.close()
+
+
+def test_serve_unittest_dies_of_sigint_on_a_keyboardinterrupt(served_unittest):
+    server, idx = served_unittest()
+    assert server.recv()["ready"] is True
+    out = server.run(idx["guard"], ["test_core.T.test_guard"])
+    # As a cold `python -m unittest`: not exit 2, a usage error to fermut.
+    assert out["signal"] == 2 and "error" not in out, out
+    server.close()
+
+
+def test_serve_unittest_refuses_a_suite_with_import_errors(served_unittest):
+    server, _ = served_unittest({"tests/test_broken.py": "import nope\n"})
+    ready = server.recv()
+    assert ready == {"ready": False, "error": "1 errors during collection"}, ready

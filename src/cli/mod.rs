@@ -848,6 +848,19 @@ mod tests {
     }
 
     #[test]
+    fn explicit_dot_path_is_distinguishable_from_an_omitted_one() {
+        use clap::Parser;
+        // `run .` is the cwd, not "use source_root": CI passing `.` got the
+        // config's `src` root and every `src/...` exclude glob missed.
+        let path = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().cmd {
+            Cmd::Run(a) => a.path,
+            _ => unreachable!(),
+        };
+        assert_eq!(path(&["fermut", "run"]), None);
+        assert_eq!(path(&["fermut", "run", "."]), Some(PathBuf::from(".")));
+    }
+
+    #[test]
     fn smart_order_and_no_smart_order_are_mutually_exclusive_in_the_parser() {
         use clap::Parser;
         // The force-on and force-off knobs contradict, so clap must reject both

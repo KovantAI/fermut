@@ -53,7 +53,15 @@ fn resolve_smart_order(cli_no: bool, cli_yes: bool, file: Option<bool>) -> bool 
 
 /// Merge the parsed `run` CLI args (`cli_path` positional + the flattened
 /// [`RunConfigArgs`]) with the loaded config file into a runtime `Config`.
-pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Config> {
+///
+/// `cli_path` is `None` only when no path was given; then the config's
+/// `source_root` applies. Any explicit path — `.` included — is the mutation
+/// root, so `exclude` globs written relative to the project root match.
+pub(crate) fn build_config(
+    cli_path: impl Into<Option<PathBuf>>,
+    args: RunConfigArgs,
+) -> Result<Config> {
+    let cli_path: Option<PathBuf> = cli_path.into();
     let RunConfigArgs {
         tests: cli_tests,
         jobs: cli_jobs,
@@ -104,7 +112,7 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     let cli_isolation: Option<IsolationMode> = cli_isolation.map(Into::into);
     let cli_cache_scope: Option<CacheScope> = cli_cache_scope.map(Into::into);
 
-    let loaded = LoadedConfig::load(&cli_path)?;
+    let loaded = LoadedConfig::load(cli_path.as_deref().unwrap_or(Path::new(".")))?;
     let file = &loaded.file;
 
     if loaded.source != ConfigSource::None {
@@ -115,15 +123,12 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
         );
     }
 
-    let source_root = if cli_path == Path::new(".") {
-        // No explicit path on CLI — prefer config's source_root.
+    let source_root = cli_path.unwrap_or_else(|| {
         file.source_root
             .clone()
             .map(|p| loaded.resolve_path(p))
-            .unwrap_or(cli_path)
-    } else {
-        cli_path
-    };
+            .unwrap_or_else(|| PathBuf::from("."))
+    });
     // Mirror::build → find_project_root walks parents looking for
     // pyproject.toml / setup.cfg. With a relative `source_root` or `tests`
     // the walk's empty PathBuf can match a sibling marker in cwd and yield
@@ -395,6 +400,11 @@ pub(crate) fn build_config(cli_path: PathBuf, args: RunConfigArgs) -> Result<Con
     for pat in &exclude {
         globset::Glob::new(pat).with_context(|| format!("invalid exclude glob: {pat:?}"))?;
     }
+    let configured_root = file.source_root.clone().map(|p| loaded.resolve_path(p));
+    let anchors: Vec<&Path> = std::iter::once(loaded.base_dir.as_path())
+        .chain(configured_root.as_deref())
+        .collect();
+    let exclude = rebase_excludes(exclude, &source_root, &anchors);
     let ignore_patterns = file.ignore_patterns.clone().unwrap_or_default();
     for pat in &ignore_patterns {
         regex::Regex::new(pat)
@@ -554,7 +564,8 @@ fn resolve_max_memory(cli_no: bool, cli: Option<u64>, file: Option<&str>) -> Res
     })
 }
 
-/// Schemata is on by default wherever it can run. `--no-schemata` /
+/// Schemata is on by default wherever it can run (rstest and unittest: opt-in
+/// only, until their parity with a normal run is measured). `--no-schemata` /
 /// `schemata = false` turn it off; `--schemata` / `schemata = true` demand it,
 /// so an unsupported runner or platform is an error rather than a silent
 /// normal run.
@@ -574,16 +585,13 @@ fn resolve_schemata(
     match requested {
         Some(false) => Ok(false),
         Some(true) => check_schemata(runner).map(|()| true),
-        None => Ok(check_schemata(runner).is_ok()),
+        None => Ok(runner == RunnerKind::Pytest && check_schemata(runner).is_ok()),
     }
 }
 
-/// Schemata forks a warm pytest process: pytest runner only, and `fork` only
-/// exists on Unix.
-fn check_schemata(runner: RunnerKind) -> Result<()> {
-    if runner != RunnerKind::Pytest {
-        anyhow::bail!("`--schemata` works with the pytest runner only (runner is {runner:?})");
-    }
+/// Schemata forks a warm test process (pytest, rstest's vendored pytest, or
+/// unittest), and `fork` only exists on Unix.
+fn check_schemata(_runner: RunnerKind) -> Result<()> {
     if !cfg!(unix) {
         anyhow::bail!("`--schemata` needs fork(), which this platform doesn't have");
     }
@@ -607,6 +615,38 @@ fn check_audit_rate(r: f64) -> Result<f64, String> {
 
 /// Make `p` absolute. Prefer `canonicalize` so symlinks resolve to a real
 /// directory; fall back to `cwd.join(p)` for paths that don't exist yet.
+/// `exclude` globs are written relative to the project root (`src/gen/**`)
+/// or to the configured `source_root` (`gen/**`); both are in use. The walk
+/// matches paths relative to `root` only, so add each glob rebased from every
+/// anchor onto `root`, keeping it as written too. Whichever root a run walks
+/// — `source_root`, or an explicit path — both forms then match.
+fn rebase_excludes(globs: Vec<String>, root: &Path, anchors: &[&Path]) -> Vec<String> {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let slash = |p: &Path| p.to_string_lossy().replace('\\', "/");
+    let root = canon(root);
+    let mut out = Vec::new();
+    for g in globs {
+        for a in anchors.iter().map(|a| canon(a)) {
+            if let Ok(below) = a.strip_prefix(&root) {
+                // Anchor at or under the walk root: prefix the glob with it.
+                if !below.as_os_str().is_empty() {
+                    out.push(format!("{}/{g}", slash(below)));
+                }
+            } else if let Ok(above) = root.strip_prefix(&a) {
+                // Walk root under the anchor: drop the leading segment, if
+                // the glob names it; otherwise it can't match inside `root`.
+                if let Some(rest) = g.strip_prefix(&format!("{}/", slash(above))) {
+                    out.push(rest.to_string());
+                }
+            }
+        }
+        out.push(g);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn absolutize(p: PathBuf) -> PathBuf {
     if p.is_absolute() {
         return p;
@@ -1224,26 +1264,23 @@ mod tests {
 
     #[test]
     fn schemata_is_on_wherever_it_can_run_unless_turned_off() {
-        let (py, rs) = (RunnerKind::Pytest, RunnerKind::Rstest);
+        let (py, rs, ut) = (RunnerKind::Pytest, RunnerKind::Rstest, RunnerKind::Unittest);
         let on = |no, yes, file, runner| resolve_schemata(no, yes, file, runner).ok();
         // Default: on with pytest on Unix, quietly off elsewhere.
         assert_eq!(on(false, false, None, py), Some(cfg!(unix)));
+        assert_eq!(on(false, false, None, ut), Some(false));
+        // rstest and unittest are opt-in: off by default, on when asked for.
         assert_eq!(on(false, false, None, rs), Some(false));
+        assert_eq!(on(false, true, None, rs), cfg!(unix).then_some(true));
+        assert_eq!(on(false, true, None, ut), cfg!(unix).then_some(true));
+        assert_eq!(on(false, false, Some(true), ut), cfg!(unix).then_some(true));
         // Off wins over config and is fine with any runner.
         assert_eq!(on(true, false, Some(true), py), Some(false));
         assert_eq!(on(false, false, Some(false), py), Some(false));
-        assert_eq!(on(true, false, None, rs), Some(false));
-        // Asked for explicitly: an unsupported runner is an error, not a fallback.
+        assert_eq!(on(true, false, None, ut), Some(false));
+        // Asked for explicitly: an unsupported platform is an error, not a
+        // fallback.
         assert_eq!(on(false, true, Some(false), py), cfg!(unix).then_some(true));
-        assert_eq!(on(false, true, None, rs), None);
-        assert_eq!(on(false, false, Some(true), rs), None);
-    }
-
-    #[test]
-    fn schemata_needs_the_pytest_runner() {
-        assert!(check_schemata(RunnerKind::Rstest).is_err());
-        assert!(check_schemata(RunnerKind::Unittest).is_err());
-        assert_eq!(check_schemata(RunnerKind::Pytest).is_ok(), cfg!(unix));
     }
 
     #[test]
@@ -1727,6 +1764,31 @@ mod tests {
         let cfg = build_config(tmp.path().to_path_buf(), args).unwrap();
         assert_eq!(cfg.cache_audit_rate, 0.0);
         assert_eq!(cfg.shard, Some((1, 4)), "CLI shard beats config");
+    }
+
+    #[test]
+    fn excludes_match_from_project_root_and_source_root_alike() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (proj, src) = (tmp.path(), tmp.path().join("src"));
+        std::fs::create_dir(&src).unwrap();
+        let globs = || vec!["src/skills/**".to_string(), "generated/**".to_string()];
+        // Walking `source_root`: the project-relative glob loses its `src/`.
+        assert_eq!(
+            rebase_excludes(globs(), &src, &[proj, &src]),
+            ["generated/**", "skills/**", "src/skills/**"]
+        );
+        // Walking the project root: the source-relative glob gains `src/`.
+        // A glob's form is unknown, so each is rebased from both anchors;
+        // `src/src/skills/**` is the harmless no-match leftover.
+        assert_eq!(
+            rebase_excludes(globs(), proj, &[proj, &src]),
+            [
+                "generated/**",
+                "src/generated/**",
+                "src/skills/**",
+                "src/src/skills/**"
+            ]
+        );
     }
 
     #[test]

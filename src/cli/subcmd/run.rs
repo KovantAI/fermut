@@ -22,8 +22,8 @@ use crate::report::{Report, ReportSinks};
 #[derive(clap::Args, Debug)]
 pub(crate) struct RunArgs {
     /// Python source root (package or module path).
-    #[arg(default_value = ".")]
-    pub(crate) path: PathBuf,
+    /// Omitted: the config's `source_root`, else the current directory.
+    pub(crate) path: Option<PathBuf>,
 
     #[command(flatten)]
     pub(crate) cfg_args: RunConfigArgs,
@@ -97,7 +97,7 @@ pub(crate) struct RunArgs {
 /// dispatch arm destructures `Cmd::Run` straight into this struct.
 #[derive(Debug)]
 pub struct RunOpts {
-    pub path: PathBuf,
+    pub path: Option<PathBuf>,
     pub cfg_args: RunConfigArgs,
     pub annotate: bool,
     pub watch: bool,
@@ -495,7 +495,7 @@ mod tests {
 
     fn run_opts(root: &Path, py: &Path, no_history: bool) -> RunOpts {
         RunOpts {
-            path: root.to_path_buf(),
+            path: Some(root.to_path_buf()),
             cfg_args: RunConfigArgs {
                 tests: Some(root.join("tests")),
                 jobs: Some(1),

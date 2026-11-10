@@ -538,6 +538,13 @@ fn save_fingerprints(db_path: &Path, fp: &Fingerprints) -> Result<()> {
     Ok(())
 }
 
+/// Record the current trees as `db_path`'s baseline, as a passing `fermut
+/// coverage` would.
+#[cfg(test)]
+pub(crate) fn seed_fingerprints(db_path: &Path, tests: &Path, source: &Path, base_dir: &Path) {
+    save_fingerprints(db_path, &current_fingerprints(tests, source, base_dir)).unwrap();
+}
+
 /// Content fingerprints of both trees, keyed by base-dir-relative path with
 /// forward slashes (matching purge prefixes and recorded pytest node ids).
 fn current_fingerprints(tests: &Path, source: &Path, base_dir: &Path) -> Fingerprints {

@@ -2739,3 +2739,35 @@ fn mcp_answers_initialize_on_stdout() {
     assert_eq!(msg["id"], 1);
     assert_eq!(msg["result"]["serverInfo"]["name"], "fermut");
 }
+
+// A stale auto-discovered `.coverage` (no fingerprint sidecar, older than the
+// sources) is dropped, and the run says so again after the summary so a slow,
+// low-scoring run explains itself.
+#[test]
+#[ignore = "requires pytest on PATH; enable once env is set up"]
+fn stale_auto_discovered_coverage_is_noted_after_the_summary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    let db = sample.join(".coverage");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute("CREATE TABLE coverage_schema (version integer)", [])
+        .unwrap();
+    filetime::set_file_mtime(&db, filetime::FileTime::from_unix_time(1000, 0)).unwrap();
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .current_dir(&sample)
+        .arg("run")
+        .arg(sample.join("src"))
+        .arg("--tests")
+        .arg(sample.join("tests"))
+        .arg("--no-ty-filter")
+        .arg("--no-cache")
+        .arg("--no-history")
+        .arg("--fail-under")
+        .arg("0")
+        .assert()
+        .success()
+        .stderr(contains("note: this run ignored stale coverage"));
+}

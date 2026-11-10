@@ -16,8 +16,9 @@ pub fn default_history_path(project_root: &Path) -> PathBuf {
 /// wrote `src/.fermut/history.jsonl` while a bare `fermut trend` read
 /// `./.fermut/history.jsonl` and saw an empty history. Both now walk up to a
 /// shared anchor:
-///   1. the nearest ancestor (including the target) holding a project marker
-///      (`pyproject.toml` / `setup.cfg`);
+///   1. the nearest ancestor (including the target) that is a project root
+///      ([`crate::runner::is_project_root`]: `pyproject.toml`, `setup.cfg`,
+///      a pytest/tox config, `setup.py`, or `.git`);
 ///   2. failing that, the nearest ancestor that already has a `.fermut/`
 ///      directory — so `trend` finds wherever a prior `run` wrote;
 ///   3. failing both, the target directory itself.
@@ -31,9 +32,7 @@ pub fn resolve_root(path: &Path) -> PathBuf {
     } else {
         abs
     };
-    if let Some(root) = find_ancestor(&base, |p| {
-        p.join("pyproject.toml").exists() || p.join("setup.cfg").exists()
-    }) {
+    if let Some(root) = find_ancestor(&base, crate::runner::is_project_root) {
         return root;
     }
     if let Some(root) = find_ancestor(&base, |p| p.join(".fermut").is_dir()) {
@@ -95,6 +94,19 @@ mod tests {
             "run-on-src and trend-on-root must land on the same project root"
         );
         assert_eq!(from_run, root);
+    }
+
+    #[test]
+    fn resolve_root_stops_at_a_pytest_ini_inside_a_pyproject_dir() {
+        // #76: sidecars anchor on the same markers as the mirror.
+        let tmp = tempdir().unwrap();
+        let outer = tmp.path().canonicalize().unwrap();
+        std::fs::write(outer.join("pyproject.toml"), "").unwrap();
+        let app = outer.join("app");
+        std::fs::create_dir_all(app.join("hc")).unwrap();
+        std::fs::write(app.join("pytest.ini"), "[pytest]\n").unwrap();
+
+        assert_eq!(resolve_root(&app.join("hc")), app);
     }
 
     #[test]

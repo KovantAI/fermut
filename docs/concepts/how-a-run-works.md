@@ -25,7 +25,8 @@ flowchart TD
 ## 1. Project and config
 
 The **project root** is the nearest directory above the source root with a
-`pyproject.toml` or `setup.cfg`. fermut reads `fermut.toml` or
+project marker: `pyproject.toml`, `setup.cfg`, a pytest/tox config,
+`setup.py`, or `.git` ([Projects](projects.md)). fermut reads `fermut.toml` or
 `[tool.fermut]` there; command-line flags override it
 ([Configuration](configuration.md)). Paths in reports are resolved against
 it, and the coverage data must match it.

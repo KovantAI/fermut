@@ -49,6 +49,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- The project root is also found by `pytest.ini`, `.pytest.ini`, `tox.ini`,
+  `setup.py`, or `.git`, not only `pyproject.toml` / `setup.cfg`. A Django
+  app with none of the latter walked up to an unrelated ancestor, mirrored
+  the wrong tree, and failed the baseline (`pytest exit 4`). Repos without
+  any config marker now anchor `.fermut/` at the git root, so a cache left
+  in a subdirectory by an earlier run is not reused once.
 - An explicit `.` path (`fermut run .`, `fermut list .`, `fermut hom .`, MCP
   `fermut_run` with `path: "."`) now mutates the current directory. It was
   read as "no path" and fell back to the config's `source_root`, so

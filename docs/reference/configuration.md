@@ -57,7 +57,7 @@ TOML primitives: `string`, `bool`, `int`, `float`, `array<string>`.
 | `cache_path`       | `string` (path) | `<project root>/.fermut/cache.json`             | Custom cache file location.                                                                       |
 | `cache_audit_rate` | `float` (0–1)   | `0.05`                                          | Fraction of killer-keyed cache hits re-run against their killing test each run (at least one when any occur). `0` disables. See [Caching](../concepts/caching.md#killed-verdicts-keyed-on-the-killing-test). |
 | `history`          | `bool`          | `true`                                          | Append a summary entry to the history log on every run.                                            |
-| `history_path`     | `string` (path) | `<project root>/.fermut/history.jsonl`          | Custom history log location. Project root = nearest ancestor of `source_root` with `pyproject.toml` / `setup.cfg`. |
+| `history_path`     | `string` (path) | `<project root>/.fermut/history.jsonl`          | Custom history log location. Project root = nearest ancestor of `source_root` with a project marker (see [Projects](../concepts/projects.md)). |
 | `sample`           | `float`         | `1.0`                                           | Test only this fraction of mutants (0.0–1.0), deterministic per `sample_seed`.                     |
 | `sample_seed`      | `int`           | `0`                                             | Seed for `sample` selection.                                                                       |
 | `shard`            | `string`        | none                                            | `"i/n"` — process only the i-th of n disjoint slices. Both 1-based.                                |

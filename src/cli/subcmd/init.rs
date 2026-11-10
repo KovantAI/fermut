@@ -394,12 +394,7 @@ fn lockfile_mentions(root: &Path, needles: &[&str]) -> bool {
 
 pub(super) fn find_project_root(start: &Path) -> PathBuf {
     let start = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
-    for ancestor in start.ancestors() {
-        if ancestor.join("pyproject.toml").is_file() || ancestor.join("setup.cfg").is_file() {
-            return ancestor.to_path_buf();
-        }
-    }
-    start
+    crate::runner::find_project_root(&start).unwrap_or(start)
 }
 
 fn detect_source_root(root: &Path) -> PathBuf {
@@ -1322,11 +1317,8 @@ mod tests {
     fn find_project_root_without_markers_returns_start() {
         let tmp = tempdir().unwrap();
         let canon = tmp.path().canonicalize().unwrap();
-        // No pyproject/setup.cfg up to /tmp normally; only assert when true.
-        if !canon
-            .ancestors()
-            .any(|a| a.join("pyproject.toml").is_file() || a.join("setup.cfg").is_file())
-        {
+        // No project marker up to /tmp normally; only assert when true.
+        if !canon.ancestors().any(crate::runner::is_project_root) {
             assert_eq!(find_project_root(tmp.path()), canon);
             // Uncanonicalizable (missing) start is returned as-is.
             let missing = tmp.path().join("nope");

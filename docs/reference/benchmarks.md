@@ -165,9 +165,8 @@ whole suite still runs.
 
 Fixture notes (`benchmarks/configs/repos.toml`): healthchecks runs under
 pytest-django with a `bench_settings.py` that re-applies its test-only
-settings (upstream gates them on `manage.py test`). Its checkout gets an
-empty `setup.cfg` so fermut finds the project root (fermut stops only at
-`pyproject.toml` / `setup.cfg`). mutmut also copies `CHANGELOG.md` and
+settings (upstream gates them on `manage.py test`), plus a `pytest.ini`
+that is also its project-root marker. mutmut also copies `CHANGELOG.md` and
 `search.db`, which the settings and search view read. flaskbb replaces
 its xdist `addopts`, and deselects `test_flaskbbdomain_translations` for
 both tools: it needs the compiled `*.mo` files, which `.gitignore` lists

@@ -215,10 +215,7 @@ test_path = "hc"
 # hc/settings.py applies its test overrides (MAILERS, fast hasher, blocking
 # email) only when sys.argv[1] == "test", so bench_settings.py (repo root,
 # outside the mutated package) re-applies them for pytest.
-# `touch setup.cfg`: fermut's find_project_root only stops at pyproject.toml /
-# setup.cfg; without one it walks up to benchmarks/pyproject.toml and mirrors
-# the wrong tree (fermut bug, pytest.ini isn't a root marker).
-install_cmd = '''pip install -r requirements.txt -r requirements-dev.txt pytest pytest-django 'coverage==7.17.0' pytest-cov && printf 'from hc.settings import *  # noqa\nSECRET_KEY = "bench"\nPASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]\nBLOCKING_EMAILS = True\nMAILERS = {"default": {"BACKEND": "django.core.mail.backends.smtp.EmailBackend", "OPTIONS": {}}}\n' > bench_settings.py && printf '[pytest]\nDJANGO_SETTINGS_MODULE = bench_settings\n' > pytest.ini && touch setup.cfg'''
+install_cmd = '''pip install -r requirements.txt -r requirements-dev.txt pytest pytest-django 'coverage==7.17.0' pytest-cov && printf 'from hc.settings import *  # noqa\nSECRET_KEY = "bench"\nPASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]\nBLOCKING_EMAILS = True\nMAILERS = {"default": {"BACKEND": "django.core.mail.backends.smtp.EmailBackend", "OPTIONS": {}}}\n' > bench_settings.py && printf '[pytest]\nDJANGO_SETTINGS_MODULE = bench_settings\n' > pytest.ini'''
 test_cmd = "pytest hc"
 loop_edit_file = "hc/api/models.py"
 # Scoped to hc/api (~4.2k LOC: check/ping/flip models, API views): the whole

@@ -309,4 +309,28 @@ mod tests {
         assert!(h.contains("-x = 1 + 2"));
         assert!(h.contains("+x = 1 - 2"));
     }
+
+    #[test]
+    fn html_lists_projects_escaped_only_when_aggregated() {
+        let mut r = Report::new(vec![]);
+        assert!(!read(&r).contains("<table class='projects'>"));
+        r.projects = vec![crate::report::ProjectSummary {
+            dir: "pkg/<a>".into(),
+            config_hash: None,
+            counts: crate::report::Counts {
+                killed: 3,
+                survived: 1,
+                errored: 2,
+                ..Default::default()
+            },
+        }];
+        let h = read(&r);
+        assert!(h.contains("<table class='projects'>"));
+        assert!(
+            h.contains(
+                "<tr><td>pkg/&lt;a&gt;</td><td>75.0%</td><td>4</td><td>1</td><td>2</td></tr>"
+            ),
+            "{h}"
+        );
+    }
 }

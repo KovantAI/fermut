@@ -761,6 +761,23 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn mutant_mut_edits_every_outcome_kind() {
+        use crate::report::testing::make_mutant;
+        let mut all = vec![
+            MutantOutcome::killed(make_mutant()),
+            MutantOutcome::survived(make_mutant()),
+            MutantOutcome::timed_out(make_mutant()),
+            MutantOutcome::skipped(make_mutant(), "coverage"),
+            MutantOutcome::error(make_mutant(), "boom".into()),
+            MutantOutcome::equivalent(make_mutant(), "reason", "bytecode"),
+        ];
+        for o in &mut all {
+            Arc::make_mut(o.mutant_mut()).replacement = "edited".into();
+            assert_eq!(o.mutant().replacement, "edited", "{}", o.status_label());
+        }
+    }
+
+    #[test]
     fn killed_and_timed_out_score_identically() {
         // The invariant that makes smart ordering verdict-neutral even under a
         // per-mutant timeout (finding #1): `timed_out` and `killed` are both

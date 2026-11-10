@@ -985,6 +985,24 @@ mod tests {
         assert!(err.to_string().contains("no `DIR=` prefix"), "{err}");
         // Component-wise nesting: `a/bc` is not inside `a/b`.
         group_by_project(&[PathBuf::from("a/b=x"), PathBuf::from("a/bc=y")]).unwrap();
+        // Shards of one project (trailing slash or not) land in one group.
+        let groups = group_by_project(&[
+            PathBuf::from("a=s1.json"),
+            PathBuf::from("b=s.json"),
+            PathBuf::from("a/=s2.json"),
+        ])
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            groups,
+            [
+                (
+                    "a".into(),
+                    vec![PathBuf::from("s1.json"), PathBuf::from("s2.json")]
+                ),
+                ("b".into(), vec![PathBuf::from("s.json")]),
+            ]
+        );
     }
 
     #[test]

@@ -866,6 +866,60 @@ mod tests {
     }
 
     #[test]
+    fn trend_project_filter_and_by_project_render() {
+        let (_tmp, p) = write_history(&[
+            agg(
+                "2026-01-01T00:00:00Z",
+                &[("a", "h1", 9, 1), ("b", "h2", 1, 1)],
+            ),
+            agg(
+                "2026-01-02T00:00:00Z",
+                &[("a", "h1", 8, 2), ("b", "h2", 2, 0)],
+            ),
+        ]);
+        let mut opts = strict_opts(p);
+        opts.format = Format::Human;
+        opts.group_by = Some(TrendGroupBy::Project);
+        // a: 90 → 80, under a 50-pt threshold.
+        opts.fail_on_regression = Some(50.0);
+        assert!(trend(opts.clone()).is_ok());
+        opts.project = Some("a".into());
+        assert!(trend(opts.clone()).is_ok());
+        // Unknown project drops every entry: empty window, still ok.
+        opts.project = Some("zzz".into());
+        assert!(trend(opts).is_ok());
+        // Non-aggregate latest entry: per-project view is silent.
+        print_grouping(&[entry("t", 50.0, None)], TrendGroupBy::Project);
+    }
+
+    #[test]
+    fn regressions_reports_aggregate_drop_and_skips_rising_projects() {
+        let prev = agg("1", &[("a", "h1", 9, 1)]);
+        let curr = agg("2", &[("a", "h1", 10, 0)]);
+        assert!(regressions(&[prev.clone(), curr], 1.0).is_empty());
+        let drop = agg("2", &[("a", "h1", 1, 9)]);
+        assert_eq!(
+            regressions(&[prev, drop], 1.0),
+            [
+                "mutation score regressed by 80.0 pts (threshold 1.0)",
+                "project a: mutation score regressed by 80.0 pts (threshold 1.0)",
+            ]
+        );
+        assert!(regressions(&[], 1.0).is_empty());
+    }
+
+    #[test]
+    fn project_arg_drops_trailing_slash() {
+        use clap::Parser;
+        let cli =
+            crate::cli::Cli::try_parse_from(["fermut", "trend", "--project", "pkg/a/"]).unwrap();
+        let crate::cli::Cmd::Trend(args) = cli.cmd else {
+            panic!("not trend")
+        };
+        assert_eq!(TrendOpts::from(args).project.as_deref(), Some("pkg/a"));
+    }
+
+    #[test]
     fn project_view_keeps_only_that_projects_counts_hash_and_survivors() {
         let mut e = agg("1", &[("pkg/a", "h1", 3, 1), ("pkg/b", "h2", 0, 2)]);
         e.survivor_ids = Some(vec!["pkg/a/x.py@1".into(), "pkg/ab/y.py@2".into()]);

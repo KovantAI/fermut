@@ -92,6 +92,9 @@ ACTIVE = "_fm_active"  # attribute on the builtins module
 # Set by fermut (`runner::PRIVATE_HOME_ENV`) when tests run with a private home;
 # then each fork gets its own. XDG dirs as in `runner::XDG_DIRS`.
 PRIVATE_HOME_ENV = "FERMUT_PRIVATE_HOME"
+# Set by fermut when the runner is rstest: run on rstest's vendored pytest,
+# which it puts first on `sys.path` and uses even beside an installed one.
+RSTEST_ENV = "FERMUT_RSTEST"
 XDG_DIRS = (
     ("XDG_CONFIG_HOME", ".config"),
     ("XDG_CACHE_HOME", ".cache"),
@@ -544,6 +547,8 @@ class Template:
         os.chdir(self.mirror_root)
         setattr(builtins, ACTIVE, 0)
         self.trace()
+        if os.environ.pop(RSTEST_ENV, None):
+            use_rstest_pytest()
         import pytest
 
         # Parametrize ids as a spawned run gets them from `-p _fermut_reporter`
@@ -967,6 +972,19 @@ def summarize(events):
     if ended:
         out["unfinished"] = None  # only a killed child leaves one behind
     return out
+
+
+def use_rstest_pytest():
+    """Shadow any installed pytest with rstest's vendored one, as rstest's
+    worker does (`rstest_worker/__main__.py`), without importing rstest."""
+    import importlib.util
+
+    spec = importlib.util.find_spec("rstest_worker")
+    if spec is None or not spec.submodule_search_locations:
+        raise ImportError(f"rstest_worker isn't importable from {sys.executable}")
+    vendor = os.path.join(spec.submodule_search_locations[0], "_vendor")
+    if vendor not in sys.path:
+        sys.path.insert(0, vendor)
 
 
 def main(argv):

@@ -469,7 +469,11 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
         private_home: cfg.private_home,
         isolation,
         coverage: cfg.coverage.clone(),
-        python: cfg.python.clone(),
+        python: if exe == "rstest" {
+            python::rstest_interpreter(cfg.python.as_deref())
+        } else {
+            cfg.python.clone()
+        },
         exe,
         smart_order: cfg.smart_order,
         kill_order: kill_order.clone(),
@@ -489,6 +493,11 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
         #[cfg(unix)]
         RunnerKind::Pytest if cfg.schemata => {
             let inner = pytest::PytestRunner::new(pytest_config("pytest"));
+            Box::new(schema::SchemaRunner::new(inner))
+        }
+        #[cfg(unix)]
+        RunnerKind::Rstest if cfg.schemata => {
+            let inner = pytest::PytestRunner::new(pytest_config("rstest"));
             Box::new(schema::SchemaRunner::new(inner))
         }
         RunnerKind::Pytest => pytest_compatible("pytest"),

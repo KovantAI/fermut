@@ -40,7 +40,7 @@ echo "$SPECS" | while read -r repo src tests sample extra; do
     t0=$(date +%s)
     ( cd "$wt" && PATH="$FX/.venvs/fermut-$repo/bin:$PATH" ${MEASURE:+python3 "$HERE/peakrss.py" "$OUT/$mode-$repo${RUN:+-r$RUN}.rss.json" --} "$FERMUT" run "$src" --tests "$tests" \
         --coverage "$cov" --no-cache --no-history ${T:+--timeout $T} ${JOBS:+--jobs $JOBS} --baseline-timeout 1200 \
-        --sample "$sample" --json "$OUT/$mode-$repo${RUN:+-r$RUN}.json" $flag $extra ) \
+        ${RUNNER:+--runner $RUNNER} --sample "$sample" --json "$OUT/$mode-$repo${RUN:+-r$RUN}.json" $flag $extra ) \
       > "$OUT/$mode-$repo${RUN:+-r$RUN}.log" 2>&1
     echo "$repo $mode${RUN:+ r$RUN} rc=$? wall=$(( $(date +%s) - t0 ))s" | tee -a "$OUT/walls.txt"
   done

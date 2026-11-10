@@ -554,7 +554,8 @@ fn resolve_max_memory(cli_no: bool, cli: Option<u64>, file: Option<&str>) -> Res
     })
 }
 
-/// Schemata is on by default wherever it can run. `--no-schemata` /
+/// Schemata is on by default wherever it can run (rstest: opt-in only, until
+/// its parity with a normal run is measured). `--no-schemata` /
 /// `schemata = false` turn it off; `--schemata` / `schemata = true` demand it,
 /// so an unsupported runner or platform is an error rather than a silent
 /// normal run.
@@ -574,15 +575,17 @@ fn resolve_schemata(
     match requested {
         Some(false) => Ok(false),
         Some(true) => check_schemata(runner).map(|()| true),
-        None => Ok(check_schemata(runner).is_ok()),
+        None => Ok(runner == RunnerKind::Pytest && check_schemata(runner).is_ok()),
     }
 }
 
-/// Schemata forks a warm pytest process: pytest runner only, and `fork` only
-/// exists on Unix.
+/// Schemata forks a warm pytest process: pytest or rstest (a pytest suite on
+/// rstest's vendored pytest), and `fork` only exists on Unix.
 fn check_schemata(runner: RunnerKind) -> Result<()> {
-    if runner != RunnerKind::Pytest {
-        anyhow::bail!("`--schemata` works with the pytest runner only (runner is {runner:?})");
+    if runner == RunnerKind::Unittest {
+        anyhow::bail!(
+            "`--schemata` works with the pytest and rstest runners only (runner is {runner:?})"
+        );
     }
     if !cfg!(unix) {
         anyhow::bail!("`--schemata` needs fork(), which this platform doesn't have");
@@ -1224,26 +1227,22 @@ mod tests {
 
     #[test]
     fn schemata_is_on_wherever_it_can_run_unless_turned_off() {
-        let (py, rs) = (RunnerKind::Pytest, RunnerKind::Rstest);
+        let (py, rs, ut) = (RunnerKind::Pytest, RunnerKind::Rstest, RunnerKind::Unittest);
         let on = |no, yes, file, runner| resolve_schemata(no, yes, file, runner).ok();
         // Default: on with pytest on Unix, quietly off elsewhere.
         assert_eq!(on(false, false, None, py), Some(cfg!(unix)));
+        assert_eq!(on(false, false, None, ut), Some(false));
+        // rstest is opt-in: off by default, on when asked for.
         assert_eq!(on(false, false, None, rs), Some(false));
+        assert_eq!(on(false, true, None, rs), cfg!(unix).then_some(true));
         // Off wins over config and is fine with any runner.
         assert_eq!(on(true, false, Some(true), py), Some(false));
         assert_eq!(on(false, false, Some(false), py), Some(false));
-        assert_eq!(on(true, false, None, rs), Some(false));
+        assert_eq!(on(true, false, None, ut), Some(false));
         // Asked for explicitly: an unsupported runner is an error, not a fallback.
         assert_eq!(on(false, true, Some(false), py), cfg!(unix).then_some(true));
-        assert_eq!(on(false, true, None, rs), None);
-        assert_eq!(on(false, false, Some(true), rs), None);
-    }
-
-    #[test]
-    fn schemata_needs_the_pytest_runner() {
-        assert!(check_schemata(RunnerKind::Rstest).is_err());
-        assert!(check_schemata(RunnerKind::Unittest).is_err());
-        assert_eq!(check_schemata(RunnerKind::Pytest).is_ok(), cfg!(unix));
+        assert_eq!(on(false, true, None, ut), None);
+        assert_eq!(on(false, false, Some(true), ut), None);
     }
 
     #[test]

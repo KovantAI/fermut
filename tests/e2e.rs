@@ -263,6 +263,47 @@ fn run_finds_known_survivor_with_rstest() {
 }
 
 #[test]
+#[cfg(unix)]
+#[ignore = "requires rstest on PATH; enable once env is set up"]
+fn schemata_under_rstest_gives_the_same_verdicts_as_a_normal_run() {
+    // The template runs the suite on rstest's vendored pytest (rstest doesn't
+    // install pytest), forked per mutant; verdicts must match rstest's own.
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    let run = |mode: &str| {
+        let out = Command::cargo_bin("fermut")
+            .unwrap()
+            .args(["run", "--runner", "rstest", "--no-ty-filter", "--no-cache"])
+            .args(["--no-history", "--fail-under", "0", "--jobs", "2", mode])
+            .arg(sample.join("src"))
+            .arg("--tests")
+            .arg(sample.join("tests"))
+            .env("RUST_LOG", "info")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let score = stdout.lines().find(|l| l.contains("score:")).unwrap();
+        (
+            score.to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    let (normal, _) = run("--no-schemata");
+    let (schemata, log) = run("--schemata");
+    assert_eq!(schemata, normal);
+    let served: u32 = log
+        .lines()
+        .find(|l| l.contains("mutants run from the schema"))
+        .and_then(|l| l.split("schemata: ").nth(1))
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no schemata summary in:\n{log}"));
+    assert!(served > 0, "no mutant was run from the schema:\n{log}");
+}
+
+#[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn import_breaking_mutant_is_killed_under_node_id_selection() {
     // A mutant that breaks a module's *import* must score as killed. With

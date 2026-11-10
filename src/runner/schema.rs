@@ -87,6 +87,10 @@ pub struct SchemaRunner {
 const AUDIT_RATE: f64 = 0.05;
 const AUDIT_SEED: u64 = 0x5c4e_a0d1;
 
+/// Tells the template to run on rstest's vendored pytest
+/// (`_fermut_schema.py`'s `RSTEST_ENV`).
+const RSTEST_ENV: &str = "FERMUT_RSTEST";
+
 /// The built schema: one read-only mirror shared by every template.
 struct Schema {
     /// Shared with the template, which maps node ids into and out of it.
@@ -96,6 +100,8 @@ struct Schema {
     /// Template command line after the interpreter: script, `serve`, args.
     serve_args: Vec<std::ffi::OsString>,
     python: PathBuf,
+    /// The runner is rstest: the template runs on rstest's vendored pytest.
+    rstest: bool,
     /// Per-mutant memory cap each forked child sets on itself.
     mem_cap: Option<u64>,
     /// The template runs with a private `HOME` and gives each fork its own.
@@ -257,6 +263,7 @@ impl SchemaRunner {
             index,
             serve_args,
             python,
+            rstest: self.inner.exe == "rstest",
             mem_cap: self.inner.mem_cap,
             private_home: self.inner.private_home,
             ready_timeout: self.inner.baseline_timeout,
@@ -753,6 +760,9 @@ impl Template {
         cmd.args(&schema.serve_args);
         configure_mirror_cmd(&mut cmd, &schema.mirror, schema.private_home)?;
         cmd.env_remove("FM_ACTIVE");
+        if schema.rstest {
+            cmd.env(RSTEST_ENV, "1");
+        }
         // macOS unified logging isn't fork-safe: a forked child that reads a
         // system preference (PDFium's CoreGraphics, psycopg's Kerberos) dies
         // in `_os_log_preferences_refresh`. Off from the template's start, the
@@ -1060,6 +1070,7 @@ mod tests {
             index: HashMap::new(),
             serve_args: vec!["-c".into(), format!("{FAKE}{script}").into()],
             python: "/bin/sh".into(),
+            rstest: false,
             mem_cap: None,
             private_home: true,
             ready_timeout: Duration::from_secs(10),

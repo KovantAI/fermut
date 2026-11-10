@@ -257,7 +257,39 @@ pub(crate) fn configure_mirror_cmd(
         set_home(cmd, &mirror.home, cfg!(windows));
         cmd.env(PRIVATE_HOME_ENV, "1");
     }
+    if let Some(suffix) = db_suffix() {
+        cmd.env(DB_SUFFIX_ENV, suffix);
+    }
     Ok(())
+}
+
+/// pytest-django appends this variable's value to every test database name
+/// (`test_hc` → `test_hc_fm2`; in-memory SQLite is left alone). Without it,
+/// concurrent workers all create the same Postgres/MySQL test DB: the losers
+/// fail `database "test_hc" already exists`, every test errors, and each of
+/// those mutants is a false kill (healthchecks `--jobs 4`: 100 % vs 81.9 %).
+pub(crate) const DB_SUFFIX_ENV: &str = "TOX_PARALLEL_ENV";
+
+/// This worker's test-DB suffix: `fm<rayon worker index>`, after the user's
+/// own `TOX_PARALLEL_ENV` (inside `tox -p`) when set. Per worker, not per
+/// mutant: a worker runs one suite at a time on either path (the schemata
+/// template is sent it per request), and a DB a killed run leaves behind is
+/// clobbered by that worker's next run instead of piling up. None outside the
+/// worker pool (baseline): the user's value, unchanged.
+pub(crate) fn db_suffix() -> Option<String> {
+    db_suffix_from(
+        std::env::var(DB_SUFFIX_ENV).ok().as_deref(),
+        rayon::current_thread_index(),
+    )
+}
+
+fn db_suffix_from(user: Option<&str>, worker: Option<usize>) -> Option<String> {
+    let user = user.filter(|u| !u.is_empty());
+    match (user, worker) {
+        (Some(u), Some(k)) => Some(format!("{u}_fm{k}")),
+        (None, Some(k)) => Some(format!("fm{k}")),
+        (u, None) => u.map(str::to_string),
+    }
 }
 
 /// Tells the schemata template to give each fork its own home.
@@ -1401,6 +1433,16 @@ mod tests {
         let off = env_of(&a, false);
         assert_eq!(var(&off, "HOME"), None, "inherits the real home");
         assert_eq!(var(&off, crate::runner::PRIVATE_HOME_ENV), None);
+    }
+
+    #[test]
+    fn db_suffix_is_per_worker_after_the_users_own() {
+        use super::db_suffix_from as f;
+        assert_eq!(f(None, Some(2)).as_deref(), Some("fm2"));
+        assert_eq!(f(Some("py313"), Some(0)).as_deref(), Some("py313_fm0"));
+        assert_eq!(f(Some(""), Some(1)).as_deref(), Some("fm1"));
+        assert_eq!(f(Some("py313"), None).as_deref(), Some("py313"));
+        assert_eq!(f(None, None), None, "baseline: as a cold run");
     }
 
     /// Windows moves `USERPROFILE` and the AppData dirs too; elsewhere they

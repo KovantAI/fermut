@@ -922,7 +922,10 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
     //     Same-size mutations (e.g. `<`→`>`) are the worst case since the size
     //     check can't catch them. We also set PYTHONDONTWRITEBYTECODE on the test
     //     subprocess so pytest can't write fresh `.pyc` back mid-run.
-    //   - anything matched by `.gitignore` (`venv`, `node_modules`, data dirs, ...).
+    //   - directories matched by `.gitignore` (`venv`, `node_modules`, data dirs,
+    //     ...), and ignored files outside Python packages (`coverage.json`, logs).
+    //     Ignored files inside a package are build output the package imports
+    //     or reads (`*.so`, compiled `*.mo`), so `copy_ignored_files` keeps them.
     //
     // What we keep: hidden *files*. Dotfiles like `.env`, `.python-version`,
     // `.coveragerc`, `.flake8` are tiny but can change test behavior, so `hidden`
@@ -958,7 +961,11 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
         if file_type.is_dir() {
             std::fs::create_dir_all(&target)
                 .with_context(|| format!("create mirror dir {}", target.display()))?;
-            copy_native_extensions(path, &target, mode)?;
+            let in_package = rel
+                .ancestors()
+                .take_while(|a| !a.as_os_str().is_empty())
+                .any(|a| src.join(a).join("__init__.py").is_file());
+            copy_ignored_files(path, &target, mode, in_package)?;
         } else if file_type.is_file() {
             // Skip stray compiled bytecode outside `__pycache__` (e.g. legacy
             // sidecar `.pyc`); same staleness hazard as above.
@@ -966,6 +973,10 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
                 path.extension().and_then(|e| e.to_str()),
                 Some("pyc") | Some("pyo")
             ) {
+                continue;
+            }
+            // Already copied by its directory's `copy_ignored_files` pass.
+            if target.is_file() {
                 continue;
             }
             if let Some(parent) = target.parent() {
@@ -985,24 +996,37 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
     Ok(())
 }
 
-/// Copy the compiled extension modules (`*.so`, `*.pyd`) directly in `dir`,
-/// even when `.gitignore` excludes them: a C extension built in place
-/// (`build_ext --inplace`, editable installs) is part of the importable
-/// package. Without it the mirror imports a different package than the one
-/// coverage was recorded against, and node ids parametrized on the extension
-/// (markupsafe's `[markupsafe._speedups]`) don't exist, so pytest exits 4.
+/// Copy the files directly in `dir` that `.gitignore` excluded but that are
+/// part of the importable package:
+/// - compiled extension modules (`*.so`, `*.pyd`) anywhere. A C extension
+///   built in place (`build_ext --inplace`, editable installs) is what the
+///   project imports; without it node ids parametrized on the extension
+///   (markupsafe's `[markupsafe._speedups]`) don't exist, so pytest exits 4.
+/// - any other file when `dir` sits inside a Python package (`in_package`):
+///   build output generated into the package, like flaskbb's compiled `*.mo`
+///   catalogues, without which its translation test fails in the mirror only.
+///   Stray `.pyc`/`.pyo` stay out (stale-bytecode hazard).
+///
 /// Only directories the walk mirrors are scanned, so ignored trees (venvs,
-/// build dirs) stay out.
-fn copy_native_extensions(dir: &Path, target: &Path, mode: IsolationMode) -> Result<()> {
+/// build dirs) stay out, and out-of-package ignored files (`coverage.json`,
+/// logs at the root) aren't copied.
+fn copy_ignored_files(
+    dir: &Path,
+    target: &Path,
+    mode: IsolationMode,
+    in_package: bool,
+) -> Result<()> {
     let entries = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
     for entry in entries {
         let path = entry?.path();
-        let native = matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("so") | Some("pyd")
-        );
+        let ext = path.extension().and_then(|e| e.to_str());
+        let keep = match ext {
+            Some("so") | Some("pyd") => true,
+            Some("pyc") | Some("pyo") => false,
+            _ => in_package,
+        };
         let to = target.join(path.file_name().unwrap());
-        if native && path.is_file() && !to.exists() {
+        if keep && path.is_file() && !to.exists() {
             clone_file(&path, &to, mode)?;
         }
     }
@@ -1602,6 +1626,33 @@ mod tests {
         copy_dir_all(&src, &dst, IsolationMode::Copy).unwrap();
         assert!(dst.join("pkg/_ext.cpython-313-darwin.so").is_file());
         assert!(!dst.join("venv").exists());
+    }
+
+    /// flaskbb compiles `*.mo` catalogues into its package and gitignores
+    /// them; without them its translation test fails in the mirror only.
+    #[test]
+    fn mirror_copies_gitignored_files_inside_packages_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        for d in ["pkg/tr/de/LC_MESSAGES", "pkg/build", "tests"] {
+            fs::create_dir_all(src.join(d)).unwrap();
+        }
+        fs::write(src.join(".gitignore"), "*.mo\n*.log\n*.pyc\nbuild/\n").unwrap();
+        fs::write(src.join("pkg/__init__.py"), "").unwrap();
+        fs::write(src.join("pkg/tr/de/LC_MESSAGES/m.po"), "po").unwrap();
+        fs::write(src.join("pkg/tr/de/LC_MESSAGES/m.mo"), "mo").unwrap();
+        fs::write(src.join("pkg/stale.pyc"), "pyc").unwrap();
+        fs::write(src.join("pkg/build/out.mo"), "mo").unwrap();
+        fs::write(src.join("run.log"), "log").unwrap();
+        fs::write(src.join("tests/data.mo"), "mo").unwrap();
+        let dst = tmp.path().join("dst");
+        copy_dir_all(&src, &dst, IsolationMode::Copy).unwrap();
+        assert!(dst.join("pkg/tr/de/LC_MESSAGES/m.mo").is_file());
+        assert!(dst.join("pkg/tr/de/LC_MESSAGES/m.po").is_file());
+        assert!(!dst.join("pkg/stale.pyc").exists());
+        assert!(!dst.join("pkg/build").exists(), "ignored dir stays pruned");
+        assert!(!dst.join("run.log").exists(), "root-level ignored file");
+        assert!(!dst.join("tests/data.mo").exists(), "not inside a package");
     }
 
     #[test]

@@ -726,7 +726,10 @@ fn preflight_baseline(
              until they pass) or, if you accept the risk, re-run with \
              --no-verify-baseline.\n\n\
              If the same tests pass when you run them yourself, fermut's \
-             copy of the project broke them: please report it at {}{}\n\n\
+             copy of the project broke them: please report it at {}. The \
+             copy leaves out gitignored directories and gitignored files \
+             outside Python packages, so a test that reads one of those \
+             fails only here.{}\n\n\
              Common causes: {}\n\n\
              --- test output (tail) ---\n{output}",
             crate::ISSUES_URL,

@@ -551,6 +551,15 @@ class Template:
             use_rstest_pytest()
         import pytest
 
+        # Parametrize ids as a spawned run gets them from `-p _fermut_reporter`
+        # (fermut writes it beside this script): ids recorded in the project
+        # resolve. Without it an id may not; that run exits 4 and the mutant
+        # runs normally.
+        try:
+            import _fermut_reporter  # noqa: F401
+        except ImportError:
+            pass
+
         template = self
 
         class Plugin:

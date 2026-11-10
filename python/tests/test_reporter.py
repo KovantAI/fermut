@@ -209,3 +209,65 @@ def test_collect_context_attributes_import_time_lines_then_restores(
     by_line = data.contexts_by_lineno(str(pytester.path / "proj.py"))
     assert by_line[1] == ["test_a.py|collect"]
     assert by_line[5] == [""]
+
+
+def _long_str_ids_or_skip():
+    from _pytest.python import IdMaker
+
+    if not hasattr(IdMaker, "_apply_long_str_strategy"):
+        pytest.skip("pytest < 9.2: parametrize ids don't depend on length")
+
+
+# One str parameter: the copy's root plus padding to `n` characters.
+PADDED_PARAM = """\
+import pytest
+
+
+@pytest.mark.parametrize("path", ["/copy/" + "x" * ({n} - 6)])
+def test_p(path):
+    pass
+"""
+
+
+def _collected(pytester, monkeypatch, project, n):
+    monkeypatch.setenv("PYTHONPATH", PLUGIN_DIR)
+    monkeypatch.setenv("FERMUT_MIRROR_ROOT", "/copy")
+    if project is None:
+        monkeypatch.delenv("FERMUT_PROJECT_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("FERMUT_PROJECT_ROOT", project)
+    pytester.makepyfile(test_a=PADDED_PARAM.format(n=n))
+    res = pytester.runpytest_subprocess(
+        "-p", "_fermut_reporter", "-p", "no:cacheprovider", "--collect-only", "-q"
+    )
+    return [line for line in res.outlines if line.startswith("test_a.py::")]
+
+
+def test_long_param_ids_follow_the_project_when_only_it_crosses_100(
+    pytester, monkeypatch
+):
+    # 90 characters here, 140 in the project: pytest names it there by
+    # argument and index, so it must here too.
+    _long_str_ids_or_skip()
+    project = "/" + "p" * 54
+    assert _collected(pytester, monkeypatch, project, 90) == [
+        "test_a.py::test_p[path0]"
+    ]
+
+
+def test_long_param_ids_keep_the_value_when_only_the_copy_crosses_100(
+    pytester, monkeypatch
+):
+    # 102 characters here, 99 in the project (`/p` for `/copy`): pytest ids
+    # it by value there, so it keeps the value (this copy's path, which
+    # fermut maps back to the project's).
+    _long_str_ids_or_skip()
+    value = "/copy/" + "x" * 96
+    assert _collected(pytester, monkeypatch, "/p", 102) == [
+        f"test_a.py::test_p[{value}]"
+    ]
+
+
+def test_long_param_ids_untouched_outside_fermuts_copy(pytester, monkeypatch):
+    _long_str_ids_or_skip()
+    assert _collected(pytester, monkeypatch, None, 110) == ["test_a.py::test_p[path0]"]

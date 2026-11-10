@@ -49,6 +49,16 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- An explicit `.` path (`fermut run .`, `fermut list .`, `fermut hom .`, MCP
+  `fermut_run` with `path: "."`) now mutates the current directory. It was
+  read as "no path" and fell back to the config's `source_root`, so
+  `exclude` globs written relative to the project root (`src/...`) never
+  matched and excluded files were mutated. Omitting the path still uses
+  `source_root`.
+- `exclude` globs match whether written relative to the project root
+  (`src/generated/**`) or to `source_root` (`generated/**`), whichever root
+  the run walks. Before, only the walk root counted, so project-root globs
+  silently excluded nothing under `source_root = "src"`.
 - The rstest runner precompiles and keys its cache on the `python` beside the
   `rstest` binary it runs, not on the interpreter behind a `pytest` on `PATH`.
 - On pytest 9.2+, mutants whose tests take a long string parameter holding

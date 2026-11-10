@@ -208,7 +208,7 @@ pub fn autofix(opts: AutofixOpts) -> Result<()> {
 /// through — autofix doesn't mutate, it just needs the runner + baseline.
 fn build_run_config(opts: &AutofixOpts) -> Result<crate::config::Config> {
     crate::cli::build_config::build_config(
-        opts.path.clone(),
+        Some(opts.path.clone()).filter(|p| p != Path::new(".")),
         crate::cli::RunConfigArgs {
             tests: opts.tests.clone(),
             timeout: opts.timeout,

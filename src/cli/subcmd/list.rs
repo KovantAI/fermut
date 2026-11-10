@@ -13,8 +13,9 @@ use crate::filter;
 /// `fermut list` argument struct (flattened into `Cmd::List`).
 #[derive(clap::Args, Debug)]
 pub(crate) struct ListArgs {
-    #[arg(default_value = ".")]
-    pub(crate) path: PathBuf,
+    /// Python source root. Omitted: the config's `source_root`, else the
+    /// current directory.
+    pub(crate) path: Option<PathBuf>,
 
     /// Skip the ty pre-filter — list every generated mutant, including ones
     /// ty would reject as type-invalid. Matches `run --no-ty-filter`.
@@ -82,7 +83,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("fermut.toml"), "jobs = \"many\"\n").unwrap();
         let err = run(ListArgs {
-            path: tmp.path().to_path_buf(),
+            path: Some(tmp.path().to_path_buf()),
             no_ty_filter: true,
             ruff_filter: false,
             tce: false,

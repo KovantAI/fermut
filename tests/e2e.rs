@@ -2469,7 +2469,10 @@ fn pr_comment_surfaces_env_and_gh_failures() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();
     let md = tmp.path().join("report.md");
-    std::fs::write(&md, "# report\n").unwrap();
+    // Larger than a pipe buffer (64 KiB): a failing `gh` that exits without
+    // reading stdin always breaks the pipe, so the EPIPE path is exercised
+    // deterministically instead of racing.
+    std::fs::write(&md, format!("# report\n{}", "x".repeat(256 * 1024))).unwrap();
     let bin = tmp.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     // `gh` that fails (stderr "nope") on any argv containing `fail_on`.

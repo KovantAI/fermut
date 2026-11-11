@@ -338,6 +338,13 @@ mod tests {
     }
 
     #[test]
+    fn opting_into_migrations_changes_the_hash() {
+        let mut on = cfg();
+        on.mutate_migrations = true;
+        assert_ne!(config_hash(&cfg()), config_hash(&on));
+    }
+
+    #[test]
     fn config_hash_is_stable_for_identical_config() {
         assert_eq!(config_hash(&cfg()), config_hash(&cfg()));
     }

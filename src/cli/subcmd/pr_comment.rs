@@ -157,29 +157,9 @@ fn patch_comment(repo: &str, comment_id: u64, body: &str) -> Result<()> {
     // to hundreds of KB on large repos — never hits the per-process
     // `ARG_MAX` ceiling (typically 2 MB on Linux, less in some CI envs).
     let payload = format!("{{\"body\":{}}}", json_quote(body));
-    let mut child = Command::new("gh")
-        .args([
-            "api",
-            "-X",
-            "PATCH",
-            &format!("repos/{repo}/issues/comments/{comment_id}"),
-            "--input",
-            "-",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("invoking `gh api PATCH`")?;
-    child
-        .stdin
-        .as_mut()
-        .ok_or_else(|| anyhow!("failed to open stdin for `gh api PATCH`"))?
-        .write_all(payload.as_bytes())
-        .context("writing payload to `gh api PATCH` stdin")?;
-    let out = child
-        .wait_with_output()
-        .context("waiting for `gh api PATCH`")?;
+    let path = format!("repos/{repo}/issues/comments/{comment_id}");
+    let args = ["api", "-X", "PATCH", &path, "--input", "-"];
+    let out = gh_with_stdin(&args, payload.as_bytes(), "gh api PATCH")?;
     if !out.status.success() {
         bail!(
             "patching comment {comment_id} failed: {}",
@@ -192,30 +172,9 @@ fn patch_comment(repo: &str, comment_id: u64, body: &str) -> Result<()> {
 fn create_comment(repo: &str, pr: u64, body: &str) -> Result<()> {
     // `--body-file -` reads the comment body from stdin, avoiding the
     // `ARG_MAX` limit that `--body <large-string>` would hit.
-    let mut child = Command::new("gh")
-        .args([
-            "pr",
-            "comment",
-            &pr.to_string(),
-            "--repo",
-            repo,
-            "--body-file",
-            "-",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("invoking `gh pr comment`")?;
-    child
-        .stdin
-        .as_mut()
-        .ok_or_else(|| anyhow!("failed to open stdin for `gh pr comment`"))?
-        .write_all(body.as_bytes())
-        .context("writing body to `gh pr comment` stdin")?;
-    let out = child
-        .wait_with_output()
-        .context("waiting for `gh pr comment`")?;
+    let pr = pr.to_string();
+    let args = ["pr", "comment", &pr, "--repo", repo, "--body-file", "-"];
+    let out = gh_with_stdin(&args, body.as_bytes(), "gh pr comment")?;
     if !out.status.success() {
         bail!(
             "creating comment on {repo}#{pr} failed: {}",
@@ -223,6 +182,31 @@ fn create_comment(repo: &str, pr: u64, body: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Run `gh` with `input` piped to stdin. A `gh` that exits before reading
+/// all of stdin (auth failure, bad args) closes the pipe: the write gets
+/// `BrokenPipe`, which is ignored so the caller reports `gh`'s own exit
+/// status and stderr instead of an opaque EPIPE.
+fn gh_with_stdin(args: &[&str], input: &[u8], what: &str) -> Result<std::process::Output> {
+    let mut child = Command::new("gh")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("invoking `{what}`"))?;
+    let stdin = child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| anyhow!("failed to open stdin for `{what}`"))?;
+    let wrote = stdin.write_all(input);
+    if !matches!(&wrote, Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe) {
+        wrote.with_context(|| format!("writing to `{what}` stdin"))?;
+    }
+    child
+        .wait_with_output()
+        .with_context(|| format!("waiting for `{what}`"))
 }
 
 /// Minimal JSON string literal escaper. Used for the `--jq` marker filter

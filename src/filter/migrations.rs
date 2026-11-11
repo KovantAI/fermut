@@ -95,6 +95,9 @@ mod tests {
         assert!(admits(&helper));
         assert!(admits(&loose));
         assert!(admits(&other_versions));
+        // No parent or file name: not a migration.
+        assert!(admits(Path::new("/")));
+        assert_eq!(off.name(), "migrations");
         assert!(MigrationsFilter::new(true)
             .admits(&mutant_in(&django))
             .unwrap());

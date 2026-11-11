@@ -31,7 +31,7 @@ Cache the database and its fingerprint sidecar across PR runs:
 
 ```yaml
       - name: restore coverage db
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             .coverage
@@ -44,7 +44,7 @@ Cache the database and its fingerprint sidecar across PR runs:
 
       - name: save coverage db
         if: always()
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             .coverage
@@ -88,12 +88,14 @@ fermut coverage --source src/pkg/payments --tests tests/
 ```
 
 For **specific scattered files**, drop to the manual pytest-cov path with
-one `--cov=` per changed file (fermut reads the resulting `.coverage`
-just the same):
+one `--cov=` per directory holding a changed file (fermut reads the
+resulting `.coverage` just the same). Pass directories, not `.py` paths:
+pytest-cov treats a `--cov` value that isn't a directory as an importable
+package name, so `--cov=src/pkg/x.py` measures nothing:
 
 ```sh
-CHANGED=$(git diff --name-only origin/main -- '*.py' | grep '^src/')
-pytest $(printf ' --cov=%s' $CHANGED) --cov-context=test
+CHANGED_DIRS=$(git diff --name-only origin/main -- '*.py' | grep '^src/' | xargs -n1 dirname | sort -u)
+pytest $(printf ' --cov=%s' $CHANGED_DIRS) --cov-context=test
 fermut run src/ --tests tests/ --diff-only origin/main --coverage .coverage
 ```
 
@@ -151,17 +153,18 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           python-version: "3.12"
       - run: |
           uv sync
+          uv pip install pytest-cov
           uv tool install fermut
       - run: uv tool run fermut coverage --source src --tests tests/
-      - uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             .coverage
@@ -174,7 +177,7 @@ PR gate — restore the baseline **read-only** (no save step), then let
 
 ```yaml
       - name: restore main coverage baseline
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             .coverage

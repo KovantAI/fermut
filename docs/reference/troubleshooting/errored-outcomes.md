@@ -10,8 +10,12 @@ state and leak across mutants.
 
 ## Fix
 
-1. Switch isolation mode to `copy` so each worker gets a fully
-   independent tree: `--isolation copy` or `isolation = "copy"`.
+1. If you set `--isolation hardlink`, drop it: hardlinked mirrors share
+   inodes with your tree, so a test that rewrites a file in place leaks
+   the change. The default `auto` (reflink, else copy) gives each worker
+   an independent tree, and fermut already
+   [puts back files a failed test moved, deleted or rewrote](../cli/run-isolation.md#tree-writes)
+   after every mutant.
 2. Audit fixtures that write to disk inside the project tree. Move
    writes to `tmp_path`.
 3. Check for module-level state that persists across `subprocess`

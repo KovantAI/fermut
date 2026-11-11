@@ -14,8 +14,10 @@ for GitLab CI and Jenkins.
 
 `fermut run` exits `1` when the gate fails (a survivor, or a score under
 `--fail-under`) and `3` when the run itself errors out (bad config, red
-baseline, git failure); see [exit codes](../reference/cli/run.md). `merge`
-and `trend --fail-on-regression` follow the same split. A shared CI template
+baseline, git failure); see [exit codes](../reference/cli/run.md).
+`trend --fail-on-regression` follows the same split. `merge` has no score
+gate: every merge failure, including a tripped `--max-errored`, exits `3`
+([merge](../reference/cli/merge.md)). A shared CI template
 can branch on the code directly. To keep the gate in its own step instead,
 run with `--no-fail` so a non-zero exit can only mean the run broke, then
 gate on the [JSON report](../reference/json.md):
@@ -107,7 +109,7 @@ fermut-shard:
     - pip install fermut pytest coverage pytest-cov -e .
     - fermut coverage
     - fermut run src/ --tests tests/ --shard "$CI_NODE_INDEX/$CI_NODE_TOTAL"
-        --no-fail --json "shard-$CI_NODE_INDEX.json"
+        --no-diff-only --no-fail --json "shard-$CI_NODE_INDEX.json"
   artifacts:
     paths: ["shard-*.json"]
 
@@ -168,7 +170,7 @@ pipeline {
         script {
           def scope = env.CHANGE_TARGET
             ? "--diff-only origin/${env.CHANGE_TARGET}"
-            : ''
+            : '--no-diff-only'   // full sweep even under a pr-gate fermut.toml
           if (env.CHANGE_TARGET) {
             sh "git fetch origin ${env.CHANGE_TARGET}:refs/remotes/origin/${env.CHANGE_TARGET}"
           }

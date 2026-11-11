@@ -1,14 +1,15 @@
 # `fermut show`
 
-Inspect mutants from a prior JSON report.
+Inspect mutants from a prior JSON report. `fermut results` is an alias
+(after `mutmut results`).
 
 ```sh
-fermut show <report.json> [SELECTOR] [--all]
+fermut show [REPORT] [SELECTOR] [--all]
 ```
 
 | Argument / flag       | Effect                                                                  |
 |-----------------------|-------------------------------------------------------------------------|
-| `<report.json>`       | Path to a JSON report produced by `fermut run --json …`.                |
+| `REPORT`              | Path to a JSON report from `fermut run`. Defaults to `.fermut/last.json`, which every `run` writes. |
 | `SELECTOR`            | 1-based outcome index, the full mutant id, or any substring of the printed `file:line@offset …` row. A partial selector matching more than one mutant (e.g. two operators at one offset) errors and lists candidates — pass the full id or the index to disambiguate. Omit for the summary list. |
 | `--all`               | Show every outcome, not just survivors.                                  |
 

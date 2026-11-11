@@ -19,6 +19,12 @@ jq '[.outcomes[] | select(.status == "skipped") | .filter] |
 This tells you which filter is doing the dropping (`ty`,
 `coverage`, `diff-only`, etc.). Adjust accordingly.
 
+If no `skipped` row explains it, the mutant was never generated.
+`exclude` globs, `ignore_patterns` and inline
+[`# fermut: ignore` markers](../operators/inline-ignore.md) drop sites at
+collection, before any filter runs, so they leave no row in the report. Check
+those settings for the file.
+
 ## See also
 
 - **[Filters guide](../../guides/filters.md)** — what each filter

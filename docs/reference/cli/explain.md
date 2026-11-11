@@ -15,7 +15,7 @@ fermut explain <report.json> <SELECTOR> [--format human|json] [--context N] \
 | `<SELECTOR>`              | 1-based outcome index, the full mutant id, or any substring of the printed `file:line@offset …` row. Same grammar as `fermut show`; an ambiguous partial selector errors and lists candidates. |
 | `--format human\|json`    | Output format. `human` (default) prints the terminal-laid-out view. `json` emits the structured `ExplainReport`. |
 | `--context N`             | Source lines to show on each side of the mutant line. Default `5`.                                              |
-| `--tests <dir>`           | Tests directory to grep for the enclosing symbol. `--tests` with no value uses `tests/`.                        |
+| `--tests <dir>`           | Tests directory to grep for the enclosing symbol. `--tests` with no value, or no flag at all, uses `tests/` when it exists. |
 | `--coverage <file>`       | Coverage data with per-test contexts — either coverage.py's native `.coverage` SQLite DB or a `coverage.json` export (the format is sniffed). When present, shows whether any test executed the mutant line. Without the flag, `.coverage` at the project root is auto-discovered; a bare `--coverage` means `coverage.json`. |
 | `--llm`                   | Append an LLM-generated prose explanation + killing test below the heuristic block. Requires `ANTHROPIC_API_KEY`. |
 | `--model M`               | Anthropic model id. Default `claude-sonnet-4-6` (applied by the handler when omitted on the CLI; clap itself has no default). |
@@ -38,8 +38,9 @@ fermut explain <report.json> <SELECTOR> [--format human|json] [--context N] \
 }
 ```
 
-`coverage`, `test_matches`, and `llm` are present only when their inputs
-are. The JSON shape is the contract for agent consumers — additions are
+`enclosing`, `coverage`, `test_matches`, and `llm` are present only when their
+inputs are. `status` is one of `killed`, `survived`, `timeout`, `skipped`,
+`error`, `equivalent` — note `timeout`, where the run report says `timed_out`. The JSON shape is the contract for agent consumers — additions are
 backwards-compatible; renames are not. See `VERSIONING.md`.
 
 The output stacks, top to bottom:

@@ -116,6 +116,9 @@ Apple M4 Max (14 cores, 36 GB), Python 3.13.13, pytest 9.2.0, fermut 0.7.0
 - **Different mutant sets.** The scored counts and scores aren't the
   same population. fermut's `minimal` profile and coverage filter pick
   which mutants to run differently from mutmut's operators.
+- The [full sweep](#full-fermut-sweep-coverage-on-cold) below shows
+  werkzeug at 71.9 on the same 7982 mutants: it is an earlier session
+  (2026-11-03), on an older `main`.
 
 Fixture notes: werkzeug pins `coverage==7.17.0` (7.17.1+ under
 `--cov-context=test` breaks `test_safe_join_windows_special`, which patches
@@ -149,9 +152,12 @@ whole suite still runs.
 
 - **healthchecks: mutmut is ~3× faster cold, fermut scores ~2.5× more
   mutants.** Per scored mutant the two are close (~0.14s vs ~0.12s).
-  Each of fermut's forks re-creates the Django test database, because
-  pytest-django sets it up in the first test, after the fork. That makes
-  it ~2s per mutant per worker, against tens of milliseconds on werkzeug.
+  In this run each of fermut's forks re-created the Django test database,
+  because pytest-django sets it up in the first test, after the fork:
+  ~2s per mutant per worker, against tens of milliseconds on werkzeug.
+  fermut now builds the test DB once in the schemata template
+  ([Django](../guides/frameworks.md#django)), which cut healthchecks to
+  0.5 s per mutant; the table above predates that and hasn't been re-run.
 - **Warm re-runs and sharding are where fermut pulls ahead**, as on
   werkzeug: under a second warm, and a quarter of the cold wall time on
   four runners.
@@ -170,7 +176,8 @@ that is also its project-root marker. mutmut also copies `CHANGELOG.md` and
 `search.db`, which the settings and search view read. flaskbb replaces
 its xdist `addopts`, and deselects `test_flaskbbdomain_translations` for
 both tools: it needs the compiled `*.mo` files, which `.gitignore` lists
-and fermut's mirror therefore drops.
+and fermut's mirror dropped at the time. The mirror now keeps gitignored
+files inside packages, so the deselect is no longer needed for fermut.
 
 ### Full fermut sweep (coverage-on cold)
 

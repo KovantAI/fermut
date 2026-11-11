@@ -157,6 +157,7 @@ if you hit one of these.
 | killed     | ✓               | Same patched bytes + same killing-test bytes → same outcome.                          |
 | survived   | ✓               | Same.                                                                                |
 | timed_out  | ✓               | Same.                                                                                |
+| equivalent | ✓               | Same.                                                                                |
 | skipped    | ✗               | Filter chain may differ between runs (different `--ops`, `--coverage`, etc.) — reusing a skip would be wrong. |
 | errored    | ✗               | Often transient (flaky import, missing env var).                                      |
 

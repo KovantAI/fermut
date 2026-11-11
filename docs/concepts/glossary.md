@@ -61,8 +61,8 @@ the source tree — see
 
 Composable stack of pre-flight checks every mutant runs through
 before pytest sees it. Order is cheap → expensive: experimental →
-parity → profile → operator → shard → sample → diff-only → since →
-coverage → ruff → ty → tce. Skipping a
+migrations → parity → profile → operator → shard → sample → diff-only →
+since → coverage → selection → ruff → ty → tce. Skipping a
 mutant via a filter is dramatically cheaper than running pytest
 against it. See
 [filter chain overview](mutation-testing.md#the-filter-chain).

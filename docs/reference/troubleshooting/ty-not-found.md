@@ -9,7 +9,8 @@ Caused by:
     `ty` not found in the project venv or on PATH
 ```
 
-or `fermut doctor` reports the `ty` check as `[fail]`.
+or `fermut doctor` reports the `ty` check as `[fail]` (with
+`FERMUT_TY_EMBEDDED=0`) or `[warn]` (embedded checker on).
 
 **Cause.** By default the ty pre-filter runs **in-process** (an
 embedded ty checker), and the `ty` binary is optional: a missing binary
@@ -22,8 +23,9 @@ happens when:
   `embedded ty checker unavailable; falling back to subprocess` and then
   needs the binary.
 
-`fermut doctor` always treats a missing binary as `[fail]`, even though
-an embedded-mode run works without it.
+`fermut doctor` reports a missing binary as `[warn]` while the embedded
+checker is on (the run works without it), and as `[fail]` only when
+`FERMUT_TY_EMBEDDED=0` forces the subprocess path.
 
 ## Fix
 

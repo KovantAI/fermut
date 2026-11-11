@@ -3,7 +3,7 @@
 Rank surviving mutants by which one to fix next.
 
 ```sh
-fermut next <REPORT> [flags...]
+fermut next [REPORT] [flags...]
 ```
 
 Reads the JSON report from `fermut run --json`, groups survivors into
@@ -12,7 +12,7 @@ Built for an agent picking its next target, so JSON is the default format.
 
 | Flag                   | Default | Effect                                                          |
 |------------------------|---------|-----------------------------------------------------------------|
-| `REPORT`               | —       | Path to a JSON report produced by `fermut run --json …`.         |
+| `REPORT`               | `.fermut/last.json` | Path to a JSON report from `fermut run`.          |
 | `--limit <N>`          | `1`     | Number of ranked survivors to emit. `1` is the single best target. |
 | `--all`                | off     | Emit every ranked survivor instead of `--limit`.                 |
 | `--max-tokens <N>`     | off     | Cap output at an estimated token budget. Emits the highest-ranked survivors that fit; drops the rest (count logged to stderr). Conflicts with `--limit` and `--all`. |
@@ -87,8 +87,8 @@ an unexecuted line and need a brand-new test, not just an assertion.
 ]
 ```
 
-- **`cluster_size`** — survivors sharing this `(file, operator)`,
-  representative included.
+- **`cluster_size`** — survivors sharing this `(file, operator)` and within
+  2 lines of a neighbour, representative included.
 - **`min_gain_pts`** — points the score climbs from killing the representative
   alone, plus the survivors it subsumes (`(1 + subsumed) / score_denominator`).
   The floor: one test, guaranteed kills.

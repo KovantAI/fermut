@@ -35,10 +35,10 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           python-version: "3.12"
       - run: |
@@ -47,13 +47,13 @@ jobs:
           uv tool install fermut
       - run: uv tool run fermut coverage --source src --tests tests/
       - name: restore nightly history (read-only)
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .fermut/history.jsonl
           key: fermut-history-main
           restore-keys: |
             fermut-history-main-
-      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .fermut/cache.json
           key: fermut-cache-${{ runner.os }}-${{ hashFiles('uv.lock', 'src/**/*.py', 'tests/**/*.py') }}
@@ -113,7 +113,7 @@ jobs:
           fermut run src/ --tests tests/ \
               --shard ${{ matrix.shard }}/4 \
               --json shard-${{ matrix.shard }}.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         if: always()  # shards with survivors exit 1; still upload
         with:
           name: shard-${{ matrix.shard }}
@@ -183,10 +183,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         with:
           python-version: "3.12"
       - run: |
@@ -198,7 +198,7 @@ jobs:
       # Verdict cache + smart-ordering history: without them every nightly
       # runs cold. Unchanged files are answered from cache.json.
       - name: restore fermut cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             .fermut/cache.json
@@ -208,12 +208,12 @@ jobs:
             fermut-nightly-cache-
 
       - name: restore fermut history
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .fermut/history.jsonl
           key: fermut-history-main
           restore-keys: |
-            fermut-history-
+            fermut-history-main-
 
       - name: full sweep (override pr-gate narrowing)
         run: |
@@ -229,21 +229,21 @@ jobs:
 
       - name: save fermut history
         if: always()
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: .fermut/history.jsonl
           key: fermut-history-main-${{ github.run_id }}
 
       - name: save fermut cache
         if: always()
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             .fermut/cache.json
             .fermut/kill-order.json
           key: fermut-nightly-cache-${{ github.run_id }}
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         if: always()
         with:
           name: fermut-nightly
@@ -320,7 +320,7 @@ and save it only from `main`:
 
 ```yaml
 - name: restore fermut history
-  uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+  uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
   with:
     path: .fermut/history.jsonl
     key: fermut-history-main
@@ -332,7 +332,7 @@ and save it only from `main`:
 
 - name: save fermut history
   if: always() && github.ref == 'refs/heads/main'
-  uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+  uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
   with:
     path: .fermut/history.jsonl
     key: fermut-history-main-${{ github.sha }}

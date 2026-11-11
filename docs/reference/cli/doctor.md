@@ -29,6 +29,7 @@ a preflight.
 | `ty`           | optional | `ty` binary. `run` uses the embedded checker, so a missing binary is `warn`; it is `fail` only with `FERMUT_TY_EMBEDDED=0`. |
 | `ruff`         | required | Only when `ruff_filter = true` in config.                                                         |
 | `gh`           | optional | Only needed for `fermut pr-comment`.                                                              |
+| `bytecode`     | warn     | Under 80% of the venv's site-packages modules have a `.pyc` — uncompiled deps recompile on every mutant spawn. Fix: `python -m compileall -q -j 0 <site-packages>`, and `UV_COMPILE_BYTECODE=1` for future uv installs. |
 | `hypothesis`   | warn     | Project depends on Hypothesis but no `hypothesis_seed` pinned — survivors flicker between runs.    |
 | `tests`        | required | When `tests = "…"` is wired: the path resolves to an existing directory.                          |
 | `legacy-artifacts` | warn | Detects leftover dirs from prior mutation tools (`mutants/`, `.mutmut-cache`, `cosmic-ray-data/`, `.cache/mutpy/`). `mutants/tests/` breaks pytest collection. |

@@ -91,6 +91,7 @@ Values of `filter` on a `skipped` outcome, in the order filters run:
 | `filter` | Skipped because |
 |---|---|
 | `experimental` | An experimental operator, without `--experimental`. |
+| `migrations` | A migration file (Django `migrations/0001_*.py`, Alembic `versions/*.py`), without `--mutate-migrations`. |
 | `parity` | A parity-only operator, without `--parity`. |
 | `profile` | The `--operators` profile (`minimal` by default) leaves it out. |
 | `operator` | `--ops` / `--skip-ops` excluded the operator. |
@@ -108,14 +109,14 @@ Values of `filter` on a `skipped` outcome, in the order filters run:
 
 | Field | Meaning |
 |---|---|
-| `id` | `<file>@<byte offset>:<operator>:<original>-><replacement>`, with `exp:` before the operator for an experimental one. Unique within a run. |
+| `id` | `<file>@<byte offset>:<operator>:<original>-><replacement>`, with `exp:` before the operator for an experimental one and `parity:` for a parity one. Unique within a run. |
 | `file` | Absolute path of the source file. |
-| `operator` | Operator name, as in `--ops`. See [Operators](operators/index.md). |
+| `operator` | Operator name in kebab case, without the `exp:` / `parity:` prefix the id carries (e.g. `numeric-type-swap`). See [Operators](operators/index.md). |
 | `range` | `[start, end]` byte offsets of the replaced text; `start` is the id's `@offset`. |
 | `original`, `replacement` | The replaced text and what replaced it: the operator token, not the whole expression. |
 | `line` | 1-based line of `range.start`. |
 | `stmt_line` | First line of the enclosing statement; differs from `line` on a continuation line. |
-| `site` | Present on compare and `and`/`or` mutants that the [operator profiles](operators/profiles.md) model. |
+| `site` | Present on compare and `and`/`or` mutants that the [operator profiles](operators/profiles.md) model: `start` (byte offset of the whole compare / boolean expression, shared by the site's mutants), `mask` (bitmask of the input regions where the mutant's truth differs from the original's), `minimal` (`true` when it is in the site's dominator set). |
 
 ## `fermut next`
 
@@ -143,7 +144,7 @@ many on stderr.
 | Field | Meaning |
 |---|---|
 | `mutant` | `id`, `file`, `line`, `operator`, `original`, `replacement`. |
-| `status` | The outcome's `status`. `filter` or `error` is added for a skipped or errored mutant. |
+| `status` | The outcome's status, except that a timed-out mutant reads `timeout` (not `timed_out`). `filter` or `error` is added for a skipped or errored mutant. |
 | `source_context` | `start_line`, `mutant_line`, and `lines`: the source around the mutant (`--context N` widens it). |
 | `enclosing` | `kind` (`def`, `class`, …) and `name` of the enclosing definition, when there is one. |
 | `hint` | Operator-specific advice. |
@@ -157,12 +158,12 @@ many on stderr.
 | Field | Meaning |
 |---|---|
 | `score`, `killed`, `survived`, `timed_out`, `timestamp` | The latest comparable run. |
-| `baseline_score`, `baseline_timestamp` | The run compared against (`--baseline N` runs back); `null` when there's none. |
-| `delta` | `score - baseline_score`; `null` without a baseline. |
+| `baseline_score`, `baseline_timestamp` | The run compared against (`--baseline N` runs back); omitted when there's none. |
+| `delta` | `score - baseline_score`; omitted without a baseline. |
 | `new_survivors` | Mutants that survive now but were killed in the baseline run. |
 | `newly_killed` | Mutants that survived in the baseline run and are killed now. |
 | `regressed` | `true` when the score dropped or a new survivor appeared: consider reverting the last change. |
-| `survivor_ids_compared` | `false` when either run predates survivor ids in history; the id lists are then empty and `regressed` reflects the score alone. |
+| `survivor_ids_compared` | Present only as `false`, when either run predates survivor ids in history; the id lists are then empty and `regressed` reflects the score alone. |
 
 ## `fermut baseline --format json`
 

@@ -81,7 +81,7 @@ Forms:
 | `# fermut: ignore[op-a, op-b]`         | Skip multiple                                  |
 
 Prefer the **narrowest** form. `# fermut: ignore[arith-op-swap]`
-keeps boundary-shift / compare-op-swap / etc. live on the same line;
+keeps boundary-shift / ror-equality / etc. live on the same line;
 the bare `# fermut: ignore` switches them all off and can hide real
 gaps that show up later.
 

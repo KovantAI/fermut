@@ -8,9 +8,11 @@ expect, where it lives in config.
 The order (cheap → expensive) is fixed:
 
 ```
-experimental → parity → profile → operator allow/deny → shard → sample → diff-only/since → coverage → ruff → ty → tce
+experimental → migrations → parity → profile → operator allow/deny → shard → sample → diff-only/since → coverage → selection → ruff → ty → tce
 ```
 
+`selection` only runs under `--select-tests` (the pytest plugin): it
+skips mutants that only tests outside the selection cover.
 `shard` only runs when `--shard i/n` is set (CI matrix split); it
 partitions the surviving mutants by id hash so each worker handles
 a disjoint slice. Paths excluded via `--exclude` / `exclude = [...]`
@@ -26,7 +28,7 @@ Allowlist + denylist for operators. `--skip-ops` wins over `--ops`.
 
 ```sh
 # Start narrow; widen as score climbs.
-fermut run src/ --ops arith-op-swap,compare-op-swap,boundary-shift
+fermut run src/ --ops arith-op-swap,boundary-shift,ror-equality,ror-const
 
 # Everything except a noisy operator.
 fermut run src/ --skip-ops number-shift
@@ -35,7 +37,7 @@ fermut run src/ --skip-ops number-shift
 Config:
 
 ```toml
-ops = ["arith-op-swap", "compare-op-swap", "boundary-shift"]
+ops = ["arith-op-swap", "boundary-shift", "ror-equality", "ror-const"]
 skip_ops = ["number-shift"]
 ```
 
@@ -45,8 +47,17 @@ Useful when:
   improve.
 - One operator generates high false-positive noise (e.g.
   `string-sentinel` on internal sentinel strings).
-- You're targeting a class of bug (auth → `compare-op-swap` +
-  `boundary-shift`).
+- You're targeting a class of bug (auth → `boundary-shift` +
+  `ror-equality` + `ror-const`).
+
+`--ops` applies on top of the [operator profile](../reference/operators/profiles.md).
+Under the default `minimal` profile, ordering compares (`<`, `<=`, …)
+emit only `boundary-shift`, `ror-equality` and `ror-const`, and `and` /
+`or` in a condition emit `bool-operand-drop` and `bool-const`;
+`compare-op-swap` and `bool-op-swap` fire only where the profile
+doesn't model the site (`==`, `is`, `in`, a boolean used as a value).
+An allowlist naming only the `classic` operators silently drops those
+dominators.
 
 See the **[operators catalogue](../reference/operators/index.md)** for
 every available name.
@@ -157,8 +168,12 @@ app they can be half the mutants. `--mutate-migrations` (or
 - Vendor / third-party trees checked into the source tree.
 - Integration test directories where mutation testing is too coarse.
 
-There is no file-level inline marker: `--exclude` is the only way to
-skip a whole file. (`# fermut: ignore` applies to its own line only.)
+To skip a whole file, `--exclude` is the usual tool; a
+`# fermut: ignore-start` with no matching `ignore-end` also runs to the
+end of the file. Inline markers also come in region forms
+(`ignore-start` / `ignore-end`, `ignore-block`), and the
+`ignore_patterns` config key drops every line matching a regex. See
+[inline ignore markers](../reference/operators/inline-ignore.md).
 
 ## `--coverage`
 
@@ -278,7 +293,12 @@ fermut run src/ --tests tests/ \
     --timeout 15
 ```
 
-This is what `fermut init --profile pr-gate` writes for you.
+This is what `fermut init --profile pr-gate` writes for you. Its
+`ops` list predates the `minimal` profile, so on an ordering compare
+it keeps only `boundary-shift`, and it drops `ror-equality`,
+`ror-const`, `bool-operand-drop` and `bool-const` everywhere. Add
+those four to `ops` (or delete the line) to keep the full minimal
+set.
 
 ## Where next
 

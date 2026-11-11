@@ -277,6 +277,11 @@ first; a future PR can graduate it.
   `Operator::name()`. It usually mirrors the variant, but not always
   (`RelationalToEquality` → `ror-equality`, `BoolOpToConst` →
   `bool-const`), so look it up there rather than deriving it.
+- The JSON report's `operator` field comes from serde's
+  `rename_all = "kebab-case"` on the variant, not from `name()`. When the
+  two differ, add `#[serde(rename = "...")]` with the `name()` string, as
+  `RelationalToEquality` and `BoolOpToConst` do, or the report won't match
+  the CLI name.
 - Experimental operator names are prefixed `exp:` and parity names
   `parity:` in their `name()` output (`exp:exception-class-swap`).
   `from_name` accepts them with or without the prefix.
@@ -287,6 +292,7 @@ first; a future PR can graduate it.
 - Add a one-line entry to `CHANGELOG.md` (when present) under
   "Added".
 - If the operator changes the JSON report shape (e.g. carries extra
-  metadata in the `mutant` object), bump the JSON schema doc in
-  `docs/reference/cli/index.md` and call it out as a breaking change in the
-  version bump.
+  metadata in the `mutant` object), document it in
+  `docs/reference/json.md`. A new optional field is fine in a patch
+  release; renaming, retyping or removing one is breaking (see the
+  [versioning policy](../policies/versioning.md)).

@@ -7,8 +7,8 @@ markers).
 | Operator             | Example                                                            |
 |----------------------|--------------------------------------------------------------------|
 | `arith-op-swap`      | `a + b` → `a - b`; bitwise `&` → `\|`, `<<` → `>>`                 |
-| `compare-op-swap`    | `a < b` → `a >= b` **and** `a > b` (ordering compares only under `--operators classic`; the default `minimal` profile replaces them, see [profiles](profiles.md)) (each direction emits both flipped + non-strict-flipped pairs); `==` ↔ `!=`, `is` ↔ `is not`, `in` ↔ `not in` |
-| `boundary-shift`     | `<` ↔ `<=`, `>` ↔ `>=` (fires alongside `compare-op-swap` — a single `<` produces 3 mutants total: `>`, `>=`, `<=`) |
+| `compare-op-swap`    | `==` ↔ `!=`, `is` ↔ `is not`, `in` ↔ `not in`. Ordering compares only under `--operators classic`: `<` → `>=` and `>`, `>` → `<=` and `<`, `<=` → `>=`, `>=` → `<=`; the default `minimal` profile replaces them, see [profiles](profiles.md) |
+| `boundary-shift`     | `<` ↔ `<=`, `>` ↔ `>=`. Under `minimal` a single `<` produces 3 mutants: `<=` (`boundary-shift`), `!=` (`ror-equality`), `False` (`ror-const`); under `classic`: `<=`, `>=`, `>` |
 | `bool-op-swap`       | `x and y` → `x or y` (where the value is used only as a condition, `minimal` replaces it with `bool-operand-drop` / `bool-const`) |
 | `unary-op-swap`      | `-x` → `+x`, `not x` → `x`, `~x` → `x`                             |
 | `aug-assign-swap`    | `x += y` → `x -= y`, `//=` → `/=`, `&=` → `\|=`                    |
@@ -24,7 +24,7 @@ markers).
 | `slice-bound-drop`   | `a[1:n]` → `a[:n]` and `a[1:]`                                     |
 | `slice-step-mutate`  | `a[::2]` ↔ `a[::1]` (and any non-`1` step collapses to `1`, e.g. `a[::3]` → `a[::1]`). Fires on any step expression, including variables — `a[::n]` → `a[::1]`. |
 | `assign-value-to-none` | `x = expr` → `x = None`                                          |
-| `none-to-value`      | `return None` → `return ""` (replaces a `None` literal with a non-`None` sentinel — flips `is None` / optional-default logic) |
+| `none-to-value`      | `return None` → `return ""` (replaces a `None` literal with a non-`None` sentinel — flips `is None` / optional-default logic; inside `is` / `is not` it emits `str()`, since `x is ""` is a `SyntaxWarning`) |
 | `number-to-zero`     | `n` → `0`                                                          |
 | `number-to-neg`      | `n` → `-n`                                                         |
 | `string-to-empty`    | `"hello"` → `""`                                                   |

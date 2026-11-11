@@ -26,8 +26,8 @@ An unclosed `ignore-start` runs to the end of the file; a stray
 [Configuration](../configuration.md) instead of a marker per line.
 
 Operator names match the CLI / config (`arith-op-swap`,
-`boundary-shift`, …); experimental ops accept the bare name or the
-`exp:` prefix (`zero-iteration-for-loop` or
+`boundary-shift`, …); experimental and parity ops accept the bare name or the
+`exp:` / `parity:` prefix (`zero-iteration-for-loop` or
 `exp:zero-iteration-for-loop`). Unknown names inside the brackets
 are dropped from the list; the marker still applies to any known
 names alongside them. If **every** name in the brackets is unknown,

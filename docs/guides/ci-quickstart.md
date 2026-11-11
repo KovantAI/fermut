@@ -15,9 +15,9 @@ is the fastest way to lose the team's trust in mutation testing.
 
 - [ ] Python project with a working `pytest` (or any pytest-compatible)
       test suite.
-- [ ] The suite runs under `coverage run -m pytest` without errors.
-      `pr-gate` uses per-test coverage selection and won't be useful
-      without it.
+- [ ] [`fermut coverage`](../reference/cli/coverage.md) (pytest-cov
+      with per-test contexts) runs the suite without errors. `pr-gate`
+      uses per-test coverage selection and won't be useful without it.
 - [ ] `git` history available on CI (`actions/checkout` with
       `fetch-depth: 0` — the generated workflow already sets this).
 - [ ] A package manager fermut can install through. The default GHA
@@ -115,16 +115,24 @@ uses it to post.
 
 ## First run — what to expect
 
-The first PR after wiring this up will produce one of four outcomes:
+The first PR after wiring up the packaged action from the TL;DR will
+produce one of four outcomes:
 
-- **No run at all.** The PR touched no `.py`, `pyproject.toml` or
-  `fermut.toml`, so the workflow didn't trigger.
-- **Green, comment with `Score: N/A`.** The diff had no mutable code.
-  The comment is still posted. Expected, not a failure.
+- **Skipped.** The PR changed no Python files, so the job passes without
+  running and the action's `skipped` output is `"true"`. No comment.
+- **Green, no comment.** The diff had no mutable code, so nothing was
+  scored (N/A). The action skips the PR comment when nothing was scored.
+  Expected, not a failure.
 - **Green, comment with score and zero survivors.** The happy path.
-- **Red, comment listing survivors.** Each survivor is one line with
-  its `path:line`, operator and the `original → replacement` edit. Run `fermut explain` locally on one for the full context, then
-  fix it or add a `# fermut: ignore[<op>]` marker.
+- **Warning, comment listing survivors.** Each survivor is one line with
+  its `path:line`, operator and the `original → replacement` edit. With
+  `blocking: "false"` a failing gate only warns; drop it and the job goes
+  red instead. Run `fermut explain` locally on one for the full context,
+  then fix it or add a `# fermut: ignore[<op>]` marker.
+
+The `--with-gha` workflow differs: its `paths:` filter doesn't trigger at
+all on a PR without `.py`, `pyproject.toml` or `fermut.toml` changes, and
+a failing gate is always red.
 
 If you get **`errored` outcomes** in the comment instead of
 killed/survived, your tests probably have side effects on the source

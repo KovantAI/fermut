@@ -27,11 +27,13 @@ is one `HistoryEntry`:
 | `git_sha`        | `string` \| null | Short git sha, if the working tree is a git repo.                                                 |
 | `git_branch`     | `string` \| null | Current branch name, if discoverable.                                                              |
 | `survivor_ids`   | `array<string>` \| null | IDs of mutants that survived this run. Stored inline so `fermut trend --diff` can compute new-survivor / newly-killed diffs without a sidecar file. |
+| `baseline`       | `bool`         | `true` on the entry written by [`fermut baseline`](../reference/cli/baseline.md), the trend's run zero. Omitted (false) on `run` entries. |
+| `partial`        | `bool`         | `true` when a `--max-time` budget expired before every mutant ran, so the score covers a timing-dependent subset. Trend and regression checks skip these. Omitted (false) otherwise. |
 
 The schema is additive: new fields are tagged `#[serde(default)]`,
 so older entries keep parsing and an older `fermut` reading a newer
 log skips entries it doesn't understand instead of misinterpreting
-them. Authoritative shape lives in `src/history.rs::HistoryEntry`.
+them. Authoritative shape lives in `src/history/entry.rs::HistoryEntry`.
 
 Disable with `--no-history` or `history = false` in `fermut.toml`.
 `fermut clean` **preserves** the history file even when it evicts
@@ -92,7 +94,7 @@ separate `main`-only `actions/cache/save` step.
 
 ```yaml
 - name: restore fermut history
-  uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+  uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
   with:
     path: .fermut/history.jsonl
     key: fermut-history-main
@@ -103,7 +105,7 @@ separate `main`-only `actions/cache/save` step.
 
 - name: save fermut history
   if: always() && github.ref == 'refs/heads/main'
-  uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+  uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
   with:
     path: .fermut/history.jsonl
     key: fermut-history-main-${{ github.sha }}

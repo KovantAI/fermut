@@ -1687,8 +1687,8 @@ mod tests {
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct ExplainArgs {
-    /// JSON report from `fermut run`. Defaults to `.fermut/last.json`, which
-    /// every `run` writes.
+    /// JSON report from `fermut run` (e.g. `.fermut/last.json`, which every
+    /// `run` writes).
     #[arg(required = true)]
     pub(crate) report: Option<std::path::PathBuf>,
 

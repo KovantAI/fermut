@@ -964,7 +964,7 @@ pub(crate) struct TrendArgs {
 
     /// Custom path to the history log. Defaults to `.fermut/history.jsonl`
     /// under the project root (nearest ancestor of `<path>` with
-    /// `pyproject.toml`/`setup.cfg`).
+    /// a project marker such as `pyproject.toml`, `setup.py` or `.git`).
     #[arg(long)]
     pub(crate) history_path: Option<std::path::PathBuf>,
 

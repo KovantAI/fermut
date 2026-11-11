@@ -15,8 +15,8 @@ to write a patch and want to know where it should live.
         candidate mutants (source patches)
                       │
                       ▼
-        filter chain  ◄── cheap → expensive: operator tiers, shard/sample,
-                      │     diff, coverage, ruff, ty, tce
+        filter chain  ◄── cheap → expensive: operator tiers, migrations,
+                      │     shard/sample, diff, coverage, selection, ruff, ty, tce
                       ▼
          test runner (pytest | rstest | unittest)  — parallel, isolated, timeout-bounded
                       │
@@ -35,7 +35,7 @@ both built from the same crate root. The module structure:
 | `config`      | Runtime `Config` struct, TOML schema, walk-up file loader.                            |
 | `mutator`     | AST visitor + operator catalog → `Mutant` candidates.                                  |
 | `emit`        | Splice a `Mutant`'s replacement bytes into the source range.                           |
-| `filter`      | `Filter` trait + composable filter chain (experimental, parity, profile, operator, shard, sample, diff-only, since, coverage, ruff, ty, tce). |
+| `filter`      | `Filter` trait + composable filter chain (experimental, migrations, parity, profile, operator, shard, sample, diff-only, since, coverage, selection, ruff, ty, tce). |
 | `runner`      | `Runner` trait + pytest (also drives rstest) / unittest implementations. Worker mirror management. |
 | `engine`      | Top-level orchestration: parse → mutate → filter → run → report. Parallel via rayon. |
 | `cache`       | `(mutant.id, ast_hash(file), scope) → outcome` cache, plus killer-scoped lookup for kills. |
@@ -64,9 +64,9 @@ both built from the same crate root. The module structure:
 
 3. **Build filter chain.** `filter::build_chain(cfg)` returns a
    `Vec<Box<dyn Filter>>` in cost order (`CANONICAL_ORDER` in
-   `src/filter/mod.rs`): experimental → parity → profile → operator
-   allow/deny → shard → sample → diff-only → since → coverage → ruff →
-   ty → tce. Each filter exposes `name()` and `admits(&Mutant) ->
+   `src/filter/mod.rs`): experimental → migrations → parity → profile →
+   operator allow/deny → shard → sample → diff-only → since → coverage →
+   selection (`--select-tests`) → ruff → ty → tce. Each filter exposes `name()` and `admits(&Mutant) ->
    Result<bool>`; the first `false` names the rejecting filter.
 
 4. **Hash files once.** Every unique source file gets one structural
@@ -115,8 +115,9 @@ both built from the same crate root. The module structure:
   injected JSONL reporter when the pytest plugin is on. The same runner
   drives `rstest` (`runner = "rstest"`), swapping only the executable.
 - `SchemaRunner` — the default for the pytest runner on Unix
-  (`--no-schemata` turns it off; see [Schemata](../cli/run-schemata.md)).
-  Wraps a `PytestRunner`. `Runner::prepare` hands it the mutants the cheap
+  (`--no-schemata` turns it off; see [Schemata](../cli/run-schemata.md)),
+  and opt-in (`--schemata`) for `rstest` and `unittest`. Wraps the
+  `PytestRunner` (or `UnittestRunner`) it would otherwise use. `Runner::prepare` hands it the mutants the cheap
   filters admit; it builds one schema mirror from them (every function-body
   mutant behind an active-index switch, via the embedded
   `python/pytest_fermut/_fermut_schema.py`), then starts one template — a
@@ -127,7 +128,7 @@ both built from the same crate root. The module structure:
   inside a test, only stands once the tests that child ran pass in a fork
   with no mutant active (cached per test list); unconfirmed ones, timeouts
   before any test began, crashed children and everything outside the schema
-  go to the wrapped `PytestRunner`. A stable ~5% sample of survivors and
+  go to the wrapped runner. A stable ~5% sample of survivors and
   timeouts is re-run there too (`AUDIT_RATE`), and that verdict is reported.
 - `UnittestRunner` — invokes `<python> -m unittest discover -s
   <mirrored-tests> -p <unittest_pattern>` (default `test*.py`).

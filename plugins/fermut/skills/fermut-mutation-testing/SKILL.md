@@ -47,9 +47,10 @@ Fix what `doctor` reports. The usual ones:
 
 fermut finds the project's Python by itself: `--python`, else an active
 `$VIRTUAL_ENV`, else a `.venv` near the project. If the venv lives somewhere
-else, pass `--python /abs/path/to/venv` to `doctor`, `coverage`, `baseline`
-and `run`. Never prepend it to `PATH` instead; some sandboxes forbid that,
-and `--python` works everywhere.
+else, pass `--python /abs/path/to/venv` to `coverage` and `run`; `doctor`
+and `baseline` have no `--python` flag, so prefix them with
+`VIRTUAL_ENV=/abs/path/to/venv`. Never prepend the venv to `PATH` instead;
+some sandboxes forbid that.
 
 Run commands from the project root.
 

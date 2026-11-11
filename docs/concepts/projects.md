@@ -123,8 +123,8 @@ unusual.
 ## Project size and the auto profile
 
 `fermut init` counts the `.py` files under the source root and
-classifies the project as **Small** (< 50 files), **Medium**
-(50–500), or **Large** (> 500). The classification feeds the
+classifies the project as **Small** (≤ 50 files), **Medium**
+(51–500), or **Large** (> 500). The classification feeds the
 default profile choice when you don't pass `--profile` explicitly.
 See **[Configuration](configuration.md#profiles)** for the profile
 catalogue.

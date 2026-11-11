@@ -43,7 +43,8 @@ here and prints them.
 ## 3. Filter chain
 
 Cheap checks run first, so the expensive ones see as few mutants as
-possible. In order: operator selection (experimental, parity, the
+possible. In order: operator selection (experimental, the default
+`migrations` skip, parity, the
 [operator profile](../reference/operators/profiles.md), `--ops` /
 `--skip-ops`), `--shard`, `--sample`, `--diff-only` / `--since`, then
 **coverage** (no test executes the line), `--select-tests`, the optional
@@ -52,8 +53,9 @@ and the optional bytecode check (`--tce`). A dropped mutant is reported as
 `skipped` with the filter's name, and never counts toward the score
 ([JSON output → filter values](../reference/json.md#outcomes)).
 
-On a typical run most mutants stop here. On pyjwt, 4,525 of 6,475 were
-skipped; the coverage and `ty` filters alone removed about 1,400.
+On a typical run most mutants stop here. On pyjwt, only 1,730 of 6,475
+generated mutants were scored
+([benchmarks](../reference/benchmarks.md)); the rest were skipped.
 
 ## 4. Cache
 

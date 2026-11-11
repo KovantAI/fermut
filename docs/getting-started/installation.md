@@ -245,10 +245,10 @@ want to regenerate it):
 
 ```sh
 cargo run --release -- list examples/sample/src
-# expect 45 mutants across 4 operator types — the sample's fermut.toml
+# expect 39 mutants across 4 operator types — the sample's fermut.toml
 # restricts the operator set (`ops = [...]`) to keep the demo focused
 cargo run --release -- list examples/sample/src --experimental
-# still 45: the experimental operators aren't in the sample's whitelist,
+# still 39: the experimental operators aren't in the sample's whitelist,
 # so --experimental adds nothing here. Delete the `ops`/`skip_ops` keys
 # from examples/sample/fermut.toml to exercise the full catalogue.
 ```

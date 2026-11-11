@@ -6,7 +6,7 @@ calling the Anthropic Messages API. Reads the same JSON report as
 for style mimicry), then emits or appends a complete `def test_…():`.
 
 ```sh
-fermut suggest <report.json> [SELECTOR] [--all-survivors] [--format human|json] \
+fermut suggest [REPORT] [SELECTOR] [--all-survivors] [--format human|json] \
     [--out PATH] [--apply] [--parallel N] \
     [--tests <dir>] [--context N] [--sample-count K] \
     [--model M] [--no-cache] [--cache-path PATH]
@@ -14,7 +14,7 @@ fermut suggest <report.json> [SELECTOR] [--all-survivors] [--format human|json] 
 
 | Argument / flag         | Effect                                                                                                                |
 |-------------------------|-----------------------------------------------------------------------------------------------------------------------|
-| `<report.json>`         | Path to a JSON report produced by `fermut run --json …`.                                                              |
+| `REPORT`                | Path to a JSON report from `fermut run`. Defaults to `.fermut/last.json`, which every `run` writes.                   |
 | `[SELECTOR]`            | 1-based outcome index or substring of mutant id. Omit when `--all-survivors` is set.                                  |
 | `--all-survivors`       | Generate tests for every survived / timed-out outcome in the report.                                                  |
 | `--format human\|json`  | Output format. `human` (default) prints code blocks + progress logs. `json` emits the structured `SuggestReport`.      |

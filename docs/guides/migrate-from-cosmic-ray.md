@@ -105,12 +105,12 @@ Side-by-side:
     ```toml
     # pyproject.toml
     [tool.fermut]
-    source_root = "src"
-    timeout = 60
+    source_root = "src/"
     runner = "pytest"
     pytest_args = ["-x", "-q"]
+    timeout = 60
     isolation = "copy"
-    exclude = ["migrations/**"]
+    exclude = ["migrations/*"]
     ```
 
 ## CLI
@@ -139,8 +139,8 @@ markers print. Rough mapping for the operators with a direct analogue:
 | cosmic-ray operator family                              | fermut operator        |
 |---------------------------------------------------------|------------------------|
 | `core/ReplaceBinaryOperator_*`                          | `arith-op-swap`        |
-| `core/ReplaceComparisonOperator_*`                      | `compare-op-swap` + `boundary-shift` |
-| `core/ReplaceBooleanOperator_*`                         | `bool-op-swap`         |
+| `core/ReplaceComparisonOperator_*`                      | `boundary-shift` + `ror-equality` + `ror-const` for ordering compares under the default `minimal` [profile](../reference/operators/profiles.md) (`compare-op-swap` + `boundary-shift` under `--operators classic`); `compare-op-swap` for `==`, `is`, `in` |
+| `core/ReplaceBooleanOperator_*`                         | `bool-operand-drop` + `bool-const` in a condition under `minimal`; `bool-op-swap` otherwise |
 | `core/ReplaceUnaryOperator_*`                           | `unary-op-swap`        |
 | `core/ReplaceTrueWithFalse` / `ReplaceFalseWithTrue`    | `constant-replace`     |
 | `core/NumberReplacer`                                   | `number-shift` + `number-to-zero` |

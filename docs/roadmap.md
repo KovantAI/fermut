@@ -116,18 +116,12 @@ return is highest today.
 
 ## Reports and UX
 
-- **HTML report with collapsible per-file mutant diff.** Today's
-  HTML is a flat list. Next: collapse-by-file tree, per-mutant
-  inline diff, filterable by operator / status.
+- **Filterable HTML report.** The HTML report already groups mutants
+  in collapsible per-file sections with a per-mutant diff. Next:
+  filter by operator / status.
 - **Resource budgets reports.** Wall-clock + RSS + pytest
   invocation count per filter stage, per operator. Tells you
   *where* the budget went, not just the total.
-
-## Long-term
-
-- **Rust self-mutation.** Mutate fermut's own Rust source as part
-  of CI. Eats own dogfood, catches regressions in operator
-  emission logic.
 
 ## Time-boxed runs (`--max-time`) — shipped
 
@@ -141,6 +135,12 @@ for CI trust. See **[run reference](reference/cli/run.md#time-boxed-runs-max-tim
 Follow-up still open: coverage-call-graph ordering would sharpen the
 "highest-value first" signal (historical-killer ordering has shipped as
 part of smart test ordering, above).
+
+## Rust self-mutation — shipped
+
+fermut mutates its own Rust source with `cargo mutants`: every PR runs
+it on the diff (`--in-diff`), and a weekly sharded sweep covers the whole
+crate. See [CONTRIBUTING](https://github.com/KovantAI/fermut/blob/main/CONTRIBUTING.md).
 
 ## Public PyPI — shipped
 

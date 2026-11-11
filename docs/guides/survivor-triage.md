@@ -15,9 +15,9 @@ unkillable cases, see
 
 The detail view from `fermut show` is the unit of triage:
 
-`fermut show report.json` lists every outcome with its index; pass an
-index (or a mutant id) to see one. The index counts all outcomes, not
-just survivors:
+`fermut show report.json` lists survived and timed-out outcomes with
+their index (`--all` lists every outcome); pass an index (or a mutant
+id) to see one. The index counts all outcomes, not just survivors:
 
 ```sh
 fermut show report.json        # [  28] SURVIVED  /home/me/proj/src/auth/session.py:42@1187 [boundary-shift] `>` → `>=`
@@ -137,8 +137,10 @@ name hints at which:
 |-----------------------|--------------------------------------------------------------------|
 | `boundary-shift`      | Missing input at the boundary (`<` vs `<=`).                       |
 | `arith-op-swap`       | Weak assertion that wouldn't catch an arithmetic substitution.    |
-| `compare-op-swap`     | Missing test for the inverse comparison case.                     |
-| `bool-op-swap`        | Test only exercises the "true" path of an `and` / `or`.            |
+| `ror-equality` / `ror-const` | Comparison result never pinned on one side (`<` → `!=`, or the whole compare → `True`/`False`). |
+| `compare-op-swap`     | Missing test for the inverse comparison case (`==`, `is`, `in`; ordering compares under `classic`). |
+| `bool-operand-drop` / `bool-const` | Test only exercises one path of an `and` / `or` condition.  |
+| `bool-op-swap`        | Same, for an `and` / `or` used as a value (or any `and` / `or` under `classic`). |
 | `return-value-to-none` | Function's return value is never asserted against.                |
 | `constant-replace`    | Magic number not pinned by a test.                                |
 
@@ -164,8 +166,8 @@ suite genuinely doesn't exercise.
 
 ## Surviving outcomes that aren't `SURVIVED`
 
-`fermut show` reports three outcomes you might mistake for "needs a
-test":
+`fermut show --all` reports three outcomes you might mistake for "needs a
+test" (plain `fermut show` lists only `SURVIVED` and `TIMEOUT`):
 
 - **`ERROR`** — pytest crashed before producing a verdict. Not a
   test gap; usually a test-suite side effect on the source tree.

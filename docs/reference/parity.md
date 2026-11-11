@@ -35,10 +35,10 @@ its full catalogue, including the opt-in parity operators, is in play):
 
 | Repo            | mutmut mutations | catalogue holes | hole % | detection-loss |
 |-----------------|-----------------:|----------------:|-------:|---------------:|
-| pyjwt 2.13.0    |            1,575 |              33 |     2% |              0 |
-| markupsafe 3.0.3|              247 |              12 |     4% |              0 |
-| typer 0.26.7    |            1,832 |              15 |     0% |              0 |
-| more-itertools 10.5.0 | 3,512        |              19 |     0% |              0 |
+| pyjwt 2.13.0    |            1,575 |              33 |   2.1% |              0 |
+| markupsafe 3.0.3|              247 |              12 |   4.9% |              0 |
+| typer 0.26.7    |            1,832 |              15 |   0.8% |              0 |
+| more-itertools 10.5.0 | 3,512        |              19 |   0.5% |              0 |
 | **total**       |        **7,166** |          **79** | **1.1%** |          **0** |
 
 The 79 residual holes are **edge cases, not categories**:

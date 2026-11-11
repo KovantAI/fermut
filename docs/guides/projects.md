@@ -12,7 +12,8 @@ The short version:
    honest baseline.
 2. Pick a profile that matches *one* scenario you want to support
    first; usually `pr-gate`.
-3. Wire it into CI behind `continue-on-error`. Watch the score for a week.
+3. Wire it into CI in warn-only mode (`blocking: "false"`). Watch the score
+   for a week.
 4. Flip the gate on for new code only (`--diff-only`).
 5. Slowly tighten: add operators, add the nightly variant, raise the
    target.
@@ -70,7 +71,8 @@ optimize for different starting points:
 
     Defaults: diff-restricted to the merge base, per-test coverage
     selection, narrow op set (arith / compare / boundary / return-value-to-none),
-    `--timeout 15`, Hypothesis seed pinned.
+    `--timeout 15`, Hypothesis seed pinned when Hypothesis is a declared
+    dependency.
 
     Best first profile for most teams. Doesn't surface existing
     survivors — only flags new ones the PR introduces.
@@ -116,7 +118,7 @@ optimize for different starting points:
     ```
 
     Defaults: every stable op (no experimental noise), Hypothesis seed
-    pinned, `--timeout 30`.
+    pinned when Hypothesis is a declared dependency, `--timeout 30`.
 
 You can switch profiles at any time:
 
@@ -167,8 +169,8 @@ After the gate has been stable for a few weeks, you can start tightening:
   `--experimental` for exception/loop ops.
 - **Add a nightly variant.** Same `fermut.toml`, different CLI flags.
   See the [nightly override pattern](../reference/cli/run.md#cli-overrides-vs-config).
-- **Lower `--timeout`** as you optimize slow tests — most teams can
-  drop from 30s to 15s as they tune.
+- **Lower `--timeout`** as you optimize slow tests — profiles that write
+  30s (`library`) can usually drop to 15s, `pr-gate`'s default, as you tune.
 - **Track the trend.** `fermut trend` shows whether the score is moving
   in the right direction over time, which is more useful than chasing
   a fixed target. The PR comment's `--trend` block surfaces the delta

@@ -37,12 +37,13 @@ the repo.
 ## Precedence
 
 ```
-CLI args   >   config file   >   built-in defaults
+CLI args   >   env vars   >   config file   >   built-in defaults
 ```
 
-Each list (`ops`, `skip_ops`, `pytest_args`) merges independently — a
-CLI `--ops` overrides the file's `ops` but leaves the file's
-`skip_ops` intact, and vice versa.
+Each list (`ops`, `skip_ops`) merges independently — a CLI `--ops`
+overrides the file's `ops` but leaves the file's `skip_ops` intact,
+and vice versa. `pytest_args` and `exclude` don't merge: any CLI value
+replaces the file's whole list.
 
 This makes the common CI pattern clean: keep `fermut.toml` tuned to
 your primary profile (usually `pr-gate`), then have *other* CI jobs

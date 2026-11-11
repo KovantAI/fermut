@@ -25,7 +25,7 @@ The bundled sample lives in `examples/sample/`. Smoke-test mutation generation:
 
 ```sh
 cargo run -- list examples/sample/src
-# 45 mutants across the bundled calculator.py
+# 39 mutants across the bundled calculator.py
 ```
 
 ## Required toolchain
@@ -48,7 +48,7 @@ src/
 ├── config/            runtime Config + TOML schema + walk-up loader
 ├── mutator/           AST visitor + operator catalog
 ├── emit.rs            byte-range source splice
-├── filter/            Filter trait + 11 implementations
+├── filter/            Filter trait + 13 implementations
 ├── runner/            Runner trait + pytest (also drives rstest) + unittest
 ├── engine.rs          parallel orchestration
 ├── cache.rs           per-mutant result cache

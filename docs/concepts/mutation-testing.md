@@ -81,18 +81,20 @@ Output (paths shortened; fermut prints absolute paths):
 
 ```
 SURVIVED  src/age.py:2@47 [boundary-shift] `>=` → `>`
+SURVIVED  src/age.py:2@43 [ror-const] `age >= 18` → `True`
 SURVIVED  src/age.py:2@50 [number-shift] `18` → `19`
 SURVIVED  src/age.py:2@50 [number-shift] `18` → `17`
 SURVIVED  src/age.py:2@50 [number-to-zero] `18` → `0`
 SURVIVED  src/age.py:2@50 [number-to-neg] `18` → `-18`
 
-13 mutants — killed: 1, survived: 5, timeout: 0, skipped: 7 (profile 5, experimental 1, ty 1), equivalent: 0, errored: 0  | score: 16.7%
+13 mutants — killed: 1, survived: 6, timeout: 0, skipped: 6 (profile 4, experimental 1, ty 1), equivalent: 0, errored: 0  | score: 14.3%
 ```
 
-Thirteen mutants were generated from one line; seven were filtered
-before any test ran (profile-gated and experimental operators, plus
-one the ty filter proved type-invalid). Of the six that ran, only
-`compare-op-swap` (`>=` → `<=`) was killed.
+Thirteen mutants were generated from one line; six were filtered
+before any test ran (operators the default `minimal` profile doesn't
+need, an experimental operator, plus one the ty filter proved
+type-invalid). Of the seven that ran, only `ror-equality` (`>=` → `==`)
+was killed.
 
 Inspect the boundary survivor (`4` is its index in the report):
 
@@ -118,7 +120,8 @@ mutation : `>=` → `>`
 What the survivors mean: the test only checks `age=25`, where every
 mutant still returns `True`. It never exercises the boundary — neither
 `18` (where `>=` and `>` disagree, and where `18 → 19` flips) nor `17`
-(where `18 → 17`, `18 → 0` and `18 → -18` all wrongly return `True`).
+(where `18 → 17`, `18 → 0`, `18 → -18` and the constant `True` all
+wrongly return `True`).
 That's the gap.
 
 Write the killing test:
@@ -132,11 +135,11 @@ def test_boundary():
 Re-run:
 
 ```
-13 mutants — killed: 6, survived: 0, timeout: 0, skipped: 7 (profile 5, experimental 1, ty 1), equivalent: 0, errored: 0  | score: 100.0%
+13 mutants — killed: 7, survived: 0, timeout: 0, skipped: 6 (profile 4, experimental 1, ty 1), equivalent: 0, errored: 0  | score: 100.0%
 ```
 
 The new test pins behaviour on both sides of the boundary. Each
-surviving mutant moves the boundary, so at least one of the two assertions fails on the mutated
+surviving mutant moves or removes the boundary, so at least one of the two assertions fails on the mutated
 code and the mutant is killed. Mutation testing **named** the gap
 (boundary not exercised); two assertions closed it.
 
@@ -228,6 +231,7 @@ Order is cheap → expensive:
 | Stage          | Cost        | What it does                                                       |
 |----------------|-------------|--------------------------------------------------------------------|
 | experimental   | in-memory   | Drop experimental ops unless `--experimental`                      |
+| migrations     | in-memory   | Drop mutants in Django/Alembic migration files unless `--mutate-migrations` |
 | parity         | in-memory   | Drop parity-tier ops unless `--parity`                             |
 | profile        | in-memory   | Drop profile-gated ops the active profile doesn't enable           |
 | operator       | in-memory   | Apply `--ops` allowlist and `--skip-ops` denylist                  |
@@ -235,6 +239,7 @@ Order is cheap → expensive:
 | sample         | in-memory   | Random subset via `--sample <ratio>`                               |
 | diff-only / since | git read | Drop mutants on lines unchanged since the base: the merge-base for `--diff-only`, the given commit or date for `--since` (working tree, so uncommitted edits count) |
 | coverage       | file read   | Drop mutants on lines no test executes (per-test contexts required) |
+| selection      | in-memory   | Under `--select-tests`, drop mutants covered only by tests outside the selection |
 | ruff           | subprocess  | Drop mutants that introduce new ruff lints (optional)              |
 | ty             | in-process  | Drop mutants that introduce new ty diagnostics (embedded checker; subprocess fallback) |
 | tce            | subprocess  | Drop mutants whose bytecode is identical to the original (optional, `--tce`) |

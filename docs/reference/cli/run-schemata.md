@@ -26,8 +26,9 @@ Unix, fermut instead pays it once:
 Whole runs were 1.5–3.9× faster on most suites tested, and the template costs
 one copy of your loaded suite in memory (88–728 MB on the suites tested).
 Timeouts become the main cost, since forking can't make a hanging mutant
-finish sooner, so schemata turns on a
-[timeout budget](run.md#timeout-budgets) of `3 × baseline + 5 s` unless you set one.
+finish sooner. The default
+[timeout budget](run.md#timeout-budgets) of `3 × baseline + 5 s` (on for
+every run, schemata or not) keeps that cost bounded.
 
 ## What runs the normal way
 

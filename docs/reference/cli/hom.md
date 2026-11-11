@@ -20,7 +20,7 @@ filter flags, and the rest). The flags below are specific to `hom`:
 
 | Flag                 | Effect                                                                                     |
 |----------------------|--------------------------------------------------------------------------------------------|
-| `[PATH]`             | Source root. Use the same one as the `--record-kill-sets` run. Default `.`.                |
+| `[PATH]`             | Source root. Use the same one as the `--record-kill-sets` run. Default: config `source_root`, else `.`. |
 | `--kill-sets <PATH>` | JSONL from `fermut run --record-kill-sets` (required).                                      |
 | `--out <PATH>`       | Where to write the per-pair results as JSONL. Default `hom-results.jsonl`.                  |
 | `--max-pairs <N>`    | Maximum number of candidate pairs to run, highest kill overlap first. Default `2000`. The summary reports how many pairs were dropped. |

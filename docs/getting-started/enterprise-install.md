@@ -134,7 +134,7 @@ A Linux container with Python, your project's dependencies, `pytest`,
 - Start every team non-blocking and diff-scoped, then gate; see
   [Rolling out to a team](../guides/projects.md).
 - Teams on `unittest` work, but slower: [schemata](../reference/cli/run-schemata.md)
-  is pytest-only, and the `unittest` runner runs the full suite for each
-  mutant regardless of coverage ([caching](../concepts/caching.md)).
+  is on by default only for pytest (opt-in for `unittest`), and the `unittest`
+  runner runs the full suite for each mutant regardless of coverage ([caching](../concepts/caching.md)).
 - Dashboards should read the [JSON report](../reference/json.md), never
   stdout, and ignore fields they don't know.

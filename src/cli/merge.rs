@@ -390,7 +390,7 @@ mod tests {
             entry.fermut_version.as_deref(),
             Some(env!("CARGO_PKG_VERSION"))
         );
-        // Passed through (merge can't derive it).
+        // An explicit hash is passed through.
         assert_eq!(entry.config_hash.as_deref(), Some("deadbeef"));
         // Counts are the merged full-universe totals, not one shard's.
         assert_eq!(entry.killed, 2);
@@ -827,9 +827,9 @@ pub(crate) struct MergeArgs {
     #[arg(long, value_name = "PATH")]
     pub(crate) history: Option<std::path::PathBuf>,
 
-    /// `config_hash` to stamp into the `--history` entry. Merge can't derive
-    /// it (the run config lives in the shard jobs), so pass the value the
-    /// shards recorded, e.g. `$(jq -r .config_hash shard-1-entry.json)`.
+    /// `config_hash` to stamp into the `--history` entry. Defaults to the hash
+    /// the shard reports share; pass it only for shards that predate it, e.g.
+    /// `$(jq -r .config_hash shard-1-entry.json)`.
     #[arg(long, value_name = "HEX")]
     pub(crate) config_hash: Option<String>,
 

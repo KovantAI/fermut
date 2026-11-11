@@ -55,7 +55,7 @@ uv tool install fermut
 cargo install --git https://github.com/KovantAI/fermut --locked
 ```
 
-Full prereqs (Python ≥ 3.10, pytest, coverage, pytest-cov, ty) and
+Full prereqs (Python ≥ 3.10, pytest, coverage, pytest-cov; `ty` is embedded) and
 venv layout in **[Installation](getting-started/installation.md)**.
 
 ## Why fermut over mutmut or cosmic-ray?

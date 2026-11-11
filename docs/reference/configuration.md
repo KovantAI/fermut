@@ -77,7 +77,7 @@ TOML primitives: `string`, `bool`, `int`, `float`, `array<string>`.
 | `kill_order_path`  | `path`          | `<project root>/.fermut/kill-order.json`        | Location of the advisory smart-ordering sidecar. Relative paths resolve against the config file's directory. Advisory — losing or relocating it only costs a slow run. |
 | `max_time`         | `int`           | unset (whole catalogue)                         | Wall-clock ceiling (seconds) on the testing phase. Mutants are evaluated highest-value first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` and excluded from the score. Bounds the testing phase only — not baseline, generation, or the `ty` pre-filter. CLI `--max-time` overrides. See [Time-boxed runs](cli/run.md#time-boxed-runs-max-time). |
 | `timeout_factor`   | `float`         | `3.0` (`0` = flat `timeout`)                    | Per-mutant timeout of `min(timeout, timeout_factor × baseline wall + 5 s)`. At least 2, or 0 to turn it off. Needs the baseline run, or with it skipped `--baseline-secs` / `FERMUT_BASELINE_SECS` (which `pytest --fermut` sets). CLI `--timeout-factor` overrides. See [Timeout budgets](cli/run.md#timeout-budgets). |
-| `max_memory`       | `string`        | auto                                            | Per-mutant memory cap, e.g. `"4G"`, `"512M"`; `"0"` = off. Unset = 4 × the baseline's peak memory, at least 2 GiB. Linux, macOS and Windows. CLI `--max-memory` / `--no-max-memory` override. See [Memory cap](cli/run.md#memory-cap). |
+| `max_memory`       | `string`        | auto                                            | Per-mutant memory cap, e.g. `"4G"`, `"512M"`; `"0"` = off. Unset = 4 × the baseline's peak memory, at least 2 GiB; off when no baseline ran. Linux, macOS and Windows. CLI `--max-memory` / `--no-max-memory` override. See [Memory cap](cli/run.md#memory-cap). |
 
 ## Examples
 
@@ -178,6 +178,7 @@ elided):
     runner = "pytest"
     ty_filter = true
     timeout = 30
+    coverage = ".coverage"  # only when coverage is detected in the project
     experimental = false
     hypothesis_seed = 12345   # only when Hypothesis is a dependency
     ```

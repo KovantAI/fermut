@@ -8,7 +8,7 @@ fermut run [PATH] [flags...]
 
 | Flag                        | Default                          | Effect                                                              |
 |-----------------------------|----------------------------------|---------------------------------------------------------------------|
-| `PATH`                      | `.`                              | Python source root.                                                 |
+| `PATH`                      | config `source_root`, else `.`   | Python source root.                                                 |
 | `--tests <dir>`             | `<PATH>/tests`                   | Test directory.                                                     |
 | `--jobs <n>`                | num CPUs                         | Parallel workers (one mutant per worker at a time).                  |
 | `--timeout <s>`             | `30`                             | Per-mutant test timeout.                                            |
@@ -18,7 +18,7 @@ fermut run [PATH] [flags...]
 | `--hypothesis-seed <N>`     | none                             | Pin Hypothesis seed across mutants. Ignored (with a warning) when the test interpreter can't import `hypothesis`, since pytest would reject the flag. See [mutation testing concepts](../../concepts/mutation-testing.md#vocabulary). |
 | `--pytest-arg <ARG>`        | none, repeatable                 | Forward arbitrary args to pytest.                                   |
 | `--no-cache`                | cache on                         | Disable the result cache.                                           |
-| `--cache-path <p>`          | `<project-root>/.fermut/cache.json`     | Custom cache file location. Project root = nearest `pyproject.toml`/`setup.cfg` ancestor. |
+| `--cache-path <p>`          | `<project-root>/.fermut/cache.json`     | Custom cache file location. Project root = nearest ancestor holding `pyproject.toml`, `setup.cfg`, `pytest.ini`, `.pytest.ini`, `tox.ini`, `setup.py` or `.git`; failing that, the nearest ancestor with a `.fermut/` directory. |
 | `--cache-audit-rate <r>`    | `0.05`                           | Fraction (0–1) of killer-keyed cache hits re-verified against their killing test (at least one when any occur). |
 | `--no-cache-audit`          | audit on                         | Skip the killer-hit audit (same as `--cache-audit-rate 0`).         |
 | `--no-history`              | history on                       | Skip the run-history log append for this run.                        |
@@ -62,7 +62,7 @@ fermut run [PATH] [flags...]
 | `--no-schemata`             | schemata on                      | Start a fresh pytest per mutant instead of forking one that already imported and collected the suite. Schemata is on by default with the pytest runner on Unix. See [Schemata](run-schemata.md). |
 | `--schemata`                | on where supported               | Require schemata: an unsupported runner or platform is an error instead of a silent normal run. Overrides `schemata = false`. |
 | `--max-time <SECS>`         | off (whole catalogue)            | Wall-clock ceiling on the testing phase. Evaluates highest-value mutants first (covered before uncovered); once the deadline passes, untested mutants are recorded as `skipped`/`time-budget` (excluded from the score) instead of run — in-flight mutants finish. A predictable time ceiling for PR gates. See [Time-boxed runs](#time-boxed-runs-max-time). |
-| `--timeout-factor <F>`      | `3` (`0` = flat `--timeout`)     | Size each mutant's timeout from the baseline run: `min(--timeout, F × baseline wall + 5 s)`, so hung mutants stop in seconds. Needs the baseline; without one, the flat `--timeout` applies. See [Timeout budgets](#timeout-budgets). |
+| `--timeout-factor <F>`      | `3` (`0` = flat `--timeout`)     | Size each mutant's timeout from the baseline run: `min(--timeout, F × baseline wall + 5 s)`, so hung mutants stop in seconds. `F` must be at least `2` (or `0`). Needs the baseline; without one, the flat `--timeout` applies. See [Timeout budgets](#timeout-budgets). |
 | `--no-timeout-factor`       | off                              | Use the flat `--timeout` for every mutant. Same as `--timeout-factor 0` / `timeout_factor = 0`. |
 | `--max-memory <SIZE>`       | auto                             | Cap each mutant's memory, e.g. `512M`, `4G`; `0` for off. A mutant past it fails with `MemoryError` and counts as killed. See [Memory cap](#memory-cap). |
 | `--no-max-memory`           | off                              | Don't cap mutant memory. Same as `max_memory = "0"`. |

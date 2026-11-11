@@ -5,7 +5,7 @@ it**. Where [`suggest`](suggest.md) writes a test and trusts it, `autofix`
 closes the loop — only proven tests land.
 
 ```sh
-fermut autofix <REPORT> [TARGET] [flags...]
+fermut autofix [REPORT] [TARGET] [flags...]
 ```
 
 For each surviving mutant, autofix:
@@ -23,7 +23,7 @@ For each surviving mutant, autofix:
 
 | Flag                  | Default              | Effect                                                          |
 |-----------------------|----------------------|-----------------------------------------------------------------|
-| `REPORT`              | —                    | JSON report from `fermut run --json`.                            |
+| `REPORT`              | `.fermut/last.json`  | JSON report from `fermut run`.                                   |
 | `TARGET`              | —                    | Mutant selector: 1-based index or id substring. Omit with `--all-survivors`. |
 | `--all-survivors`     | off                  | Fix every survivor / timeout in the report.                      |
 | `--path <dir>`        | `.`                  | Source root for the runner + baseline.                           |

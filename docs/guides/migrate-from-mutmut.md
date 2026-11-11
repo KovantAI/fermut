@@ -192,8 +192,8 @@ A side-by-side example:
     ```toml
     # pyproject.toml
     [tool.fermut]
-    source_root = "src"
-    tests = "tests"
+    source_root = "src/"
+    tests = "tests/"
     runner = "pytest"        # 1.x only: translated from `runner`; 3.x emits no runner key
     pytest_args = ["-x", "-q"]
     coverage = ".coverage"   # or "coverage.json" for a manual JSON export
@@ -225,9 +225,9 @@ and inline markers. Mapping for the operators with a direct analogue:
 | mutmut concept                  | fermut operator      |
 |---------------------------------|----------------------|
 | arithmetic operator swap        | `arith-op-swap`      |
-| comparison operator swap        | `compare-op-swap`    |
+| comparison operator swap        | `compare-op-swap` (`==`, `is`, `in`); ordering compares get `boundary-shift`, `ror-equality`, `ror-const` under the default `minimal` [profile](../reference/operators/profiles.md), `compare-op-swap` under `--operators classic` |
 | boundary `< / <=` swap          | `boundary-shift`     |
-| boolean `and / or` swap         | `bool-op-swap`       |
+| boolean `and / or` swap         | `bool-op-swap` (an `and` / `or` used as a value); in a condition, `bool-operand-drop` + `bool-const` under `minimal` |
 | unary operator swap             | `unary-op-swap`      |
 | augmented-assignment swap       | `aug-assign-swap`    |
 | constant replacement            | `constant-replace`   |
@@ -294,8 +294,8 @@ After:
 # pyproject.toml — after  (drop the [tool.mutmut] block; `fermut migrate
 # mutmut --pyproject` writes the [tool.fermut] block for you)
 [tool.fermut]
-source_root = "src"
-tests = "tests"
+source_root = "src/"
+tests = "tests/"
 runner = "pytest"
 pytest_args = ["-x", "-q"]
 coverage = ".coverage"
@@ -336,10 +336,12 @@ Three things decide how long it takes:
 - **Shard it.** `--shard i/n` splits mutants across a CI matrix with no
   coordination, and `fermut merge` combines the reports and refuses a
   missing shard. mutmut has no equivalent.
-- **Start with the default operators.** fermut's defaults already cover
-  ~99% of the lines mutmut mutates ([parity](../reference/parity.md)).
-  `--experimental` adds operators mutmut doesn't have, so it's more work,
-  not a like-for-like replacement. Add it once the default run is green.
+- **Start with the default operators.** With `--parity` (the opt-in
+  `parity:*` operators on top of the defaults) fermut covers ~99% of the
+  lines mutmut mutates ([parity](../reference/parity.md)); the defaults
+  alone cover somewhat less. `--experimental` adds operators mutmut
+  doesn't have, so it's more work, not a like-for-like replacement. Add
+  it once the default run is green.
 
 Scores aren't comparable across tools (different operators, and fermut
 skips uncovered lines instead of counting them as survivors), so reset

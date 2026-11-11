@@ -21,8 +21,10 @@ reach several GB on a large suite.
 `coverage = "…"` (config), which wins over a `.coverage` auto-discovered at
 the project root. `--no-coverage` turns selection off entirely.
 [`fermut coverage`](coverage.md) builds `.coverage` and refreshes it
-incrementally when tests change; it runs
-`pytest --cov=src --cov-context=test`, which you can run yourself instead.
+incrementally when tests change. You can run
+`pytest --cov=<source> --cov-context=test` yourself instead, but that loses the
+import-time contexts `fermut coverage` records and forces a full rebuild next
+time (see [`fermut coverage`](coverage.md)).
 
 **Freshness guard.** A stale auto-discovered `.coverage` is refreshed
 incrementally if `fermut coverage` wrote it, else ignored (the run proceeds
@@ -54,7 +56,8 @@ root are dropped with a warning.
 - A selection that covers none of the code under mutation is an error: every
   mutant would be skipped and the run would pass while testing nothing.
 - It needs coverage data. Without it fermut warns, ignores the file and runs
-  every mutant against the whole suite.
+  every mutant against the whole suite. Combining it with `--no-coverage` is a
+  usage error (exit 2).
 
 ## Tests pytest deselects
 

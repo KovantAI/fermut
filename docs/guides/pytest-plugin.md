@@ -14,7 +14,7 @@ adds a section to the end of the report:
 
 ```text
 ==================================== fermut ====================================
-mutation score 87.8%: 36 killed, 5 survived, 0 timed out, 0 errored (155 skipped)
+mutation score 92.3%: 36 killed, 3 survived, 0 timed out, 0 errored (155 skipped)
 surviving mutants:
   src/calculator.py:14 [boundary-shift] `<=` -> `<`
   src/calculator.py:53 [boundary-shift] `<` -> `<=`

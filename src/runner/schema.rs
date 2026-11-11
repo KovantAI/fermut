@@ -35,6 +35,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 
+use super::pristine::Pristine;
 use super::pytest::{run_timing, PytestRunner};
 use super::pytest_result::RunResult;
 use super::python::pytest_interpreter;
@@ -285,6 +286,12 @@ struct Schema {
     template: OnceLock<Option<Template>>,
     template_starting: AtomicBool,
     template_dead: AtomicBool,
+    /// The mirror as built, and whether a run has left it changed since.
+    /// Forks share it, so a test that fails midway through moving a file
+    /// leaves it moved for every later fork: from then on mutants run
+    /// normally, in per-worker mirrors that are put back after each run.
+    pristine: Pristine,
+    drifted: AtomicBool,
 }
 
 #[derive(Deserialize)]
@@ -418,6 +425,8 @@ impl<R: SchemaInner> SchemaRunner<R> {
         let mut serve_args = vec![script.into()];
         serve_args.extend(self.inner.serve_args(&mirror, &schema_json));
         Ok(Schema {
+            pristine: Pristine::take(&mirror.root),
+            drifted: AtomicBool::new(false),
             mirror: Arc::new(mirror),
             index,
             serve_args,
@@ -440,7 +449,7 @@ impl<R: SchemaInner> SchemaRunner<R> {
         let schema = self.schema()?;
         let idx = *schema.index.get(&mutant.id)?;
         let ids = self.inner.selection(mutant, only);
-        if schema.verified.failed() {
+        if schema.verified.failed() || schema.drifted.load(Ordering::Relaxed) {
             return None;
         }
         with_template(schema, |template| {
@@ -465,7 +474,7 @@ impl<R: SchemaInner> SchemaRunner<R> {
             let mut served = template.request(idx, ids.as_deref(), all, self.inner.timeout())?;
             // A kill or a hang must be the mutant's doing.
             if served.status.is_some_and(|s| self.inner.killed(s)) || hung_in_a_test(&served) {
-                served.unconfirmed = !self.confirm(template, &served.ran);
+                served.unconfirmed = drifted(schema) || !self.confirm(template, &served.ran);
             }
             Ok(Some(served))
         })
@@ -689,6 +698,32 @@ fn usable(served: &Served) -> bool {
 /// Timed out (the child was killed) while running a test.
 fn hung_in_a_test(served: &Served) -> bool {
     served.status.is_none() && served.error.is_none() && served.result.unfinished.is_some()
+}
+
+/// Whether the shared mirror has drifted from its build (see
+/// [`Schema::pristine`]); checked after each kill or hang, since a test that
+/// fails midway is what skips its cleanup.
+fn drifted(schema: &Schema) -> bool {
+    if schema.drifted.load(Ordering::Relaxed) {
+        return true;
+    }
+    let drift = schema.pristine.drift();
+    if drift.is_empty() {
+        return false;
+    }
+    if !schema.drifted.swap(true, Ordering::Relaxed) {
+        let shown: Vec<_> = drift
+            .iter()
+            .take(5)
+            .map(|p| p.display().to_string())
+            .collect();
+        warn!(
+            "--schemata: tests changed files inside the project tree and didn't put them back \
+             ({}); forks share one copy of it, so the remaining mutants run normally",
+            shown.join(", ")
+        );
+    }
+    true
 }
 
 fn warn_unconfirmed(ran: &[String]) {
@@ -1249,6 +1284,8 @@ mod tests {
             super::super::build_mirror(&dir.join("tests"), crate::config::IsolationMode::Copy)
                 .unwrap();
         Schema {
+            pristine: Pristine::take(&mirror.root),
+            drifted: AtomicBool::new(false),
             mirror: Arc::new(mirror),
             index: HashMap::new(),
             serve_args: vec!["-c".into(), format!("{FAKE}{script}").into()],

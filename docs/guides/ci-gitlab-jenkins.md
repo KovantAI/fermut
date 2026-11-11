@@ -28,14 +28,15 @@ python - <<'EOF'                                              # non-zero = gate 
 import json, sys
 s = json.load(open("report.json"))["summary"]
 if s["scored"] == 0:
-    sys.exit(0)                      # nothing to score: N/A, not a failure
+    sys.exit(1 if s["errored"] else 0)  # all errored = fail; nothing to score = N/A
 print(f"mutation score {s['mutation_score']}% over {s['scored']} mutants")
 sys.exit(1 if s["mutation_score"] < 80 else 0)
 EOF
 ```
 
 Read `scored` before `mutation_score`: with nothing scored the score is a
-placeholder `100.0`. Both scripts below use this split.
+placeholder `100.0`, and a run where every mutant errored must still fail
+(fermut's own gate does the same). Both scripts below use this split.
 
 ## GitLab CI
 

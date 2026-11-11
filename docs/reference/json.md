@@ -121,15 +121,15 @@ Values of `filter` on a `skipped` outcome, in the order filters run:
 ## `fermut next`
 
 A JSON array, best target first. Each entry is one cluster: a representative
-survivor and the other survivors in the same `(file, operator)`.
+survivor and the other survivors in the same `(file, operator)` within 2 lines of each other.
 
 | Field | Meaning |
 |---|---|
 | `rank` | 1 = write this test first. |
-| `id`, `file`, `line`, `operator`, `original`, `replacement` | The representative survivor, as in the run report. |
+| `id`, `file`, `line`, `operator`, `original`, `replacement` | The representative survivor, as in the run report, except `operator` keeps the `exp:` / `parity:` prefix (as `explain` does). |
 | `cluster_size` | Survivors in the cluster, the representative included. |
 | `ease` | `high`, `medium` or `low`: how directly a test can observe this operator's change. |
-| `min_gain_pts` | Score points gained by killing the representative alone. |
+| `min_gain_pts` | Score points gained by killing the representative alone, counting the survivors it subsumes (they die with it). |
 | `max_gain_pts` | Score points gained if one test kills the whole cluster. |
 | `hint` | How to kill this operator's mutants. |
 | `sibling_ids` | The cluster's other survivors. A test for the representative often kills these too. |
@@ -178,7 +178,7 @@ run, read by `trend`, `score` and `dashboard`.
 |---|---|
 | `v` | Entry schema version. |
 | `timestamp` | When the run finished (RFC 3339). |
-| `mutation_score`, `killed`, `survived`, `timed_out`, `skipped`, `errored`, `equivalent`, `total` | As in the run summary. |
+| `mutation_score`, `killed`, `survived`, `timed_out`, `skipped`, `errored`, `equivalent`, `total` | As in the run summary, except `total` excludes `equivalent` and `mutation_score` is not rounded. |
 | `duration_ms` | Wall time of the run. |
 | `config_hash` | As in the run report. Runs are compared only with runs of the same hash and `fermut_version`. |
 | `fermut_version`, `git_sha`, `git_branch` | Where the run came from, when known. |

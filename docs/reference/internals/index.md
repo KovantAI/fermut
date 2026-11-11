@@ -66,7 +66,8 @@ both built from the same crate root. The module structure:
    `Vec<Box<dyn Filter>>` in cost order (`CANONICAL_ORDER` in
    `src/filter/mod.rs`): experimental → migrations → parity → profile →
    operator allow/deny → shard → sample → diff-only → since → coverage →
-   selection (`--select-tests`) → ruff → ty → tce. Each filter exposes `name()` and `admits(&Mutant) ->
+   ruff → ty → tce. With `--select-tests`, `build_chain` also pushes
+   `selection` right after coverage; it has no `CANONICAL_ORDER` entry. Each filter exposes `name()` and `admits(&Mutant) ->
    Result<bool>`; the first `false` names the rejecting filter.
 
 4. **Hash files once.** Every unique source file gets one structural
@@ -170,7 +171,7 @@ mutants into its schema.
 A rejected mutant becomes `Skipped { filter: name() }`. Adding a filter
 is one struct + one `chain.push` in `filter::build_chain`, at its cost
 position, plus its name in `CANONICAL_ORDER` (the chain-order tests
-enforce it). Tests live next to the filter implementation;
+enforce it; `selection` is the one exception). Tests live next to the filter implementation;
 the engine tests are coarse end-to-end.
 
 ## Cache

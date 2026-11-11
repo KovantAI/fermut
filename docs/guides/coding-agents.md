@@ -31,14 +31,13 @@ seconds in steady state.
 
 **2. Run fermut, write JSON** — `--diff-only HEAD` scopes mutants to
 lines edited since the last commit; cache reuses verdicts for everything
-else. (`--diff-only HEAD` behaves like `--since HEAD` but also overrides a
-`diff_only = "main"` key from a `pr-gate` config; `--since` would collide
-with that key and error out.)
+else. (A CLI `--diff-only HEAD` or `--since HEAD` replaces a
+`diff_only = "main"` key from a `pr-gate` config; only a config that sets
+both `diff_only` and `since` is rejected.)
 
 ```sh
 fermut run src/ --tests tests/ \
     --diff-only HEAD \
-    --coverage .coverage \
     --json .fermut/last.json \
     --history-path .fermut/agent-history.jsonl --quiet
 ```
@@ -131,6 +130,10 @@ Key invariants:
    every mutant runs the whole suite and uncovered lines count as
    survivors: on pyjwt, one edited function turned a 38 s run into 311 s
    and nearly doubled the survivors. Never commit the coverage file.
+   Both behaviours apply only to the auto-discovered `.coverage` at the
+   project root: a path passed with `--coverage` (or the `coverage`
+   config key) is used as-is, with only a `looks stale` warning. Leave
+   it unset in the agent loop.
 
 ## Cache strategy
 
@@ -394,7 +397,7 @@ history = true
 hypothesis_seed = 12345
 
 # Narrow ops to start. The agent can widen as the score climbs.
-ops = ["arith-op-swap", "compare-op-swap", "boundary-shift", "return-value-to-none"]
+ops = ["arith-op-swap", "compare-op-swap", "boundary-shift", "ror-equality", "ror-const", "bool-op-swap", "bool-operand-drop", "bool-const", "return-value-to-none"]
 
 # ty filter drops type-invalid mutants before they cost a pytest run.
 ty_filter = true
@@ -410,6 +413,6 @@ timeout = 15
 
 Use `fermut init --profile pr-gate` to get a config close to this — then
 hand-edit. Note `pr-gate` also writes `diff_only = "main"`: pass
-`--diff-only <ref>` to re-scope a run, `--no-diff-only` for a full sweep.
-`--since` on top of that key is rejected (`--diff-only` and `--since` are
-mutually exclusive).
+`--diff-only <ref>` or `--since <ref>` to re-scope a run (either CLI flag
+replaces the key), `--no-diff-only` for a full sweep. Passing both flags
+together, or setting both `diff_only` and `since` in config, is rejected.

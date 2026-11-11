@@ -26,7 +26,7 @@ For each surviving mutant, autofix:
 | `REPORT`              | `.fermut/last.json`  | JSON report from `fermut run`.                                   |
 | `TARGET`              | —                    | Mutant selector: 1-based index or id substring. Omit with `--all-survivors`. |
 | `--all-survivors`     | off                  | Fix every survivor / timeout in the report.                      |
-| `--path <dir>`        | `.`                  | Source root for the runner + baseline.                           |
+| `--path <dir>`        | config `source_root`, else `.` | Source root for the runner + baseline.                 |
 | `--tests <dir>`       | configured           | Tests dir: mined for the apply target and mirrored by the verifier. |
 | `--python <PATH>`     | auto-discover        | Interpreter or virtualenv the verifier runs pytest with (`<python> -m pytest`). Same discovery as [`fermut run`](run.md#python-interpreter). |
 | `--out <file>`        | inferred             | Write generated tests to this file instead of the inferred one. **Must live inside the tests tree** or the verifier won't see it. |

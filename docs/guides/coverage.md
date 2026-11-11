@@ -256,10 +256,11 @@ pytest --cov=src --cov-context=test && \
   fermut run src/ --tests tests/ --coverage coverage.json
 ```
 
-A stale `.coverage` (or `coverage.json`) — including an auto-discovered
-one — silently narrows the test set and wrongly skips mutants on lines
-your new tests exercise. Always refresh before a mutation run that
-follows a test change.
+An explicitly passed `.coverage` (or `coverage.json`) that is stale is
+still used, with a warning, and can wrongly skip mutants on lines your
+new tests exercise. Always refresh before a mutation run that follows a
+test change. (A stale auto-discovered file is refreshed or ignored; see
+[Freshness guard](#freshness-guard).)
 
 ## CI: combining coverage + diff-only
 
@@ -302,9 +303,10 @@ authoritative baseline on `main` that every PR restores read-only
   context will see the right lines — but only if coverage is
   collected *in-process*. Subprocess tests need extra setup.
 - **Stale coverage file.** A mutant on a line your fresh test
-  exercises will be wrongly skipped if the `.coverage` (or
-  `coverage.json`) predates the test — an auto-discovered stale
-  database bites the same way. Re-generate.
+  exercises will be wrongly skipped if an explicitly passed `.coverage`
+  (or `coverage.json`) predates the test; fermut warns but still uses
+  it. Re-generate. (Auto-discovered files are refreshed or ignored; see
+  [Freshness guard](#freshness-guard).)
 
 ## Where next
 

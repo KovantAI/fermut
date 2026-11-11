@@ -47,8 +47,8 @@ Their full numbers are in the
 
 - **Test database.** pytest-django builds the test DB in a session fixture.
   Under schemata, fermut builds an in-memory SQLite test DB once in the
-  template, and every fork gets its own copy. healthchecks: 0.5 s per
-  mutant instead of 1.5 s, 0 diffs on 9341 mutants.
+  template, and every fork gets its own copy. healthchecks: 839 s instead
+  of 1249 s spawning, 0 diffs on 9341 mutants.
 - **File SQLite, Postgres, MySQL.** Each child builds its own test DB. Each
   worker gets its own DB name (pytest-django's `TOX_PARALLEL_ENV` suffix),
   so `--jobs > 1` doesn't share one database. Expect about a second per
@@ -170,7 +170,7 @@ project uses Hypothesis without a pinned seed.
 fermut already runs one mutant per CPU, so xdist inside each mutant's run
 adds processes and doesn't make the run faster. With `-n 4` in typer's
 `addopts`, both modes gave the same verdicts as without it, and the wall
-time barely changed (198 s vs 221 s for schemata). One mutant did differ: an
+time barely changed (schemata: 198 s with `-n 4`, 221 s without). One mutant did differ: an
 equivalent mutant whose surviving test run takes about 30 s timed out
 serially and finished under xdist.
 
@@ -201,7 +201,8 @@ fermut snapshots each mirror when it builds it and, after every mutant,
 puts back files that were moved, deleted, rewritten or added, warning once
 with the paths ([details](../reference/cli/run-isolation.md#tree-writes)).
 On aiofiles, whose `test_rename` moves `tests/resources/test_file1.txt`
-away and back, run-to-run diffs dropped from 128 to 18.
+away and back, run-to-run diffs between spawn runs dropped from 112–176
+to 18 (see [pytest-asyncio](#pytest-asyncio)).
 
 Under schemata all forks share one mirror, which can't be put back while
 other forks run. Once a kill leaves it changed, the rest of the mutants

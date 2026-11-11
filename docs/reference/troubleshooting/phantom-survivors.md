@@ -10,9 +10,10 @@ the file by hand and re-run pytest, the test fails.
 - Hypothesis happened to generate a passing input on this run.
   `hypothesis_seed = 12345` (or any fixed value) fixes it.
 - The coverage database is stale and missed a test that exercises
-  the line. A stale `.coverage` — including one fermut auto-discovered
-  at the project root — silently narrows the test set (the same holds
-  for a legacy `coverage.json` export). Re-generate.
+  the line. A stale `.coverage` (or legacy `coverage.json`) you passed
+  with `--coverage` or `coverage = "…"` is still used, with a warning;
+  an auto-discovered one is refreshed or ignored instead (see
+  [Freshness guard](../../guides/coverage.md#freshness-guard)). Re-generate.
 
 ## Fix
 

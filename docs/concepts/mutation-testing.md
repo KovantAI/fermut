@@ -77,7 +77,7 @@ Run fermut:
 fermut run src/ --tests tests/ --json report.json
 ```
 
-Output (paths shortened; fermut prints absolute paths):
+Output (`fermut run` prints paths as you passed them; `fermut show` prints absolute paths):
 
 ```
 SURVIVED  src/age.py:2@47 [boundary-shift] `>=` → `>`
@@ -194,7 +194,8 @@ A few things to know about the number:
 - **100% is rarely achievable.** Some mutants are *equivalent* — they
   produce code that behaves identically to the original even though
   the source looks different (e.g. `x + 0` → `x - 0`). Equivalent mutants
-  are noise; they reduce the achievable ceiling.
+  are noise; they reduce the achievable ceiling. fermut drops only the
+  bytecode-identical ones automatically; `x + 0`-style ones stay survivors.
 - **The right target depends on your domain.** Auth/financial code
   benefits from ≥ 95%. A glue layer that mostly forwards calls might
   plateau at 70% because most of its lines are trivial passthroughs that
@@ -214,7 +215,7 @@ Quick-reference table. Full alphabetical lookup in
 | [Mutant](glossary.md#mutant)       | One specific application of an operator to one specific source location.                                   |
 | [Survived](glossary.md#survived)     | The mutant changed observable behavior, but the test suite passed anyway. **What you want fewer of.**     |
 | [Killed](glossary.md#killed)       | The mutant changed behavior, and the test suite caught it. **What you want more of.**                     |
-| [Timed out](glossary.md#timed-out)    | pytest ran longer than `--timeout` against this mutant. Usually means the mutant introduced an infinite loop. Counted as killed for scoring purposes. |
+| [Timed out](glossary.md#timed-out)    | pytest ran past the per-mutant limit, `min(--timeout, 3 × baseline + 5 s)` by default. Usually means the mutant introduced an infinite loop. Counted as killed for scoring purposes. |
 | [Skipped](glossary.md#skipped)      | A filter (ty, ruff, coverage, diff-only, sample, ops allowlist) refused this mutant before pytest ran. Not counted toward the score. (Inline-ignored mutants are never generated.) |
 | [Errored](glossary.md#errored)      | pytest crashed in a non-test-failure way (collection error, import error). Investigated, but not counted toward the score. |
 | [Equivalent](glossary.md#equivalent-mutant)   | A mutant that produces semantically identical code. A layered detector (AST patterns + CPython bytecode by default) auto-promotes provably-equivalent survivors to the `equivalent` outcome and drops them from the score; likely-equivalent ones stay plain survivors. |
@@ -277,9 +278,10 @@ there's no kill history yet, and pytest's `-x` stops at the first kill.
 See the [project issues on GitHub](https://github.com/KovantAI/fermut/issues)
 for current status + the [roadmap](../roadmap.md) for what's planned.
 
-Equivalent-mutant detection — `x + 0 == x - 0` style trivial mutants
-— used to be on this list. It now ships on by default: survivors whose
-compiled bytecode is identical to the original are auto-promoted to the
-`equivalent` outcome and dropped from the score denominator
-(`--no-equiv-detect` turns it off). See
+Equivalent-mutant detection used to be on this list. It now ships on
+by default: survivors whose compiled bytecode is identical to the
+original are auto-promoted to the `equivalent` outcome and dropped from
+the score denominator (`--no-equiv-detect` turns it off). Pattern-matched
+identities like `x + 0` → `x - 0` compile differently, so they are only
+flagged as likely-equivalent and stay survivors. See
 **[equivalent-mutants guide](../guides/equivalent-mutants.md)**.

@@ -164,7 +164,7 @@ warm, [measured together](../reference/benchmarks.md#warm-and-loop-runs-the-incr
 Output — a line per survivor/timeout/error, then a one-line summary:
 
 ```
-SURVIVED  src/auth.py:42@1187 [boundary-shift] `age >= 18` → `age > 18`
+SURVIVED  src/auth.py:42@1187 [boundary-shift] `>=` → `>`
 TIMEOUT   src/slow.py:88@2304 [arith-op-swap] `n * 2` → `n / 2`
 
 152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3 (coverage 3), equivalent: 0, errored: 0  | score: 94.6%

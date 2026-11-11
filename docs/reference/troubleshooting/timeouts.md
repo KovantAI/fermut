@@ -10,10 +10,13 @@ to `<=` on a loop condition), or your test fixture is slow.
 - If timeouts cluster on **specific** mutants (loop conditions in
   particular files), accept it — counting them as killed is the
   right call.
-- If timeouts cluster on **specific tests**, raise `--timeout`
-  globally, or skip those tests with `--pytest-arg='-k not slow'`.
-- If timeouts are uniform across the run, raise `--timeout`
-  outright (default `30` → `60`).
+- If timeouts cluster on **specific tests**, raise `--timeout-factor`,
+  or skip those tests with `--pytest-arg='-k not slow'`.
+- If timeouts are uniform across the run, raise `--timeout-factor`
+  (default `3`), or pass `--timeout-factor 0` and raise `--timeout`
+  (default `30` → `60`). Each mutant's limit is
+  `min(--timeout, factor × baseline + 5 s)`, so raising `--timeout`
+  alone changes nothing while the budget is the lower bound.
 - The [timeout budget](../cli/run.md#timeout-budgets) is on by default
   (`--timeout-factor 3`): it sizes each mutant's timeout from the baseline
   run, so hung mutants stop in seconds. With

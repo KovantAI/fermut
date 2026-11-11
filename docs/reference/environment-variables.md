@@ -12,7 +12,7 @@ Precedence is the standard **CLI flag > env var > config file > built-in default
 | `FERMUT_ISOLATION`         | Default for `--isolation` (`auto` / `copy` / `hardlink` / `reflink`). See [Isolation modes](cli/run-isolation.md#isolation-modes).                                |
 | `FERMUT_TY_EMBEDDED`       | When set to `0`, forces the legacy ty subprocess path instead of the embedded in-process checker. Any other value (or unset) keeps embedded on. See [filters → embedded vs subprocess ty](../guides/filters.md#embedded-vs-subprocess-ty-default-embedded). |
 | `FERMUT_PYTHON`            | Python interpreter used by the bytecode-identity detector and the `--tce` pre-filter. Defaults to `python3` on `PATH`. Not the interpreter that runs your tests (that's `--python` / `VIRTUAL_ENV`). |
-| `FERMUT_LLM_MOCK`          | When set to a truthy value (`1`, `true`, `yes`, `on`), `fermut explain --llm` and `fermut suggest` use a deterministic offline mock client instead of calling Anthropic. Test/offline only. |
+| `FERMUT_LLM_MOCK`          | When set to a truthy value (`1`, `true`, `yes`, `on`), `fermut explain --llm`, `fermut suggest` and `fermut autofix` use a deterministic offline mock client instead of calling Anthropic. Test/offline only. |
 | `FERMUT_ANTHROPIC_API_KEY` | Fallback for `ANTHROPIC_API_KEY` in the LLM-backed subcommands. Read only when `ANTHROPIC_API_KEY` is unset, so it can't override a global key. |
 | `FERMUT_NO_CONFIG`         | When truthy (`1` / `true` / `yes` / `on`), skip `fermut.toml` / `pyproject.toml` discovery entirely and run on built-in defaults plus CLI flags only. Opt-out switch for hosts that audit before trusting a discovered config. |
 | `FERMUT_BASELINE_SECS`     | Default for `--baseline-secs`. `pytest --fermut` sets it to a whole-suite session's duration. See [Timeout budgets](cli/run.md#timeout-budgets). |
@@ -24,8 +24,9 @@ Precedence is the standard **CLI flag > env var > config file > built-in default
 | Variable     | Effect |
 |--------------|--------|
 | `FERMUT_CHILD` | `1` in every test process fermut starts. |
-| `FERMUT_RESULT`, `FERMUT_MIRROR_ROOT`, `FERMUT_PROJECT_ROOT`, `FERMUT_PRIVATE_HOME` | Internal plumbing between fermut and its pytest reporter. Don't set them yourself. |
-| `HOME`, `XDG_*` | Pointed at a private per-worker (and, under schemata, per-fork) directory so tests can't race on a shared home. `--no-private-home` turns this off. |
+| `FERMUT_RESULT`, `FERMUT_MIRROR_ROOT`, `FERMUT_PROJECT_ROOT` | Internal plumbing between fermut and its pytest reporter. Don't set them yourself. |
+| `FERMUT_PRIVATE_HOME` | Internal: tells the schemata template to give each fork its own private home. Don't set it yourself. |
+| `HOME`, `XDG_*` (on Windows also `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`) | Pointed at a private per-worker (and, under schemata, per-fork) directory so tests can't race on a shared home. `--no-private-home` turns this off. |
 | `PYTHONHASHSEED` | `1` unless you export your own (`PYTHONHASHSEED=random` opts out), so set/dict order is the same for every mutant. Part of the cache key. |
 | `PYTHONPATH`, `PYTHONDONTWRITEBYTECODE` | Pinned to the mirror, and `1`. |
 | `OS_ACTIVITY_MODE` | `disable` in the schemata template on macOS (os_log isn't fork-safe), unless you set it. |
@@ -41,7 +42,7 @@ config or `pytest_args` instead.
 
 | Variable             | Effect                                                                                                                              |
 |----------------------|-------------------------------------------------------------------------------------------------------------------------------------|
-| `VIRTUAL_ENV`        | Interpreter discovery when `--python` / `python` is unset. If it is set, the tests run with `$VIRTUAL_ENV/bin/python -m <runner>`. If it is unset, fermut looks for a `.venv` walking up from the source root, and with neither it uses `pytest` (or `python3` for unittest) from `PATH`. `fermut doctor` probes tools in the same venv. See [Choosing the interpreter](cli/run.md#python-interpreter). |
+| `VIRTUAL_ENV`        | Interpreter discovery when `--python` / `python` is unset. If it is set, the tests run with `$VIRTUAL_ENV/bin/python -m <runner>` (rstest, a native binary, runs as `$VIRTUAL_ENV/bin/rstest`). If it is unset, fermut looks for a `.venv` walking up from the source root, and with neither it uses `pytest` (or `python3` for unittest) from `PATH`. `fermut doctor` probes tools in the same venv. See [Choosing the interpreter](cli/run.md#python-interpreter). |
 | `RUST_LOG`           | Logging level for fermut's tracing layer. Takes precedence over `-v` / `-q`. E.g. `RUST_LOG=fermut=debug`.                            |
 | `ANTHROPIC_API_KEY`  | Required by `fermut explain --llm`, `fermut suggest` and `fermut autofix` (unless `FERMUT_LLM_MOCK=1`). Falls back to `FERMUT_ANTHROPIC_API_KEY`.        |
 | `GH_TOKEN`           | Read by `gh` for `fermut pr-comment`. Required in CI; `${{ secrets.GITHUB_TOKEN }}` is sufficient.                                    |

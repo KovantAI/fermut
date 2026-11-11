@@ -38,7 +38,8 @@ After every successful mutant evaluation, fermut writes one entry to
   vice versa.
 
 All of fermut's sidecar state lives in one `.fermut/` directory at the
-**project root** (nearest `pyproject.toml`/`setup.cfg`, so a
+**project root** (nearest ancestor with `pyproject.toml`, `setup.cfg`,
+`pytest.ini`, `.pytest.ini`, `tox.ini`, `setup.py` or `.git`, so a
 `source_root = "src"` layout still anchors at the repo root, not under
 `src/`): `cache.json` (this cache), `history.jsonl` (trend log),
 `kill-order.json` (smart test ordering's kill history),

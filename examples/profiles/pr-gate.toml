@@ -15,4 +15,4 @@ timeout = 15
 coverage = "coverage.json"
 diff_only = "main"
 hypothesis_seed = 12345
-ops = ["arith-op-swap", "compare-op-swap", "boundary-shift", "return-value-to-none"]
+ops = ["arith-op-swap", "compare-op-swap", "boundary-shift", "ror-equality", "ror-const", "bool-op-swap", "bool-operand-drop", "bool-const", "return-value-to-none"]

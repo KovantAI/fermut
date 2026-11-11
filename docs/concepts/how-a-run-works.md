@@ -70,8 +70,8 @@ and finishes in well under a second ([Caching](caching.md)).
 
 Before the first mutant runs, fermut runs your unmutated suite once. If it
 fails, fermut stops: a red suite would make every mutant look killed. The
-baseline's wall time also sizes the per-mutant timeout when a
-`--timeout-factor` budget is on.
+baseline's wall time also sizes the per-mutant timeout: `3 × baseline
++ 5 s` by default, capped at `--timeout` (`--timeout-factor 0` turns it off).
 
 ## 6. Run each mutant
 

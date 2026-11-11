@@ -38,12 +38,15 @@ jobs:
 
       - name: resolve since-ref
         id: since
+        env:
+          SINCE_INPUT: ${{ github.event.inputs.since }}
         run: |
-          if [ -n "${{ github.event.inputs.since }}" ]; then
-            ref="${{ github.event.inputs.since }}"
+          if [ -n "$SINCE_INPUT" ]; then
+            ref="$SINCE_INPUT"
           else
-            # Fall back to most recent semver tag, or 7 days ago if none exist.
-            ref=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo '7 days ago')
+            # Most recent semver tag *before* HEAD (on a tag push HEAD is the
+            # new tag itself), or 7 days ago if there is no earlier tag.
+            ref=$(git describe --tags --abbrev=0 --match 'v*' HEAD^ 2>/dev/null || echo '7 days ago')
           fi
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "Comparing against: $ref"

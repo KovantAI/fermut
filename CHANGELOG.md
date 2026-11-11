@@ -56,6 +56,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- `fermut init --profile pr-gate`, and plain `fermut init` on a large repo,
+  write an `ops` list that keeps the `minimal` profile's operators
+  (`ror-equality`, `ror-const`, `bool-op-swap`, `bool-operand-drop`,
+  `bool-const`). The old list named only `classic` operators, so under the
+  default `minimal` profile an ordering compare got one `boundary-shift`
+  mutant and an `and`/`or` condition got none.
 - `fermut coverage` passes `-n0` when pytest-xdist is installed. With `-n`
   in the project's `addopts`, pytest-cov's per-test contexts crashed the
   xdist workers (`no such table: context`) and left an empty `.coverage`

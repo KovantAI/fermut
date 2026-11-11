@@ -106,12 +106,7 @@ impl RepoSize {
             Self::Small => None,
             Self::Medium => None,
             // Large repos: PR-gate subset keeps wall-clock reasonable.
-            Self::Large => Some(vec![
-                "arith-op-swap",
-                "compare-op-swap",
-                "boundary-shift",
-                "return-value-to-none",
-            ]),
+            Self::Large => Some(PR_GATE_OPS.to_vec()),
         }
     }
 }
@@ -539,6 +534,22 @@ fn profile_timeout(profile: Option<Profile>) -> u64 {
     }
 }
 
+/// PR-gate operator subset (pr-gate profile, and the default for large
+/// repos). Carries the minimal profile's dominators (`ror-*`, `bool-*`) too:
+/// without them, an allowlist under the default `minimal` profile would keep
+/// only `boundary-shift` at an ordering compare and nothing at `and`/`or`.
+const PR_GATE_OPS: &[&str] = &[
+    "arith-op-swap",
+    "compare-op-swap",
+    "boundary-shift",
+    "ror-equality",
+    "ror-const",
+    "bool-op-swap",
+    "bool-operand-drop",
+    "bool-const",
+    "return-value-to-none",
+];
+
 fn write_profile_keys(out: &mut String, p: Profile, hypothesis: bool) {
     match p {
         Profile::PrGate => {
@@ -546,15 +557,7 @@ fn write_profile_keys(out: &mut String, p: Profile, hypothesis: bool) {
             if hypothesis {
                 out.push_str("hypothesis_seed = 12345\n");
             }
-            write_ops(
-                out,
-                &[
-                    "arith-op-swap",
-                    "compare-op-swap",
-                    "boundary-shift",
-                    "return-value-to-none",
-                ],
-            );
+            write_ops(out, PR_GATE_OPS);
         }
         Profile::Nightly => {
             out.push_str("experimental = true\n");
@@ -1511,6 +1514,17 @@ mod tests {
         fs::create_dir(tmp.path().join("tests")).unwrap();
         fs::write(tmp.path().join("tests/__init__.py"), "").unwrap();
         assert_eq!(detect_source_root(tmp.path()), tmp.path());
+    }
+
+    #[test]
+    fn pr_gate_ops_keep_every_minimal_dominator() {
+        use crate::mutator::Operator;
+        for name in PR_GATE_OPS {
+            assert!(Operator::from_name(name).is_some(), "unknown op {name}");
+        }
+        for op in Operator::all().iter().filter(|o| o.is_minimal_only()) {
+            assert!(PR_GATE_OPS.contains(&op.name()), "missing {}", op.name());
+        }
     }
 
     #[test]

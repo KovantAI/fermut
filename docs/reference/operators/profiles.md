@@ -7,7 +7,7 @@ mutants fermut makes for ordering comparisons (`<`, `<=`, `>`, `>=`) and for
 | Profile   | What you get                                                          |
 |-----------|-----------------------------------------------------------------------|
 | `minimal` | **Default.** Only the mutants no other mutant subsumes (3 per site).   |
-| `classic` | The swaps fermut used before 0.7: 3 per ordering compare, `and` ↔ `or`. |
+| `classic` | The swaps fermut used before 0.7: 3 per `<` / `>`, 2 per `<=` / `>=`, `and` ↔ `or`. |
 | `full`    | Both sets. For experiments.                                            |
 
 `minimal` makes 0.3–6% more mutants than `classic` (11 repos, see

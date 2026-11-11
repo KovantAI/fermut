@@ -82,7 +82,8 @@ Two files:
 
 - `diff_only = "main"` — only mutate changed lines vs the merge base.
 - Narrow op set (`arith-op-swap`, `compare-op-swap`, `boundary-shift`,
-  `return-value-to-none`).
+  `ror-equality`, `ror-const`, `bool-op-swap`, `bool-operand-drop`,
+  `bool-const`, `return-value-to-none`).
 - `timeout = 15`. `hypothesis_seed` is pinned only when Hypothesis is a
   declared dependency.
 

@@ -163,7 +163,7 @@ expression at all, so the visitor pattern-matches on AST shape, not
 lexeme.
 
 Suppose you want a new operator `dict-key-typo` that mutates the keys
-of dict literals (`{"foo": 1}` → `{"foOO": 1}`) to verify your tests
+of dict literals (`{"foo": 1}` → `{"foXX": 1}`) to verify your tests
 actually care about dict key spelling.
 
 ### Step 1 — Add the variant

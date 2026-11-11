@@ -101,7 +101,6 @@ jobs:
         with:
           fermut-version: ${{ env.FERMUT_VERSION }}
           artifact-name: mutation-self
-          cache-key-prefix: ${{ env.PREFIX }}
           # Bump when the sweep's shape (source, tests, args, shards) changes.
           config-hash: pytest_fermut-2shards-v1
           fail-on-regression: "2"

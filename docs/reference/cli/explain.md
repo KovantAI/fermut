@@ -5,14 +5,14 @@ same JSON report as `fermut show`, then layers heuristic signal on top
 of the bare detail view.
 
 ```sh
-fermut explain <report.json> <SELECTOR> [--format human|json] [--context N] \
+fermut explain <report.json | SELECTOR> [SELECTOR] [--format human|json] [--context N] \
     [--tests <dir>] [--coverage <file>] [--llm] [--model M]
 ```
 
 | Argument / flag           | Effect                                                                                                          |
 |---------------------------|-----------------------------------------------------------------------------------------------------------------|
-| `<report.json>`           | Path to a JSON report produced by `fermut run --json …`.                                                        |
-| `<SELECTOR>`              | 1-based outcome index, the full mutant id, or any substring of the printed `file:line@offset …` row. Same grammar as `fermut show`; an ambiguous partial selector errors and lists candidates. |
+| `report.json`             | Path to a JSON report produced by `fermut run --json …`. At least one positional is required. A lone argument that isn't an existing file and doesn't end in `.json` is the selector, read against `.fermut/last.json`. |
+| `[SELECTOR]`              | 1-based outcome index, the full mutant id, or any substring of the printed `file:line@offset …` row. Same grammar as `fermut show`; an ambiguous partial selector errors and lists candidates. |
 | `--format human\|json`    | Output format. `human` (default) prints the terminal-laid-out view. `json` emits the structured `ExplainReport`. |
 | `--context N`             | Source lines to show on each side of the mutant line. Default `5`.                                              |
 | `--tests <dir>`           | Tests directory to grep for the enclosing symbol. `--tests` with no value, or no flag at all, uses `tests/` when it exists. |

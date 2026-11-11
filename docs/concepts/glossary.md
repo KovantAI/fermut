@@ -138,7 +138,7 @@ See [mutation score on the concept page](mutation-testing.md#the-mutation-score)
 ## Operator (`op`)
 
 A *kind* of mutation. Examples: `arith-op-swap` (replace `+` with
-`-`), `boundary-shift` (`<` → `<=`), `return-to-none`. fermut ships
+`-`), `boundary-shift` (`<` → `<=`), `return-value-to-none`. fermut ships
 30 stable operators and 8 experimental. Select with `--ops`, skip
 with `--skip-ops`, enable experimental with `--experimental`. See
 [operator catalogue](../reference/operators/index.md).
@@ -158,7 +158,7 @@ after `init` the config is plain text and you hand-edit. See
 Fast Python linter (Rust-based). fermut's optional ruff filter rejects
 mutants that introduce *new* lint diagnostics — a cheap signal that
 the mutant produces obviously wrong code. Enable with `--ruff-filter`
-(off by default; on when ruff is on `$PATH` and the profile opts in).
+or `ruff_filter = true` (off by default; no `init` profile turns it on).
 
 ## Score swings
 
@@ -191,12 +191,13 @@ behavioral gap in your tests.
 
 ## Timed out
 
-Outcome: pytest ran longer than `--timeout` against the mutant.
+Outcome: pytest ran past the per-mutant limit, `min(--timeout,
+3 × baseline + 5 s)` by default (see `--timeout-factor`).
 Usually means the mutant introduced an infinite loop (a boundary
 shift flipped a `<` to `<=` and broke loop termination). Counted as
 killed for scoring — the mutant changed behavior enough to wedge the
-test. Raise `--timeout` if you're getting timeouts on legitimately
-slow tests.
+test. On legitimately slow tests, raise `--timeout-factor` (or set it
+to `0` to use the flat `--timeout`).
 
 ## ty
 

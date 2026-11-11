@@ -99,7 +99,7 @@ in any minor release**:
 
 - `MutantOutcome` — the `status` discriminant in JSON reports.
 - `Operator` — the operator catalog.
-- `RunnerKind` — `pytest`, `unittest`, future runners.
+- `RunnerKind` — `pytest`, `unittest`, `rstest`, future runners.
 - `ReportFormat` — `human`, `json`, future stdout formats.
 - `ConfigSource` — `none`, `fermut.toml`, `pyproject.toml`, future config sources.
 

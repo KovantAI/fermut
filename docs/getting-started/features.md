@@ -10,7 +10,7 @@ guide or reference page.
 ## Mutation testing core
 
 - **30 stable operators + 8 experimental.** Arithmetic / compare /
-  boundary / boolean / constant / return-to-none / slice / sentinel /
+  boundary / boolean / constant / return-value-to-none / slice / sentinel /
   decorator / and more. See the **[Operators reference](../reference/operators/index.md)**.
 - **Inline ignore markers.** `# fermut: ignore[op-name]` on a line
   drops one or all operators from that line. Useful for
@@ -30,7 +30,7 @@ guide or reference page.
   normal way. See **[Schemata](../reference/cli/run-schemata.md)**.
 - **`ty` pre-filter.** Type-invalid mutants are dropped via
   [`ty`](https://github.com/astral-sh/ty) before they cost a pytest
-  invocation. Removed 28–39% of covered mutants across 9 benchmarked
+  invocation. Removed about 30–40% of covered mutants across 9 benchmarked
   libraries ([benchmarks](../reference/benchmarks.md#ty-filter)).
 - **Per-mutant result cache.** Keyed on `(mutant.id, ast_hash(file), scope)`.
   Any code change to a file invalidates every mutant in that file (the

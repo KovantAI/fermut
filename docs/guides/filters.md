@@ -289,16 +289,17 @@ The PR-gate sweet spot is the full stack:
 fermut run src/ --tests tests/ \
     --diff-only origin/main \
     --coverage .coverage \
-    --ops arith-op-swap,compare-op-swap,boundary-shift,return-value-to-none \
+    --ops arith-op-swap,compare-op-swap,boundary-shift,ror-equality,ror-const,bool-op-swap,bool-operand-drop,bool-const,return-value-to-none \
     --timeout 15
 ```
 
-This is what `fermut init --profile pr-gate` writes for you. Its
-`ops` list predates the `minimal` profile, so on an ordering compare
-it keeps only `boundary-shift`, and it drops `ror-equality`,
-`ror-const`, `bool-operand-drop` and `bool-const` everywhere. Add
-those four to `ops` (or delete the line) to keep the full minimal
-set.
+This is what `fermut init --profile pr-gate` writes for you. The
+`ops` list names both the `classic` operators and the `minimal`
+profile's (`ror-*`, `bool-operand-drop`, `bool-const`), so an
+ordering compare or an `and`/`or` condition keeps its full set under
+either profile. When you write your own `ops`, include those too:
+an allowlist with only `compare-op-swap`/`boundary-shift` leaves an
+ordering compare just one `boundary-shift` mutant under `minimal`.
 
 ## Where next
 

@@ -156,11 +156,12 @@ whole suite still runs.
   because pytest-django sets it up in the first test, after the fork:
   ~2s per mutant per worker, against tens of milliseconds on werkzeug.
   fermut now builds the test DB once in the schemata template
-  ([Django](../guides/frameworks.md#django)), which cut healthchecks to
-  0.5 s per mutant; the table above predates that and hasn't been re-run.
+  ([Django](../guides/frameworks.md#django)); a later, separate run of
+  `hc/api` took 839 s instead of 1249 s spawning (9341 mutants). The
+  table above predates that and hasn't been re-run.
 - **Warm re-runs and sharding are where fermut pulls ahead**, as on
-  werkzeug: under a second warm, and a quarter of the cold wall time on
-  four runners.
+  werkzeug: under a second warm, and 31–41% of the cold wall time on
+  four runners (244 s vs 779 s, 105 s vs 254 s).
 - † **mutmut 3.8.1 can't run flaskbb.** Its stats pass succeeds, then
   its clean-test run errors in collection: `The setup method 'add_url_rule'
   can no longer be called on the blueprint '_themes'` (flask-themes2's

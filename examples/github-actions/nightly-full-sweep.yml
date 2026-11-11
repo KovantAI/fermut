@@ -40,10 +40,12 @@ jobs:
       - name: build per-test coverage
         run: uv tool run fermut coverage
 
+      # Exit 1 = gate failed (survivors), 3 = the run itself broke. Record
+      # the code so only real survivors open an issue.
       - name: full mutation sweep
         id: mutate
-        continue-on-error: true
         run: |
+          code=0
           uv tool run fermut run src/ \
               --tests tests/ \
               --no-diff-only \
@@ -53,9 +55,11 @@ jobs:
               --jobs 8 \
               --json fermut-report.json \
               --html fermut-report.html \
-              --junit fermut-report.xml
+              --junit fermut-report.xml || code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
         with:
           name: fermut-nightly
           path: |
@@ -64,7 +68,7 @@ jobs:
             fermut-report.xml
 
       - name: open issue on regression
-        if: steps.mutate.outcome == 'failure'
+        if: steps.mutate.outputs.code == '1'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -72,3 +76,9 @@ jobs:
               --title "Nightly mutation regression on $(date -u +%Y-%m-%d)" \
               --label mutation,regression \
               --body "Survivors detected on the nightly full sweep. Download the [fermut-nightly artifact](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for the HTML report."
+
+      - name: fail on a broken run
+        if: steps.mutate.outputs.code != '0' && steps.mutate.outputs.code != '1'
+        run: |
+          echo "::error::fermut run failed with exit ${{ steps.mutate.outputs.code }} (not a gate failure); see the log"
+          exit 1

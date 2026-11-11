@@ -49,6 +49,14 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- `fermut coverage` passes `-n0` when pytest-xdist is installed. With `-n`
+  in the project's `addopts`, pytest-cov's per-test contexts crashed the
+  xdist workers (`no such table: context`) and left an empty `.coverage`
+  behind a "Wrote …" message.
+- `fermut run path/to/module.py` (a single file) roots the ty filter at the
+  file's directory. It handed ty the file as a project root, fell back to
+  the subprocess checker, and could reject nearly every mutant as a type
+  error (fastapi `routing.py`: 5198 of 5440, 0 tested).
 - An explicit `.` path (`fermut run .`, `fermut list .`, `fermut hom .`, MCP
   `fermut_run` with `path: "."`) now mutates the current directory. It was
   read as "no path" and fell back to the config's `source_root`, so

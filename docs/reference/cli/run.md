@@ -136,6 +136,12 @@ that.)
 Disable explicitly with `--no-smart-order` (or `smart_order = false` in
 config); it then uses the plain coverage order.
 
+The score is order-invariant only when the tests are. A test that asserts on
+state an earlier test changed passes or fails depending on what ran before
+it, and the learned order changes between runs, so its mutants flip between
+killed and survived. Fix such tests, or run with `--no-smart-order`. See
+[Framework compatibility](../../guides/frameworks.md#fastapi).
+
 Ordering relies on pytest honoring the node-id order fermut passes on the
 command line. A test-shuffling plugin (`pytest-randomly`,
 `pytest-random-order`) re-sorts collected tests and silently defeats it —

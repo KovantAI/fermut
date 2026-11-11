@@ -140,7 +140,7 @@ impl PytestRunner {
         // arguments") when the Hypothesis plugin isn't installed, which would
         // abort the baseline. Probe once and drop the seed instead.
         let hypothesis_seed = hypothesis_seed.filter(|_| {
-            let ok = hypothesis_importable(python.as_deref());
+            let ok = importable(python.as_deref(), "hypothesis");
             if !ok {
                 tracing::warn!("hypothesis not installed; ignoring hypothesis_seed");
             }
@@ -1038,12 +1038,13 @@ fn fits_argv(ids: &[String]) -> bool {
     ids.iter().map(|id| id.len() + 1).sum::<usize>() <= ARGV_BUDGET
 }
 
-/// Whether the test interpreter can `import hypothesis`. A probe that can't
-/// even spawn answers `true`: keep the seed and let the baseline report the
-/// real interpreter problem.
-fn hypothesis_importable(python: Option<&Path>) -> bool {
+/// Whether the test interpreter can `import <module>` (a pytest plugin's
+/// flags are unrecognized arguments without it). A probe that can't even
+/// spawn answers `true`: keep the flag and let the pytest run report the real
+/// interpreter problem.
+pub(crate) fn importable(python: Option<&Path>, module: &str) -> bool {
     Command::new(super::python::interpreter(python))
-        .args(["-c", "import hypothesis"])
+        .args(["-c", &format!("import {module}")])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -1569,15 +1570,16 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn hypothesis_probe_follows_interpreter_exit_status() {
-        // `false` stands in for an interpreter without Hypothesis (import
+    fn import_probe_follows_interpreter_exit_status() {
+        // `false` stands in for an interpreter without the module (import
         // fails → non-zero), `true` for one with it.
-        assert!(!hypothesis_importable(Some(Path::new("false"))));
-        assert!(hypothesis_importable(Some(Path::new("true"))));
-        // Unspawnable interpreter → keep the seed; the baseline reports it.
-        assert!(hypothesis_importable(Some(Path::new(
-            "/nonexistent/python"
-        ))));
+        assert!(!importable(Some(Path::new("false")), "hypothesis"));
+        assert!(importable(Some(Path::new("true")), "hypothesis"));
+        // Unspawnable interpreter → keep the flag; the pytest run reports it.
+        assert!(importable(
+            Some(Path::new("/nonexistent/python")),
+            "hypothesis"
+        ));
     }
 
     #[test]

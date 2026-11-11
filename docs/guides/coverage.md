@@ -293,9 +293,10 @@ authoritative baseline on `main` that every PR restores read-only
 
 ## Pitfalls
 
-- **Not enough contexts.** Some pytest plugins (e.g. `pytest-xdist`
-  with `-n auto`) can break context attribution. Run coverage
-  single-process at least once on each branch.
+- **Not enough contexts.** `pytest-xdist` (`-n auto`) breaks per-test
+  contexts. `fermut coverage` passes `-n0` when xdist is installed; if
+  you build coverage with your own `pytest --cov` command, add `-n0`
+  yourself.
 - **Coverage of integration tests.** If your tests hit `src/` only
   via a network call (FastAPI test client, etc.), the per-test
   context will see the right lines — but only if coverage is

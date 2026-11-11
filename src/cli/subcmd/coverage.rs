@@ -790,6 +790,13 @@ fn run_pytest(
     for arg in extra {
         cmd.arg(arg);
     }
+    // pytest-xdist (`-n auto` in addopts) crashes pytest-cov's per-test
+    // contexts (workers race on the data file: `no such table: context`,
+    // INTERNALERROR) and leaves an empty `.coverage`. Last `-n` wins over
+    // addopts; only passed when xdist is installed, or `-n` is unrecognized.
+    if crate::runner::pytest::importable(python, "xdist") {
+        cmd.arg("-n0");
+    }
     for t in targets {
         // Pass targets relative to base_dir so recorded pytest node ids stay
         // relative — matches the purge prefixes and the reader's rebasing.

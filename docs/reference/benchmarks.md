@@ -85,6 +85,93 @@ Because `coverage_prep` is a **one-time** cost, the *steady-state* cost is
 the `mutation` column; the cold totals are the conservative first-contact
 figure.
 
+### A mutmut-scale repo: werkzeug
+
+The four repos above are small libraries. werkzeug 3.1.8 is closer to the
+size a team migrating off a long mutmut nightly runs: 21.5k lines of
+source, 10.2k lines of tests. Same machine, same session (2026-11-10):
+Apple M4 Max (14 cores, 36 GB), Python 3.13.13, pytest 9.2.0, fermut 0.7.0
+(`main` e6579ce448) vs mutmut 3.8.1, clone and install excluded.
+
+| Run                      | fermut                            | mutmut  |
+|--------------------------|-----------------------------------|---------|
+| Cold                     | ~146s (~6s coverage + ~140s run)  | ~155s   |
+| Warm, nothing changed    | **~1.5s**                         | ~12s    |
+| Cold, 4 shards (wall)    | **~56s** (slowest shard + merge)  | —       |
+| Cold, 4 shards (summed)  | ~206s machine time                | —       |
+| Scored mutants           | 7982 (0 errored)                  | 10511   |
+| Score                    | 71.2                              | 68.1    |
+
+- **Cold is a tie.** On one machine with every core, fermut and mutmut
+  take about the same time to do a first full pass.
+- **Warm is ~8× faster.** fermut's cache keys each verdict by the code,
+  settings and covering tests, so an unchanged re-run only checks
+  that nothing moved.
+- **Sharding cuts wall time to ~1/3.** `--shard i/4` across four runners
+  plus `fermut merge` gives the same 7982 scored mutants and the same
+  score as the single run. Each shard started from an empty cache,
+  the way a fresh CI host would. The four ran one after another here, so
+  "wall" is the slowest shard plus the merge, which is what you'd wait
+  for in CI. mutmut has no sharding.
+- **Different mutant sets.** The scored counts and scores aren't the
+  same population. fermut's `minimal` profile and coverage filter pick
+  which mutants to run differently from mutmut's operators.
+
+Fixture notes: werkzeug pins `coverage==7.17.0` (7.17.1+ under
+`--cov-context=test` breaks `test_safe_join_windows_special`, which patches
+`os.name`), and deselects `tests/test_serving.py` (live reloader servers
+hang). mutmut also deselects four tests that fail its clean-stats pass
+because they inspect frames and wrapped callables that mutmut's
+trampolines change (`benchmarks/configs/repos.toml`). rich and click
+couldn't be the mutmut-scale subject: mutmut imports both at startup, so
+mutating them breaks mutmut itself.
+
+### Application repos: healthchecks and flaskbb
+
+werkzeug is a library with fast, isolated tests. These two are web apps
+whose tests set up a database and an app for each test, measured the same
+way on the same machine (2026-11-10). Each is **scoped to one package**,
+with the rest of the package excluded from mutation for both tools; the
+whole suite still runs.
+
+- **healthchecks v5.0.3** (Django, SQLite test DB): `hc/api`, ~4.2k of
+  the app's ~17k source lines; 1780 tests (~8s for the whole suite).
+- **flaskbb v3.0.0** (Flask + SQLAlchemy, SQLite): `flaskbb/forum`, ~3.7k
+  of ~24k source lines; 809 tests (~45s for the whole suite, one process).
+
+| Run                     | healthchecks fermut       | healthchecks mutmut | flaskbb fermut           | flaskbb mutmut |
+|-------------------------|---------------------------|---------------------|--------------------------|----------------|
+| Cold                    | ~779s (~25s cov + ~754s)  | **~263s**           | ~254s (~54s cov + ~201s) | fails†         |
+| Warm, nothing changed   | **~0.9s**                 | ~11s                | **~0.6s**                | —              |
+| 4 shards, wall / summed | ~244s / ~919s             | —                   | ~105s / ~387s            | —              |
+| Scored                  | 5292 (0 errored)          | 2117 (+465 no tests)| 1796 (0 errored)         | —              |
+| Score                   | 72.7                      | 78.0                | 56.2                     | —              |
+
+- **healthchecks: mutmut is ~3× faster cold, fermut scores ~2.5× more
+  mutants.** Per scored mutant the two are close (~0.14s vs ~0.12s).
+  Each of fermut's forks re-creates the Django test database, because
+  pytest-django sets it up in the first test, after the fork. That makes
+  it ~2s per mutant per worker, against tens of milliseconds on werkzeug.
+- **Warm re-runs and sharding are where fermut pulls ahead**, as on
+  werkzeug: under a second warm, and a quarter of the cold wall time on
+  four runners.
+- † **mutmut 3.8.1 can't run flaskbb.** Its stats pass succeeds, then
+  its clean-test run errors in collection: `The setup method 'add_url_rule'
+  can no longer be called on the blueprint '_themes'` (flask-themes2's
+  module-level blueprint). The same suite passes under plain pytest. The
+  likely cause is mutmut running pytest again in the same process with
+  Flask's state still live. Not patched: that would benchmark a modified
+  flaskbb.
+
+Fixture notes (`benchmarks/configs/repos.toml`): healthchecks runs under
+pytest-django with a `bench_settings.py` that re-applies its test-only
+settings (upstream gates them on `manage.py test`), plus a `pytest.ini`
+that is also its project-root marker. mutmut also copies `CHANGELOG.md` and
+`search.db`, which the settings and search view read. flaskbb replaces
+its xdist `addopts`, and deselects `test_flaskbbdomain_translations` for
+both tools: it needs the compiled `*.mo` files, which `.gitignore` lists
+and fermut's mirror therefore drops.
+
 ### Full fermut sweep (coverage-on cold)
 
 All ten suite repos, `cold`, same session (2026-11-03), sorted by mutant

@@ -17,7 +17,8 @@ covers the team rollout (baseline → measure-only CI → gate → tighten).
 ## 1. Initialize the project
 
 `fermut init` walks up from the current directory to find the project root
-(any ancestor containing `pyproject.toml` or `setup.cfg`), detects the
+(nearest ancestor with `pyproject.toml`, `setup.cfg`, a pytest/tox config,
+`setup.py`, or `.git`; see [Projects](../concepts/projects.md)), detects the
 source/tests layout, checks which test runner is on `PATH`, and writes a
 config tuned to the repo.
 

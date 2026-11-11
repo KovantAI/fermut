@@ -129,14 +129,14 @@ pub(crate) fn build_config(
             .map(|p| loaded.resolve_path(p))
             .unwrap_or_else(|| PathBuf::from("."))
     });
-    // Mirror::build → find_project_root walks parents looking for
-    // pyproject.toml / setup.cfg. With a relative `source_root` or `tests`
+    // Mirror::build → find_project_root walks parents looking for a
+    // project marker (`runner::is_project_root`). With a relative `source_root` or `tests`
     // the walk's empty PathBuf can match a sibling marker in cwd and yield
     // an empty project_root, breaking the mirror copy. Absolutize both so
     // the walk always anchors on a real directory.
     let source_root = absolutize(source_root);
     // `.fermut/` sidecars (cache + history) share one anchor — the project
-    // root (`history::resolve_root`: nearest pyproject.toml/setup.cfg, else an
+    // root (`history::resolve_root`: nearest project marker, else an
     // existing `.fermut/`, else the target dir; a file target resolves to its
     // parent). Co-locating them means `fermut run src/` and a bare
     // `fermut trend` agree, and the documented default `.fermut/cache.json`

@@ -1080,6 +1080,61 @@ fn systemexit_while_importing_the_package_is_a_kill() {
 }
 
 #[test]
+#[ignore = "requires pytest on PATH; enable once env is set up"]
+fn pytest_ini_marks_the_project_root_under_an_outer_pyproject() {
+    // #76: an app with only `pytest.ini` nested under a dir that has a
+    // `pyproject.toml` mirrored the outer dir. The outer `.gitignore` drops
+    // the app from that mirror (the benchmark harness's cloned repos), so
+    // pytest got paths that don't exist (exit 4) and the baseline went red.
+    let tmp = tempfile::tempdir().unwrap();
+    let outer = tmp.path();
+    let proj = outer.join("app");
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    std::fs::write(
+        outer.join("pyproject.toml"),
+        "[project]\nname = \"outer\"\n",
+    )
+    .unwrap();
+    std::fs::write(outer.join(".gitignore"), "app/\n").unwrap();
+    write("pytest.ini", "[pytest]\npythonpath = src\n");
+    write("src/pkg/__init__.py", "");
+    write("src/pkg/calc.py", "def double(x):\n    return x * 2\n");
+    write(
+        "tests/test_calc.py",
+        "from pkg.calc import double\n\n\ndef test_double():\n    assert double(2) == 4\n",
+    );
+    let report = proj.join("report.json");
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("run")
+        .arg(proj.join("src"))
+        .arg("--tests")
+        .arg(proj.join("tests"))
+        .args([
+            "--no-coverage",
+            "--no-ty-filter",
+            "--no-cache",
+            "--no-history",
+        ])
+        .args(["--fail-under", "0", "--json"])
+        .arg(&report)
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    let outcomes = json["outcomes"].as_array().unwrap();
+    assert!(!outcomes.is_empty());
+    assert!(
+        outcomes.iter().any(|o| o["status"] == "killed"),
+        "{outcomes:#?}"
+    );
+}
+
+#[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn a_plugin_importing_the_broken_package_is_a_kill() {
     // #59: a `-p` plugin that imports the package under test (trio's

@@ -923,14 +923,30 @@ fn precompile(root: &Path, python: &Path) {
     }
 }
 
+/// Files that mark a Python project root: pytest's own rootdir set plus
+/// `setup.py`. Apps without a `pyproject.toml` (Django, older packages) still
+/// carry one of these, so the walk doesn't climb into an unrelated ancestor.
+const ROOT_MARKERS: &[&str] = &[
+    "pyproject.toml",
+    "setup.cfg",
+    "pytest.ini",
+    ".pytest.ini",
+    "tox.ini",
+    "setup.py",
+];
+
+/// Whether `p` is a project root: it holds a [`ROOT_MARKERS`] file or `.git`
+/// (a file in worktrees/submodules, hence `exists`). `.git` caps the walk at
+/// the repo boundary when no marker sits inside it.
+pub(crate) fn is_project_root(p: &Path) -> bool {
+    ROOT_MARKERS.iter().any(|m| p.join(m).exists()) || p.join(".git").exists()
+}
+
 pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
-    let mut p = start;
-    loop {
-        if p.join("pyproject.toml").exists() || p.join("setup.cfg").exists() {
-            return Some(p.to_path_buf());
-        }
-        p = p.parent()?;
-    }
+    start
+        .ancestors()
+        .find(|p| is_project_root(p))
+        .map(Path::to_path_buf)
 }
 
 fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
@@ -1845,9 +1861,28 @@ mod tests {
     }
 
     #[test]
+    fn project_root_stops_at_any_marker_before_an_outer_pyproject() {
+        // #76: a Django app with only `pytest.ini` (or tox.ini / setup.py /
+        // a worktree's `.git` file) under a dir holding `pyproject.toml` used
+        // to resolve to the outer dir and mirror the wrong tree.
+        for marker in ["pytest.ini", ".pytest.ini", "tox.ini", "setup.py", ".git"] {
+            let tmp = tempfile::tempdir().unwrap();
+            fs::write(tmp.path().join("pyproject.toml"), "").unwrap();
+            let app = tmp.path().join("app");
+            fs::create_dir_all(app.join("tests")).unwrap();
+            fs::write(app.join(marker), "").unwrap();
+            assert_eq!(
+                super::find_project_root(&app.join("tests")),
+                Some(app),
+                "{marker}"
+            );
+        }
+    }
+
+    #[test]
     fn mirror_without_project_marker_roots_at_the_tests_parent() {
-        // No pyproject.toml/setup.cfg anywhere up the temp path: the tests
-        // dir's parent is the project.
+        // No project marker anywhere up the temp path: the tests dir's
+        // parent is the project.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("proj");
         fs::create_dir_all(root.join("tests")).unwrap();
@@ -1930,7 +1965,7 @@ mod tests {
         fs::create_dir_all(&tests).unwrap();
         fs::write(tmp.path().join("app.py"), "x = 1\n").unwrap();
         if super::find_project_root(&tests).is_some() {
-            return; // a pyproject.toml above the temp dir; can't test here
+            return; // a project marker above the temp dir; can't test here
         }
         let mirror = Mirror::build(&tests, IsolationMode::Copy).unwrap();
         assert!(mirror.root.join("app.py").is_file());

@@ -6,16 +6,18 @@
 #      BLOCKING, FAIL_UNDER, SCORE, SCORED, SURVIVED, ERRORED
 source "$(dirname "$0")/lib.sh"
 
+# 3 = the run broke after writing its report; not a gate verdict, so
+# `blocking: false` doesn't hide it. Checked first: a broken run's report can
+# also look all-errored, which would otherwise downgrade it to a gate warning.
+if [ "${RC:-}" = 3 ]; then
+  die "fermut exited 3 — the run broke (see the log above), so the report is not a mutation result."
+fi
+
 if [ "$ERRORED" -gt 0 ] && [ "$SCORED" = 0 ]; then
   gate_fail "All $ERRORED mutant(s) errored — the suite likely fails under mutation for reasons unrelated to the change. The score is not trustworthy."
 fi
 
 if [ -n "$RC" ]; then
-  # 3 = the run broke after writing its report; not a gate verdict, so
-  # `blocking: false` doesn't hide it.
-  if [ "$RC" = 3 ]; then
-    die "fermut exited 3 — the run broke (see the log above), so the report is not a mutation result."
-  fi
   if [ "$RC" != 0 ]; then
     gate_fail "fermut exited $RC — score ${SCORE:-N/A}%${FAIL_UNDER:+ (threshold $FAIL_UNDER%)}, $SURVIVED survivor(s). See the job summary."
   fi

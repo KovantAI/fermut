@@ -9,16 +9,16 @@ what we ran to find out, and the settings to use.
 |---|---|---|
 | [Django / pytest-django](#django) | Works, both modes | Nothing for migrations (skipped by default); macOS + Postgres: `PGGSSENCMODE=disable` |
 | [FastAPI / Starlette `TestClient`, anyio](#fastapi) | Works, both modes | Fix order-dependent tests, or `--no-smart-order` with `--no-schemata` |
-| [pytest-asyncio](#pytest-asyncio) | Forks work | Tests must not write inside the repo ([below](#tests-that-write-into-the-repo)) |
+| [pytest-asyncio](#pytest-asyncio) | Forks work | Prefer `tmp_path` for files tests write ([below](#tests-that-write-into-the-repo)) |
 | [trio](#trio) | Works, both modes | Pass the suite's own plugin flags as usual |
 | [C extensions](#c-extensions) | Works, both modes | Build the extension in place before `fermut coverage` and `fermut run` |
 | [Hypothesis](#hypothesis) | Works, both modes | Pin `hypothesis_seed` |
 | [pytest-xdist](#xdist) | Works, both modes | `pytest_args = ["-n0"]` |
 
 "Both modes" means schemata (forked runs, the default) and `--no-schemata`
-(a fresh pytest per mutant) give the same verdicts. The one problem that
-affects every framework, tests that write files inside the repo, is
-[at the end](#tests-that-write-into-the-repo).
+(a fresh pytest per mutant) give the same verdicts. Tests that write files
+inside the repo affect every framework; fermut repairs the damage, but they
+cost speed under schemata ([at the end](#tests-that-write-into-the-repo)).
 
 ## How we tested
 
@@ -34,7 +34,7 @@ container (Ubuntu 24.04, 8 workers).
 | Django | healthchecks v5.0.3, `hc/api` | 9341 | 0 | 839 s / 1249 s |
 | FastAPI | fastapi 0.162.2, 10 % sample | 1125 | 0 apart from order-dependent tests (see below) | 670 s / 561 s |
 | Starlette | starlette (benchmark pin) | 5960 | 0 (Linux, 3 rounds) | 203 s / 469 s |
-| pytest-asyncio | aiofiles @9d1acc1 | 1664 | not measurable: the suite's own runs vary by ~110 | 29 s / 35 s |
+| pytest-asyncio | aiofiles @9d1acc1 | 1664 | not measured: spawn runs still differ by 18, all one timing-flaky test | 29 s / 35 s |
 | trio | trio (benchmark pin), 30 % sample | 2330 | 0 (Linux, 3 rounds) | 224 s / 285 s |
 | C extension | markupsafe 3.0.3 | 217 | 0 (Linux, 3 rounds) | 14 s / 12 s |
 | Hypothesis | attrs 26.1.0, 50 % sample | 1735 | 0 with a pinned seed (4 runs) | 138–150 s / 150–154 s |
@@ -58,11 +58,12 @@ Their full numbers are in the
   fermut detects the crashes and runs those mutants the normal way, so
   verdicts are right but the forks are wasted. `export PGGSSENCMODE=disable`
   stops the crashes.
-- **Migrations.** fermut skips Django migrations (`migrations/0001_*.py`)
-  and Alembic revisions by default; they show as `migrations` in the run
-  summary. In healthchecks they were 55 % of all mutants, 76 % of them
-  survived, and they all run the slow way (class attributes run at import).
-  `--mutate-migrations` mutates them anyway.
+- **Migrations.** fermut skips Django migrations (`migrations/0001_*.py`
+  in a package) and Alembic revisions (`versions/*.py` next to `env.py`) by
+  default; they show as `migrations` in the run summary. In healthchecks
+  they were 55 % of all mutants, 76 % of them survived, and they all run
+  the slow way (class attributes run at import).
+  `--mutate-migrations` (or `mutate_migrations = true`) mutates them anyway.
 
 - **Transactional tests** (`TestCase`, `TransactionTestCase`) ran
   unchanged.
@@ -104,10 +105,12 @@ which run the normal way in both modes.
 aiofiles (`asyncio_mode = "auto"`) ran in forks without trouble: 462
 mutants served from the fork, 29 s vs 35 s spawning.
 
-We couldn't measure schemata-vs-spawn parity. Two spawn runs of the same
-commit differed by 112–176 verdicts, because aiofiles' tests create,
-rename and delete files under `tests/resources/`. See
-[Tests that write into the repo](#tests-that-write-into-the-repo).
+aiofiles' tests create, rename and delete files under `tests/resources/`.
+Before fermut restored mirrors, two spawn runs of the same commit differed
+by 112–176 verdicts. Now they differ by 18, all
+`test_concurrency.py::test_slow_file`, a timing-sensitive test that also
+fails in a fork with no mutant, and the false kills are gone (score 51 % →
+45 %). See [Tests that write into the repo](#tests-that-write-into-the-repo).
 
 ## trio { #trio }
 
@@ -191,15 +194,16 @@ no-xdist run exactly.
 Each worker reuses one mirror of your project for all the mutants it runs.
 A test that creates, moves or deletes files **inside the repo** and undoes
 it at the end of the test leaves the change behind when a mutant makes it
-fail halfway. Later mutants on that worker then fail because of the
-leftover file, not because of the mutation, and are counted as killed.
+fail halfway. Left alone, later mutants on that worker would fail because
+of the leftover file and count as killed.
 
-aiofiles shows the effect: `test_rename` moves `tests/resources/test_file1.txt`
-away and back, and `test_islink` / `test_mkdir_and_rmdir` create and
-remove files next to it. Two identical runs differed by up to 176 verdicts,
-and the score moved between 48.5 % and 51.8 %.
+fermut snapshots each mirror when it builds it and, after every mutant,
+puts back files that were moved, deleted, rewritten or added, warning once
+with the paths ([details](../reference/cli/run-isolation.md#tree-writes)).
+On aiofiles, whose `test_rename` moves `tests/resources/test_file1.txt`
+away and back, run-to-run diffs dropped from 128 to 18.
 
-Use `tmp_path` (or `tmp_path_factory`) for anything a test writes. A
-mutation run, unlike a normal run, makes tests fail halfway, so cleanup at
-the end of a test isn't enough. Detecting and repairing a dirty mirror is
-tracked in backlog #82.
+Under schemata all forks share one mirror, which can't be put back while
+other forks run. Once a kill leaves it changed, the rest of the mutants
+run the normal way: verdicts stay right, the fork speedup is lost. Use
+`tmp_path` (or `tmp_path_factory`) for anything a test writes.

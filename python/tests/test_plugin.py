@@ -72,6 +72,16 @@ def test_fermut_failure_without_report_is_an_internal_error(
     result.stdout.fnmatch_lines(["fermut exited 1 without a report"])
 
 
+def test_fermut_runtime_error_after_report_is_an_internal_error(
+    green_suite, fake_fermut, run_pytest, monkeypatch
+):
+    monkeypatch.setenv("FAKE_FERMUT_MODE", "broken")
+    result = run_pytest(green_suite, "--fermut", "--fermut-no-coverage")
+    assert result.ret == pytest.ExitCode.INTERNAL_ERROR
+    result.stdout.fnmatch_lines(["fermut exited 3: the run broke"])
+    assert "mutation gate failed" not in result.stdout.str()
+
+
 def test_run_command_maps_options(green_suite, fake_fermut, run_pytest):
     run_pytest(
         green_suite,

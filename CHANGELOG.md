@@ -56,6 +56,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- `pytest --fermut`: a fermut run that broke after writing its report (exit
+  `3`) failed the session as a gate failure (exit `1`); it now exits `3`
+  (internal error), as documented.
+- GitHub Action: a run that exited `3` with an all-errored report was treated
+  as a gate failure, so `blocking: false` downgraded it to a warning. Exit `3`
+  now always fails the job.
 - `--schemata` with pytest-django on in-memory SQLite: the test database is
   created and migrated once in the template instead of in every fork
   (healthchecks: 1.5 → 0.5 s per mutant, same verdicts). Other databases and

@@ -116,7 +116,7 @@ fails in a fork with no mutant, and the false kills are gone (score 51 % →
 
 trio loads its own pytest plugin. Pass the suite's flags as usual
 (`pytest_args = ["-p", "trio._tests.pytest_plugin", "--import-mode=importlib"]`
-when they aren't already in `addopts`). 0 stable diffs over 3 Linux rounds.
+when they aren't already in `addopts`). No diffs in any of 3 Linux rounds.
 One mutant used to differ: dropping `daemon=True` from a worker thread made
 a normal run hang at exit while a forked child exited at once. Forked
 children now wait for non-daemon threads too.

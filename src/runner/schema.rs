@@ -78,6 +78,12 @@ pub(crate) trait SchemaInner: Runner {
     fn record_all(&self) -> bool {
         false
     }
+    /// The tests for `mutant` in the order coverage recorded them, close to
+    /// the suite's own order: no learned or breadth reordering. `None` when
+    /// the selection has no other order to try.
+    fn natural_selection(&self, _mutant: &Arc<Mutant>) -> Option<Vec<String>> {
+        None
+    }
 }
 
 /// How the template runs, fixed when the schema is built.
@@ -134,6 +140,11 @@ impl SchemaInner for PytestRunner {
                 ids
             }
         })
+    }
+
+    fn natural_selection(&self, mutant: &Arc<Mutant>) -> Option<Vec<String>> {
+        let ctx = self.coverage.as_ref().filter(|_| self.smart_order)?;
+        ctx.tests_for_mutant(mutant).map(<[String]>::to_vec)
     }
 
     /// A failing test (1) or one interrupting the run (2).
@@ -467,6 +478,25 @@ impl<R: SchemaInner> SchemaRunner<R> {
             if served.status.is_some_and(|s| self.inner.killed(s)) || hung_in_a_test(&served) {
                 served.unconfirmed = !self.confirm(template, &served.ran);
             }
+            // A kill the same order reproduces with no mutant active: smart
+            // ordering put an order-dependent test after one that breaks it
+            // (fastapi: a module-level `dependency_overrides` test after
+            // another app's). The spawn path would run that order again and
+            // keep the false kill; the suite's own order judges the mutant.
+            if served.unconfirmed && served.status.is_some() && only.is_none() {
+                if let Some(natural) = self.inner.natural_selection(mutant) {
+                    let mut again =
+                        template.request(idx, Some(&natural), all, self.inner.timeout())?;
+                    if again.status.is_some_and(|s| self.inner.killed(s)) || hung_in_a_test(&again)
+                    {
+                        again.unconfirmed = !self.confirm(template, &again.ran);
+                    }
+                    if !again.unconfirmed {
+                        again.reordered = true;
+                        return Ok(Some(again));
+                    }
+                }
+            }
             Ok(Some(served))
         })
     }
@@ -485,12 +515,13 @@ impl<R: SchemaInner> SchemaRunner<R> {
         if let Some(&ok) = lock_recover(&self.confirmed).get(ran) {
             return ok;
         }
+        let run = template.request(0, Some(ran), false, self.inner.timeout());
         let ok = matches!(
-            template.request(0, Some(ran), false, self.inner.timeout()),
+            &run,
             Ok(s) if s.error.is_none() && s.status.is_some_and(|st| st.success())
         );
         if !ok {
-            warn_unconfirmed(ran);
+            warn_unconfirmed(ran, run.as_ref().ok());
         }
         lock_recover(&self.confirmed).insert(ran.to_vec(), ok);
         ok
@@ -691,12 +722,33 @@ fn hung_in_a_test(served: &Served) -> bool {
     served.status.is_none() && served.error.is_none() && served.result.unfinished.is_some()
 }
 
-fn warn_unconfirmed(ran: &[String]) {
+/// Name the test that broke the no-mutant run (the run list can be the whole
+/// selection, hundreds of ids). Logged once; later ones at debug.
+fn warn_unconfirmed(ran: &[String], run: Option<&Served>) {
     static WARNED: AtomicBool = AtomicBool::new(false);
+    let culprit = match run {
+        Some(s) if !s.result.failures.is_empty() => {
+            format!("{} failed", s.result.failures.join(", "))
+        }
+        Some(s) if s.status.is_none() => format!(
+            "hung in {}",
+            s.result.unfinished.as_deref().unwrap_or("collection")
+        ),
+        Some(s) => match &s.error {
+            Some(tb) => format!("the child broke:\n{tb}"),
+            None => format!("exit {:?}", s.status.and_then(|st| st.code())),
+        },
+        None => "the template didn't answer".to_string(),
+    };
     if !WARNED.swap(true, Ordering::Relaxed) {
         warn!(
-            "--schemata: {} fails or hangs in a forked run even with no mutant active; mutants it kills or hangs run normally",
-            ran.join(", ")
+            "--schemata: a forked run of {} test(s) fails with no mutant active ({culprit}); mutants it kills or hangs run normally",
+            ran.len()
+        );
+    } else {
+        tracing::debug!(
+            "--schemata: unconfirmed forked run of {} test(s): {culprit}",
+            ran.len()
         );
     }
 }
@@ -741,7 +793,7 @@ impl<R: SchemaInner> Runner for SchemaRunner<R> {
                     self.hangs.fetch_add(1, Ordering::Relaxed);
                 }
                 let survived = served.status.and_then(|s| s.code()) == Some(0);
-                if (survived || timed_out) && self.audit_pick(&mutant.id) {
+                if (survived || timed_out) && !served.reordered && self.audit_pick(&mutant.id) {
                     return self.audit_normal(mutant, served);
                 }
                 Ok(self.inner.served_outcome(mutant, &served, true))
@@ -821,6 +873,9 @@ pub(crate) struct Served {
     /// A kill or hang that the same tests reproduce with no mutant active:
     /// not the mutant's doing (see [`SchemaRunner::confirm`]).
     unconfirmed: bool,
+    /// Re-run in coverage order after the selected order failed with no
+    /// mutant active; the spawn path can't stand in for it (it reorders).
+    reordered: bool,
 }
 
 #[derive(Deserialize)]
@@ -1042,6 +1097,7 @@ impl Template {
             error: done.error,
             ran: done.ran.into_iter().map(from_mirror).collect(),
             unconfirmed: false,
+            reordered: false,
         })
     }
 }
@@ -1136,6 +1192,7 @@ mod tests {
             error: error.map(str::to_string),
             ran: Vec::new(),
             unconfirmed: false,
+            reordered: false,
         }
     }
 
@@ -1523,6 +1580,7 @@ done"#
             error: None,
             ran: Vec::new(),
             unconfirmed: false,
+            reordered: false,
         };
         assert!(!usable(&served(libc::SIGSEGV)));
         assert!(!usable(&served(libc::SIGABRT)));

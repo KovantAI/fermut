@@ -46,7 +46,7 @@ pub struct PytestRunner {
     pub(super) hypothesis_seed: Option<u64>,
     pub(super) extra_args: Vec<String>,
     pub(super) isolation: IsolationMode,
-    coverage: Option<Arc<CoverageContexts>>,
+    pub(super) coverage: Option<Arc<CoverageContexts>>,
     /// Interpreter to run the framework with. `Some` → `<python> -m <exe>`
     /// (rstest: the binary beside it); `None` → bare `<exe>` from `PATH`.
     pub(super) python: Option<PathBuf>,
@@ -1667,6 +1667,25 @@ mod tests {
         let out: Vec<String> = r.ordered_ids(&ctx, &m, &ids).into_iter().cloned().collect();
         // Smart ordering off → caller's coverage order is preserved verbatim.
         assert_eq!(out, ids);
+    }
+
+    /// The schemata retry after an order-broken kill: coverage order, not the
+    /// breadth/learned order `selection` gives; nothing to retry without smart
+    /// ordering.
+    #[test]
+    fn natural_selection_is_coverage_order_under_smart_ordering_only() {
+        use crate::runner::schema::SchemaInner;
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = breadth_ctx(tmp.path());
+        let m = Arc::new(Mutant {
+            line: 2,
+            stmt_line: 2,
+            ..mutant_in(tmp.path())
+        });
+        let recorded = ctx.tests_for_mutant(&m).map(<[String]>::to_vec);
+        assert_eq!(recorded.as_ref().map(Vec::len), Some(2));
+        assert_eq!(runner(true, ctx.clone()).natural_selection(&m), recorded);
+        assert_eq!(runner(false, ctx).natural_selection(&m), None);
     }
 
     #[test]

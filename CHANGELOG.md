@@ -49,6 +49,15 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- `--schemata`: a kill whose test order fails with no mutant active (an
+  order-dependent test that smart ordering put after one that breaks it) is
+  re-run in a fork in coverage order, close to the suite's own, instead of
+  falling back to a spawned run of the same order, which kept the false kill.
+  fastapi (10 % sample): 8 verdicts change, all to what a natural-order run
+  gives; 423 mutants served from the fork instead of 360.
+- The "fails or hangs in a forked run even with no mutant active" warning
+  names the test that failed or hung instead of listing every test the run
+  selected (fastapi: 630 ids for one failing test).
 - `--schemata` with pytest-django on in-memory SQLite: the test database is
   created and migrated once in the template instead of in every fork
   (healthchecks: 1.5 → 0.5 s per mutant, same verdicts). Other databases and

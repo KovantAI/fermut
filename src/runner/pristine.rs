@@ -205,4 +205,33 @@ mod tests {
             "x = 1"
         );
     }
+
+    #[test]
+    fn restore_recreates_a_removed_dir_and_its_files() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("data/empty")).unwrap();
+        std::fs::write(src.path().join("data/f.txt"), "one").unwrap();
+        let mirror = tempfile::tempdir().unwrap();
+        let root = mirror.path();
+        super::super::copy_dir_all(src.path(), root, IsolationMode::Copy).unwrap();
+        let mut p = Pristine::take(root);
+
+        std::fs::remove_dir_all(root.join("data")).unwrap();
+        let dirty = p.restore(src.path(), IsolationMode::Copy).unwrap();
+        assert_eq!(dirty, [PathBuf::from("data")]);
+        assert!(root.join("data/empty").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(root.join("data/f.txt")).unwrap(),
+            "one"
+        );
+        assert!(p.drift().is_empty(), "{:?}", p.drift());
+    }
+
+    #[test]
+    fn an_unreadable_root_scans_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Pristine::take(&tmp.path().join("missing"));
+        assert!(p.entries.is_empty());
+        assert!(p.drift().is_empty());
+    }
 }

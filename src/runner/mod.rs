@@ -1101,6 +1101,39 @@ mod tests {
     };
 
     #[test]
+    fn a_mirror_that_cant_be_restored_is_rebuilt() {
+        use crate::config::IsolationMode;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "").unwrap();
+        std::fs::write(dir.join("mod.py"), "x = 1").unwrap();
+        let tests = dir.join("tests");
+        // Precompiling is best effort; `true` skips it.
+        let py = std::path::Path::new("true");
+        // A fresh thread: the mirror is thread-local.
+        std::thread::spawn(move || {
+            let run = |edit: bool| {
+                super::with_worker_mirror(&tests, IsolationMode::Copy, Some(py), |m| {
+                    if edit {
+                        // Changed in the mirror, gone from the source: restore
+                        // has nothing to copy back and fails.
+                        std::fs::write(m.root.join("mod.py"), "x = 2").unwrap();
+                        std::fs::remove_file(dir.join("mod.py")).unwrap();
+                    }
+                    Ok(m.root.clone())
+                })
+                .unwrap()
+            };
+            let first = run(true);
+            assert!(!first.exists(), "the broken mirror was dropped");
+            assert_ne!(run(false), first);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
     fn hash_seed_is_pinned_unless_the_user_sets_one() {
         use crate::runner::{hash_seed_from, DEFAULT_HASH_SEED};
         use std::ffi::OsStr;

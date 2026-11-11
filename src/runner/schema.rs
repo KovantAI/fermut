@@ -1306,6 +1306,19 @@ idof() { id=$(printf %s "$1" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); }
 "#;
 
     #[test]
+    fn drift_in_the_shared_mirror_stops_serving_for_good() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schema = fake_schema(tmp.path(), "");
+        assert!(!drifted(&schema));
+        let left = schema.mirror.root.join("tests/left_behind.txt");
+        std::fs::write(&left, "x").unwrap();
+        assert!(drifted(&schema));
+        // Latched: putting the tree back doesn't resume serving.
+        std::fs::remove_file(&left).unwrap();
+        assert!(drifted(&schema));
+    }
+
+    #[test]
     fn the_template_answers_concurrent_requests_out_of_order() {
         let tmp = tempfile::tempdir().unwrap();
         // Each request answers after `idx` seconds, in its own background job.

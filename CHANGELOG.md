@@ -49,6 +49,17 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- `--schemata` with pytest-django on in-memory SQLite: the test database is
+  created and migrated once in the template instead of in every fork
+  (healthchecks: 1.5 → 0.5 s per mutant, same verdicts). Other databases and
+  `django_db_setup` overrides keep the per-fork build.
+- Django on Postgres/MySQL (or SQLite with `TEST.NAME`) with `--jobs > 1`:
+  every worker created the same test database, the losers' tests all errored,
+  and their mutants counted as killed (healthchecks: 100 % vs 81.9 % at
+  `--jobs 1`). fermut now sets `TOX_PARALLEL_ENV` per worker (`fm<k>`, after
+  your own value inside `tox -p`), which pytest-django appends to test DB
+  names. Re-run with `--no-cache` if a cached run scored a Django project
+  on such a DB with several workers.
 - An explicit `.` path (`fermut run .`, `fermut list .`, `fermut hom .`, MCP
   `fermut_run` with `path: "."`) now mutates the current directory. It was
   read as "no path" and fell back to the config's `source_root`, so

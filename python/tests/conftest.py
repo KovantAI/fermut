@@ -53,7 +53,7 @@ FAKE_FERMUT = textwrap.dedent(
     }}
     with open(args[args.index("--json") + 1], "w") as fh:
         json.dump(report, fh)
-    sys.exit(1 if survivors else 0)
+    sys.exit(3 if mode == "broken" else 1 if survivors else 0)
     """
 )
 

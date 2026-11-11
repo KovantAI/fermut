@@ -13,6 +13,7 @@
 pub(crate) mod exit;
 pub mod kill_sets;
 pub(crate) mod memory;
+pub(crate) mod pristine;
 pub(crate) mod process_group;
 pub mod pytest;
 pub(crate) mod pytest_result;
@@ -828,14 +829,16 @@ pub(crate) fn apply_patch(mirror: &Mirror, mutant: &Mutant) -> Result<PatchGuard
 }
 
 thread_local! {
-    static WORKER_MIRROR: RefCell<Option<(PathBuf, IsolationMode, Mirror)>> =
+    static WORKER_MIRROR: RefCell<Option<(PathBuf, IsolationMode, Mirror, pristine::Pristine)>> =
         const { RefCell::new(None) };
 }
 
 /// Run `f` against this worker's mirror, building one on first call.
 /// The mirror is rebuilt only if `tests` or isolation mode changes — neither
-/// should within a run. A fresh mirror is precompiled for `python` (the
-/// runner's `--python`, else pytest's interpreter); see [`precompile`].
+/// should within a run, or if putting it back after a run fails. A fresh
+/// mirror is precompiled for `python` (the runner's `--python`, else pytest's
+/// interpreter); see [`precompile`]. After `f`, files its tests left changed
+/// are restored ([`pristine`]), so the next mutant sees the tree as built.
 pub(crate) fn with_worker_mirror<F, T>(
     tests: &Path,
     mode: IsolationMode,
@@ -847,15 +850,43 @@ where
 {
     WORKER_MIRROR.with(|cell| {
         let mut slot = cell.borrow_mut();
-        let needs_build = !matches!(&*slot, Some((p, m, _)) if p == tests && *m == mode);
+        let needs_build = !matches!(&*slot, Some((p, m, ..)) if p == tests && *m == mode);
         if needs_build {
             *slot = None;
             let mirror = build_baseline_mirror(tests, mode, python)?;
-            *slot = Some((tests.to_path_buf(), mode, mirror));
+            let pristine = pristine::Pristine::take(&mirror.root);
+            *slot = Some((tests.to_path_buf(), mode, mirror, pristine));
         }
-        let mirror = &slot.as_ref().unwrap().2;
-        f(mirror)
+        let (_, _, mirror, pristine) = slot.as_mut().unwrap();
+        let out = f(mirror);
+        match pristine.restore(&mirror.project_root, mode) {
+            Ok(dirty) if !dirty.is_empty() => warn_dirtied(&dirty),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("restoring the mirror after a run failed, rebuilding it: {e:#}");
+                *slot = None;
+            }
+        }
+        out
     })
+}
+
+fn warn_dirtied(dirty: &[PathBuf]) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    tracing::debug!("restored mirror paths a run left changed: {dirty:?}");
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let shown: Vec<_> = dirty
+            .iter()
+            .take(5)
+            .map(|p| p.display().to_string())
+            .collect();
+        tracing::warn!(
+            "tests changed files inside the project tree and didn't put them back ({}); \
+             fermut restores its copy after each mutant, but a test that leaves the tree \
+             changed when it fails isn't hermetic",
+            shown.join(", ")
+        );
+    }
 }
 
 /// Compile the mirror's sources to checked-hash `.pyc` (PEP 552), so each
@@ -1068,6 +1099,39 @@ mod tests {
         apply_patch, copy_dir_all, py_unicode_escape, replace_path, sanitize_python_env,
         shown_path, tail_lines, Mirror, PatchGuard, CHILD_ENV, SANITIZED_ENV_VARS,
     };
+
+    #[test]
+    fn a_mirror_that_cant_be_restored_is_rebuilt() {
+        use crate::config::IsolationMode;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "").unwrap();
+        std::fs::write(dir.join("mod.py"), "x = 1").unwrap();
+        let tests = dir.join("tests");
+        // Precompiling is best effort; `true` skips it.
+        let py = std::path::Path::new("true");
+        // A fresh thread: the mirror is thread-local.
+        std::thread::spawn(move || {
+            let run = |edit: bool| {
+                super::with_worker_mirror(&tests, IsolationMode::Copy, Some(py), |m| {
+                    if edit {
+                        // Changed in the mirror, gone from the source: restore
+                        // has nothing to copy back and fails.
+                        std::fs::write(m.root.join("mod.py"), "x = 2").unwrap();
+                        std::fs::remove_file(dir.join("mod.py")).unwrap();
+                    }
+                    Ok(m.root.clone())
+                })
+                .unwrap()
+            };
+            let first = run(true);
+            assert!(!first.exists(), "the broken mirror was dropped");
+            assert_ne!(run(false), first);
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn hash_seed_is_pinned_unless_the_user_sets_one() {

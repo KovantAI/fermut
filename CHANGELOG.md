@@ -64,6 +64,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   file's directory. It handed ty the file as a project root, fell back to
   the subprocess checker, and could reject nearly every mutant as a type
   error (fastapi `routing.py`: 5198 of 5440, 0 tested).
+- The project root is also found by `pytest.ini`, `.pytest.ini`, `tox.ini`,
+  `setup.py`, or `.git`, not only `pyproject.toml` / `setup.cfg`. A Django
+  app with none of the latter walked up to an unrelated ancestor, mirrored
+  the wrong tree, and failed the baseline (`pytest exit 4`). Repos without
+  any config marker now anchor `.fermut/` at the git root, so a cache left
+  in a subdirectory by an earlier run is not reused once.
 - `pytest --fermut`: a fermut run that broke after writing its report (exit
   `3`) failed the session as a gate failure (exit `1`); it now exits `3`
   (internal error), as documented.

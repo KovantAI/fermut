@@ -6,7 +6,8 @@ other artifacts. History is kept so the trend log survives cache rotation. To
 remove everything, run `rm -rf .fermut/` yourself.
 
 `clean` only looks in `<PATH>/.fermut/`. `run` writes artifacts under the
-*project root* (the nearest directory with `pyproject.toml` / `setup.cfg`),
+*project root* (the nearest directory with a project marker, see
+[Projects](../../concepts/projects.md)),
 so run `fermut clean` from that root. `fermut clean src/` misses them.
 
 ```sh

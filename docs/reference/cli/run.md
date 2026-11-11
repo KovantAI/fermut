@@ -38,6 +38,7 @@ fermut run [PATH] [flags...]
 | `--markdown <p>`            | none                             | Also write Markdown summary (for PR comments).                        |
 | `--trend`                   | off                              | Include a compact trend block at the top of the Markdown report.      |
 | `--experimental`            | off                              | Include experimental operators.                                       |
+| `--mutate-migrations`       | off                              | Mutate Django `migrations/0001_*.py` and Alembic `versions/*.py` too. Skipped by default, shown as `migrations` in the summary. Also `mutate_migrations`. |
 | `--parity`                  | off                              | Include parity operators (cross-tool comparison only — very noisy, never for normal scoring). See [Parity operators](../operators/parity.md). |
 | `--operators <profile>`     | `minimal`                        | Compare / `and`-`or` operator set: `minimal`, `classic`, `full`. See [Operator profiles](../operators/profiles.md). |
 | `--ops <list>`              | all                              | Allowlist operators.                                                  |

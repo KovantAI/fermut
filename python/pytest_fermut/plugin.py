@@ -37,6 +37,8 @@ import pytest
 CHILD_ENV = "FERMUT_CHILD"
 BIN_ENV = "FERMUT_BIN"
 BASELINE_SECS_ENV = "FERMUT_BASELINE_SECS"
+# `fermut run` exit code for a run that broke (1 is a failed gate).
+FERMUT_RUNTIME_ERROR = 3
 
 _STATE = pytest.StashKey["_FermutState"]()
 
@@ -414,7 +416,11 @@ def pytest_sessionfinish(session, exitstatus):
         return
     state.report = report
     _summarize(state, report, root, config.getoption("fermut_show"))
-    if rc != 0:
+    if rc == FERMUT_RUNTIME_ERROR:
+        # The run broke after writing its report: not a gate verdict.
+        state.lines.append(({"red": True}, f"fermut exited {rc}: the run broke"))
+        session.exitstatus = pytest.ExitCode.INTERNAL_ERROR
+    elif rc != 0:
         state.lines.append(({"red": True, "bold": True}, "mutation gate failed"))
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
 

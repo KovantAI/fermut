@@ -111,6 +111,10 @@ fn hash_with_shard(cfg: &Config, shard: Option<(u32, u32)>) -> String {
     } else {
         &b"off"[..]
     });
+    // Fed only on opt-in, so history without migrations keeps its hash.
+    if cfg.mutate_migrations {
+        h.update(b"|migrations=on");
+    }
     h.update(b"|ops=");
     if let Some(allow) = &cfg.ops_allow {
         let mut sorted: Vec<String> = allow.iter().map(|o| format!("{o:?}")).collect();
@@ -277,6 +281,7 @@ mod tests {
             ruff_filter: false,
             tce: false,
             experimental: false,
+            mutate_migrations: false,
             parity: false,
             ops_allow: None,
             ops_deny: Default::default(),
@@ -330,6 +335,13 @@ mod tests {
         let mut off = cfg();
         off.private_home = false;
         assert_ne!(config_hash(&cfg()), config_hash(&off));
+    }
+
+    #[test]
+    fn opting_into_migrations_changes_the_hash() {
+        let mut on = cfg();
+        on.mutate_migrations = true;
+        assert_ne!(config_hash(&cfg()), config_hash(&on));
     }
 
     #[test]

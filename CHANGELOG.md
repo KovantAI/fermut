@@ -31,6 +31,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 - MCP `fermut_run` and `fermut_score` take a `history_path` argument.
 
 ### Changed
+- Schema migrations are skipped by default: Django `migrations/0001_*.py`
+  in a package and Alembic `versions/*.py` next to `env.py`, shown as
+  `migrations` in the skip summary. On healthchecks they were 55 % of
+  `hc/api`'s mutants, 76 % surviving (score 44.2 % with them, 68.9 %
+  without). `--mutate-migrations` / `mutate_migrations = true` opts back
+  in. A Django project's `trend` shows the drop in mutants under the same
+  config hash.
 - **Breaking:** a runtime error (bad config, red baseline, git or I/O
   failure, a failed `merge` check) now exits `3` instead of `1`, so CI can
   tell a broken run from a failed gate. `1` still means the gate failed
@@ -57,6 +64,23 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   file's directory. It handed ty the file as a project root, fell back to
   the subprocess checker, and could reject nearly every mutant as a type
   error (fastapi `routing.py`: 5198 of 5440, 0 tested).
+- `pytest --fermut`: a fermut run that broke after writing its report (exit
+  `3`) failed the session as a gate failure (exit `1`); it now exits `3`
+  (internal error), as documented.
+- GitHub Action: a run that exited `3` with an all-errored report was treated
+  as a gate failure, so `blocking: false` downgraded it to a warning. Exit `3`
+  now always fails the job.
+- `--schemata` with pytest-django on in-memory SQLite: the test database is
+  created and migrated once in the template instead of in every fork
+  (healthchecks: 1.5 → 0.5 s per mutant, same verdicts). Other databases and
+  `django_db_setup` overrides keep the per-fork build.
+- Django on Postgres/MySQL (or SQLite with `TEST.NAME`) with `--jobs > 1`:
+  every worker created the same test database, the losers' tests all errored,
+  and their mutants counted as killed (healthchecks: 100 % vs 81.9 % at
+  `--jobs 1`). fermut now sets `TOX_PARALLEL_ENV` per worker (`fm<k>`, after
+  your own value inside `tox -p`), which pytest-django appends to test DB
+  names. Re-run with `--no-cache` if a cached run scored a Django project
+  on such a DB with several workers.
 - An explicit `.` path (`fermut run .`, `fermut list .`, `fermut hom .`, MCP
   `fermut_run` with `path: "."`) now mutates the current directory. It was
   read as "no path" and fell back to the config's `source_root`, so

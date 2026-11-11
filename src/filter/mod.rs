@@ -5,6 +5,7 @@
 pub mod coverage;
 pub mod diff;
 pub mod experimental;
+pub mod migrations;
 pub mod operator;
 pub mod parity;
 pub mod profile;
@@ -206,13 +207,12 @@ pub(crate) fn retry_etxtbsy<T>(
 
 /// Build the filter chain implied by the config, cheap-to-expensive.
 pub fn build_chain(cfg: &Config) -> Result<Vec<Box<dyn Filter>>> {
-    let mut chain: Vec<Box<dyn Filter>> = Vec::new();
-
-    chain.push(Box::new(experimental::ExperimentalFilter::new(
-        cfg.experimental,
-    )));
-    chain.push(Box::new(parity::ParityFilter::new(cfg.parity)));
-    chain.push(Box::new(profile::ProfileFilter::new(cfg.operator_profile)));
+    let mut chain: Vec<Box<dyn Filter>> = vec![
+        Box::new(experimental::ExperimentalFilter::new(cfg.experimental)),
+        Box::new(migrations::MigrationsFilter::new(cfg.mutate_migrations)),
+        Box::new(parity::ParityFilter::new(cfg.parity)),
+        Box::new(profile::ProfileFilter::new(cfg.operator_profile)),
+    ];
 
     if cfg.ops_allow.is_some() || !cfg.ops_deny.is_empty() {
         chain.push(Box::new(operator::OperatorFilter::new(
@@ -318,6 +318,7 @@ pub fn first_rejector<'a>(
 #[allow(dead_code)] // used only by chain_order_tests; kept as docs/refactor guide.
 pub(crate) const CANONICAL_ORDER: &[&str] = &[
     "experimental",
+    "migrations",
     "parity",
     "profile",
     "operator",
@@ -363,6 +364,7 @@ mod chain_order_tests {
             ruff_filter: false,
             tce: false,
             experimental: false,
+            mutate_migrations: false,
             parity: false,
             ops_allow: None,
             ops_deny: HashSet::new(),
@@ -442,7 +444,7 @@ mod chain_order_tests {
         // reviewed together.
         assert_eq!(
             names(&empty_config()),
-            vec!["experimental", "parity", "profile"]
+            vec!["experimental", "migrations", "parity", "profile"]
         );
     }
 
@@ -462,6 +464,7 @@ mod chain_order_tests {
             names(&cfg),
             vec![
                 "experimental",
+                "migrations",
                 "parity",
                 "profile",
                 "operator",
@@ -513,7 +516,8 @@ mod chain_order_tests {
         // asserts they kept the buckets in the right order.
         fn bucket(name: &str) -> u8 {
             match name {
-                "experimental" | "parity" | "profile" | "operator" | "shard" | "sample" => 0,
+                "experimental" | "migrations" | "parity" | "profile" | "operator" | "shard"
+                | "sample" => 0,
                 "diff-only" | "since" | "coverage" => 1,
                 "ruff" | "ty" => 2,
                 "tce" => 3,
@@ -650,6 +654,7 @@ mod chain_order_tests {
         let got: Vec<&str> = chain.iter().map(|f| f.name()).collect();
         let mut want = vec![
             "experimental",
+            "migrations",
             "parity",
             "profile",
             "diff-only",

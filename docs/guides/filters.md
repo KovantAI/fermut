@@ -131,15 +131,14 @@ than skipping mutants downstream.
 
 ```sh
 fermut run src/ \
-    --exclude 'alembic/**' \
     --exclude 'tests/integration/**' \
-    --exclude '**/migrations/*.py'
+    --exclude 'vendor/**'
 ```
 
 Config:
 
 ```toml
-exclude = ["alembic/**", "tests/integration/**", "**/migrations/*.py"]
+exclude = ["tests/integration/**", "vendor/**"]
 ```
 
 CLI `--exclude` (when passed at least once) replaces the config
@@ -147,7 +146,14 @@ CLI `--exclude` (when passed at least once) replaces the config
 
 Useful for:
 
-- Auto-generated code (alembic migrations, protobuf stubs).
+- Auto-generated code (protobuf stubs).
+
+Schema migrations are skipped without any config: Django
+`migrations/0001_*.py` (in a package) and Alembic `versions/*.py` (next to
+`env.py`) show up as `migrations` in the skip summary. Their survivors mean
+"no test reads this column's `max_length`", not a logic gap, and on a Django
+app they can be half the mutants. `--mutate-migrations` (or
+`mutate_migrations = true`) mutates them anyway.
 - Vendor / third-party trees checked into the source tree.
 - Integration test directories where mutation testing is too coarse.
 

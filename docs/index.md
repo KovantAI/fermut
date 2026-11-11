@@ -109,6 +109,7 @@ Expected output — a line per survivor/timeout, then a one-line summary:
 
 ```
 SURVIVED  src/auth.py:42@1187 [boundary-shift] `>=` → `>`
+TIMEOUT   src/slow.py:88@2306 [arith-op-swap] `*` → `/`
 
 152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3 (coverage 3), equivalent: 0, errored: 0  | score: 94.6%
 ```

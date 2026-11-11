@@ -1,8 +1,9 @@
 name: Mutation (nightly full sweep)
 
 # Runs the full mutation suite every night against `main`. No diff filter, no
-# sampling — exhaustive. Result lands as an HTML artifact and, on regression,
-# files a tracking issue.
+# sampling — exhaustive. Result lands as an HTML artifact; when mutants
+# survive it files a tracking issue. A full sweep almost always has some
+# survivors, so add `--fail-under N` to open issues only below a floor.
 
 on:
   schedule:
@@ -40,8 +41,9 @@ jobs:
       - name: build per-test coverage
         run: uv tool run fermut coverage
 
-      # Exit 1 = gate failed (survivors), 3 = the run itself broke. Record
-      # the code so only real survivors open an issue.
+      # Exit 1 = gate failed: survivors, or nothing scored because every
+      # mutant errored. Exit 3 = the run itself broke. Record the code; the
+      # steps below tell survivors apart from a broken run.
       - name: full mutation sweep
         id: mutate
         run: |
@@ -67,18 +69,27 @@ jobs:
             fermut-report.html
             fermut-report.xml
 
-      - name: open issue on regression
+      - name: classify the result
+        id: verdict
         if: steps.mutate.outputs.code == '1'
+        run: |
+          # scored == 0 with errors means nothing was tested, not survivors.
+          broken=$(jq '.summary.scored == 0 and .summary.errored > 0' fermut-report.json)
+          echo "broken=$broken" >> "$GITHUB_OUTPUT"
+
+      - name: open issue for survivors
+        if: steps.mutate.outputs.code == '1' && steps.verdict.outputs.broken == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh issue create \
-              --title "Nightly mutation regression on $(date -u +%Y-%m-%d)" \
-              --label mutation,regression \
+              --title "Nightly mutation survivors on $(date -u +%Y-%m-%d)" \
               --body "Survivors detected on the nightly full sweep. Download the [fermut-nightly artifact](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for the HTML report."
 
       - name: fail on a broken run
-        if: steps.mutate.outputs.code != '0' && steps.mutate.outputs.code != '1'
+        if: (steps.mutate.outputs.code != '0' && steps.mutate.outputs.code != '1') || steps.verdict.outputs.broken == 'true'
+        env:
+          CODE: ${{ steps.mutate.outputs.code }}
         run: |
-          echo "::error::fermut run failed with exit ${{ steps.mutate.outputs.code }} (not a gate failure); see the log"
+          echo "::error::fermut run broke (exit $CODE, or every mutant errored); see the log"
           exit 1

@@ -305,7 +305,8 @@ Maintainers only.
 
 ```sh
 # 1. Roll Unreleased → x.y.z in CHANGELOG.md.
-# 2. Bump Cargo.toml `version`.
+# 2. Bump Cargo.toml `version` and the `fermut==` pin in
+#    examples/github-actions/pr-gate.yml (a test enforces they match).
 # 3. Open a release PR; merge after green CI.
 # 4. Tag the merge commit:
 git tag -a v0.2.0 -m "v0.2.0"

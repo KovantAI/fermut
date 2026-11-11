@@ -34,7 +34,13 @@ jobs:
       - name: install project + fermut
         run: |
           uv sync
+          uv pip install pytest-cov   # `fermut coverage` runs `pytest --cov` in this venv
           uv tool install fermut
+
+      # Per-test coverage narrows each mutant to the tests that reach it. A
+      # pr-gate `fermut.toml` names `coverage = ".coverage"` explicitly, and
+      # fermut errors if that file is missing.
+      - run: uv tool run fermut coverage --source src --tests tests/
 
       - name: resolve since-ref
         id: since
@@ -45,22 +51,26 @@ jobs:
             ref="$SINCE_INPUT"
           else
             # Most recent semver tag *before* HEAD (on a tag push HEAD is the
-            # new tag itself), or 7 days ago if there is no earlier tag.
-            ref=$(git describe --tags --abbrev=0 --match 'v*' HEAD^ 2>/dev/null || echo '7 days ago')
+            # new tag itself), or the root commit if there is no earlier tag.
+            ref=$(git describe --tags --abbrev=0 --match 'v*' HEAD^ 2>/dev/null \
+                  || git rev-list --max-parents=0 HEAD | tail -1)
           fi
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "Comparing against: $ref"
 
       - name: run fermut since ${{ steps.since.outputs.ref }}
+        env:
+          SINCE_REF: ${{ steps.since.outputs.ref }}
         run: |
           uv tool run fermut run src/ \
               --tests tests/ \
-              --since "${{ steps.since.outputs.ref }}" \
+              --since "$SINCE_REF" \
               --hypothesis-seed 1234 \
               --markdown fermut-incremental.md \
               --json fermut-incremental.json
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()  # `fermut run` exits 1 when mutants survive; still upload
         with:
           name: fermut-incremental
           path: |

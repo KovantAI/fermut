@@ -155,7 +155,9 @@ full sweep on branch builds.
 pipeline {
   agent { docker { image 'python:3.12' } }
   environment {
-    FERMUT_CACHE_KEY = credentials('fermut-cache-key')   // optional: signs the cache
+    // Signs the cache. Delete this line if you don't use a signing key:
+    // a missing credential ID fails the whole pipeline.
+    FERMUT_CACHE_KEY = credentials('fermut-cache-key')
   }
   stages {
     stage('Install') {

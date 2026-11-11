@@ -29,6 +29,7 @@ Precedence is the standard **CLI flag > env var > config file > built-in default
 | `HOME`, `XDG_*` (on Windows also `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`) | Pointed at a private per-worker (and, under schemata, per-fork) directory so tests can't race on a shared home. `--no-private-home` turns this off. |
 | `PYTHONHASHSEED` | `1` unless you export your own (`PYTHONHASHSEED=random` opts out), so set/dict order is the same for every mutant. Part of the cache key. |
 | `PYTHONPATH`, `PYTHONDONTWRITEBYTECODE` | Pinned to the mirror, and `1`. |
+| `PYTEST_DEBUG_TEMPROOT` | A pytest temp root per mirror, so `tmp_path` / `tmp_path_factory` directories live under it instead of the shared `$TMPDIR/pytest-of-$USER`. |
 | `OS_ACTIVITY_MODE` | `disable` in the schemata template on macOS (os_log isn't fork-safe), unless you set it. |
 | `FM_ACTIVE`  | Under [schemata](cli/run-schemata.md), the active mutant's number in the schema. Exported so a Python subprocess a test starts runs the same mutant; `0` means none. A subprocess started without it (`env={...}`) finds the mutant by its process group instead, unless it starts a new session. Don't set it yourself. |
 | `TOX_PARALLEL_ENV` | Set per worker to `fm<k>` (after your own value inside `tox -p`: `py313_fm0`). pytest-django appends it to test database names, so concurrent workers and forks each get their own Postgres/MySQL/file-SQLite test DB instead of failing on a shared one. In-memory SQLite is unaffected. |

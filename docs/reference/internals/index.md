@@ -66,8 +66,10 @@ both built from the same crate root. The module structure:
    `Vec<Box<dyn Filter>>` in cost order (`CANONICAL_ORDER` in
    `src/filter/mod.rs`): experimental → migrations → parity → profile →
    operator allow/deny → shard → sample → diff-only → since → coverage →
-   ruff → ty → tce. With `--select-tests`, `build_chain` also pushes
-   `selection` right after coverage; it has no `CANONICAL_ORDER` entry. Each filter exposes `name()` and `admits(&Mutant) ->
+   ruff → ty → tce. When the run narrows tests (`--select-tests`, or a baseline whose
+   pytest deselects some via `-k` / `-m` / `--deselect`), `build_chain`
+   also pushes `selection` right after coverage; it has no
+   `CANONICAL_ORDER` entry. Each filter exposes `name()` and `admits(&Mutant) ->
    Result<bool>`; the first `false` names the rejecting filter.
 
 4. **Hash files once.** Every unique source file gets one structural

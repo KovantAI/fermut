@@ -90,7 +90,7 @@ jobs = 4
 timeout = 30
 ty_filter = true
 experimental = false
-ops = ["arith-op-swap", "boundary-shift", "ror-equality", "ror-const", "return-value-to-none"]
+ops = ["arith-op-swap", "compare-op-swap", "boundary-shift", "ror-equality", "ror-const", "return-value-to-none"]
 skip_ops = ["number-shift"]
 diff_only = "main"
 coverage = ".coverage"
@@ -123,7 +123,7 @@ against the prior run instead of an absolute floor, use
 
 ```toml
 [tool.fermut]
-ops = ["arith-op-swap", "boundary-shift", "ror-equality", "ror-const"]
+ops = ["arith-op-swap", "compare-op-swap", "boundary-shift", "ror-equality", "ror-const"]
 diff_only = "main"
 coverage = ".coverage"
 ```

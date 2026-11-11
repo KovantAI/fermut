@@ -393,7 +393,8 @@ pub(crate) struct RunConfigArgs {
 
     /// Wall time of a green whole-suite run you already did (seconds). When
     /// fermut's baseline is skipped it stands in for it when sizing
-    /// `--timeout-factor` timeouts; ignored without `--timeout-factor`.
+    /// `--timeout-factor` timeouts (on by default); ignored when the factor
+    /// is off (`--timeout-factor 0` / `--no-timeout-factor`).
     /// `pytest --fermut` passes its session time through the env var.
     #[arg(long, value_name = "SECS", env = "FERMUT_BASELINE_SECS")]
     pub baseline_secs: Option<f64>,
@@ -482,8 +483,8 @@ enum Cmd {
 
     /// Detect project layout and emit a starter `fermut.toml`.
     ///
-    /// Walks up from PATH to find the project root (pyproject.toml or
-    /// setup.cfg), detects the source/tests directories and which tools
+    /// Walks up from PATH to find the project root (pyproject.toml,
+    /// setup.cfg, pytest.ini, tox.ini, setup.py or .git), detects the source/tests directories and which tools
     /// are on PATH (pytest, unittest, ty), and writes a config tuned to
     /// the repo size. Optionally drops a PR-gate GitHub Actions workflow.
     Init(subcmd::init::InitArgs),

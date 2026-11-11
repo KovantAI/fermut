@@ -31,24 +31,28 @@ container (Ubuntu 24.04, 8 workers).
 
 | Row | Repo | Mutants run | Detection diffs, schemata vs spawn | Wall, schemata / spawn |
 |---|---|---|---|---|
-| Django | healthchecks v5.0.3, `hc/api` | 9341 | 0 | 839 s / 1249 s |
+| Django | healthchecks v5.0.3, `hc/api` | 9341 (migrations included) | 0 | 839 s / 1249 s |
 | FastAPI | fastapi 0.162.2, 10 % sample | 1125 | 0 apart from order-dependent tests (see below) | 670 s / 561 s |
 | Starlette | starlette (benchmark pin) | 5960 | 0 (Linux, 3 rounds) | 203 s / 469 s |
 | pytest-asyncio | aiofiles @9d1acc1 | 1664 | not measured: spawn runs still differ by 18, all one timing-flaky test | 29 s / 35 s |
-| trio | trio (benchmark pin), 30 % sample | 2330 | 0 (Linux, 3 rounds) | 224 s / 285 s |
+| trio | trio (benchmark pin), 30 % sample | 2330 | 1 (Linux, 3 rounds), fixed since, not re-run | 224 s / 285 s |
 | C extension | markupsafe 3.0.3 | 217 | 0 (Linux, 3 rounds) | 14 s / 12 s |
 | Hypothesis | attrs 26.1.0, 50 % sample | 1735 | 0 with a pinned seed (4 runs) | 138–150 s / 150–154 s |
 | xdist | typer (benchmark pin), `-n 4` in addopts | 209 | 0 | 198 s / 196 s |
 
-Their full numbers are in the
-[schemata Linux parity run](https://github.com/KovantAI/fermut/tree/main/benchmarks/schemata#linux-parity-2026-11-04-backlog-40).
+The Starlette, trio and markupsafe numbers are in the
+[schemata Linux parity run](https://github.com/KovantAI/fermut/tree/main/benchmarks/schemata#linux-parity-2026-11-04-backlog-40). Raw results for
+the other rows weren't checked in.
 
 ## Django / pytest-django { #django }
 
 - **Test database.** pytest-django builds the test DB in a session fixture.
   Under schemata, fermut builds an in-memory SQLite test DB once in the
   template, and every fork gets its own copy. healthchecks: 839 s instead
-  of 1249 s spawning, 0 diffs on 9341 mutants.
+  of 1249 s spawning, 0 diffs on 9341 mutants. That run predates the
+  default migrations skip, so it includes the migrations (below); it isn't
+  comparable to the [benchmarks](../reference/benchmarks.md#application-repos-healthchecks-and-flaskbb)
+  table, which excludes them.
 - **File SQLite, Postgres, MySQL.** Each child builds its own test DB. Each
   worker gets its own DB name (pytest-django's `TOX_PARALLEL_ENV` suffix),
   so `--jobs > 1` doesn't share one database. Expect about a second per
@@ -116,10 +120,11 @@ fails in a fork with no mutant, and the false kills are gone (score 51 % →
 
 trio loads its own pytest plugin. Pass the suite's flags as usual
 (`pytest_args = ["-p", "trio._tests.pytest_plugin", "--import-mode=importlib"]`
-when they aren't already in `addopts`). No diffs in any of 3 Linux rounds.
-One mutant used to differ: dropping `daemon=True` from a worker thread made
-a normal run hang at exit while a forked child exited at once. Forked
-children now wait for non-daemon threads too.
+when they aren't already in `addopts`). The 3 Linux rounds had one stable
+diff: dropping `daemon=True` from a worker thread
+(`_core/_thread_cache.py@5793`) made a normal run hang at exit while a
+forked child exited at once. Forked children now wait for non-daemon
+threads too; the rounds haven't been re-run since that fix.
 
 ## C extensions { #c-extensions }
 

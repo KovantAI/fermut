@@ -27,7 +27,8 @@ for the conceptual model.
 Allowlist + denylist for operators. `--skip-ops` wins over `--ops`.
 
 ```sh
-# Start narrow; widen as score climbs.
+# Start narrow; widen as score climbs. This skips ==/!=/is/in and
+# and/or (add compare-op-swap and the bool-* ops to cover them).
 fermut run src/ --ops arith-op-swap,boundary-shift,ror-equality,ror-const
 
 # Everything except a noisy operator.

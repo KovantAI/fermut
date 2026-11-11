@@ -8,7 +8,7 @@ from `src/` + `tests/`.
 
 | Profile                    | When                          | Highlights                                                                            |
 |----------------------------|-------------------------------|---------------------------------------------------------------------------------------|
-| [`pr-gate.toml`](pr-gate.toml) | Pre-merge CI gate. Fail fast. | `diff_only = "main"`, coverage required, 4-op allowlist, 15s timeout, pinned seed.    |
+| [`pr-gate.toml`](pr-gate.toml) | Pre-merge CI gate. Fail fast. | `diff_only = "main"`, coverage required, 9-op allowlist, 15s timeout, pinned seed.    |
 | [`nightly.toml`](nightly.toml) | Cron full sweep. Catch drift. | `experimental = true`, no diff filter, no coverage, 60s timeout, every op.            |
 | [`local.toml`](local.toml)     | Dev loop. Sub-second cycle.   | `sample = 0.25` (`sample_seed = 0`), no coverage, 15s timeout.                        |
 | [`library.toml`](library.toml) | Library authors.              | All stable ops, `experimental = false`, pinned `hypothesis_seed`, 30s timeout.        |

@@ -72,7 +72,7 @@ source root and tests directory.
 
 - **Auto-discovered `.coverage` written by `fermut coverage` is refreshed.**
   `fermut run` re-runs only the test files the change invalidated, then
-  uses it (on pyjwt, one edited function: 9 test files, a few seconds,
+  uses it (on pyjwt, one edited function: 6 test files, a few seconds,
   instead of a 311 s run without selection).
 - **Any other stale auto-discovered `.coverage` is ignored**, and so is one
   whose refresh failed. Since you didn't opt into it, fermut declines to

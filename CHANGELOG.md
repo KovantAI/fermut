@@ -31,6 +31,9 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 - MCP `fermut_run` and `fermut_score` take a `history_path` argument.
 
 ### Changed
+- The workflow written by `fermut init --with-gha` pins exact versions
+  (`fermut==0.7.0`, `pytest-cov==7.1.0`) instead of installing the latest:
+  the job holds `GH_TOKEN`.
 - Schema migrations are skipped by default: Django `migrations/0001_*.py`
   in a package and Alembic `versions/*.py` next to `env.py`, shown as
   `migrations` in the skip summary. On healthchecks they were 55 % of
@@ -50,7 +53,8 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 - Human-readable output (`run`, `list`, `show`, `baseline`'s worst files)
   prints source paths relative to the current directory
   (`src/calculator.py:14@216`) instead of the full checkout path. Mutant ids
-  and JSON reports still carry absolute paths.
+  and JSON reports still carry absolute paths, as does `show`'s
+  single-mutant detail view.
 - The unittest runner stops each mutant's run at the first failure
   (`unittest discover -f`). Verdicts don't change; a run that failed and then
   hung is now killed instead of timed out (both count as detected).

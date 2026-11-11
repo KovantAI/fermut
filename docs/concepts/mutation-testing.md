@@ -77,7 +77,7 @@ Run fermut:
 fermut run src/ --tests tests/ --json report.json
 ```
 
-Output (`fermut run` prints paths as you passed them; `fermut show` prints absolute paths):
+Output (`fermut run` and the `fermut show` listing print paths relative to the current directory):
 
 ```
 SURVIVED  src/age.py:2@47 [boundary-shift] `>=` → `>`
@@ -88,6 +88,7 @@ SURVIVED  src/age.py:2@50 [number-to-zero] `18` → `0`
 SURVIVED  src/age.py:2@50 [number-to-neg] `18` → `-18`
 
 13 mutants — killed: 1, survived: 6, timeout: 0, skipped: 6 (profile 4, experimental 1, ty 1), equivalent: 0, errored: 0  | score: 14.3%
+noisy operators (survivors ≥ kills): number-shift, boundary-shift, number-to-neg, number-to-zero, ror-const — add to `skip_ops` if their survivors aren't observably wrong
 ```
 
 Thirteen mutants were generated from one line; six were filtered
@@ -96,7 +97,12 @@ need, an experimental operator, plus one the ty filter proved
 type-invalid). Of the seven that ran, only `ror-equality` (`>=` → `==`)
 was killed.
 
-Inspect the boundary survivor (`4` is its index in the report):
+The `noisy operators` hint is a whole-run heuristic; with one test it
+flags almost everything. Here the survivors are real gaps, so don't skip
+them — write the missing tests instead.
+
+Inspect the boundary survivor (`4` is its index in the report). The detail
+view prints absolute paths; they're shortened here:
 
 ```sh
 fermut show report.json 4

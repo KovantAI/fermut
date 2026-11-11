@@ -106,7 +106,7 @@ of impact:
    today, `--ops boundary-shift,ror-equality,ror-const` cuts mutant
    count dramatically (under the default `minimal` profile those are
    the ordering-compare operators; `compare-op-swap` only covers
-   `==`, `is` and `in` there).
+   `==`, `!=`, `is`, `in` and chained compares there).
 3. **Drop `--sample` to 10%** for stress-iteration sessions:
    `--sample 0.1`. Less recall, faster cycle.
 

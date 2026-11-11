@@ -165,7 +165,7 @@ Output — a line per survivor/timeout/error, then a one-line summary:
 
 ```
 SURVIVED  src/auth.py:42@1187 [boundary-shift] `>=` → `>`
-TIMEOUT   src/slow.py:88@2304 [arith-op-swap] `n * 2` → `n / 2`
+TIMEOUT   src/slow.py:88@2306 [arith-op-swap] `*` → `/`
 
 152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3 (coverage 3), equivalent: 0, errored: 0  | score: 94.6%
 ```
@@ -198,7 +198,7 @@ The most common surprises, in roughly the order people hit them:
 - **Lots of `errored` outcomes.** Usually means your tests have
   side effects on the source tree — they write files inside `src/`,
   patch in-process state that doesn't survive `fork`, or rely on
-  cwd. Switch to `--isolation copy` (slower, safer). See
+  cwd. For fork trouble, run with `--no-schemata`. See
   [errored outcomes](../reference/troubleshooting/errored-outcomes.md).
 - **Score wobbles between identical runs.** Hypothesis seed isn't
   pinned, or you have order-dependent tests. Pin
@@ -211,7 +211,10 @@ The most common surprises, in roughly the order people hit them:
   [diff-only empty](../reference/troubleshooting/diff-only-empty.md).
 - **Lots of timeouts.** Some tests don't terminate cleanly under
   arithmetic mutants (infinite loops on boundary-shifted
-  conditions). Raise `--timeout`; tune later.
+  conditions). Those already count as detected. If slow but correct
+  tests time out, raise `--timeout-factor` (the limit is
+  `min(--timeout, 3 × baseline + 5 s)`), or `--timeout` when the 30 s
+  cap is the smaller one.
 - **Score lower than expected.** Not a bug. Even mature libraries
   score 67–86%; see the note above the "What can go wrong" header.
 - **Run is much slower than the wall-clock table.** Check that

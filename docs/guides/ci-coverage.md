@@ -94,7 +94,8 @@ pytest-cov treats a `--cov` value that isn't a directory as an importable
 package name, so `--cov=src/pkg/x.py` measures nothing:
 
 ```sh
-CHANGED_DIRS=$(git diff --name-only origin/main -- '*.py' | grep '^src/' | xargs -n1 dirname | sort -u)
+CHANGED_DIRS=$(git diff --name-only origin/main -- '*.py' | { grep '^src/' || true; } | xargs -n1 dirname | sort -u)
+[ -n "$CHANGED_DIRS" ] || { echo "no changed source files; nothing to mutate"; exit 0; }
 pytest $(printf ' --cov=%s' $CHANGED_DIRS) --cov-context=test
 fermut run src/ --tests tests/ --diff-only origin/main --coverage .coverage
 ```

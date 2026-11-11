@@ -23,7 +23,7 @@ _Line coverage tells you which lines run. fermut tells you which lines your test
 $ fermut run src/ --tests tests/
 
 SURVIVED  src/auth.py:42@1187 [boundary-shift] `>=` → `>`
-TIMEOUT   src/slow.py:88@2304 [arith-op-swap] `n * 2` → `n / 2`
+TIMEOUT   src/slow.py:88@2306 [arith-op-swap] `*` → `/`
 
 152 mutants — killed: 140, survived: 8, timeout: 1, skipped: 3 (coverage 3), equivalent: 0, errored: 0  | score: 94.6%
 ```
@@ -98,7 +98,7 @@ fermut is **faster at a similar score** here: per-test coverage selection
 and a fork server that collects the suite once (schemata) cut wall-clock
 without dropping rigor. The win is suite-shaped: on more-itertools the two
 tie (~123s vs ~119s), and on a tiny suite like markupsafe mutmut's simpler
-model still wins (~9s vs ~15s). On the larger suites fermut finishes
+model still wins (~9s vs ~15s including clone and install; ~4s vs ~10s without). On the larger suites fermut finishes
 werkzeug (41k generated mutants, 8k run) in under 3 minutes. Full numbers and methodology:
 **[benchmarks](docs/reference/benchmarks.md)**.
 

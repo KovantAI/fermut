@@ -29,7 +29,13 @@ jobs:
       - name: install project + fermut
         run: |
           uv sync
+          uv pip install pytest-cov   # `fermut coverage` runs `pytest --cov` in this venv
           uv tool install fermut
+
+      # A full sweep still needs per-test coverage: a pr-gate `fermut.toml`
+      # names `coverage = ".coverage"` explicitly, and fermut errors if that
+      # file is missing. (Or pass `--no-coverage` to run every test per mutant.)
+      - run: uv tool run fermut coverage --source src --tests tests/
 
       - name: run shard ${{ matrix.shard }}/8
         run: |

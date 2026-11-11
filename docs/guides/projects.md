@@ -50,7 +50,9 @@ A few things you might see:
   [`--isolation` modes](../reference/cli/run-isolation.md#isolation-modes); usually
   switching to `copy` mode fixes it.
 - **Lots of timeouts.** Some test fixtures don't terminate well under
-  arithmetic mutants. Raise `--timeout`; tune later.
+  arithmetic mutants. Each mutant gets `min(--timeout, factor × baseline + 5 s)`:
+  raise `--timeout-factor` if the budget is the lower limit, `--timeout` if
+  the flat cap is; tune later.
 
 Keep `baseline.json` — it's the "before" snapshot you'll
 compare future runs to.
@@ -70,7 +72,8 @@ optimize for different starting points:
     ```
 
     Defaults: diff-restricted to the merge base, per-test coverage
-    selection, narrow op set (arith / compare / boundary / return-value-to-none),
+    selection, narrow op set (arith, compare, boundary, `ror-*`, `bool-*`,
+    return-value-to-none),
     `--timeout 15`, Hypothesis seed pinned when Hypothesis is a declared
     dependency.
 
@@ -188,7 +191,9 @@ CLI reference. The most common shapes:
 | Sharded full sweep | push to main   | `pr-gate`           | `--no-diff-only --shard <i>/<n> --json shard-<i>.json`, plus a merge job     |
 
 `pr-gate` writes `diff_only = "main"`; full sweeps need `--no-diff-only`
-or a run on `main` diffs against itself and mutates nothing.
+or a run on `main` diffs against itself and mutates nothing. It also pins
+`coverage = ".coverage"`, which fermut requires to exist: run
+`fermut coverage` before the sweep, or pass `--no-coverage`.
 
 The "one config file + per-job overrides" pattern keeps everything in
 one place; the `--profile` template just opinionates the defaults.

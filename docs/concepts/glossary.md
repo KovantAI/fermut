@@ -147,7 +147,7 @@ with `--skip-ops`, enable experimental with `--experimental`. See
 
 A named starter template for `fermut.toml`. Four profiles ship:
 `pr-gate` (narrow ops, diff-only, fast), `nightly` (every op incl.
-experimental, no coverage, slower), `local` (25% sample, dev loop), `library`
+experimental, no `coverage` key, slower), `local` (25% sample, dev loop), `library`
 (every stable op, no experimental). Pick with
 `fermut init --profile <name>`. Profiles are templates, not modes —
 after `init` the config is plain text and you hand-edit. See
@@ -196,8 +196,8 @@ Outcome: pytest ran past the per-mutant limit, `min(--timeout,
 Usually means the mutant introduced an infinite loop (a boundary
 shift flipped a `<` to `<=` and broke loop termination). Counted as
 killed for scoring — the mutant changed behavior enough to wedge the
-test. On legitimately slow tests, raise `--timeout-factor` (or set it
-to `0` to use the flat `--timeout`).
+test. On legitimately slow tests, raise `--timeout-factor` when the
+baseline budget is the smaller limit, or `--timeout` when the 30 s cap is.
 
 ## ty
 

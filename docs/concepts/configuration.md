@@ -51,8 +51,11 @@ override individual knobs from YAML rather than carry a second
 config file.
 
 ```yaml
-# Nightly sweep job — same fermut.toml, broadened via CLI.
-- run: fermut run src/ --tests tests/ \
+# Nightly sweep job — same fermut.toml, broadened via CLI. A pr-gate
+# config sets `diff_only` and `coverage = ".coverage"`, so drop the diff
+# scope and build the coverage file first.
+- run: fermut coverage
+- run: fermut run src/ --tests tests/ --no-diff-only \
        --experimental --ops "" --timeout 60 \
        --markdown nightly.md
 ```
@@ -65,9 +68,12 @@ write a `fermut.toml` tuned to one specific use case:
 | Profile     | Optimized for                       | Key choices                                                       |
 |-------------|-------------------------------------|-------------------------------------------------------------------|
 | `pr-gate`   | Pre-merge CI gate. Fail fast.       | `diff_only`, `coverage`, narrow ops, short timeout, seeded.       |
-| `nightly`   | Cron full sweep. Catch drift.       | All operators (incl. experimental), 60 s timeout, no coverage.    |
-| `local`     | Dev loop. Cycles of seconds.       | `sample = 0.25`, all stable ops, cache on, no coverage.           |
+| `nightly`   | Cron full sweep. Catch drift.       | All operators (incl. experimental), 60 s timeout, no `coverage` key. |
+| `local`     | Dev loop. Cycles of seconds.       | `sample = 0.25`, all stable ops, cache on, no `coverage` key.     |
 | `library`   | Library authors. Reproducible.      | All stable ops, seeded, moderate timeout.                          |
+
+Leaving out the `coverage` key doesn't turn coverage off: a `.coverage`
+file at the project root is still picked up. Pass `--no-coverage` to skip it.
 
 Profiles are not mutually exclusive — they're templates. After
 `init`, the generated `fermut.toml` is plain text; hand-edit

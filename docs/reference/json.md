@@ -113,7 +113,7 @@ Values of `filter` on a `skipped` outcome, in the order filters run:
 | `file` | Absolute path of the source file. |
 | `operator` | Operator name in kebab case, without the `exp:` / `parity:` prefix the id carries (e.g. `numeric-type-swap`). See [Operators](operators/index.md). |
 | `range` | `[start, end]` byte offsets of the replaced text; `start` is the id's `@offset`. |
-| `original`, `replacement` | The replaced text and what replaced it: the operator token, not the whole expression. |
+| `original`, `replacement` | The replaced text (the `range` span) and what replaced it. Operator swaps replace just the token (`<` → `<=`); `ror-const`, `bool-const`, `bool-operand-drop`, `not-insertion`, `region-rest`, `return-value-to-none` and `assign-value-to-none` replace the whole expression or value (`a < b` → `False`). |
 | `line` | 1-based line of `range.start`. |
 | `stmt_line` | First line of the enclosing statement; differs from `line` on a continuation line. |
 | `site` | Present on compare and `and`/`or` mutants that the [operator profiles](operators/profiles.md) model: `start` (byte offset of the whole compare / boolean expression, shared by the site's mutants), `mask` (bitmask of the input regions where the mutant's truth differs from the original's), `minimal` (`true` when it is in the site's dominator set). |
@@ -121,7 +121,8 @@ Values of `filter` on a `skipped` outcome, in the order filters run:
 ## `fermut next`
 
 A JSON array, best target first. Each entry is one cluster: a representative
-survivor and the other survivors in the same `(file, operator)` within 2 lines of each other.
+survivor and the other survivors in the same `(file, operator)`, each within
+2 lines of a neighbour (clusters chain, so one can span more than 2 lines).
 
 | Field | Meaning |
 |---|---|

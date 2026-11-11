@@ -34,7 +34,9 @@ per-phase timing, mutant total, score, and return code.
 
 The numbers below are `cold`-scenario runs of fermut 0.7.0 (pre-release
 `main`, 2026-11-03) vs mutmut 3.8.1, **both re-run back-to-back on the same
-machine (2026-11-03)**, excluding clone / install. fermut runs its
+machine (2026-11-03)**. `Cold total` is the harness's wall-clock
+total, which includes cloning the repo and installing the tool and the
+repo (~3–6 s per run for both tools). fermut runs its
 defaults: coverage filter on, [schemata](cli/run-schemata.md) on,
 `--timeout-factor 3`, the `minimal` operator profile. mutmut runs its
 default.
@@ -79,7 +81,7 @@ The picture is **suite-shaped**:
   higher (90.2 vs 85.6). In June mutmut was ~2.6× faster here (~118s vs
   ~304s); schemata closed that gap.
 - **markupsafe:** a tiny suite, where mutmut's simpler model still wins
-  (~9s vs ~15s).
+  (~9s vs ~15s; without the ~5 s of clone/install each, ~4s vs ~10s).
 
 Because `coverage_prep` is a **one-time** cost, the *steady-state* cost is
 the `mutation` column; the cold totals are the conservative first-contact
@@ -91,7 +93,8 @@ The four repos above are small libraries. werkzeug 3.1.8 is closer to the
 size a team migrating off a long mutmut nightly runs: 21.5k lines of
 source, 10.2k lines of tests. Same machine, same session (2026-11-10):
 Apple M4 Max (14 cores, 36 GB), Python 3.13.13, pytest 9.2.0, fermut 0.7.0
-(`main` e6579ce448) vs mutmut 3.8.1, clone and install excluded.
+(`main` e6579ce448) vs mutmut 3.8.1, clone and install excluded. Raw
+result files for this session weren't checked in.
 
 | Run                      | fermut                            | mutmut  |
 |--------------------------|-----------------------------------|---------|
@@ -144,7 +147,7 @@ whole suite still runs.
 
 | Run                     | healthchecks fermut       | healthchecks mutmut | flaskbb fermut           | flaskbb mutmut |
 |-------------------------|---------------------------|---------------------|--------------------------|----------------|
-| Cold                    | ~779s (~25s cov + ~754s)  | **~263s**           | ~254s (~54s cov + ~201s) | fails†         |
+| Cold                    | ~730s (~26s cov + ~704s)  | **~263s**           | ~254s (~54s cov + ~201s) | fails†         |
 | Warm, nothing changed   | **~0.9s**                 | ~11s                | **~0.6s**                | —              |
 | 4 shards, wall / summed | ~244s / ~919s             | —                   | ~105s / ~387s            | —              |
 | Scored                  | 5292 (0 errored)          | 2117 (+465 no tests)| 1796 (0 errored)         | —              |
@@ -152,16 +155,20 @@ whole suite still runs.
 
 - **healthchecks: mutmut is ~3× faster cold, fermut scores ~2.5× more
   mutants.** Per scored mutant the two are close (~0.14s vs ~0.12s).
+  Migrations were excluded here for both tools.
+  fermut's cold cells are coverage + mutation phases, without the
+  clone/install time the library table's `Cold total` includes.
   In this run each of fermut's forks re-created the Django test database,
   because pytest-django sets it up in the first test, after the fork:
   ~2s per mutant per worker, against tens of milliseconds on werkzeug.
   fermut now builds the test DB once in the schemata template
-  ([Django](../guides/frameworks.md#django)); a later, separate run of
-  `hc/api` took 839 s instead of 1249 s spawning (9341 mutants). The
-  table above predates that and hasn't been re-run.
+  ([Django](../guides/frameworks.md#django)). That change hasn't been
+  benchmarked against this table: the separate schemata-vs-spawn check
+  (839 s vs 1249 s) ran 9341 mutants with migrations included, a
+  different population, on a different session.
 - **Warm re-runs and sharding are where fermut pulls ahead**, as on
-  werkzeug: under a second warm, and 31–41% of the cold wall time on
-  four runners (244 s vs 779 s, 105 s vs 254 s).
+  werkzeug: under a second warm, and 33–41% of the cold wall time on
+  four runners (244 s vs 730 s, 105 s vs 254 s).
 - † **mutmut 3.8.1 can't run flaskbb.** Its stats pass succeeds, then
   its clean-test run errors in collection: `The setup method 'add_url_rule'
   can no longer be called on the blueprint '_themes'` (flask-themes2's
@@ -169,6 +176,12 @@ whole suite still runs.
   likely cause is mutmut running pytest again in the same process with
   Flask's state still live. Not patched: that would benchmark a modified
   flaskbb.
+
+Only the healthchecks fermut cold run has a raw result file checked in
+(`benchmarks/results/runs/20261110-162628-cold-fermut-healthchecks.json`;
+its total also counts ~255 s of tool install, left out above). The other
+numbers in this section were recorded in the same session but their raw
+files weren't kept.
 
 Fixture notes (`benchmarks/configs/repos.toml`): healthchecks runs under
 pytest-django with a `bench_settings.py` that re-applies its test-only
@@ -184,8 +197,8 @@ files inside packages, so the deselect is no longer needed for fermut.
 
 All ten suite repos, `cold`, same session (2026-11-03), sorted by mutant
 count. `Generated` counts every mutant fermut produced; `Scored` the ones
-it ran. `Cold total` runs ~2–3 s above the sum of the two phases (time
-spent outside them). `June total` is the June 2026 cold total, before
+it ran. `Cold total` runs ~3–5 s above the sum of the two phases: that
+is the clone and install time it includes. `June total` is the June 2026 cold total, before
 schemata (different operator catalogue, so mutant counts and scores
 aren't comparable; wall-clock is).
 
@@ -251,7 +264,7 @@ against the mutants that would otherwise run: `ty` drops ÷ (`ty` drops +
 scored). From the default-config runs in the memory-cap A/B
 (2026-11-01, Linux, schemata on, `benchmarks/schemata/results/memcap/`).
 That's a different session from the cold table, so some `Scored` counts
-differ from it (click, werkzeug, jinja2, flask, trio); read the share,
+differ from it (click, werkzeug, jinja2, flask, trio, pyjwt); read the share,
 not the counts:
 
 | Repo           | Scored | Dropped by `ty` | Share   |

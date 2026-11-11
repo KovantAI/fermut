@@ -109,6 +109,7 @@ jobs:
         shard: [1, 2, 3, 4]
     runs-on: ubuntu-latest
     steps:
+      - run: fermut coverage --source src --tests tests/
       - run: |
           fermut run src/ --tests tests/ \
               --shard ${{ matrix.shard }}/4 \
@@ -131,10 +132,13 @@ jobs:
       - run: fermut merge shards/shard-*.json --markdown report.md
 ```
 
-A complete version (checkout, install, per-shard cache) lives in
+A complete version (checkout, install, coverage) lives in
 [`examples/github-actions/sharded-matrix.yml`](https://github.com/KovantAI/fermut/blob/main/examples/github-actions/sharded-matrix.yml).
 If `fermut.toml` sets `diff_only` (the `pr-gate` profile does), add
 `--no-diff-only` to the shard `run` so the sweep covers the whole tree.
+`pr-gate` also pins `coverage = ".coverage"`, and fermut errors when that
+file is missing: keep the `fermut coverage` step, or pass `--no-coverage`
+to run every test against every mutant.
 
 Shards are deterministic per `mutant.id` — no coordination, no
 overlap.

@@ -297,7 +297,8 @@ impl CoverageContexts {
                     "coverage file {} has per-test contexts, but all {} fall \
                      outside project_root {}. Tests appear to live in a sibling \
                      package. The project root is the nearest directory above the \
-                     source root with a pyproject.toml or setup.cfg; it must \
+                     source root with a project marker (pyproject.toml, setup.cfg, \
+                     pytest.ini, tox.ini, setup.py, .git); it must \
                      contain the tests too (e.g. the monorepo root) so pytest can \
                      resolve the rebased node ids. If the tests do live under it, fermut \
                      resolved the coverage paths wrongly: please report it at {}",

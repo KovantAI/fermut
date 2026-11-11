@@ -29,8 +29,8 @@ jobs:
       - name: install project + fermut
         run: |
           uv sync
-          uv pip install pytest-cov # `fermut coverage` shells `pytest --cov` into this venv
-          uv tool install fermut
+          uv pip install pytest-cov==7.1.0 # `fermut coverage` shells `pytest --cov` into this venv
+          uv tool install fermut==0.7.0 # pinned: this job holds GH_TOKEN
 
       # Per-test coverage. fermut reads coverage.py's `.coverage` SQLite
       # database directly, so there is no `coverage json` export step. `fermut

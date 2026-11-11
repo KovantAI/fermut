@@ -53,7 +53,9 @@ lowest-byte-offset survivor.
 **Equivalent mutants never appear** — the detector emits them as a separate
 `equivalent` status upstream, so the survivor list `next` reads is already
 clean. **Timeouts are excluded**: an assertion doesn't kill them; they need
-a faster test or a higher `--timeout`.
+a faster test, or a higher limit: each mutant gets
+`min(--timeout, factor × baseline + 5 s)`, so raise `--timeout-factor` when
+the budget is the lower one and `--timeout` when the flat cap is.
 
 **`ease` assumes the survivor's line is executed by the suite** — i.e. a
 killing test only needs a stronger assertion. That holds when the run used

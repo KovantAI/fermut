@@ -402,17 +402,17 @@ ops = ["arith-op-swap", "compare-op-swap", "boundary-shift", "ror-equality", "ro
 # ty filter drops type-invalid mutants before they cost a pytest run.
 ty_filter = true
 
-# Per-mutant test selection. Big speedup once .coverage exists.
-# fermut reads the native .coverage SQLite DB directly and auto-discovers
-# it at the project root, so this line is optional — set it to pin the path.
-coverage = ".coverage"
+# Per-mutant test selection: no `coverage` key. fermut auto-discovers the
+# .coverage at the project root and refreshes it when sources or tests
+# change; a pinned path is used as-is, with only a staleness warning.
 
 # Keep timeouts tight in the inner loop — slow mutants slow the agent.
 timeout = 15
 ```
 
 Use `fermut init --profile pr-gate` to get a config close to this — then
-hand-edit. Note `pr-gate` also writes `diff_only = "main"`: pass
+hand-edit: delete the `coverage = ".coverage"` line it writes, so the
+loop keeps auto-refresh. Note `pr-gate` also writes `diff_only = "main"`: pass
 `--diff-only <ref>` or `--since <ref>` to re-scope a run (either CLI flag
 replaces the key), `--no-diff-only` for a full sweep. Passing both flags
 together, or setting both `diff_only` and `since` in config, is rejected.

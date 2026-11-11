@@ -4,7 +4,7 @@
 # Generate with:  fermut init --profile pr-gate
 #
 # Run on a PR:
-#   coverage run -m pytest && coverage json -o coverage.json
+#   fermut coverage          # = pytest --cov=src --cov-context=test (needs pytest-cov)
 #   fermut run src/ --markdown fermut.md
 
 source_root = "src"
@@ -12,7 +12,7 @@ tests = "tests"
 runner = "pytest"
 ty_filter = true
 timeout = 15
-coverage = "coverage.json"
+coverage = ".coverage"
 diff_only = "main"
 hypothesis_seed = 12345
 ops = ["arith-op-swap", "compare-op-swap", "boundary-shift", "ror-equality", "ror-const", "bool-op-swap", "bool-operand-drop", "bool-const", "return-value-to-none"]

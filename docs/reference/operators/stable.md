@@ -7,7 +7,7 @@ markers).
 | Operator             | Example                                                            |
 |----------------------|--------------------------------------------------------------------|
 | `arith-op-swap`      | `a + b` → `a - b`; bitwise `&` → `\|`, `<<` → `>>`                 |
-| `compare-op-swap`    | `==` ↔ `!=`, `is` ↔ `is not`, `in` ↔ `not in`. Ordering compares only under `--operators classic`: `<` → `>=` and `>`, `>` → `<=` and `<`, `<=` → `>=`, `>=` → `<=`; the default `minimal` profile replaces them, see [profiles](profiles.md) |
+| `compare-op-swap`    | `==` ↔ `!=`, `is` ↔ `is not`, `in` ↔ `not in`. Ordering compares: under `--operators classic` `<` → `>=` and `>`, `>` → `<=` and `<`, `<=` → `>=`, `>=` → `<=`; the default `minimal` profile replaces them for single compares but keeps them on chained ones (`a < b < c`), see [profiles](profiles.md) |
 | `boundary-shift`     | `<` ↔ `<=`, `>` ↔ `>=`. Under `minimal` a single `<` produces 3 mutants: `<=` (`boundary-shift`), `!=` (`ror-equality`), `False` (`ror-const`); under `classic`: `<=`, `>=`, `>` |
 | `bool-op-swap`       | `x and y` → `x or y` (where the value is used only as a condition, `minimal` replaces it with `bool-operand-drop` / `bool-const`) |
 | `unary-op-swap`      | `-x` → `+x`, `not x` → `x`, `~x` → `x`                             |

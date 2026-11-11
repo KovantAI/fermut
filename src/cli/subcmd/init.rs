@@ -892,7 +892,9 @@ mod tests {
         d.ty_available = false;
         d.py_file_count = 5_000;
         let body = render_config(&d, false, None);
-        assert!(body.contains("ops = [\"arith-op-swap\""));
+        for op in PR_GATE_OPS {
+            assert!(body.contains(&format!("\"{op}\"")), "missing {op}");
+        }
         assert!(!body.contains("tests = "));
     }
 
@@ -1182,6 +1184,17 @@ mod tests {
             list_profiles: false,
             dry_run: false,
         }
+    }
+
+    #[test]
+    fn gha_template_pins_this_fermut_version() {
+        // The workflow holds GH_TOKEN, so it installs an exact fermut; a
+        // version bump must move this pin too.
+        let pin = format!("uv tool install fermut=={}", env!("CARGO_PKG_VERSION"));
+        assert!(
+            GHA_PR_GATE.contains(&pin),
+            "pr-gate.yml must contain `{pin}`"
+        );
     }
 
     #[test]
@@ -1525,14 +1538,10 @@ mod tests {
         for op in Operator::all().iter().filter(|o| o.is_minimal_only()) {
             assert!(PR_GATE_OPS.contains(&op.name()), "missing {}", op.name());
         }
-    }
-
-    #[test]
-    fn render_config_large_repo_gets_op_subset() {
-        let mut d = fake_detection();
-        d.py_file_count = 1000;
-        let body = render_config(&d, false, None);
-        assert!(body.contains("ops = [\"arith-op-swap\""));
+        // `minimal` keeps these for `<` → `<=` and for `==` / `is` / `in` / chained compares.
+        for name in ["boundary-shift", "compare-op-swap"] {
+            assert!(PR_GATE_OPS.contains(&name), "missing {name}");
+        }
     }
 
     #[test]

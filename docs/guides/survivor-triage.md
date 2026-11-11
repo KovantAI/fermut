@@ -172,7 +172,8 @@ test" (plain `fermut show` lists only `SURVIVED` and `TIMEOUT`):
 - **`ERROR`** — pytest crashed before producing a verdict. Not a
   test gap; usually a test-suite side effect on the source tree.
   See [errored outcomes](../reference/troubleshooting/errored-outcomes.md).
-- **`TIMEOUT`** — pytest ran longer than `--timeout`. Counts as
+- **`TIMEOUT`** — pytest ran past the per-mutant limit,
+  `min(--timeout, 3 × baseline + 5 s)` by default. Counts as
   killed for scoring. Worth investigating if the mutant introduced
   an infinite loop in code that *could* be reached at runtime.
 - **`SKIPPED`** — a filter dropped the mutant. Not a survivor at

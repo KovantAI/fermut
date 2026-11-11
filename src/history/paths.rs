@@ -75,7 +75,9 @@ mod tests {
     fn absolutize_joins_cwd_for_missing_relative_path() {
         let p = Path::new("no-such-dir-fermut/x");
         assert_eq!(absolutize(p), std::env::current_dir().unwrap().join(p));
-        assert_eq!(absolutize(Path::new("/abs/x")), Path::new("/abs/x"));
+        // `/abs/x` is drive-relative on Windows, not absolute.
+        let abs = std::env::current_dir().unwrap().join("abs").join("x");
+        assert_eq!(absolutize(&abs), abs);
     }
 
     #[test]

@@ -81,6 +81,56 @@ fn list_emits_mutations() {
         .stdout(contains("boundary-shift"));
 }
 
+// FERMUT_NO_CONFIG=1 skips config discovery: a broken fermut.toml that
+// fails the plain run is never read.
+#[test]
+fn no_config_env_skips_broken_fermut_toml() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("fermut.toml"), "not = [valid toml").unwrap();
+    std::fs::write(tmp.path().join("m.py"), "def f(a):\n    return a + 1\n").unwrap();
+    let list = || {
+        let mut c = Command::cargo_bin("fermut").unwrap();
+        c.arg("list").arg(tmp.path());
+        c
+    };
+    list().env_remove("FERMUT_NO_CONFIG").assert().failure();
+    list()
+        .env("FERMUT_NO_CONFIG", " Yes ")
+        .assert()
+        .success()
+        .stdout(contains("arith-op-swap"));
+}
+
+// `fermut hom` refuses up front without coverage or with the unittest runner.
+#[test]
+fn hom_rejects_missing_coverage_and_unittest_runner() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("m.py"), "def f(a):\n    return a + 1\n").unwrap();
+    let cov = tmp.path().join("coverage.json");
+    std::fs::write(
+        &cov,
+        r#"{"files": {"m.py": {"contexts": {"2": ["t.py::test_f|run"]}}}}"#,
+    )
+    .unwrap();
+    let hom = |args: &[&str]| {
+        let mut c = Command::cargo_bin("fermut").unwrap();
+        c.env("FERMUT_NO_CONFIG", "1")
+            .arg("hom")
+            .arg(tmp.path())
+            .args(["--kill-sets", "k.jsonl"])
+            .args(args);
+        c
+    };
+    hom(&[])
+        .assert()
+        .failure()
+        .stderr(contains("needs per-test coverage"));
+    hom(&["--runner", "unittest", "--coverage", cov.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(contains("supports the pytest/rstest runner only"));
+}
+
 #[test]
 fn list_emits_mutations_monorepo() {
     Command::cargo_bin("fermut")
@@ -2413,6 +2463,79 @@ fn pr_comment_updates_existing_or_creates_new() {
         .stderr(contains("--pr not given"));
 }
 
+#[cfg(unix)]
+#[test]
+fn pr_comment_surfaces_env_and_gh_failures() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let md = tmp.path().join("report.md");
+    // Larger than a pipe buffer (64 KiB): a failing `gh` that exits without
+    // reading stdin always breaks the pipe, so the EPIPE path is exercised
+    // deterministically instead of racing.
+    std::fs::write(&md, format!("# report\n{}", "x".repeat(256 * 1024))).unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    // `gh` that fails (stderr "nope") on any argv containing `fail_on`.
+    let gh = |fail_on: &str, lookup_reply: &str| {
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in\n  *'{fail_on}'*) echo nope >&2; exit 1 ;;\n  \
+             *--paginate*) printf '{lookup_reply}' ;;\n  *) cat >/dev/null ;;\nesac\nexit 0\n"
+        );
+        std::fs::write(bin.join("gh"), script).unwrap();
+        std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    let run = |args: &[&str]| {
+        let mut c = Command::cargo_bin("fermut").unwrap();
+        c.env("PATH", &bin)
+            .env_remove("GITHUB_REPOSITORY")
+            .env_remove("GITHUB_REF")
+            .env_remove("PR_NUMBER")
+            .arg("pr-comment")
+            .arg("--markdown")
+            .arg(&md)
+            .args(args);
+        c
+    };
+
+    run(&["--pr", "1"])
+        .assert()
+        .failure()
+        .stderr(contains("--repo not given and $GITHUB_REPOSITORY not set"));
+    run(&["--repo", "o/r"])
+        .env("PR_NUMBER", "abc")
+        .assert()
+        .failure()
+        .stderr(contains("PR_NUMBER=abc is not a number"));
+    // Repo from $GITHUB_REPOSITORY, PR from $PR_NUMBER; no `gh` on PATH yet.
+    run(&[])
+        .env("GITHUB_REPOSITORY", "o/r")
+        .env("PR_NUMBER", "3")
+        .assert()
+        .failure()
+        .stderr(contains("`gh` not found on PATH"));
+
+    let ok = ["--repo", "o/r", "--pr", "3"];
+    gh("--version", "");
+    run(&ok)
+        .assert()
+        .failure()
+        .stderr(contains("`gh --version` exited"));
+    gh("--paginate", "");
+    run(&ok).assert().failure().stderr(contains(
+        "`gh api repos/o/r/issues/3/comments` failed: nope",
+    ));
+    gh("PATCH", "77");
+    run(&ok)
+        .assert()
+        .failure()
+        .stderr(contains("patching comment 77 failed: nope"));
+    gh("pr comment", "");
+    run(&ok)
+        .assert()
+        .failure()
+        .stderr(contains("creating comment on o/r#3 failed: nope"));
+}
+
 #[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn autofix_reverts_a_test_that_does_not_kill_and_explain_llm_caches() {
@@ -2498,6 +2621,15 @@ fn autofix_reverts_a_test_that_does_not_kill_and_explain_llm_caches() {
         .success()
         .stdout(contains("\"cached\": true"))
         .stdout(contains("def test_mock_generated"));
+    // A cache miss with no key and no mock fails with setup guidance.
+    explain()
+        .env_remove("FERMUT_LLM_MOCK")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("FERMUT_ANTHROPIC_API_KEY")
+        .arg("--no-cache")
+        .assert()
+        .failure()
+        .stderr(contains("ANTHROPIC_API_KEY is not set"));
 }
 
 // ---------------------------------------------------------------------------
@@ -2722,22 +2854,61 @@ fn mcp_answers_initialize_on_stdout() {
     let out = Command::cargo_bin("fermut")
         .unwrap()
         .arg("mcp")
-        .write_stdin(
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#
-                .to_string()
-                + "\n",
-        )
+        .write_stdin(concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+            "\n\n",
+            "not json\n",
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"no/such"}"#,
+            "\n",
+        ))
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
+    // Blank line and notification get no reply; garbage gets a null-id parse
+    // error; an unknown method gets an error tied to its id.
     let stdout = String::from_utf8(out).unwrap();
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 1, "stdout: {stdout}");
-    let msg: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(msg["id"], 1);
-    assert_eq!(msg["result"]["serverInfo"]["name"], "fermut");
+    let msgs: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(msgs.len(), 3, "stdout: {stdout}");
+    assert_eq!(msgs[0]["id"], 1);
+    assert_eq!(msgs[0]["result"]["serverInfo"]["name"], "fermut");
+    assert_eq!(msgs[1]["id"], serde_json::Value::Null);
+    assert_eq!(msgs[1]["error"]["code"], -32700);
+    assert_eq!(msgs[2]["id"], 2);
+    assert_eq!(msgs[2]["error"]["code"], -32601);
+}
+
+// A zero `--max-time` budget skips every mutant: the run is partial, so the
+// regression gate says it was not evaluated, and the scoreless note explains
+// the empty score instead of passing it off as 100%.
+#[test]
+#[ignore = "requires pytest on PATH; enable once env is set up"]
+fn exhausted_time_budget_skips_regression_gate_and_notes_no_score() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .current_dir(&sample)
+        .arg("run")
+        .arg(sample.join("src"))
+        .arg("--tests")
+        .arg(sample.join("tests"))
+        .arg("--no-ty-filter")
+        .arg("--no-cache")
+        .arg("--history-path")
+        .arg(tmp.path().join("history.jsonl"))
+        .args(["--max-time", "0", "--fail-on-regression", "5"])
+        .assert()
+        .success()
+        .stderr(contains("--fail-on-regression skipped"))
+        .stderr(contains("--max-time budget expired before any mutant ran"));
 }
 
 // A stale auto-discovered `.coverage` (no fingerprint sidecar, older than the

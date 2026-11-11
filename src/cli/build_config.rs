@@ -159,6 +159,7 @@ pub(crate) fn build_config(
     let ruff_filter = cli_ruff_filter || file.ruff_filter.unwrap_or(false);
     let tce = cli_tce || file.tce.unwrap_or(false);
     let experimental = f.experimental || file.experimental.unwrap_or(false);
+    let mutate_migrations = f.mutate_migrations || file.mutate_migrations.unwrap_or(false);
     let parity = f.parity || file.parity.unwrap_or(false);
     if matches!(f.operators, Some(crate::cli::OperatorProfileCli::Default)) {
         warn!("{}", crate::config::DEPRECATED_DEFAULT_PROFILE);
@@ -539,6 +540,7 @@ pub(crate) fn build_config(
         ruff_filter,
         tce,
         experimental,
+        mutate_migrations,
         parity,
         operator_profile,
         ops_allow,
@@ -862,6 +864,7 @@ mod tests {
             no_coverage: false,
             select_tests: None,
             experimental: false,
+            mutate_migrations: false,
             parity: false,
             operators: None,
             exclude: Vec::new(),

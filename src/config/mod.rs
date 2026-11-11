@@ -36,6 +36,8 @@ pub struct Config {
     /// filters mutant); enable with `--tce` or `tce = true`.
     pub tce: bool,
     pub experimental: bool,
+    /// Mutate Django/Alembic migration files (skipped by default).
+    pub mutate_migrations: bool,
     /// Include parity operators (expr→None, positional/element drop, string
     /// case-swap) — for cross-tool comparison only, never a default score.
     pub parity: bool,

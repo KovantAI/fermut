@@ -31,6 +31,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 - MCP `fermut_run` and `fermut_score` take a `history_path` argument.
 
 ### Changed
+- Schema migrations are skipped by default: Django `migrations/0001_*.py`
+  in a package and Alembic `versions/*.py` next to `env.py`, shown as
+  `migrations` in the skip summary. On healthchecks they were 55 % of
+  `hc/api`'s mutants, 76 % surviving (score 44.2 % with them, 68.9 %
+  without). `--mutate-migrations` / `mutate_migrations = true` opts back
+  in. A Django project's `trend` shows the drop in mutants under the same
+  config hash.
 - **Breaking:** a runtime error (bad config, red baseline, git or I/O
   failure, a failed `merge` check) now exits `3` instead of `1`, so CI can
   tell a broken run from a failed gate. `1` still means the gate failed

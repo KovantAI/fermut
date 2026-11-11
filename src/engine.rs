@@ -2119,6 +2119,7 @@ mod tests {
             ruff_filter: false,
             tce: false,
             experimental: false,
+            mutate_migrations: false,
             parity: false,
             ops_allow: None,
             ops_deny: Default::default(),

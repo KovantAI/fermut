@@ -72,6 +72,13 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn absolutize_joins_cwd_for_missing_relative_path() {
+        let p = Path::new("no-such-dir-fermut/x");
+        assert_eq!(absolutize(p), std::env::current_dir().unwrap().join(p));
+        assert_eq!(absolutize(Path::new("/abs/x")), Path::new("/abs/x"));
+    }
+
+    #[test]
     fn default_history_path_uses_dot_fermut() {
         let p = default_history_path(Path::new("/proj"));
         assert!(p.ends_with(".fermut/history.jsonl"));

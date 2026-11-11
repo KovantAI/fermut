@@ -5,7 +5,7 @@
 //! Exit with Ctrl+C.
 
 use std::path::Path;
-use std::sync::mpsc::{channel, RecvTimeoutError};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -46,6 +46,14 @@ where
     info!(path = %cfg.source_root.display(), "watching for .py changes");
     eprintln!("watching {} — Ctrl+C to exit", cfg.source_root.display());
 
+    pump(cfg, &rx, on_report)
+}
+
+/// Re-run on each interesting event until the channel closes.
+fn pump<F>(cfg: &Config, rx: &Receiver<notify::Result<notify::Event>>, on_report: F) -> Result<()>
+where
+    F: Fn(&Report, &[HistoryEntry]) -> Result<()>,
+{
     loop {
         let event = rx.recv().context("watcher channel closed")?;
         let event = match event {
@@ -58,7 +66,7 @@ where
         if !is_interesting(&event) {
             continue;
         }
-        drain_debounce(&rx);
+        drain_debounce(rx);
 
         eprintln!("change detected — re-running");
         let prior = load_prior(cfg);
@@ -104,7 +112,7 @@ fn path_contains_segment(p: &Path, needle: &str) -> bool {
         .any(|c| c.as_os_str().to_string_lossy() == needle)
 }
 
-fn drain_debounce(rx: &std::sync::mpsc::Receiver<notify::Result<notify::Event>>) {
+fn drain_debounce(rx: &Receiver<notify::Result<notify::Event>>) {
     let deadline = Instant::now() + DEBOUNCE;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -296,6 +304,67 @@ mod tests {
         assert_eq!(calls.get(), 1);
         let err = format!("{:#}", res.unwrap_err());
         assert!(err.contains("watching"), "got: {err}");
+    }
+
+    /// Queue: a watcher error, an uninteresting event, then a `.py` change;
+    /// the sender is dropped so `pump` exits after one re-run.
+    fn one_change() -> Receiver<notify::Result<notify::Event>> {
+        let (tx, rx) = channel();
+        tx.send(Err(notify::Error::generic("boom"))).unwrap();
+        tx.send(Ok(event(EventKind::Modify(ModifyKind::Any), &["a.txt"])))
+            .unwrap();
+        tx.send(Ok(event(EventKind::Modify(ModifyKind::Any), &["a.py"])))
+            .unwrap();
+        rx
+    }
+
+    #[test]
+    fn pump_survives_failed_rerun_and_stops_when_channel_closes() {
+        let tmp = tempfile::tempdir().unwrap();
+        tiny_project(tmp.path());
+        let cfg = config(tmp.path(), Some(tmp.path().join("no-such-python")), true);
+        let called = std::cell::Cell::new(false);
+        let err = pump(&cfg, &one_change(), |_, _| {
+            called.set(true);
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(!called.get(), "failed run must not reach the handler");
+        assert!(
+            err.to_string().contains("watcher channel closed"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn pump_reruns_on_python_change_and_tolerates_handler_error() {
+        let out = std::process::Command::new("python3")
+            .args(["-c", "import sys, pytest; print(sys.executable)"])
+            .stderr(std::process::Stdio::null())
+            .output();
+        let Some(py) = out
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()))
+        else {
+            eprintln!("skipping: python3 with pytest not available");
+            return;
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        tiny_project(tmp.path());
+        let cfg = config(tmp.path(), Some(py), true);
+        let calls = std::cell::Cell::new(0);
+        let err = pump(&cfg, &one_change(), |report, _| {
+            calls.set(calls.get() + 1);
+            assert!(!report.outcomes.is_empty());
+            anyhow::bail!("handler failed")
+        })
+        .unwrap_err();
+        assert_eq!(calls.get(), 1, "exactly one re-run for one .py change");
+        assert!(
+            err.to_string().contains("watcher channel closed"),
+            "got: {err}"
+        );
     }
 
     #[test]

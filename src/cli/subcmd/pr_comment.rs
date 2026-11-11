@@ -277,6 +277,8 @@ mod tests {
         assert_eq!(json_quote("a\"b"), "\"a\\\"b\"");
         assert_eq!(json_quote("a\\b"), "\"a\\\\b\"");
         assert_eq!(json_quote("a\nb"), "\"a\\nb\"");
+        assert_eq!(json_quote("a\r\tb"), "\"a\\r\\tb\"");
+        assert_eq!(json_quote("a\u{1}b"), "\"a\\u0001b\"");
     }
 
     #[test]

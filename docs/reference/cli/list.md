@@ -27,6 +27,7 @@ Accepts the full `FilterArgs` set from [`fermut run`](run.md), plus the
 | `--no-coverage`      | Override `coverage` from config — disable coverage filtering.                    |
 | `--select-tests <FILE>` | Drop mutants that only tests outside `FILE` cover, as `run --select-tests` would. Needs coverage. See [Test selection](run-test-selection.md). |
 | `--exclude <GLOB>`   | Repeatable glob (relative to source root or project root) pruning files before collection.       |
+| `--mutate-migrations` | Include Django `migrations/0001_*.py` and Alembic `versions/*.py`, as `run --mutate-migrations`. Skipped by default. |
 
 Output is one mutant per line, as
 ``file:line@offset [operator] `original` → `replacement` ``, followed by a

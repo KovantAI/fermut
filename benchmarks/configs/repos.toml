@@ -218,9 +218,10 @@ test_path = "hc"
 install_cmd = '''pip install -r requirements.txt -r requirements-dev.txt pytest pytest-django 'coverage==7.17.0' pytest-cov && printf 'from hc.settings import *  # noqa\nSECRET_KEY = "bench"\nPASSWORD_HASHERS = ["django.contrib.auth.hashers.MD5PasswordHasher"]\nBLOCKING_EMAILS = True\nMAILERS = {"default": {"BACKEND": "django.core.mail.backends.smtp.EmailBackend", "OPTIONS": {}}}\n' > bench_settings.py && printf '[pytest]\nDJANGO_SETTINGS_MODULE = bench_settings\n' > pytest.ini'''
 test_cmd = "pytest hc"
 loop_edit_file = "hc/api/models.py"
-# Scoped to hc/api (~4.2k LOC: check/ping/flip models, API views): the whole
-# package (54.8k mutants) runs ~1 h on fermut alone because each fork re-creates
-# the Django test DB. The full suite still runs (coverage picks per mutant).
+# Scoped to hc/api (~4.2k LOC: check/ping/flip models, API views); the whole
+# suite still runs (coverage picks per mutant). Whole package: 54.8k mutants.
+# fermut skips migrations by default (#81); the exclude keeps mutmut's scope
+# the same.
 fermut_exclude = [
   "**/tests/**", "**/migrations/**",
   "accounts/**", "front/**", "integrations/**", "lib/**", "logs/**", "payments/**",
@@ -243,13 +244,19 @@ install_cmd = "pip install -e . && pip install pytest pytest-mock pytest-xproces
 # strict markers and its own deprecation-as-error.
 test_cmd = "pytest tests -o 'addopts=--strict-markers --pythonwarnings=error::flaskbb.deprecation.FlaskBBDeprecation'"
 loop_edit_file = "flaskbb/forum/models.py"
-# test_flaskbbdomain_translations needs the compiled *.mo catalogues, which
-# `pip install -e .` builds but .gitignore lists; fermut's mirror honours
-# .gitignore and drops them (fermut gap). Deselected for both tools.
 pytest_extra_args = [
   "-o", "addopts=--strict-markers --pythonwarnings=error::flaskbb.deprecation.FlaskBBDeprecation",
-  "--deselect=tests/unit/utils/test_translations.py::test_flaskbbdomain_translations",
 ]
+# mutmut's default process_isolation ("fork") runs its stats pass and clean
+# test in one process; the second pytest run then fails collection on
+# flask-themes2's module-level `_themes` blueprint ("add_url_rule can no longer
+# be called ... already been registered"). "forkserver" runs each in a fresh
+# child — a documented mutmut setting, not a patch to flaskbb.
+mutmut_process_isolation = "forkserver"
+# The forkserver child then dies on macOS: "+[NSNumber initialize] may have
+# been in progress in another thread when fork() was called ... Crashing
+# instead". Apple's documented opt-out of that check.
+mutmut_env = { OBJC_DISABLE_INITIALIZE_FORK_SAFETY = "YES" }
 # Scoped to flaskbb/forum (~3.7k LOC: topics, posts, forums models + views).
 fermut_exclude = [
   "migrations/**",

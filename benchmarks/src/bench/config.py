@@ -38,6 +38,14 @@ class RepoCfg:
     # trampoline injection shifts source line numbers (any test that
     # asserts on warning/exception lineno breaks file-wide).
     mutmut_ignore: list[str] = field(default_factory=list)
+    # mutmut's `process_isolation` ("fork" default, or "forkserver"). The
+    # default runs stats and the clean test in one process, so module-level
+    # state from the first pytest run leaks into the second.
+    mutmut_process_isolation: str | None = None
+    # Extra environment for mutmut's own runs (`mutmut run` and its stats
+    # export), on top of the adapter's. For settings a user would export
+    # themselves, e.g. macOS's OBJC_DISABLE_INITIALIZE_FORK_SAFETY.
+    mutmut_env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

@@ -137,6 +137,13 @@ impl TyFilter {
         project_path: &Path,
         pool_size: usize,
     ) -> Result<Self> {
+        // `fermut run pkg/mod.py` makes the file the source root; ty wants a
+        // directory (discovery walks up from it to `pyproject.toml`).
+        let project_path = if project_path.is_file() {
+            project_path.parent().unwrap_or(project_path)
+        } else {
+            project_path
+        };
         let embedded = if env_disables_embedded() {
             tracing::debug!("ty embedded path disabled via FERMUT_TY_EMBEDDED=0");
             None
@@ -530,6 +537,21 @@ mod tests {
         assert!(std::fs::read_to_string(&cache)
             .unwrap()
             .contains("ty-cache:v1"));
+    }
+
+    /// `fermut run pkg/mod.py`: the source root is a file, and the embedded
+    /// checker must root at its directory instead of falling back.
+    #[cfg(feature = "embedded-ty")]
+    #[test]
+    fn embedded_pool_roots_a_file_source_at_its_directory() {
+        if env_disables_embedded() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("m.py");
+        std::fs::write(&file, "x: int = 1\n").unwrap();
+        let filter = TyFilter::with_cache_and_project(None, &file, 1).unwrap();
+        assert!(filter.embedded.is_some());
     }
 
     #[test]

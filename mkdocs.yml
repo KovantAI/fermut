@@ -96,6 +96,7 @@ nav:
           - Filters: guides/filters.md
           - pytest plugin: guides/pytest-plugin.md
           - Jupyter notebooks: guides/notebooks.md
+          - Framework compatibility: guides/frameworks.md
       - CI and teams:
           - CI quickstart: guides/ci-quickstart.md
           - GitHub Action: guides/github-action.md

@@ -56,6 +56,14 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- `fermut coverage` passes `-n0` when pytest-xdist is installed. With `-n`
+  in the project's `addopts`, pytest-cov's per-test contexts crashed the
+  xdist workers (`no such table: context`) and left an empty `.coverage`
+  behind a "Wrote …" message.
+- `fermut run path/to/module.py` (a single file) roots the ty filter at the
+  file's directory. It handed ty the file as a project root, fell back to
+  the subprocess checker, and could reject nearly every mutant as a type
+  error (fastapi `routing.py`: 5198 of 5440, 0 tested).
 - The project root is also found by `pytest.ini`, `.pytest.ini`, `tox.ini`,
   `setup.py`, or `.git`, not only `pyproject.toml` / `setup.cfg`. A Django
   app with none of the latter walked up to an unrelated ancestor, mirrored

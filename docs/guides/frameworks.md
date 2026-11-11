@@ -7,8 +7,8 @@ what we ran to find out, and the settings to use.
 
 | Framework / plugin | Verdict | Use |
 |---|---|---|
-| [Django / pytest-django](#django) | Works, both modes | `exclude = ["**/migrations/**"]`; macOS + Postgres: `PGGSSENCMODE=disable` |
-| [FastAPI / Starlette `TestClient`, anyio](#fastapi) | Works, both modes | `--no-smart-order` if tests depend on order; on fastapi itself `--no-schemata` is faster |
+| [Django / pytest-django](#django) | Works, both modes | Nothing for migrations (skipped by default); macOS + Postgres: `PGGSSENCMODE=disable` |
+| [FastAPI / Starlette `TestClient`, anyio](#fastapi) | Works, both modes | Fix order-dependent tests, or `--no-smart-order` with `--no-schemata` |
 | [pytest-asyncio](#pytest-asyncio) | Forks work | Tests must not write inside the repo ([below](#tests-that-write-into-the-repo)) |
 | [trio](#trio) | Works, both modes | Pass the suite's own plugin flags as usual |
 | [C extensions](#c-extensions) | Works, both modes | Build the extension in place before `fermut coverage` and `fermut run` |
@@ -32,7 +32,7 @@ container (Ubuntu 24.04, 8 workers).
 | Row | Repo | Mutants run | Detection diffs, schemata vs spawn | Wall, schemata / spawn |
 |---|---|---|---|---|
 | Django | healthchecks v5.0.3, `hc/api` | 9341 | 0 | 839 s / 1249 s |
-| FastAPI | fastapi 0.162.2, 10 % sample | 1125 | 0 on a stable rerun (see below) | 675 s / 561 s |
+| FastAPI | fastapi 0.162.2, 10 % sample | 1125 | 0 apart from order-dependent tests (see below) | 670 s / 561 s |
 | Starlette | starlette (benchmark pin) | 5960 | 0 (Linux, 3 rounds) | 203 s / 469 s |
 | pytest-asyncio | aiofiles @9d1acc1 | 1664 | not measurable: the suite's own runs vary by ~110 | 29 s / 35 s |
 | trio | trio (benchmark pin), 30 % sample | 2330 | 0 (Linux, 3 rounds) | 224 s / 285 s |
@@ -58,13 +58,11 @@ Their full numbers are in the
   fermut detects the crashes and runs those mutants the normal way, so
   verdicts are right but the forks are wasted. `export PGGSSENCMODE=disable`
   stops the crashes.
-- **Migrations.** fermut mutates `migrations/` by default. In healthchecks
-  those were 55 % of all mutants, 76 % of them survived, and they all run
-  the slow way (class attributes run at import). Exclude them:
-
-```toml
-exclude = ["**/migrations/**"]
-```
+- **Migrations.** fermut skips Django migrations (`migrations/0001_*.py`)
+  and Alembic revisions by default; they show as `migrations` in the run
+  summary. In healthchecks they were 55 % of all mutants, 76 % of them
+  survived, and they all run the slow way (class attributes run at import).
+  `--mutate-migrations` mutates them anyway.
 
 - **Transactional tests** (`TestCase`, `TransactionTestCase`) ran
   unchanged.
@@ -75,22 +73,31 @@ FastAPI's `TestClient` is Starlette's, and both drive the app through anyio.
 starlette's suite (anyio's pytest plugin, asyncio and trio backends) gave 0
 diffs over 3 Linux rounds, 2.3× faster with schemata.
 
-fastapi itself gave 6 diffs on the first pair of runs. All 6 came from
-**order-dependent tests**: `tests/test_dependency_contextmanager.py`
-asserts on module-level state that an earlier test may already have
-changed. fermut runs the test most likely to fail first
-([smart ordering](../reference/cli/run.md#smart-test-ordering)), and the order it
-learns changes between runs. With `--no-smart-order`, 4 runs (2 per mode)
-of `fastapi/concurrency.py` agreed exactly. If your suite has tests that
-depend on order, fix them or run with `--no-smart-order`.
+fastapi itself has **order-dependent tests**: `test_dependency_contextmanager`,
+`test_testing_dependencies` and `test_events` assert on module-level state
+that another test may already have changed. fermut runs the test most likely
+to fail first ([smart ordering](../reference/cli/run.md#smart-test-ordering)),
+not the suite's own order, and in that order these tests fail with no mutant
+at all. They pass in collection order. Nothing about forking is involved:
+the same test lists fail in a plain pytest run.
 
-On fastapi, schemata was **slower** than spawning (675 s vs 561 s): 630
-tests fail in fermut's forked runs even with no mutant active, so their
-mutants fall back to a normal run after a wasted fork. The verdicts are
-still right. A plain fork after collection runs the same tests fine, so the
-cause is in fermut's fork setup (tracked in backlog #83). Until it's fixed,
-compare one run with `--no-schemata` on a FastAPI app and keep whichever
-is faster.
+- **Schemata (default)** checks every kill by re-running the same tests
+  with no mutant active. When that run fails too, the order is to blame,
+  and fermut runs the mutant again in coverage order, close to the suite's
+  own. On a 10 % sample of fastapi this changed 8 verdicts, all to what a
+  run in collection order gives.
+- **`--no-schemata`** has no such check, so an order-dependent test can
+  record a kill that isn't the mutant's. `--no-smart-order` avoids that but
+  isn't a cure: one fastapi test,
+  `test_exception_is_logged_once_with_trace_context`, catches 61 mutants
+  only when it runs first.
+
+Fixing tests that depend on order is the real cure. Until then, keep
+schemata on.
+
+On fastapi, schemata isn't faster than spawning (670 s vs 561 s): 556 of
+its 1793 mutants are default arguments and other code outside the schema,
+which run the normal way in both modes.
 
 ## pytest-asyncio { #pytest-asyncio }
 

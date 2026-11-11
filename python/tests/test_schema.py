@@ -313,6 +313,9 @@ PROJECT = {
             open("torn-down", "w").close()
         """
     ),
+    # Passes unless a request (or an earlier fork) set another suffix.
+    "tests/test_db.py": "import os\n\n\ndef test_db_suffix():\n"
+    '    assert os.environ.get("TOX_PARALLEL_ENV", "fm3") == "fm3"\n',
     "tests/test_core.py": textwrap.dedent(
         """\
         import os
@@ -486,7 +489,7 @@ class Server:
         self.proc.stdin.write(json.dumps(obj) + "\n")
         self.proc.stdin.flush()
 
-    def run(self, idx, ids, timeout=None, chunk=None, after=None):
+    def run(self, idx, ids, timeout=None, chunk=None, after=None, **extra):
         self.send(
             {
                 "idx": idx,
@@ -495,6 +498,7 @@ class Server:
                 "timeout": timeout,
                 "chunk": chunk,
                 "after": after,
+                **extra,
             }
         )
         self.recv()  # pid
@@ -775,6 +779,16 @@ def test_each_child_gets_a_private_home_removed_after(served):
     assert [d for d in os.listdir(server.temproot) if d.startswith("h-")] == []
 
 
+def test_each_child_gets_its_requests_db_suffix(served):
+    server, _ = served
+    assert server.recv()["ready"] is True
+    ids = ["tests/test_db.py::test_db_suffix"]
+    assert server.run(0, ids, db_suffix="fm3")["exit"] == 0
+    assert server.run(0, ids, db_suffix="fm4")["exit"] == 1
+    assert server.run(0, ids)["exit"] == 0, "not left behind by the last fork"
+    server.close()
+
+
 def test_fake_user_matches_real_user_length():
     t = object.__new__(schema.Template)
     t.user = "drorasaf"
@@ -907,6 +921,9 @@ UNITTEST_PROJECT = {
         """
     ),
     "tests/__init__.py": "",
+    # Passes unless a request (or an earlier fork) set another suffix.
+    "tests/test_db.py": "import os\n\n\ndef test_db_suffix():\n"
+    '    assert os.environ.get("TOX_PARALLEL_ENV", "fm3") == "fm3"\n',
     "tests/test_core.py": textwrap.dedent(
         """\
         import unittest
@@ -1019,3 +1036,108 @@ def test_serve_unittest_refuses_a_suite_with_import_errors(served_unittest):
     server, _ = served_unittest({"tests/test_broken.py": "import nope\n"})
     ready = server.recv()
     assert ready == {"ready": False, "error": "1 errors during collection"}, ready
+
+
+DJANGO_PROJECT = {
+    "pytest.ini": "[pytest]\nDJANGO_SETTINGS_MODULE = settings\n",
+    "settings.py": textwrap.dedent(
+        """\
+        import os
+        SECRET_KEY = "x"
+        INSTALLED_APPS = ["app"]
+        USE_TZ = True
+        DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": "db.sqlite"}}
+        if os.environ.get("FILE_DB"):
+            DATABASES["default"]["TEST"] = {"NAME": "test.sqlite"}
+        """
+    ),
+    "app/__init__.py": "",
+    "app/models.py": textwrap.dedent(
+        """\
+        from django.db import models
+        class Row(models.Model):
+            n = models.IntegerField()
+        """
+    ),
+    "app/migrations/__init__.py": "",
+    "app/migrations/0001_initial.py": textwrap.dedent(
+        """\
+        import os
+        from django.db import migrations, models
+        def note(apps, schema_editor):
+            with open("migrated.log", "a") as f:
+                f.write(f"{os.getpid()}\\n")
+        class Migration(migrations.Migration):
+            initial = True
+            operations = [
+                migrations.CreateModel("Row", [
+                    ("id", models.AutoField(primary_key=True)),
+                    ("n", models.IntegerField()),
+                ]),
+                migrations.RunPython(note),
+            ]
+        """
+    ),
+    # A row one fork writes must not show up in the next one.
+    "tests/test_rows.py": textwrap.dedent(
+        """\
+        from django.test import TestCase
+        from app.models import Row
+        class RowTest(TestCase):
+            def test_alone(self):
+                assert Row.objects.count() == 0
+                Row.objects.create(n=1)
+        """
+    ),
+}
+
+
+@pytest.fixture
+def django_project(tmp_path):
+    pytest.importorskip("pytest_django")
+    for rel, text in DJANGO_PROJECT.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    (tmp_path / "schema.json").write_text(json.dumps({"functions": {}}))
+    return tmp_path
+
+
+def migrations_run(root):
+    log = root / "migrated.log"
+    return log.read_text().split() if log.exists() else []
+
+
+def test_in_memory_django_db_is_migrated_once_before_forking(django_project):
+    server = Server(django_project, django_project / "schema.json")
+    assert server.recv()["ready"] is True
+    assert len(migrations_run(django_project)) == 1, "built in the template"
+    for _ in range(3):
+        assert server.run(0, None)["exit"] == 0
+    server.close()
+    assert len(migrations_run(django_project)) == 1, "forks inherit it"
+
+
+def test_file_django_db_is_left_to_each_fork(django_project, monkeypatch):
+    monkeypatch.setenv("FILE_DB", "1")
+    server = Server(django_project, django_project / "schema.json")
+    assert server.recv()["ready"] is True
+    assert migrations_run(django_project) == []
+    assert server.run(0, None)["exit"] == 0
+    assert server.run(0, None)["exit"] == 0
+    server.close()
+    assert len(migrations_run(django_project)) == 2, "one per fork, as before"
+
+
+def test_a_failing_django_db_setup_refuses_the_template(django_project):
+    migration = django_project / "app/migrations/0001_initial.py"
+    migration.write_text(
+        migration.read_text().replace(
+            "def note(apps, schema_editor):",
+            "def note(apps, schema_editor):\n    raise RuntimeError('boom')",
+        )
+    )
+    server = Server(django_project, django_project / "schema.json")
+    ready = server.recv()
+    server.close()
+    assert ready["ready"] is False
+    assert "django_db_setup failed" in ready["error"] and "boom" in ready["error"]

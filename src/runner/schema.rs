@@ -996,6 +996,11 @@ impl Template {
         // The template kills a child past `timeout` itself: it alone knows the
         // child isn't reaped yet, so its group id can't have been recycled.
         req["timeout"] = timeout.as_secs_f64().into();
+        // The sending worker's test-DB name, as its spawns get it: children
+        // run side by side, so the template's own would be shared.
+        if let Some(suffix) = super::db_suffix() {
+            req["db_suffix"] = suffix.into();
+        }
         // Ids as pytest names them in the mirror (parametrize ids can embed
         // the project path), and results mapped back, as on the spawn path.
         let into_mirror = |v: &serde_json::Value| -> Option<serde_json::Value> {

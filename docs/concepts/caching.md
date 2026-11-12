@@ -4,6 +4,8 @@ The result cache is what makes iterative use of fermut viable. This
 page explains the model. The CI / agent ergonomics live in
 **[Coding agents → cache strategy](../guides/coding-agents.md#cache-strategy)**.
 
+![How the cache decides: each entry is keyed on the mutant id, the source hash and the scope. An exact match reuses the verdict; otherwise a kill is reused if its killing test is unchanged and still covers the line, with about 5% re-run as an audit; otherwise the mutant runs and its verdict is stored under the new key.](../assets/cache-lookup.svg)
+
 ## What the cache stores
 
 After every successful mutant evaluation, fermut writes one entry to
@@ -24,8 +26,10 @@ After every successful mutant evaluation, fermut writes one entry to
   edit that shifts bytes **above** a mutant changes its id and misses
   (see [Why AST-hash](#why-ast-hash-not-mtime-or-raw-bytes)). With `cache_scope = "scope"`, this
   narrows to the enclosing top-level def/class instead of the whole
-  file, so sibling-function edits keep cache hits intact (see
-  [`cache_scope`](../reference/configuration.md#schema)).
+  file, so editing one function keeps the hash of its siblings (see
+  [`cache_scope`](../reference/configuration.md#schema)). Siblings
+  *below* the edit still miss if it changed the byte length, because
+  their ids moved.
 - `scope` captures every input that could change the outcome without
   touching the AST: runner kind (with or without schemata: the verdicts
   match, so they share the cache), interpreter, timeout, hypothesis
@@ -61,9 +65,11 @@ On the next `run`:
    Entries whose id no longer exists (the mutant moved or vanished)
    are never pruned — they accumulate until `fermut clean`.
 
-Result: editing one function in one file only pays for mutants
-inside that function (under `cache_scope = "scope"`) or that file
-(default `cache_scope = "file"`). Everything else is reused.
+Result: editing one file only pays for mutants in that file; other
+files are reused. Within the file, `cache_scope = "scope"` keeps
+functions above the edit, and those below it too when the edit didn't
+change the byte length. The default `cache_scope = "file"` re-runs the
+whole file.
 
 ## Test-suite invalidation
 

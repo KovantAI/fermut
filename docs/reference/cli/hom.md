@@ -8,6 +8,20 @@ Look for **strongly-subsuming second-order mutants (SSHOMs)**. An SSHOM
 combines two killed first-order mutants `f1` and `f2`. It is killed only by
 tests that kill both of them: `K(h) ≠ ∅` and `K(h) ⊆ K(f1) ∩ K(f2)`.
 
+![Higher-order mutants: f1 is killed by t1, t2, t3 and f2 by t2, t3, t4. Applying both edits gives h. If only shared killers kill h it is an SSHOM; if nothing kills it the pair is decoupled; if a test outside the overlap kills it, it is non-subsuming.](../../assets/higher-order-mutants.svg)
+
+`K(m)` is a mutant's kill-set, the tests that fail on it (see
+[`subsume`](subsume.md#what-its-for)). A first-order mutant makes one edit;
+a second-order mutant makes two. An SSHOM is a pair that is at least as
+hard to kill as either edit alone: only tests that catch both parents catch
+it. That makes it one mutant standing in for two, and a fault that touches
+two places, as many real bugs do.
+
+`hom` measures how many SSHOMs a codebase has. It is a research tool, not a
+speed-up: finding them costs a recorded run plus a test run per candidate
+pair. To run fewer mutants with no extra test runs, use
+[`subsume`](subsume.md) instead.
+
 ```sh
 fermut run src/pkg --no-cache --record-kill-sets kill-sets.jsonl
 fermut hom src/pkg --kill-sets kill-sets.jsonl --coverage .coverage

@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="How the result cache decides. Each entry is keyed on three parts: the mutant id (file, byte offset, operator, edit), the source hash (the AST of the file, or of the enclosing def with cache_scope scope), and the scope (run settings plus the tests that cover the mutant: their ids, files, conftest chain and support files). If all three match, the verdict is reused. Otherwise, if the mutant was killed and its killing test is unchanged and still covers the line, the kill is reused, with about 5% re-run as an audit. Otherwise the mutant runs and its verdict is stored under the new key, unless it errored. Survived and timed-out verdicts are reused only on an exact match." viewBox="0 0 820 640">
+<style>
+svg { --ink: #1f2427; --muted: #6b7178; --line: #a0a5ab; --box: #f4f5f6; --chip: #ffffff; --accent: #ff523b; --accent-bg: #fff1ef; }
+@media (prefers-color-scheme: dark) {
+  svg { --ink: #e2e4e9; --muted: #9aa0a6; --line: #5c6370; --box: #2a2d36; --chip: #1e2129; --accent: #ff6a55; --accent-bg: #3a2420; }
+}
+text { fill: var(--ink); text-anchor: middle; font-family: Inter, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+.fm-title { font-size: 19px; font-weight: 700; }
+.fm-sub { font-size: 14.5px; }
+.fm-sm.fm-title { font-size: 17px; }
+.fm-sm.fm-sub { font-size: 14px; }
+.fm-label { fill: var(--muted); font-size: 12.5px; font-weight: 600; text-anchor: start; }
+.fm-tag { fill: var(--accent); font-size: 12.5px; font-weight: 600; letter-spacing: 0.5px; }
+.fm-box { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+.fm-hot { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2.5; }
+.fm-loop { fill: var(--box); stroke: var(--accent); stroke-width: 2; stroke-dasharray: 7 5; }
+.fm-chips rect { fill: var(--chip); stroke: var(--accent); }
+.fm-chips text { font-size: 12px; font-weight: 600; }
+.fm-lane { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+.fm-lane.fm-hot { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2.5; }
+.fm-row { fill: var(--chip); stroke: var(--line); stroke-width: 1; }
+.fm-row-text { font-size: 13.5px; }
+.fm-note { fill: var(--muted); font-size: 12.5px; }
+.fm-line, .fm-edge { stroke: var(--ink); stroke-width: 2.5; fill: none; }
+.fm-edge { marker-end: url(#fm-arrow); }
+.fm-edge.fm-accent { stroke: var(--accent); marker-end: url(#fm-arrow-accent); }
+.fm-head { fill: var(--ink); }
+.fm-head-accent { fill: var(--accent); }
+.fm-code { font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 15px; }
+.fm-code-accent { fill: var(--accent); font-weight: 700; }
+.fm-left { text-anchor: start; }
+.fm-on { fill: var(--accent); }
+.fm-off { fill: none; stroke: var(--line); stroke-width: 1.5; }
+.fm-grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
+.fm-venn-a { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2; fill-opacity: 0.6; }
+.fm-venn-b { fill: var(--box); stroke: var(--ink); stroke-width: 2; fill-opacity: 0.6; }
+.fm-row { fill: var(--chip); stroke: var(--line); stroke-width: 1; }
+.fm-note { fill: var(--muted); font-size: 12.5px; }
+</style>
+
+<defs>
+<marker id="fm-arrow" markerWidth="10" markerHeight="10" refX="7" refY="3.5" orient="auto"><path class="fm-head" d="M0 0L7 3.5L0 7"/></marker>
+<marker id="fm-arrow-accent" markerWidth="10" markerHeight="10" refX="7" refY="3.5" orient="auto"><path class="fm-head-accent" d="M0 0L7 3.5L0 7"/></marker>
+</defs>
+<rect class="fm-box" x="20" y="20" width="780" height="200" rx="14"/>
+<text class="fm-title" x="410" y="52">The key: three parts per entry</text>
+<rect class="fm-row" x="32" y="70" width="250" height="134" rx="10"/>
+<text class="fm-title fm-sm" x="157" y="98">Mutant id</text>
+<text class="fm-sub fm-sm" x="157" y="124">file, byte offset,</text>
+<text class="fm-sub fm-sm" x="157" y="144">operator, edit</text>
+<text class="fm-note" x="157" y="192">a line added above changes it</text>
+<rect class="fm-row" x="285" y="70" width="250" height="134" rx="10"/>
+<text class="fm-title fm-sm" x="410" y="98">Source hash</text>
+<text class="fm-sub fm-sm" x="410" y="124">AST of the file, or of the</text>
+<text class="fm-sub fm-sm" x="410" y="144">enclosing def (scope mode)</text>
+<text class="fm-note" x="410" y="192">formatting and comments ignored</text>
+<rect class="fm-row" x="538" y="70" width="250" height="134" rx="10"/>
+<text class="fm-title fm-sm" x="663" y="98">Scope</text>
+<text class="fm-sub fm-sm" x="663" y="124">run settings + covering tests:</text>
+<text class="fm-sub fm-sm" x="663" y="144">ids, files, conftest chain</text>
+<text class="fm-note" x="663" y="192">a new covering test changes it</text>
+<line class="fm-edge" x1="280" y1="220" x2="280" y2="244"/>
+<rect class="fm-box" x="40" y="252" width="480" height="84" rx="14"/>
+<text class="fm-title fm-sm" x="280" y="284">All three match?</text>
+<text class="fm-sub fm-sm" x="280" y="308">the exact key</text>
+<line class="fm-edge" x1="520" y1="294" x2="574" y2="294"/>
+<text class="fm-label" x="530" y="284">yes</text>
+<rect class="fm-box" x="582" y="254" width="218" height="80" rx="14"/>
+<text class="fm-title fm-sm" x="691" y="286">Full hit</text>
+<text class="fm-sub fm-sm" x="691" y="308">reuse the verdict</text>
+<line class="fm-edge" x1="280" y1="336" x2="280" y2="360"/>
+<text class="fm-label" x="290" y="354">no</text>
+<rect class="fm-box" x="40" y="368" width="480" height="104" rx="14"/>
+<text class="fm-title fm-sm" x="280" y="400">Killed, and the killer unchanged?</text>
+<text class="fm-sub fm-sm" x="280" y="424">same id and source hash; the killing test still covers</text>
+<text class="fm-sub fm-sm" x="280" y="444">the line; its file, conftest chain and support files</text>
+<text class="fm-sub fm-sm" x="280" y="464">are unchanged</text>
+<line class="fm-edge" x1="520" y1="420" x2="574" y2="420"/>
+<text class="fm-label" x="530" y="410">yes</text>
+<rect class="fm-box" x="582" y="380" width="218" height="80" rx="14"/>
+<text class="fm-title fm-sm" x="691" y="412">Killer hit</text>
+<text class="fm-sub fm-sm" x="691" y="434">reuse the kill;</text>
+<text class="fm-sub fm-sm" x="691" y="452">~5% re-run as an audit</text>
+<line class="fm-edge" x1="280" y1="472" x2="280" y2="496"/>
+<text class="fm-label" x="290" y="490">no</text>
+<rect class="fm-box fm-hot" x="40" y="504" width="480" height="80" rx="14"/>
+<text class="fm-title fm-sm" x="280" y="536">Run the mutant</text>
+<text class="fm-sub fm-sm" x="280" y="560">store the verdict under the new key</text>
+<line class="fm-edge" x1="520" y1="544" x2="574" y2="544"/>
+<rect class="fm-box" x="582" y="504" width="218" height="80" rx="14"/>
+<text class="fm-title fm-sm" x="691" y="536">Errored: not stored</text>
+<text class="fm-sub fm-sm" x="691" y="558">often transient,</text>
+<text class="fm-sub fm-sm" x="691" y="576">so it runs again next time</text>
+<text class="fm-note" x="410" y="616">Survived and timed out reuse only on the exact key: any covering test that changed could now kill them.</text>
+</svg>

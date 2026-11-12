@@ -7,8 +7,8 @@ format-agnostic — it rejects either a `.coverage` SQLite DB or a
 - From `fermut run` (runtime path, whether the coverage file was
   auto-discovered, set via `coverage = "…"`, or passed with
   `--coverage`): ``coverage file <path> has no per-test contexts.
-  Regenerate it with `fermut coverage` (or `pytest --cov=src
-  --cov-context=test`, which needs pytest-cov).``
+  Regenerate it with `fermut coverage` (or `COVERAGE_CORE=ctrace pytest
+  --cov=src --cov-context=test`, which needs pytest-cov).``
 - From `fermut doctor` (the `coverage-data` pre-flight check):
   `<path> (SQLite DB) has no per-test contexts` or
   `<path> (JSON export) has no per-test contexts` — surfaced as a `[fail]`
@@ -34,7 +34,7 @@ flag is the part that matters — it writes coverage.py's native
 `.coverage` SQLite DB with the per-test resolution fermut needs:
 
 ```sh
-pytest --cov=src --cov-context=test
+COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test
 fermut run          # auto-discovers .coverage at the project root
 ```
 
@@ -53,7 +53,7 @@ fermut run --coverage .coverage
 Or, manually, produce a legacy JSON export instead:
 
 ```sh
-pytest --cov=src --cov-context=test
+COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test
 coverage json -o coverage.json --show-contexts
 fermut run --coverage coverage.json
 ```

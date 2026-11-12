@@ -200,8 +200,54 @@ impl Filter for CoverageFilter {
 
 #[cfg(test)]
 mod tests {
-    use super::parse::{detect_coverage_cwd, is_sqlite, numbits_to_lines};
+    use super::parse::{detect_coverage_cwd, is_sqlite, numbits_to_lines, one_test_per_line};
     use super::*;
+
+    /// `file.py → line → tests` from `(line, tests)` pairs.
+    fn line_map(lines: &[(u32, &[&str])]) -> HashMap<PathBuf, HashMap<u32, Vec<String>>> {
+        let per_line = lines
+            .iter()
+            .map(|(l, ids)| (*l, ids.iter().map(|s| s.to_string()).collect()))
+            .collect();
+        HashMap::from([(PathBuf::from("m.py"), per_line)])
+    }
+
+    fn tests_named(n: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| format!("tests/test_m.py::test_{i}"))
+            .collect()
+    }
+
+    #[test]
+    fn one_test_per_line_flags_a_sysmon_shaped_db() {
+        // 10 tests, each the only one on its lines: what core=sysmon leaves.
+        let names = tests_named(10);
+        let lines: Vec<(u32, Vec<&str>)> = names
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (i as u32 + 1, vec![t.as_str()]))
+            .collect();
+        let pairs: Vec<(u32, &[&str])> = lines.iter().map(|(l, v)| (*l, v.as_slice())).collect();
+        assert!(one_test_per_line(&line_map(&pairs)));
+    }
+
+    #[test]
+    fn one_test_per_line_passes_a_shared_line_or_a_small_suite() {
+        let names = tests_named(10);
+        let all: Vec<&str> = names.iter().map(String::as_str).collect();
+        // One line shared by two tests is enough.
+        let shared = [(1, &all[..2]), (2, &all[2..3])];
+        assert!(!one_test_per_line(&line_map(&shared)));
+        // Nine tests: too few to judge.
+        let small: Vec<(u32, &[&str])> = (0..9).map(|i| (i as u32 + 1, &all[i..=i])).collect();
+        assert!(!one_test_per_line(&line_map(&small)));
+        // Import-time contexts (no `::`) never count as sharing, nor as tests.
+        let collect: Vec<(u32, Vec<&str>)> = (0..10)
+            .map(|i| (i as u32 + 1, vec![all[i], "tests/test_m.py"]))
+            .collect();
+        let pairs: Vec<(u32, &[&str])> = collect.iter().map(|(l, v)| (*l, v.as_slice())).collect();
+        assert!(one_test_per_line(&line_map(&pairs)));
+    }
 
     fn write_doc(dir: &Path, body: &str) -> PathBuf {
         let p = dir.join("coverage.json");

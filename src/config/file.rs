@@ -88,6 +88,14 @@ pub struct FileConfig {
     /// unittest default `test*.py` misses `*_test.py`; set e.g. `"*_test.py"`
     /// to match that convention. Ignored by pytest/rstest.
     pub unittest_pattern: Option<String>,
+    /// `unittest discover -t` (the `unittest` runner only): the directory test
+    /// modules are imported relative to, e.g. the project root for a tests
+    /// package using relative imports. Relative to the config's base dir.
+    pub unittest_top_level: Option<PathBuf>,
+    /// Working directory of the `unittest` runner, for tests that open files
+    /// relative to it. Relative to the config's base dir. Default: the project
+    /// root.
+    pub unittest_cwd: Option<PathBuf>,
     pub isolation: Option<IsolationMode>,
     pub equiv_detect: Option<bool>,
     pub cache_scope: Option<CacheScope>,

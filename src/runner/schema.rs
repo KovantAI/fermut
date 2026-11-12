@@ -193,12 +193,19 @@ impl SchemaInner for UnittestRunner {
     }
 
     fn serve_args(&self, mirror: &Mirror, schema_json: &Path) -> Vec<OsString> {
+        // The baseline already ran `discover_command`, which fails on a
+        // directory outside the project, so the mapping holds here.
+        let (top, cwd) = self
+            .mirror_dirs(mirror)
+            .unwrap_or_else(|_| (None, mirror.root.clone()));
         vec![
             "serve-unittest".into(),
             mirror.root.clone().into(),
             schema_json.into(),
             mirror.tests.clone().into(),
             self.pattern.clone().into(),
+            top.unwrap_or_default().into(),
+            cwd.into(),
         ]
     }
 
@@ -1218,7 +1225,7 @@ mod tests {
             IsolationMode::Copy,
             true,
             "python".into(),
-            None,
+            crate::runner::unittest::Discovery::default(),
         )
     }
 
@@ -1778,6 +1785,8 @@ done"#
                 json.as_os_str(),
                 mirror.tests.as_os_str(),
                 ut.pattern.as_ref(),
+                "".as_ref(),
+                mirror.root.as_os_str(),
             ])
         );
         assert_eq!(SchemaInner::timeout(&ut), Duration::from_secs(1));

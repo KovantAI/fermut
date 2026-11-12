@@ -558,7 +558,11 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
                 // set, else a PATH-probed `python3`/`python`. `unittest` has no
                 // console script, so it's always `<interp> -m unittest`.
                 interpreter(cfg.python.as_deref()),
-                cfg.unittest_pattern.clone(),
+                unittest::Discovery {
+                    pattern: cfg.unittest_pattern.clone(),
+                    top_level: cfg.unittest_top_level.clone(),
+                    cwd: cfg.unittest_cwd.clone(),
+                },
             );
             #[cfg(unix)]
             if cfg.schemata {

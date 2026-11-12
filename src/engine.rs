@@ -1500,6 +1500,21 @@ fn compute_scope_prefix(cfg: &Config) -> String {
         h.update(b"|");
         h.update(a.as_bytes());
     }
+    // Which tests unittest discovers and where it runs them. Fed only when
+    // set, so existing entries keep their scope.
+    if let Some(p) = &cfg.unittest_pattern {
+        h.update(b"|ut_pattern=");
+        h.update(p.as_bytes());
+    }
+    for (tag, dir) in [
+        (&b"|ut_top="[..], &cfg.unittest_top_level),
+        (&b"|ut_cwd="[..], &cfg.unittest_cwd),
+    ] {
+        if let Some(d) = dir {
+            h.update(tag);
+            h.update(d.as_os_str().as_encoded_bytes());
+        }
+    }
     h.update(b"|cov=");
     h.update(if cfg.coverage.is_some() {
         &b"on"[..]
@@ -2383,6 +2398,8 @@ mod tests {
             runner: RunnerKind::Pytest,
             python: None,
             unittest_pattern: None,
+            unittest_top_level: None,
+            unittest_cwd: None,
             isolation: IsolationMode::Auto,
             equiv_detect: false,
             cache_scope: CacheScope::File,

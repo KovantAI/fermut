@@ -39,9 +39,12 @@ After every successful mutant evaluation, fermut writes one entry to
       def/class. Can return a stale verdict when a test for one
       function calls another.
 
-  One gap in `coverage` mode: a mutant that steers a test into code
-  the baseline never ran keeps its verdict when that code changes,
-  until `fermut coverage` refreshes the DB.
+  `coverage` mode needs a DB that matches the source. An auto-discovered
+  `.coverage` is refreshed incrementally when a source file changed; an
+  explicit `--coverage` DB that looks stale is used as is, so that run
+  keys the cache on whole files instead. One gap remains: a mutant that
+  steers a test into code the baseline never ran keeps its verdict when
+  that code changes, until the DB is refreshed.
 - `scope` captures every input that could change the outcome without
   touching the AST: runner kind (with or without schemata: the verdicts
   match, so they share the cache), interpreter, timeout, hypothesis

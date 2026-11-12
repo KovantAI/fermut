@@ -433,14 +433,16 @@ pub struct ScopeLayout {
     /// class's decorators: code that runs at import time, so no per-test
     /// coverage context can attribute it.
     pub globals: String,
-    /// Top-level defs/classes in source order: `(first line, last line,
+    /// Top-level defs/classes in source order: `(first body line, last line,
     /// hash of the whole statement)`. Lines are 1-based, as coverage records them.
     pub scopes: Vec<(u32, u32, String)>,
 }
 
 impl ScopeLayout {
-    /// Index into `scopes` of the top-level def/class spanning `line`, or
-    /// `None` at module level.
+    /// Index into `scopes` of the top-level def/class whose body holds
+    /// `line`, or `None` at module level or on a header line. Importing a
+    /// module runs every `def` line, so a header line is no sign the function
+    /// ran; its decorators are in `globals`.
     pub fn scope_at(&self, line: u32) -> Option<usize> {
         let i = self.scopes.partition_point(|s| s.0 <= line);
         (i > 0 && line <= self.scopes[i - 1].1).then(|| i - 1)
@@ -460,9 +462,9 @@ pub fn scope_layout(path: &Path) -> Option<ScopeLayout> {
     globals.update(b"globals:v1\n");
     let mut scopes = Vec::new();
     for stmt in &parsed.syntax().body {
-        let decorators = match stmt {
-            Stmt::FunctionDef(f) => &f.decorator_list,
-            Stmt::ClassDef(c) => &c.decorator_list,
+        let (decorators, body) = match stmt {
+            Stmt::FunctionDef(f) => (&f.decorator_list, &f.body),
+            Stmt::ClassDef(c) => (&c.decorator_list, &c.body),
             other => {
                 globals.update(strip_ranges(&format!("{:#?}", other)).as_bytes());
                 globals.update(b"\n");
@@ -480,7 +482,7 @@ pub fn scope_layout(path: &Path) -> Option<ScopeLayout> {
         h.update(b"scope:v1\n");
         h.update(strip_ranges(&format!("{:#?}", stmt)).as_bytes());
         scopes.push((
-            line_of(range.start()),
+            line_of(body[0].start()),
             line_of(range.end()),
             hex::encode(h.finalize()),
         ));

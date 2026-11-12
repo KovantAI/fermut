@@ -2668,16 +2668,19 @@ mod tests {
     }
 
     /// `coverage`-mode identity hashes for a mutant on line 3 (`bar`, run by
-    /// test_a, which also runs `util.helper`) and one on line 5 (`foo`, run
-    /// by test_b), given the sources of `mod.py` and `util.py`.
-    fn cov_hashes(module: &str, util: &str) -> (String, String) {
+    /// test_a, which also runs `util.helper`), one on line 5 (`foo`, run by
+    /// test_b) and one on line 1 (import time: collecting `tests/t.py` also
+    /// ran the `def foo` line), given the sources of `mod.py` and `util.py`.
+    fn cov_hashes(module: &str, util: &str) -> [String; 3] {
         use crate::filter::coverage::CoverageContexts;
         let tmp = tempfile::tempdir().unwrap();
         let py = tmp.path().join("mod.py");
         std::fs::write(&py, module).unwrap();
         std::fs::write(tmp.path().join("util.py"), util).unwrap();
         let doc = r#"{"files": {
-            "mod.py": {"contexts": {"3": ["tests/t.py::test_a|run"], "5": ["tests/t.py::test_b|run"]}},
+            "mod.py": {"contexts": {
+                "1": ["tests/t.py|collect"], "4": ["tests/t.py|collect"],
+                "3": ["tests/t.py::test_a|run"], "5": ["tests/t.py::test_b|run"]}},
             "util.py": {"contexts": {"2": ["tests/t.py::test_a|run"]}}
         }}"#;
         let cov_path = tmp.path().join("coverage.json");
@@ -2688,14 +2691,13 @@ mod tests {
             ..base_test_config()
         };
         let id = CovIdentity::build(&cov, &tmp.path().join("tests"), [py.as_path()]);
-        let at = |line| {
+        [3, 5, 1].map(|line| {
             let mut m = arith_mutant("x + 1", "+", "-");
             m.file = py.clone();
             m.line = line;
             m.stmt_line = line;
             mutant_identity_hash(&cfg, &m, &HashMap::new(), &HashMap::new(), Some(&id)).unwrap()
-        };
-        (at(3), at(5))
+        })
     }
 
     const MOD: &str =
@@ -2704,28 +2706,32 @@ mod tests {
 
     #[test]
     fn coverage_identity_tracks_only_the_code_a_mutants_tests_ran() {
-        let (bar, foo) = cov_hashes(MOD, UTIL);
+        let [bar, foo, import] = cov_hashes(MOD, UTIL);
 
-        // Editing foo's body: bar's tests never ran foo.
-        let (bar2, foo2) = cov_hashes(&MOD.replace("x * 2", "x * 3"), UTIL);
+        // Editing foo's body: bar's tests never ran foo, and importing the
+        // module ran only foo's `def` line, not its body.
+        let [bar2, foo2, import2] = cov_hashes(&MOD.replace("x * 2", "x * 3"), UTIL);
         assert_eq!(bar, bar2);
         assert_ne!(foo, foo2);
+        assert_eq!(import, import2);
 
         // Editing another file's function bar's test calls: bar re-runs, foo doesn't.
-        let (bar3, foo3) = cov_hashes(MOD, &UTIL.replace('3', "4"));
+        let [bar3, foo3, _] = cov_hashes(MOD, &UTIL.replace('3', "4"));
         assert_ne!(bar, bar3);
         assert_eq!(foo, foo3);
 
         // Import-time code anywhere re-runs everything.
-        let (bar4, foo4) = cov_hashes(MOD, &format!("LIMIT = 1\n{UTIL}"));
+        let [bar4, foo4, import4] = cov_hashes(MOD, &format!("LIMIT = 1\n{UTIL}"));
         assert_ne!(bar, bar4);
         assert_ne!(foo, foo4);
+        assert_ne!(import, import4);
 
         // A comment, or a new undecorated helper no test runs: nothing re-runs.
+        let all = [bar, foo, import];
         let reformatted = MOD.replace("def foo(x):\n", "def foo(x):  # doubled\n");
-        assert_eq!(cov_hashes(&reformatted, UTIL), (bar.clone(), foo.clone()));
+        assert_eq!(cov_hashes(&reformatted, UTIL), all);
         let helper = format!("{MOD}def unused():\n    return 0\n");
-        assert_eq!(cov_hashes(&helper, UTIL), (bar, foo));
+        assert_eq!(cov_hashes(&helper, UTIL), all);
     }
 
     #[test]

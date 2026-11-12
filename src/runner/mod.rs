@@ -854,7 +854,7 @@ where
         if needs_build {
             *slot = None;
             let mirror = build_baseline_mirror(tests, mode, python)?;
-            let pristine = pristine::Pristine::take(&mirror.root);
+            let pristine = pristine::Pristine::take(&mirror.root, &mirror.project_root);
             *slot = Some((tests.to_path_buf(), mode, mirror, pristine));
         }
         let (_, _, mirror, pristine) = slot.as_mut().unwrap();

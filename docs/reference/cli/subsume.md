@@ -20,6 +20,34 @@ fermut subsume kill-sets.jsonl
 selected test runs on a killed mutant (about 3.8× a normal run on pyjwt: 236 s vs 62 s).
 Pass `--no-cache`: a cache hit runs nothing and records no kill-set.
 
+## What it's for
+
+Most killed mutants are redundant. On one line, `>=` → `>`, `18` → `19` and
+`18` → `17` are all killed by the same boundary test; once you know that
+test kills one of them, running the others tells you nothing new. A normal
+run can't see this: it stops each mutant at its first failing test (`-x`)
+and keeps only the verdict.
+
+A **kill-set** keeps the rest: for each mutant, *every* covering test that
+fails on it. `fermut run --record-kill-sets` writes one JSONL line per
+mutant. With kill-sets you can compare mutants by what kills them:
+
+![Kill-sets and subsumption: a grid of six mutants by four tests. m1 is killed by t1; m2 by t1 and t2; m3 by t1, t2 and t3; m4 and m5 by t4; m6 by nothing. m1 subsumes m2 and m3; m4 and m5 form one class; m1 and the m4/m5 class are the dominators.](../../assets/kill-sets-subsumption.svg)
+
+What that buys:
+
+- **A score that's harder to inflate.** The [dominator score](#dominator-score)
+  counts each independent fault once, so a test that kills twenty
+  look-alike mutants on one line counts once, not twenty times.
+- **Faster full sweeps.** [`--only-dominators`](#fermut-run-only-dominators-experimental)
+  runs the dominators and infers the rest (pyjwt: 62 s → 44 s, same
+  verdicts).
+- **Input for [`hom`](hom.md)**, which pairs mutants by shared killing
+  tests.
+
+Kill-sets describe the suite as it was recorded. Re-record after the tests
+change.
+
 ## What it computes
 
 A mutant's **kill-set** `K(m)` is the set of tests that fail on it.

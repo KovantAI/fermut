@@ -52,6 +52,10 @@ perturbation. The perturbation is the *mutant*.
   coverage. The mutant **survived**, and the surviving mutant is a
   pointer to a behavior your tests don't cover.
 
+![One mutation: the boundary-shift operator turns return age >= 18 into return age > 18. With only a test at age 25 every test passes and the mutant survived; a test at age 18 fails on it, so it is killed.](../assets/mutation-basics.svg)
+
+The worked example below runs exactly this.
+
 ## A complete worked example
 
 The smallest illustration. Source, `src/age.py`:
@@ -228,6 +232,7 @@ Order is cheap → expensive:
 | Stage          | Cost        | What it does                                                       |
 |----------------|-------------|--------------------------------------------------------------------|
 | experimental   | in-memory   | Drop experimental ops unless `--experimental`                      |
+| migrations     | path match  | Drop Django `migrations/0001_*.py` and Alembic `versions/*.py` unless `--mutate-migrations` |
 | parity         | in-memory   | Drop parity-tier ops unless `--parity`                             |
 | profile        | in-memory   | Drop profile-gated ops the active profile doesn't enable           |
 | operator       | in-memory   | Apply `--ops` allowlist and `--skip-ops` denylist                  |

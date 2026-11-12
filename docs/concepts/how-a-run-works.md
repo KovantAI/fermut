@@ -36,7 +36,9 @@ here and prints them.
 ## 3. Filter chain
 
 Cheap checks run first, so the expensive ones see as few mutants as
-possible. In order: operator selection (experimental, parity, the
+possible. In order: experimental operators, **migrations** (Django
+`migrations/0001_*.py` and Alembic `versions/*.py`, unless
+`--mutate-migrations`), operator selection (parity, the
 [operator profile](../reference/operators/profiles.md), `--ops` /
 `--skip-ops`), `--shard`, `--sample`, `--diff-only` / `--since`, then
 **coverage** (no test executes the line), `--select-tests`, the optional
@@ -48,7 +50,7 @@ and the optional bytecode check (`--tce`). A dropped mutant is reported as
 On a typical run most mutants stop here. On pyjwt, 4,525 of 6,475 were
 skipped; the coverage and `ty` filters alone removed about 1,400.
 
-**In the code:** `src/filter/` (`build_chain`, one file per filter; order in `CANONICAL_ORDER`).
+**In the code:** `src/filter/` (`build_chain`, `migrations.rs`, one file per filter; order in `CANONICAL_ORDER`).
 
 
 ## 4. Cache
@@ -83,14 +85,26 @@ never touches your source tree.
   to per-test coverage ([Test selection](../reference/cli/run-test-selection.md)),
   ordered so the test that killed this code before runs first. pytest stops
   at the first failure (`-x`).
-- **How.** With pytest on Unix, the mutant runs in a fork of one pytest
-  process that has already imported and collected your suite, instead of a
-  fresh pytest ([Schemata](../reference/cli/run-schemata.md)). Anything a
-  fork can't vouch for runs the normal way.
+- **How.** Two ways, same verdict:
+    - **Schemata** (default with pytest on Unix; unittest and rstest opt in
+      with `--schemata`). Before the first mutant, fermut builds one
+      *schema*: a copy of the project where every mutant inside a function
+      body sits behind a switch. One *template* pytest session imports and
+      collects your suite once; each mutant runs in a fork of it with its
+      switch on. A kill only stands once the same tests pass in a fork with
+      no mutant active.
+    - **Regular.** The mutated file is patched into the worker's mirror, a
+      fresh `pytest` (or `unittest`) runs the selected tests, and the
+      pristine file is restored. This is what `--no-schemata`, Windows, and
+      unittest or rstest without `--schemata` use, and where schemata sends
+      anything a fork can't vouch for: mutants outside function bodies or in
+      code that ran at import, crashed forks, unconfirmed kills, and a ~5%
+      audit sample of survivors
+      ([Schemata](../reference/cli/run-schemata.md#what-runs-the-normal-way)).
 - **Limits.** Each run has a timeout, and a memory cap so a runaway mutant
   can't take the machine down ([`fermut run`](../reference/cli/run.md#memory-cap)).
 
-**In the code:** `src/engine.rs` (rayon workers), `src/runner/` (pytest, unittest, schemata fork, mirror, memory cap), `src/kill_order.rs`.
+**In the code:** `src/engine.rs` (rayon workers), `src/runner/schema.rs` (schemata), `src/runner/pytest.rs` and `unittest.rs` (regular), `src/runner/pristine.rs` (mirror restore), `src/runner/memory.rs`, `src/kill_order.rs`.
 
 
 ## 7. Verdict

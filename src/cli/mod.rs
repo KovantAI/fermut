@@ -660,7 +660,7 @@ cli_enum! {
 }
 
 cli_enum! {
-    pub(crate) enum TrendGroupByCli => TrendGroupBy { File => File }
+    pub(crate) enum TrendGroupByCli => TrendGroupBy { File => File, Project => Project }
 }
 
 cli_enum! {

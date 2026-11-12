@@ -15,6 +15,7 @@ on:
       - "scripts/action/**"
       - ".github/workflows/action.yml"
       - "examples/sample/**"
+      - "examples/monorepo_sample/**"
   pull_request:
     paths:
       - "action.yml"
@@ -24,6 +25,7 @@ on:
       - "scripts/action/**"
       - ".github/workflows/action.yml"
       - "examples/sample/**"
+      - "examples/monorepo_sample/**"
   workflow_dispatch:
 
 permissions:
@@ -121,6 +123,54 @@ jobs:
         env:
           SCORED: ${{ steps.fermut.outputs.scored }}
         run: test "$SCORED" -gt 0
+
+  project:
+    # Monorepo aggregation: pkg_a sharded, pkg_b whole, pooled by merge.
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { project: examples/monorepo_sample/packages/pkg_a, shard: 1/2 }
+          - { project: examples/monorepo_sample/packages/pkg_a, shard: 2/2 }
+          - { project: examples/monorepo_sample/packages/pkg_b, shard: "" }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - *bin
+      - *path
+      - uses: ./sweep
+        with:
+          project: ${{ matrix.project }}
+          shard: ${{ matrix.shard }}
+          source: src
+          tests: tests
+          fermut-version: project
+          install-command: ${{ env.INSTALL }}
+          artifact-name: selftest-mono
+
+  merge-projects:
+    needs: [build, project]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - *bin
+      - *path
+      - id: fermut
+        uses: ./merge
+        with:
+          fermut-version: project
+          artifact-name: selftest-mono
+          fail-under: "50"
+          projects: |
+            examples/monorepo_sample/packages/pkg_a
+            examples/monorepo_sample/packages/pkg_b
+      - name: Assert pooled report
+        env:
+          JSON: ${{ steps.fermut.outputs.report-json }}
+        run: |
+          jq -e '.projects | length == 2' "$JSON"
+          jq -e '(.projects | map(.killed + .timed_out + .survived) | add) == .summary.scored' "$JSON"
+          jq -e '.outcomes | all(.mutant.file | startswith("examples/monorepo_sample/packages/"))' "$JSON"
 
   trend:
     needs: [build, shard]

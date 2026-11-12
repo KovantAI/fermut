@@ -18,9 +18,16 @@ fermut trend [PATH] [flags...]
 | `--fail-on-regression <PTS>`  | off                              | Exit non-zero when the most recent run dropped more than `PTS` score points vs the previous filtered entry with the same `config_hash` and fermut version (a config edit or upgrade re-baselines). CI gate. |
 | `--scale fixed\|auto`         | `fixed`                          | Sparkline scaling. `fixed` renders against `[0, 100]` for cross-window comparability; `auto` rescales to the window's own min/max (falls back to `fixed` when span < 1 pt). |
 | `--diff`                      | off                              | Expand the per-run survivor diff into full new-survivor / newly-killed mutant-id lists below the table. |
-| `--by file`                   | none                             | Aggregate the latest run's survivors. `file` groups by source file, prints counts + oldest survivor's age per group. |
+| `--by file\|project`          | none                             | `file` groups the latest run's survivors by source file, prints counts + oldest survivor's age per group. `project` prints a sparkline + latest score per project of an aggregated history. |
+| `--project <DIR>`             | none                             | Trend one project of an aggregated ([`merge DIR=REPORT`](merge.md#projects-dirreport)) history: its own counts and `config_hash`, entries without it dropped. |
 | `--format human\|json`        | `human`                          | `human` (table + sparkline) or `json`.                           |
 | `--strict`                    | off                              | Fail when the history log has a malformed (corrupt, unparseable) line instead of skipping it, so a CI step catches a truncated file. Lines from a newer schema are warned about, not failed. Doesn't affect `run --fail-on-regression`, which loads history separately. |
+
+On an aggregated history, `--fail-on-regression` also checks each project
+of the latest entry against its own earlier entries with the same
+per-project `config_hash`, and fails naming the project. A config change in
+one project re-baselines the combined line and that project, never the
+others.
 
 Run history is appended by `fermut run` unless disabled with
 `--no-history`. `fermut clean` preserves `history.jsonl`.

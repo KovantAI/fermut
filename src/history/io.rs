@@ -221,6 +221,7 @@ mod tests {
             survivor_ids: None,
             baseline: false,
             partial: false,
+            projects: Vec::new(),
         };
         append(&p, &entry).unwrap();
         append(&p, &entry).unwrap();
@@ -254,6 +255,7 @@ mod tests {
             survivor_ids: None,
             baseline: false,
             partial: false,
+            projects: Vec::new(),
         };
         // A false flag is skipped on serialize — no schema bloat on run rows.
         let normal_json = serde_json::to_string(&anchor).unwrap();
@@ -297,6 +299,7 @@ mod tests {
             survivor_ids: None,
             baseline: false,
             partial: false,
+            projects: Vec::new(),
         };
         let line = serde_json::to_string(&valid).unwrap();
         std::fs::write(&p, format!("not json\n{line}\n{{partial:")).unwrap();
@@ -327,6 +330,7 @@ mod tests {
             survivor_ids: None,
             baseline: false,
             partial: false,
+            projects: Vec::new(),
             fermut_version: None,
         };
         let good = serde_json::to_string(&valid).unwrap();
@@ -381,6 +385,7 @@ mod tests {
                         survivor_ids: None,
                         baseline: false,
                         partial: false,
+                        projects: Vec::new(),
                     };
                     append(&p, &entry).unwrap();
                 }
@@ -420,6 +425,7 @@ mod tests {
             survivor_ids: None,
             baseline: false,
             partial: false,
+            projects: Vec::new(),
         };
         let valid_line = serde_json::to_string(&valid).unwrap();
         std::fs::write(&p, format!("{line}\n{valid_line}\n")).unwrap();

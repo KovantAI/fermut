@@ -170,6 +170,14 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [0.7.0] - 2026-11-04
 
 ### Added
+- Monorepo aggregation: `fermut merge DIR=REPORT ...` pools several
+  projects into one report with a scored-weighted score, repo-relative mutant
+  paths and a per-project breakdown (`projects` in JSON and history, a table
+  in Markdown/HTML). Each project keeps its own `config_hash`;
+  `fermut trend --project DIR` / `--by project` show one or all projects, and
+  `--fail-on-regression` also gates each project. A project that scored
+  nothing fails the merge. Actions: `sweep` takes `project`, `merge`/`trend`
+  take `projects`.
 - **Per-mutant memory cap on Linux, macOS and Windows** (`--max-memory`, on by default). A
   runaway mutant (an endless append) used to grow until its timeout — 4–8 GB
   per process, 10–18 GB per run on markupsafe, more-itertools and trio. Each

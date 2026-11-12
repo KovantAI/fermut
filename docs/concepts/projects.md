@@ -139,8 +139,37 @@ fermut run packages/auth/src/
 fermut run packages/billing/src/
 ```
 
-Or wire each one as its own CI job. There's no monorepo-aware
-aggregation today.
+Or wire each one as its own CI job.
+
+### One score across projects
+
+`fermut merge` pools several projects' reports into one when each input
+is prefixed with its project's repo-relative root:
+
+```sh
+fermut merge \
+  packages/auth=auth-shard-1.json packages/auth=auth-shard-2.json \
+  packages/billing=billing.json \
+  --markdown agg.md --history agg-entry.json
+```
+
+- **Each project merges on its own first**, so shard checks,
+  `--expect-shards` and config agreement apply per project.
+- **The score is pooled**, `Σ detected / Σ scored`: a 9/10 project and a
+  1/90 project pool to 10%, not the 50% mean.
+- **Paths become repo-relative** (`packages/auth/src/...`), so the same
+  file name in two projects never collides.
+- **A breakdown** (`projects` in JSON, a table in Markdown and HTML)
+  lists each project's score, worst first.
+- **A project with nothing scored fails the merge**: its N/A would
+  otherwise hide inside the pooled score.
+
+The pooled `config_hash` hashes every project's own hash, so changing one
+project's config, or adding a project, re-baselines the combined trend.
+Each project keeps its own hash in the history entry, so `fermut trend
+--project packages/auth` and the per-project regression gate stay
+comparable when another project's config changes. In CI, use the
+[`project` / `projects` inputs](../guides/github-action.md#monorepo).
 
 ## Where next
 

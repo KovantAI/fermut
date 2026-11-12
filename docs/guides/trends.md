@@ -27,6 +27,7 @@ is one `HistoryEntry`:
 | `git_sha`        | `string` \| null | Short git sha, if the working tree is a git repo.                                                 |
 | `git_branch`     | `string` \| null | Current branch name, if discoverable.                                                              |
 | `survivor_ids`   | `array<string>` \| null | IDs of mutants that survived this run. Stored inline so `fermut trend --diff` can compute new-survivor / newly-killed diffs without a sidecar file. |
+| `projects`       | `array<object>` (omitted when empty) | Per-project counts and `config_hash` of an aggregated [`merge DIR=REPORT`](../reference/cli/merge.md#projects-dirreport) entry. Feeds `trend --project` and the per-project regression gate. |
 
 The schema is additive: new fields are tagged `#[serde(default)]`,
 so older entries keep parsing and an older `fermut` reading a newer
@@ -64,6 +65,8 @@ Flags:
 | `--all`              | Show every recorded entry.                                 |
 | `--history-path <p>` | Read from a non-default location.                          |
 | `--format json`      | Emit JSON instead of the table (for tooling).              |
+| `--project <DIR>`    | One project of an aggregated (monorepo) history.           |
+| `--by project`       | Sparkline + latest score per project of an aggregated history. |
 
 ## Showing the trend on a PR
 

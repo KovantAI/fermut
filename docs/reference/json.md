@@ -65,6 +65,7 @@ Trimmed from a real run of `examples/sample` (checkout path shortened to
 | `shard` | `{"index": i, "total": n}` for one shard of a `--shard i/n` run; absent otherwise. |
 | `config_hash` | Hash of the settings that change verdicts, with `--shard` ignored, so every shard of one run agrees. History compares only runs with the same hash. |
 | `duration_ms` | Wall time of the run. After `merge`, the sum across shards. |
+| `projects` | After a [`merge DIR=REPORT`](cli/merge.md#projects-dirreport) only: one `{dir, config_hash, killed, survived, timed_out, skipped, errored, equivalent, inferred_killed}` per project, worst score first. |
 | `outcomes` | One entry per generated mutant. |
 
 ### Outcomes
@@ -184,3 +185,4 @@ run, read by `trend`, `score` and `dashboard`.
 | `survivor_ids` | Ids of the surviving mutants, which `score` diffs between runs. |
 | `baseline` | `true` on the entry `fermut baseline` writes: run zero of the trend. |
 | `partial` | `true` when `--max-time` ran out before every mutant was tested. Partial runs are never compared. |
+| `projects` | As in the run report, on an aggregated merge's entry. Each project's `config_hash` scopes its own trend. |

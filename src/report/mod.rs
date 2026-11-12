@@ -241,6 +241,18 @@ impl MutantOutcome {
         }
     }
 
+    /// Mutable handle on the outcome's mutant; `Arc::make_mut` it to edit.
+    pub fn mutant_mut(&mut self) -> &mut Arc<Mutant> {
+        match self {
+            Self::Killed { mutant, .. }
+            | Self::Survived { mutant, .. }
+            | Self::TimedOut { mutant, .. }
+            | Self::Skipped { mutant, .. }
+            | Self::Error { mutant, .. }
+            | Self::Equivalent { mutant, .. } => mutant,
+        }
+    }
+
     pub fn status_label(&self) -> &'static str {
         match self {
             Self::Killed { .. } => "killed",
@@ -441,6 +453,18 @@ pub struct Shard {
     pub total: u32,
 }
 
+/// One project's slice of an aggregated (`fermut merge DIR=REPORT`) report.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProjectSummary {
+    /// Repo-relative project root, as given on the merge command line.
+    pub dir: String,
+    /// The project's own `config_hash`, so its trend stays comparable when
+    /// another project's config changes.
+    pub config_hash: Option<String>,
+    #[serde(flatten)]
+    pub counts: Counts,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Report {
     pub outcomes: Vec<MutantOutcome>,
@@ -468,6 +492,10 @@ pub struct Report {
     /// `None` on reports from before this field.
     #[serde(default)]
     pub duration_ms: Option<u64>,
+    /// Per-project breakdown of an aggregated merge, worst score first.
+    /// Empty for a single-project report.
+    #[serde(default)]
+    pub projects: Vec<ProjectSummary>,
 }
 
 // Hand-written so JSON output carries a derived `summary` object alongside
@@ -485,6 +513,8 @@ impl Serialize for Report {
             config_hash: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             duration_ms: Option<u64>,
+            #[serde(skip_serializing_if = "<[_]>::is_empty")]
+            projects: &'a [ProjectSummary],
             outcomes: &'a [MutantOutcome],
         }
         View {
@@ -492,6 +522,7 @@ impl Serialize for Report {
             shard: self.shard,
             config_hash: self.config_hash.as_deref(),
             duration_ms: self.duration_ms,
+            projects: &self.projects,
             outcomes: &self.outcomes,
         }
         .serialize(serializer)
@@ -508,6 +539,7 @@ impl Report {
             inferred_audit_failures: 0,
             config_hash: None,
             duration_ms: None,
+            projects: Vec::new(),
         }
     }
 
@@ -743,6 +775,23 @@ mod tests {
     use crate::mutator::Operator;
     use ruff_text_size::TextRange;
     use std::path::PathBuf;
+
+    #[test]
+    fn mutant_mut_edits_every_outcome_kind() {
+        use crate::report::testing::make_mutant;
+        let mut all = vec![
+            MutantOutcome::killed(make_mutant()),
+            MutantOutcome::survived(make_mutant()),
+            MutantOutcome::timed_out(make_mutant()),
+            MutantOutcome::skipped(make_mutant(), "coverage"),
+            MutantOutcome::error(make_mutant(), "boom".into()),
+            MutantOutcome::equivalent(make_mutant(), "reason", "bytecode"),
+        ];
+        for o in &mut all {
+            Arc::make_mut(o.mutant_mut()).replacement = "edited".into();
+            assert_eq!(o.mutant().replacement, "edited", "{}", o.status_label());
+        }
+    }
 
     #[test]
     fn killed_and_timed_out_score_identically() {

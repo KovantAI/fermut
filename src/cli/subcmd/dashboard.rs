@@ -589,6 +589,7 @@ mod tests {
             survivor_ids: survivors.map(|s| s.iter().map(|x| x.to_string()).collect()),
             baseline: false,
             partial: false,
+            projects: Vec::new(),
         }
     }
 

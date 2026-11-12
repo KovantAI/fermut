@@ -37,3 +37,10 @@ gate_fail() {
   echo "::error title=fermut gate::$1" >&2
   exit 1
 }
+
+# Artifact-safe name for a repo-relative project dir: `/` is not allowed in an
+# artifact name. merge.sh maps a `projects` entry back to its artifacts with it.
+project_slug() {
+  local d="${1%/}"
+  echo "${d//\//--}"
+}

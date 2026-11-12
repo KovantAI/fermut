@@ -273,6 +273,7 @@ mod tests {
             survivor_ids: None,
             baseline: false,
             partial: false,
+            projects: Vec::new(),
         }
     }
 

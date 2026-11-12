@@ -273,13 +273,15 @@ pub(crate) struct RunConfigArgs {
     pub no_equiv_detect: bool,
 
     /// Cache-key granularity for source identity.
-    /// `file` (default) keys cache entries on the AST hash of the whole
-    /// file — any structural edit invalidates every mutant in the file.
-    /// `scope` keys on the file prelude + the enclosing top-level
-    /// def/class body, so edits inside one function leave cache hits
-    /// intact for mutants in sibling functions. `scope` is opt-in
-    /// because it can return stale verdicts when a test for one
-    /// function indirectly calls another.
+    /// `coverage` (default) keys each mutant on the top-level defs/classes
+    /// its covering tests ran, in any file, plus every file's import-time
+    /// code: editing a function re-runs only the mutants whose tests run
+    /// it. Without coverage it acts as `file`.
+    /// `file` keys on the AST hash of the mutant's whole file — any edit
+    /// there invalidates every mutant in it; edits to other files don't.
+    /// `scope` keys on the file prelude + the enclosing top-level def/class
+    /// body; it can return stale verdicts when a test for one function
+    /// indirectly calls another.
     #[arg(long, value_enum)]
     pub cache_scope: Option<CacheScopeCli>,
 
@@ -703,6 +705,7 @@ cli_enum! {
 
 cli_enum! {
     pub(crate) enum CacheScopeCli => crate::config::CacheScope {
+        Coverage => Coverage,
         File => File,
         Scope => Scope,
     }

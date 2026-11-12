@@ -425,6 +425,72 @@ fn body_fingerprint(body: &[Stmt]) -> String {
     hex::encode(h.finalize())
 }
 
+/// One file's split for the `coverage` cache mode: what runs at import, and
+/// each top-level def/class a test can execute.
+#[derive(Debug, Clone)]
+pub struct ScopeLayout {
+    /// Every top-level statement that isn't a def/class, plus each def's and
+    /// class's decorators: code that runs at import time, so no per-test
+    /// coverage context can attribute it.
+    pub globals: String,
+    /// Top-level defs/classes in source order: `(first line, last line,
+    /// hash of the whole statement)`. Lines are 1-based, as coverage records them.
+    pub scopes: Vec<(u32, u32, String)>,
+}
+
+impl ScopeLayout {
+    /// Index into `scopes` of the top-level def/class spanning `line`, or
+    /// `None` at module level.
+    pub fn scope_at(&self, line: u32) -> Option<usize> {
+        let i = self.scopes.partition_point(|s| s.0 <= line);
+        (i > 0 && line <= self.scopes[i - 1].1).then(|| i - 1)
+    }
+}
+
+/// [`ScopeLayout`] of the file at `path`; `None` when it can't be read or
+/// parsed (the caller hashes its bytes into the global layer instead).
+pub fn scope_layout(path: &Path) -> Option<ScopeLayout> {
+    let source = std::fs::read_to_string(path).ok()?;
+    let parsed = parse_module(&source).ok()?;
+    let newlines: Vec<usize> = source.match_indices('\n').map(|(i, _)| i).collect();
+    let line_of = |offset: ruff_text_size::TextSize| {
+        1 + newlines.partition_point(|&i| i < usize::from(offset)) as u32
+    };
+    let mut globals = Sha256::new();
+    globals.update(b"globals:v1\n");
+    let mut scopes = Vec::new();
+    for stmt in &parsed.syntax().body {
+        let decorators = match stmt {
+            Stmt::FunctionDef(f) => &f.decorator_list,
+            Stmt::ClassDef(c) => &c.decorator_list,
+            other => {
+                globals.update(strip_ranges(&format!("{:#?}", other)).as_bytes());
+                globals.update(b"\n");
+                continue;
+            }
+        };
+        // Only decorated ones: adding a plain helper changes no import-time
+        // behaviour, so it mustn't re-run everything.
+        if !decorators.is_empty() {
+            globals.update(strip_ranges(&format!("{:#?}", decorators)).as_bytes());
+            globals.update(b"\n");
+        }
+        let range = stmt.range();
+        let mut h = Sha256::new();
+        h.update(b"scope:v1\n");
+        h.update(strip_ranges(&format!("{:#?}", stmt)).as_bytes());
+        scopes.push((
+            line_of(range.start()),
+            line_of(range.end()),
+            hex::encode(h.finalize()),
+        ));
+    }
+    Some(ScopeLayout {
+        globals: hex::encode(globals.finalize()),
+        scopes,
+    })
+}
+
 /// Byte ranges of every function definition in `source` (all nesting depths,
 /// source order, so an outer function precedes the ones nested in it), via a
 /// source-order walk. Empty on a parse failure.

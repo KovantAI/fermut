@@ -267,7 +267,10 @@ impl OperatorProfile {
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum CacheScope {
+    /// The code each covering test ran, from the coverage DB; `File` without
+    /// coverage. See `cov_identity`.
     #[default]
+    Coverage,
     File,
     Scope,
 }
@@ -305,6 +308,7 @@ pub enum IsolationMode {
 impl std::fmt::Display for CacheScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            CacheScope::Coverage => "coverage",
             CacheScope::File => "file",
             CacheScope::Scope => "scope",
         })
@@ -346,6 +350,7 @@ mod tests {
 
     #[test]
     fn enum_display_matches_config_spelling() {
+        assert_eq!(CacheScope::Coverage.to_string(), "coverage");
         assert_eq!(CacheScope::File.to_string(), "file");
         assert_eq!(CacheScope::Scope.to_string(), "scope");
         assert_eq!(RunnerKind::Pytest.to_string(), "pytest");
@@ -359,6 +364,7 @@ mod tests {
 
     #[test]
     fn display_names_match_cli_spellings() {
+        assert_eq!(CacheScope::Coverage.to_string(), "coverage");
         assert_eq!(CacheScope::File.to_string(), "file");
         assert_eq!(CacheScope::Scope.to_string(), "scope");
         assert_eq!(RunnerKind::Pytest.to_string(), "pytest");

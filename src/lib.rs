@@ -26,6 +26,7 @@ pub(crate) mod ast_hash;
 pub(crate) mod cache;
 pub(crate) mod cli;
 pub(crate) mod config;
+pub(crate) mod cov_identity;
 pub(crate) mod emit;
 pub(crate) mod engine;
 pub(crate) mod equiv;

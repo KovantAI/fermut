@@ -20,6 +20,7 @@ use tracing::{debug, info, warn};
 use crate::ast_hash::{self, Anchors, ScopeMap};
 use crate::cache::{Cache, SurvivorBasis};
 use crate::config::{CacheScope, Config, MemoryCap, RunnerKind};
+use crate::cov_identity::CovIdentity;
 use crate::equiv::{EquivPipeline, EquivVerdict};
 use crate::filter::{self, Filter};
 use crate::history::HistoryEntry;
@@ -121,6 +122,7 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         cache: &state.cache,
         file_hashes: &state.files.hashes,
         scope_maps: &state.files.scope_maps,
+        cov_identity: state.files.cov.as_ref(),
         anchors: &state.files.anchors,
         scope_prefix: &state.scope_prefix,
         test_tree: &state.test_tree,
@@ -370,11 +372,18 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     // hash (always), the scope map (only in `scope` cache mode), and the source
     // for the equiv detector (only when it's on). Narrowing (below) changes
     // none of these, nor the scope prefix.
-    let files = analyze_unique_files(
+    let mut files = analyze_unique_files(
         mutants,
         matches!(cfg.cache_scope, CacheScope::Scope),
         cfg.equiv_detect,
     );
+    if let (true, CacheScope::Coverage, Some(ctx)) = (cfg.cache, cfg.cache_scope, &cfg.coverage) {
+        files.cov = Some(CovIdentity::build(
+            ctx,
+            &cfg.tests_path(),
+            files.hashes.keys().map(PathBuf::as_path),
+        ));
+    }
     let scope_prefix = compute_scope_prefix(cfg);
     // Walked and hashed once; each mutant's test fingerprint folds from it.
     let test_tree = TestTree::walk(&cfg.tests_path());
@@ -568,7 +577,13 @@ fn is_cached(
     test_tree: &TestTree,
     mutant: &Mutant,
 ) -> bool {
-    let Some(hash) = mutant_identity_hash(cfg, mutant, &files.hashes, &files.scope_maps) else {
+    let Some(hash) = mutant_identity_hash(
+        cfg,
+        mutant,
+        &files.hashes,
+        &files.scope_maps,
+        files.cov.as_ref(),
+    ) else {
         return false;
     };
     let scope = compute_mutant_scope(scope_prefix, cfg, test_tree, mutant);
@@ -886,6 +901,8 @@ struct EvalCtx<'a> {
     cache: &'a Mutex<Cache>,
     file_hashes: &'a HashMap<PathBuf, String>,
     scope_maps: &'a HashMap<PathBuf, ScopeMap>,
+    /// Per-test executed-code digests for the `coverage` cache mode.
+    cov_identity: Option<&'a CovIdentity>,
     /// Top-level def/class positions per file, for [`cache_key`].
     anchors: &'a HashMap<PathBuf, Anchors>,
     scope_prefix: &'a str,
@@ -935,7 +952,13 @@ fn precheck(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> Option<MutantOutcome> {
 /// Cache lookup, then a real run, for a mutant the filter chain admitted.
 fn evaluate_admitted(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
     let scope = compute_mutant_scope(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant);
-    let identity_hash = mutant_identity_hash(ctx.cfg, mutant, ctx.file_hashes, ctx.scope_maps);
+    let identity_hash = mutant_identity_hash(
+        ctx.cfg,
+        mutant,
+        ctx.file_hashes,
+        ctx.scope_maps,
+        ctx.cov_identity,
+    );
     let key = cache_key(mutant, ctx.anchors);
 
     if let Some(hash) = &identity_hash {
@@ -1261,7 +1284,13 @@ fn audit_one(ctx: &EvalCtx, hit: &KillerHit) -> Option<MutantOutcome> {
     let key = cache_key(&hit.mutant, ctx.anchors);
     lock_recover(ctx.cache).remove(&key);
     let scope = compute_mutant_scope(ctx.scope_prefix, ctx.cfg, ctx.test_tree, &hit.mutant);
-    let identity_hash = mutant_identity_hash(ctx.cfg, &hit.mutant, ctx.file_hashes, ctx.scope_maps);
+    let identity_hash = mutant_identity_hash(
+        ctx.cfg,
+        &hit.mutant,
+        ctx.file_hashes,
+        ctx.scope_maps,
+        ctx.cov_identity,
+    );
     Some(run_and_cache(ctx, &hit.mutant, key, scope, identity_hash))
 }
 
@@ -1320,7 +1349,13 @@ fn mutant_identity_hash(
     mutant: &Mutant,
     file_hashes: &HashMap<PathBuf, String>,
     scope_maps: &HashMap<PathBuf, ScopeMap>,
+    cov: Option<&CovIdentity>,
 ) -> Option<String> {
+    if let (Some(cov), Some(ctx)) = (cov, &cfg.coverage) {
+        if let Some(h) = cov.hash_for(ctx, mutant) {
+            return Some(h);
+        }
+    }
     if matches!(cfg.cache_scope, CacheScope::Scope) {
         if let Some(map) = scope_maps.get(&mutant.file) {
             return Some(map.scope_hash_for(mutant.range));
@@ -1627,6 +1662,8 @@ struct FileArtifacts {
     /// Source text for the equiv detector, so classification doesn't re-read
     /// the file per mutant. Empty when equiv detection is off.
     sources: HashMap<PathBuf, String>,
+    /// `coverage` cache mode with a coverage DB; `None` otherwise.
+    cov: Option<CovIdentity>,
 }
 
 /// Read + parse each unique mutated file exactly once, deriving every per-file
@@ -1684,6 +1721,7 @@ fn analyze_unique_files(
         scope_maps,
         anchors,
         sources,
+        cov: None,
     }
 }
 
@@ -1960,16 +1998,16 @@ mod tests {
         };
 
         // Scope mode: bar-side hash stable across edits to foo's body.
-        let scope_a = mutant_identity_hash(&scope_cfg, &m, &files_a, &maps_a).unwrap();
-        let scope_b = mutant_identity_hash(&scope_cfg, &m, &files_b, &maps_b).unwrap();
+        let scope_a = mutant_identity_hash(&scope_cfg, &m, &files_a, &maps_a, None).unwrap();
+        let scope_b = mutant_identity_hash(&scope_cfg, &m, &files_b, &maps_b, None).unwrap();
         assert_eq!(
             scope_a, scope_b,
             "scope-mode bar hash must survive foo edit"
         );
 
         // File mode: any AST change anywhere invalidates the hash.
-        let file_a = mutant_identity_hash(&file_cfg, &m, &files_a, &maps_a).unwrap();
-        let file_b = mutant_identity_hash(&file_cfg, &m, &files_b, &maps_b).unwrap();
+        let file_a = mutant_identity_hash(&file_cfg, &m, &files_a, &maps_a, None).unwrap();
+        let file_b = mutant_identity_hash(&file_cfg, &m, &files_b, &maps_b, None).unwrap();
         assert_ne!(file_a, file_b, "file-mode bar hash must change on foo edit");
     }
 
@@ -2428,6 +2466,7 @@ mod tests {
             cache: &cache,
             file_hashes: &HashMap::new(),
             scope_maps: &HashMap::new(),
+            cov_identity: None,
             anchors: &HashMap::new(),
             scope_prefix: "",
             test_tree: &TestTree::default(),
@@ -2508,6 +2547,7 @@ mod tests {
             cache,
             file_hashes: &a.hashes,
             scope_maps: &a.scope_maps,
+            cov_identity: None,
             anchors: &a.anchors,
             scope_prefix: "",
             test_tree: &TestTree::default(),
@@ -2625,6 +2665,67 @@ mod tests {
         order_by_value(&mut mutants, &cfg);
         assert_eq!(mutants[0].id, a.id);
         assert_eq!(mutants[1].id, b.id);
+    }
+
+    /// `coverage`-mode identity hashes for a mutant on line 3 (`bar`, run by
+    /// test_a, which also runs `util.helper`) and one on line 5 (`foo`, run
+    /// by test_b), given the sources of `mod.py` and `util.py`.
+    fn cov_hashes(module: &str, util: &str) -> (String, String) {
+        use crate::filter::coverage::CoverageContexts;
+        let tmp = tempfile::tempdir().unwrap();
+        let py = tmp.path().join("mod.py");
+        std::fs::write(&py, module).unwrap();
+        std::fs::write(tmp.path().join("util.py"), util).unwrap();
+        let doc = r#"{"files": {
+            "mod.py": {"contexts": {"3": ["tests/t.py::test_a|run"], "5": ["tests/t.py::test_b|run"]}},
+            "util.py": {"contexts": {"2": ["tests/t.py::test_a|run"]}}
+        }}"#;
+        let cov_path = tmp.path().join("coverage.json");
+        std::fs::write(&cov_path, doc).unwrap();
+        let cov = CoverageContexts::from_json(&cov_path, tmp.path(), tmp.path()).unwrap();
+        let cfg = Config {
+            coverage: Some(cov.clone()),
+            ..base_test_config()
+        };
+        let id = CovIdentity::build(&cov, &tmp.path().join("tests"), [py.as_path()]);
+        let at = |line| {
+            let mut m = arith_mutant("x + 1", "+", "-");
+            m.file = py.clone();
+            m.line = line;
+            m.stmt_line = line;
+            mutant_identity_hash(&cfg, &m, &HashMap::new(), &HashMap::new(), Some(&id)).unwrap()
+        };
+        (at(3), at(5))
+    }
+
+    const MOD: &str =
+        "import util\ndef bar(x):\n    return x + util.helper()\ndef foo(x):\n    return x * 2\n";
+    const UTIL: &str = "def helper():\n    return 3\n";
+
+    #[test]
+    fn coverage_identity_tracks_only_the_code_a_mutants_tests_ran() {
+        let (bar, foo) = cov_hashes(MOD, UTIL);
+
+        // Editing foo's body: bar's tests never ran foo.
+        let (bar2, foo2) = cov_hashes(&MOD.replace("x * 2", "x * 3"), UTIL);
+        assert_eq!(bar, bar2);
+        assert_ne!(foo, foo2);
+
+        // Editing another file's function bar's test calls: bar re-runs, foo doesn't.
+        let (bar3, foo3) = cov_hashes(MOD, &UTIL.replace('3', "4"));
+        assert_ne!(bar, bar3);
+        assert_eq!(foo, foo3);
+
+        // Import-time code anywhere re-runs everything.
+        let (bar4, foo4) = cov_hashes(MOD, &format!("LIMIT = 1\n{UTIL}"));
+        assert_ne!(bar, bar4);
+        assert_ne!(foo, foo4);
+
+        // A comment, or a new undecorated helper no test runs: nothing re-runs.
+        let reformatted = MOD.replace("def foo(x):\n", "def foo(x):  # doubled\n");
+        assert_eq!(cov_hashes(&reformatted, UTIL), (bar.clone(), foo.clone()));
+        let helper = format!("{MOD}def unused():\n    return 0\n");
+        assert_eq!(cov_hashes(&helper, UTIL), (bar, foo));
     }
 
     #[test]
@@ -2820,6 +2921,7 @@ mod tests {
             cache,
             file_hashes: &hashes,
             scope_maps: &HashMap::new(),
+            cov_identity: None,
             anchors: &HashMap::new(),
             scope_prefix: &prefix,
             test_tree: &tree,
@@ -3589,6 +3691,7 @@ mod tests {
             cache: &cache,
             file_hashes: &empty_hashes,
             scope_maps: &empty_maps,
+            cov_identity: None,
             anchors: &HashMap::new(),
             scope_prefix: "",
             test_tree: &tree,
@@ -3795,13 +3898,13 @@ mod tests {
             cache_scope: CacheScope::Scope,
             ..base_test_config()
         };
-        let scoped = mutant_identity_hash(&cfg, &good, &a.hashes, &a.scope_maps);
+        let scoped = mutant_identity_hash(&cfg, &good, &a.hashes, &a.scope_maps, None);
         assert_eq!(
             scoped,
             Some(a.scope_maps[&good.file].scope_hash_for(good.range))
         );
         assert_eq!(
-            mutant_identity_hash(&cfg, &broken, &a.hashes, &a.scope_maps),
+            mutant_identity_hash(&cfg, &broken, &a.hashes, &a.scope_maps, None),
             a.hashes.get(&broken.file).cloned()
         );
     }
@@ -3880,6 +3983,7 @@ mod tests {
             cache: &cache,
             file_hashes: &empty_hashes,
             scope_maps: &empty_maps,
+            cov_identity: None,
             anchors: &HashMap::new(),
             scope_prefix: "",
             test_tree: &tree,

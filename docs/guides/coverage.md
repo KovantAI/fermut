@@ -43,7 +43,7 @@ filter uses the result.
 ## Auto-discovery and precedence
 
 For the common case you configure **nothing**: generate a `.coverage`
-database (via `fermut coverage` or `pytest --cov=src --cov-context=test`)
+database (via `fermut coverage` or `COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test`)
 at the project root and run fermut — it auto-discovers the `.coverage`
 SQLite DB there and uses it. Auto-discovery is guarded: the file is only
 picked up if it sniffs as a real SQLite database.
@@ -85,7 +85,7 @@ source root and tests directory.
   and tells you to regenerate. It is never refreshed for you.
 
 Refresh by hand with `fermut coverage` (incremental) or
-`pytest --cov=src --cov-context=test`. The mtime check is permissive: if
+`COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test`. The mtime check is permissive: if
 timestamps can't be read it never blocks a run.
 
 ## Reading `.coverage` directly vs `coverage.json`
@@ -125,7 +125,7 @@ The contexts are mandatory — they're how fermut knows *which* test
 exercised the line, not just *that* some test did.
 
 ```sh
-pytest --cov=src --cov-context=test
+COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test
 ```
 
 That writes a `.coverage` database at the project root. fermut
@@ -140,6 +140,19 @@ exactly the selector fermut feeds back to pytest when narrowing the
 run per mutant. This is the per-test-context requirement for the
 `.coverage` path; on the manual JSON path the equivalent is the
 `--show-contexts` flag on the export.
+
+!!! warning "Python 3.14: set `COVERAGE_CORE=ctrace`"
+    From Python 3.14, coverage.py measures with `sys.monitoring`
+    (`core=sysmon`) by default, and that core can't record per-test
+    contexts: each line is credited only to the first test that ran it.
+    fermut then runs too few tests per mutant and can report false
+    survivors. `COVERAGE_CORE=ctrace` picks the core that records them
+    (on older Pythons it is already the default, so the prefix is
+    harmless). `fermut coverage` sets it for you unless `COVERAGE_CORE` is
+    already set. In PowerShell: `$env:COVERAGE_CORE = "ctrace"` before
+    running pytest. When a `.coverage` built without it has at least 10
+    tests and no line shared by two, `fermut run` warns that it "looks
+    incomplete".
 
 > **Watch out for `coverage run --context=test`.** Coverage.py's own
 > `--context=LABEL` flag sets a *single static label* for the whole run
@@ -244,14 +257,14 @@ In CI, regenerate at the start of every run. Generating `.coverage`
 directly, which fermut auto-discovers:
 
 ```sh
-pytest --cov=src --cov-context=test && \
+COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test && \
   fermut run src/ --tests tests/
 ```
 
 Or, manually, when your pipeline produces a JSON export its own way:
 
 ```sh
-pytest --cov=src --cov-context=test && \
+COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test && \
   coverage json -o coverage.json --show-contexts && \
   fermut run src/ --tests tests/ --coverage coverage.json
 ```

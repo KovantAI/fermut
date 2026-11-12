@@ -494,7 +494,7 @@ fn check_coverage_file(base: &Path, rel: &Path) -> Check {
         return Check::warn(
             "coverage-data",
             format!("{} not found", path.display()),
-            "produce it before each run:  pytest --cov=src --cov-context=test  (fermut reads the `.coverage` SQLite DB directly, or a `coverage json --show-contexts` export)",
+            "produce it before each run:  COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test  (fermut reads the `.coverage` SQLite DB directly, or a `coverage json --show-contexts` export)",
         );
     }
     // fermut ingests either format: coverage.py's native `.coverage` SQLite DB
@@ -525,7 +525,7 @@ fn check_coverage_json(path: &Path) -> Check {
                 Check::fail(
                     "coverage-data",
                     format!("{} (JSON export) has no per-test contexts", path.display()),
-                    "regenerate with `pytest --cov=src --cov-context=test` and `coverage json --show-contexts` (requires pytest-cov)",
+                    "regenerate with `COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test` and `coverage json --show-contexts` (requires pytest-cov)",
                 )
             }
         }
@@ -573,7 +573,7 @@ fn check_coverage_sqlite(path: &Path) -> Check {
         Ok(_) => Check::fail(
             "coverage-data",
             format!("{} (SQLite DB) has no per-test contexts", path.display()),
-            "regenerate with `pytest --cov=src --cov-context=test` (requires pytest-cov; a bare `coverage run --context=LABEL` is not per-test)",
+            "regenerate with `COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test` (requires pytest-cov; a bare `coverage run --context=LABEL` is not per-test)",
         ),
         Err(e) => Check::fail(
             "coverage-data",

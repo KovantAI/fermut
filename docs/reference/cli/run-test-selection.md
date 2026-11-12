@@ -22,7 +22,7 @@ reach several GB on a large suite.
 the project root. `--no-coverage` turns selection off entirely.
 [`fermut coverage`](coverage.md) builds `.coverage` and refreshes it
 incrementally when tests change; it runs
-`pytest --cov=src --cov-context=test`, which you can run yourself instead.
+`COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test`, which you can run yourself instead.
 
 **Freshness guard.** A stale auto-discovered `.coverage` is refreshed
 incrementally if `fermut coverage` wrote it, else ignored (the run proceeds

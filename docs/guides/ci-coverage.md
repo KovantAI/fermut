@@ -93,7 +93,7 @@ just the same):
 
 ```sh
 CHANGED=$(git diff --name-only origin/main -- '*.py' | grep '^src/')
-pytest $(printf ' --cov=%s' $CHANGED) --cov-context=test
+COVERAGE_CORE=ctrace pytest $(printf ' --cov=%s' $CHANGED) --cov-context=test
 fermut run src/ --tests tests/ --diff-only origin/main --coverage .coverage
 ```
 

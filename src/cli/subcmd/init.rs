@@ -274,7 +274,7 @@ fn print_next_steps(detection: &Detection, wire_coverage: bool) {
     }
     if wire_coverage {
         println!(
-            "  - generate coverage with per-test contexts before each run:\n      pytest --cov=src --cov-context=test\n    (writes `.coverage`, which fermut reads directly — no `coverage json` export needed;\n     requires pytest-cov; `coverage run --context=LABEL` won't produce per-test contexts)"
+            "  - generate coverage with per-test contexts before each run:\n      COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test\n    (writes `.coverage`, which fermut reads directly — no `coverage json` export needed;\n     requires pytest-cov; `coverage run --context=LABEL` won't produce per-test contexts)"
         );
         if detection.coverage == CoverageDetection::Absent {
             println!(

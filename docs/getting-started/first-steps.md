@@ -100,7 +100,7 @@ skipped it). Quick sanity check: `coverage --version`.
 Generate per-test coverage:
 
 ```sh
-pytest --cov=src --cov-context=test
+COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test
 ```
 
 This writes coverage.py's `.coverage` database, which fermut reads
@@ -229,7 +229,7 @@ The most common surprises, in roughly the order people hit them:
   running.** Coverage was produced with `coverage run
   --context=test` (a static label, not per-test contexts) or with
   `dynamic_context = test_function` (dotted Python names, not pytest
-  nodeIDs). Regenerate with `pytest --cov=src --cov-context=test`.
+  nodeIDs). Regenerate with `COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test`.
   See [Coverage](../guides/coverage.md#generate-coverage-with-per-test-contexts).
 
 For everything else, see the

@@ -124,7 +124,7 @@ pub(crate) fn run(args: HomArgs) -> Result<()> {
     let coverage = cfg.coverage.clone().ok_or_else(|| {
         anyhow::anyhow!(
             "`fermut hom` needs per-test coverage to bound each candidate's test set. \
-             Generate it (`pytest --cov=src --cov-context=test`) and pass `--coverage`."
+             Generate it (`COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test`) and pass `--coverage`."
         )
     })?;
     let exe = match cfg.runner {

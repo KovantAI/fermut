@@ -305,7 +305,7 @@ coverage = ".coverage"
 # .github/workflows/fermut.yml — after
 - run: uv tool install fermut
 # `fermut coverage` writes the .coverage database fermut reads directly.
-# Or, manually: pytest --cov=src --cov-context=test && coverage json -o
+# Or, manually: COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test && coverage json -o
 # coverage.json --show-contexts  (then set coverage = "coverage.json").
 - run: fermut coverage
 - run: |

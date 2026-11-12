@@ -31,6 +31,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 - MCP `fermut_run` and `fermut_score` take a `history_path` argument.
 
 ### Changed
+- A cached survivor whose covering tests changed re-runs only the tests
+  that are new or in a changed file, not every covering test: adding a
+  test for a survivor re-runs that test. The others passed before and
+  are unchanged. A sample is also run against every covering test, at
+  the `--cache-audit-rate`, and fermut warns when the two disagree.
+  Timed-out verdicts still re-run fully.
 - Schema migrations are skipped by default: Django `migrations/0001_*.py`
   in a package and Alembic `versions/*.py` next to `env.py`, shown as
   `migrations` in the skip summary. On healthchecks they were 55 % of
@@ -56,6 +62,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- Cached verdicts survive edits above a mutant. The cache keyed each mutant
+  by its byte offset in the file, so a line added to one function, or a
+  comment added above a `def`, re-ran every mutant below it, even under
+  `cache_scope = "scope"`. Mutants inside a top-level `def`/`class` are now
+  keyed by their position within it. The first run after upgrading
+  re-runs them once.
 - Python 3.14: `fermut coverage` recorded only the first test that ran each
   line. coverage.py's default 3.14 core (`sysmon`) drops the per-test
   contexts pytest-cov switches, so fermut ran too few tests per mutant and

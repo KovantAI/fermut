@@ -86,6 +86,18 @@ pub trait Runner: Send + Sync {
         Vec::new()
     }
 
+    /// Run `mutant` against only `tests`: a cached survivor re-checked against
+    /// the covering tests that are new or changed since its verdict.
+    /// `Ok(None)` when the runner can't select tests (the default), in which
+    /// case the engine runs the mutant fully.
+    fn run_tests(
+        &self,
+        _mutant: &std::sync::Arc<Mutant>,
+        _tests: &[String],
+    ) -> Result<Option<MutantOutcome>> {
+        Ok(None)
+    }
+
     /// Re-run `mutant` against only the test `killer` that a cached verdict
     /// says killed it — the killer-keyed cache's sampled audit. `Ok(None)`
     /// when the runner can't select a single test (the default), in which case

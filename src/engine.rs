@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use crate::ast_hash::{self, ScopeMap};
-use crate::cache::Cache;
+use crate::ast_hash::{self, Anchors, ScopeMap};
+use crate::cache::{Cache, SurvivorBasis};
 use crate::config::{CacheScope, Config, MemoryCap, RunnerKind};
 use crate::equiv::{EquivPipeline, EquivVerdict};
 use crate::filter::{self, Filter};
@@ -119,12 +119,13 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         filters: &state.filters,
         runner: state.runner.as_ref(),
         cache: &state.cache,
-        file_hashes: &state.file_hashes,
-        scope_maps: &state.scope_maps,
+        file_hashes: &state.files.hashes,
+        scope_maps: &state.files.scope_maps,
+        anchors: &state.files.anchors,
         scope_prefix: &state.scope_prefix,
         test_tree: &state.test_tree,
         equiv: state.equiv.as_ref(),
-        file_sources: &state.file_sources,
+        file_sources: &state.files.sources,
         deadline: state.deadline,
         stats: &state.stats,
         killer_hits: &state.killer_hits,
@@ -311,9 +312,7 @@ struct RunState {
     filters: Vec<Box<dyn Filter>>,
     runner: Box<dyn Runner>,
     cache: Mutex<Cache>,
-    file_hashes: HashMap<PathBuf, String>,
-    scope_maps: HashMap<PathBuf, ScopeMap>,
-    file_sources: HashMap<PathBuf, String>,
+    files: FileArtifacts,
     equiv: Option<EquivPipeline>,
     scope_prefix: String,
     test_tree: TestTree,
@@ -340,6 +339,17 @@ struct CacheStats {
     audited: AtomicUsize,
     /// Audited killer hits whose kill didn't reproduce (entry dropped).
     dropped: AtomicUsize,
+    /// Cached survivors re-checked against only their new or changed tests.
+    delta_hits: AtomicUsize,
+    /// Tests those re-checks ran, and the covering tests a full run would have.
+    delta_tests: AtomicUsize,
+    delta_full_tests: AtomicUsize,
+    /// Delta survivors also run against every covering test, and those where
+    /// that full run detected the mutant.
+    delta_audited: AtomicUsize,
+    delta_disagreed: AtomicUsize,
+    /// The first delta survivor of a run is always audited.
+    delta_first_audit_done: std::sync::atomic::AtomicBool,
 }
 
 /// A mutant served from the cache by its killer scope, queued for the
@@ -360,11 +370,7 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     // hash (always), the scope map (only in `scope` cache mode), and the source
     // for the equiv detector (only when it's on). Narrowing (below) changes
     // none of these, nor the scope prefix.
-    let FileArtifacts {
-        hashes: file_hashes,
-        scope_maps,
-        sources: file_sources,
-    } = analyze_unique_files(
+    let files = analyze_unique_files(
         mutants,
         matches!(cfg.cache_scope, CacheScope::Scope),
         cfg.equiv_detect,
@@ -383,17 +389,7 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
         let cache = lock_recover(&cache);
         prepare_candidates(filters, mutants)
             .into_iter()
-            .filter(|m| {
-                !is_cached(
-                    cfg,
-                    &cache,
-                    &file_hashes,
-                    &scope_maps,
-                    &scope_prefix,
-                    &test_tree,
-                    m,
-                )
-            })
+            .filter(|m| !is_cached(cfg, &cache, &files, &scope_prefix, &test_tree, m))
             .collect()
     };
     // The last baseline's deselection, when nothing that decides it changed:
@@ -467,9 +463,7 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
         filters,
         runner,
         cache,
-        file_hashes,
-        scope_maps,
-        file_sources,
+        files,
         equiv,
         scope_prefix,
         test_tree,
@@ -569,19 +563,19 @@ fn prepare_candidates(filters: &[Box<dyn Filter>], mutants: &[Arc<Mutant>]) -> V
 fn is_cached(
     cfg: &Config,
     cache: &Cache,
-    file_hashes: &HashMap<PathBuf, String>,
-    scope_maps: &HashMap<PathBuf, ScopeMap>,
+    files: &FileArtifacts,
     scope_prefix: &str,
     test_tree: &TestTree,
     mutant: &Mutant,
 ) -> bool {
-    let Some(hash) = mutant_identity_hash(cfg, mutant, file_hashes, scope_maps) else {
+    let Some(hash) = mutant_identity_hash(cfg, mutant, &files.hashes, &files.scope_maps) else {
         return false;
     };
     let scope = compute_mutant_scope(scope_prefix, cfg, test_tree, mutant);
-    cache.lookup_entry(&mutant.id, &hash, &scope).is_some()
+    let key = cache_key(mutant, &files.anchors);
+    cache.lookup_entry(&key, &hash, &scope).is_some()
         || cache
-            .lookup_killer(&mutant.id, &hash, |t| {
+            .lookup_killer(&key, &hash, |t| {
                 compute_killer_scope(scope_prefix, cfg, test_tree, mutant, t)
             })
             .is_some()
@@ -857,6 +851,11 @@ fn summarize_integrity(cfg: &Config, cache: &Mutex<Cache>, stats: &CacheStats) {
     let audited = stats.audited.load(Ordering::Relaxed);
     let audit_dropped = stats.dropped.load(Ordering::Relaxed);
     let misses = stats.misses.load(Ordering::Relaxed);
+    let deltas = stats.delta_hits.load(Ordering::Relaxed);
+    let delta_tests = stats.delta_tests.load(Ordering::Relaxed);
+    let delta_full = stats.delta_full_tests.load(Ordering::Relaxed);
+    let delta_audited = stats.delta_audited.load(Ordering::Relaxed);
+    let delta_disagreed = stats.delta_disagreed.load(Ordering::Relaxed);
     info!(
         entries,
         dropped_on_load = dropped,
@@ -864,9 +863,16 @@ fn summarize_integrity(cfg: &Config, cache: &Mutex<Cache>, stats: &CacheStats) {
         killer_hits = killer,
         audited,
         audit_dropped,
+        survivor_deltas = deltas,
+        delta_tests,
+        delta_full_tests = delta_full,
+        delta_audited,
+        delta_disagreed,
         misses,
         "cache: {full} full hits, {killer} killer hits, {audited} audited \
-         ({audit_dropped} dropped), {misses} misses"
+         ({audit_dropped} dropped), {deltas} survivor deltas ({delta_tests} of \
+         {delta_full} tests run, {delta_audited} audited, {delta_disagreed} \
+         disagreed), {misses} misses"
     );
 }
 
@@ -880,6 +886,8 @@ struct EvalCtx<'a> {
     cache: &'a Mutex<Cache>,
     file_hashes: &'a HashMap<PathBuf, String>,
     scope_maps: &'a HashMap<PathBuf, ScopeMap>,
+    /// Top-level def/class positions per file, for [`cache_key`].
+    anchors: &'a HashMap<PathBuf, Anchors>,
     scope_prefix: &'a str,
     test_tree: &'a TestTree,
     equiv: Option<&'a EquivPipeline>,
@@ -928,10 +936,15 @@ fn precheck(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> Option<MutantOutcome> {
 fn evaluate_admitted(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
     let scope = compute_mutant_scope(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant);
     let identity_hash = mutant_identity_hash(ctx.cfg, mutant, ctx.file_hashes, ctx.scope_maps);
+    let key = cache_key(mutant, ctx.anchors);
 
     if let Some(hash) = &identity_hash {
-        let cached = lock_recover(ctx.cache).lookup_entry(&mutant.id, hash, &scope);
+        let cached = lock_recover(ctx.cache).lookup_entry(&key, hash, &scope);
         if let Some((cached, checked)) = cached {
+            // The key survives edits that move the mutant (see `cache_key`),
+            // so the stored outcome may carry an old line and range: report
+            // the mutant as it is now, and classify against today's source.
+            let cached = cached.rebind(mutant.clone());
             ctx.stats.full_hits.fetch_add(1, Ordering::Relaxed);
             // Translate the cached verdict against the current detector
             // setting before returning. The cache stores the post-equiv
@@ -948,12 +961,13 @@ fn evaluate_admitted(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
             if let Some(new_checked) = rewrite {
                 // Only a `Survived` is ever rewritten, so no killer scope.
                 lock_recover(ctx.cache).insert_checked(
-                    mutant.id.clone(),
+                    key.clone(),
                     hash.clone(),
                     scope.clone(),
                     outcome.clone(),
                     new_checked,
                     None,
+                    survivor_basis(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant),
                 );
             }
             return outcome;
@@ -963,7 +977,7 @@ fn evaluate_admitted(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
         // still covers the mutant — an edit elsewhere can't un-kill it. The
         // entry keeps its old `scope`, so the next run takes this path again
         // until the mutant is re-run.
-        let killer_hit = lock_recover(ctx.cache).lookup_killer(&mutant.id, hash, |t| {
+        let killer_hit = lock_recover(ctx.cache).lookup_killer(&key, hash, |t| {
             compute_killer_scope(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant, t)
         });
         if let Some((outcome, killer)) = killer_hit {
@@ -972,12 +986,17 @@ fn evaluate_admitted(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
                 mutant: mutant.clone(),
                 killer,
             });
+            return outcome.rebind(mutant.clone());
+        }
+        // A cached survivor whose covering tests changed: every test it
+        // passed before still passes, so run only the new or changed ones.
+        if let Some(outcome) = survivor_delta(ctx, mutant, &key, hash, &scope) {
             return outcome;
         }
         ctx.stats.misses.fetch_add(1, Ordering::Relaxed);
     }
 
-    run_and_cache(ctx, mutant, scope, identity_hash)
+    run_and_cache(ctx, mutant, key, scope, identity_hash)
 }
 
 /// Run `mutant` for real, remap it through the equiv detector, and cache the
@@ -986,6 +1005,7 @@ fn evaluate_admitted(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
 fn run_and_cache(
     ctx: &EvalCtx,
     mutant: &Arc<Mutant>,
+    key: String,
     scope: String,
     identity_hash: Option<String>,
 ) -> MutantOutcome {
@@ -993,27 +1013,180 @@ fn run_and_cache(
         .runner
         .run(mutant)
         .unwrap_or_else(|e| MutantOutcome::error(mutant.clone(), e.to_string()));
+    record(ctx, mutant, key, scope, identity_hash, outcome)
+}
 
+/// Remap a fresh `outcome` through the equiv detector and cache it under
+/// `(key, identity_hash, scope)`, with the killer scope for a kill and the
+/// survivor basis for a survivor.
+fn record(
+    ctx: &EvalCtx,
+    mutant: &Arc<Mutant>,
+    key: String,
+    scope: String,
+    identity_hash: Option<String>,
+    outcome: MutantOutcome,
+) -> MutantOutcome {
     let outcome = maybe_remap_equivalent(outcome, ctx.equiv, ctx.file_sources);
 
     if let Some(hash) = identity_hash {
         let killer_scope = outcome.killer().and_then(|t| {
             compute_killer_scope(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant, t)
         });
+        let basis = matches!(
+            outcome,
+            MutantOutcome::Survived { .. } | MutantOutcome::Equivalent { .. }
+        )
+        .then(|| survivor_basis(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant))
+        .flatten();
         // A detector-on run classified any surviving mutant just above, so
         // the stored outcome is already post-equiv — mark it checked so warm
         // runs never re-classify it. A detector-off run leaves it unchecked.
         lock_recover(ctx.cache).insert_checked(
-            mutant.id.clone(),
+            key,
             hash,
             scope,
             outcome.clone(),
             ctx.equiv.is_some(),
             killer_scope,
+            basis,
         );
     }
 
     outcome
+}
+
+/// The covering tests a survivor's verdict rests on (see
+/// [`SurvivorBasis`]), when they are known precisely: coverage contexts name
+/// them and every one's file can be fingerprinted (the same conditions as
+/// [`scoped_test_fingerprint`]). `None` otherwise — no delta then.
+fn survivor_basis(
+    prefix: &str,
+    cfg: &Config,
+    tree: &TestTree,
+    mutant: &Mutant,
+) -> Option<SurvivorBasis> {
+    let cov = cfg.coverage.as_ref()?;
+    let ids = cov.tests_for_mutant(mutant)?;
+    let mut files = std::collections::BTreeMap::new();
+    for id in ids {
+        let file = crate::cache::test_file(id);
+        if !files.contains_key(file) {
+            let fp = scoped_test_fingerprint(cfg, tree, cov.node_root(), std::slice::from_ref(id))?;
+            files.insert(file.to_string(), fp);
+        }
+    }
+    Some(SurvivorBasis {
+        prefix: prefix.to_string(),
+        tests: ids.iter().cloned().collect(),
+        files,
+    })
+}
+
+/// Seed for the survivor-delta audit sample (see [`survivor_delta`]).
+const DELTA_AUDIT_SEED: u64 = 0xde17_a5ed;
+
+/// Re-check a cached survivor against only the covering tests that are new or
+/// changed since its verdict. `None` when there is no usable cached survivor,
+/// the run shape changed, or the runner can't select tests: the caller then
+/// runs the mutant fully.
+///
+/// A survivor passed every covering test; an unchanged test still passes and a
+/// removed one can't kill it. The delta runs new tests without the old ones
+/// before them, so an order-dependent kill can be missed: a deterministic
+/// sample (`--cache-audit-rate`, and the first delta of each run) also runs
+/// against every covering test, and that verdict stands.
+fn survivor_delta(
+    ctx: &EvalCtx,
+    mutant: &Arc<Mutant>,
+    key: &str,
+    hash: &str,
+    scope: &str,
+) -> Option<MutantOutcome> {
+    // Recording needs every covering test's verdict, not a subset.
+    if ctx.cfg.record_kill_sets.is_some() {
+        return None;
+    }
+    let (cached, checked, old) = lock_recover(ctx.cache).lookup_survivor(key, hash)?;
+    let current = survivor_basis(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant)?;
+    if current.prefix != old.prefix {
+        return None;
+    }
+    let delta = current.delta_from(&old);
+    let full = current.tests.len();
+
+    if delta.is_empty() {
+        // Covering tests only went away: everything left already passed.
+        let cached = cached.rebind(mutant.clone());
+        let (outcome, rewrite) = remap_cached_outcome(cached, checked, ctx.equiv, ctx.file_sources);
+        ctx.stats.delta_hits.fetch_add(1, Ordering::Relaxed);
+        ctx.stats
+            .delta_full_tests
+            .fetch_add(full, Ordering::Relaxed);
+        lock_recover(ctx.cache).insert_checked(
+            key.to_string(),
+            hash.to_string(),
+            scope.to_string(),
+            outcome.clone(),
+            rewrite.unwrap_or(checked),
+            None,
+            Some(current),
+        );
+        return Some(outcome);
+    }
+
+    let ran = match ctx.runner.run_tests(mutant, &delta) {
+        Ok(Some(o)) if !matches!(o, MutantOutcome::Error { .. }) => o,
+        _ => return None,
+    };
+    ctx.stats.delta_hits.fetch_add(1, Ordering::Relaxed);
+    ctx.stats
+        .delta_tests
+        .fetch_add(delta.len(), Ordering::Relaxed);
+    ctx.stats
+        .delta_full_tests
+        .fetch_add(full, Ordering::Relaxed);
+
+    let rate = ctx.cfg.cache_audit_rate;
+    let audit = matches!(ran, MutantOutcome::Survived { .. })
+        && rate > 0.0
+        && (!ctx
+            .stats
+            .delta_first_audit_done
+            .swap(true, Ordering::Relaxed)
+            || crate::filter::sample::score(DELTA_AUDIT_SEED, key) < rate);
+    let ran = if audit {
+        ctx.stats.delta_audited.fetch_add(1, Ordering::Relaxed);
+        match ctx.runner.run(mutant) {
+            Ok(full_run) if !matches!(full_run, MutantOutcome::Error { .. }) => {
+                if matches!(
+                    full_run,
+                    MutantOutcome::Killed { .. } | MutantOutcome::TimedOut { .. }
+                ) {
+                    ctx.stats.delta_disagreed.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        mutant = %mutant.id,
+                        new_tests = ?delta,
+                        "cache audit: a survivor re-checked against only its new tests \
+                         survived, but the full covering set detects it (order-dependent \
+                         tests?); using the full run"
+                    );
+                }
+                full_run
+            }
+            _ => ran,
+        }
+    } else {
+        ran
+    };
+    Some(record(
+        ctx,
+        mutant,
+        key.to_string(),
+        scope.to_string(),
+        Some(hash.to_string()),
+        ran,
+    ))
 }
 
 /// Re-verify a random sample of this run's killer hits by re-running each
@@ -1085,10 +1258,11 @@ fn audit_one(ctx: &EvalCtx, hit: &KillerHit) -> Option<MutantOutcome> {
         "cache audit: cached kill did not reproduce against its killer alone \
          (flaky or order-dependent test?); re-running the mutant"
     );
-    lock_recover(ctx.cache).remove(&hit.mutant.id);
+    let key = cache_key(&hit.mutant, ctx.anchors);
+    lock_recover(ctx.cache).remove(&key);
     let scope = compute_mutant_scope(ctx.scope_prefix, ctx.cfg, ctx.test_tree, &hit.mutant);
     let identity_hash = mutant_identity_hash(ctx.cfg, &hit.mutant, ctx.file_hashes, ctx.scope_maps);
-    Some(run_and_cache(ctx, &hit.mutant, scope, identity_hash))
+    Some(run_and_cache(ctx, &hit.mutant, key, scope, identity_hash))
 }
 
 /// Pick `ceil(rate × n)` of `hits` (at least one when `rate > 0`) uniformly at
@@ -1115,6 +1289,32 @@ fn sample_for_audit(mut hits: Vec<KillerHit>, rate: f64) -> Vec<KillerHit> {
 /// file-AST hash. Returns `None` when no hash is available for the file
 /// (e.g., I/O error during the eager hash pass) so the caller skips the
 /// cache for that mutant.
+/// The key a mutant's verdict is cached under.
+///
+/// `mutant.id` embeds the absolute byte offset, so any edit above a mutant —
+/// a line added to an earlier function, a comment above its `def` — gives it
+/// a new id and its cached verdict is never found again. Inside a top-level
+/// def/class the key uses the offset from that def's start instead:
+/// `file::bar@12:boundary-shift:>=->>`. Whether the verdict still holds is
+/// the identity hash's and scope's job, not the key's. Module-level mutants
+/// (and files that didn't parse) keep `mutant.id`, so their entries from
+/// before this key existed still hit.
+fn cache_key(mutant: &Mutant, anchors: &HashMap<PathBuf, Anchors>) -> String {
+    match anchors
+        .get(&mutant.file)
+        .and_then(|a| a.locate(mutant.range))
+    {
+        Some((def, offset)) => format!(
+            "{}::{def}@{offset}:{}:{}->{}",
+            mutant.file.display(),
+            mutant.operator.name(),
+            mutant.original,
+            mutant.replacement
+        ),
+        None => mutant.id.clone(),
+    }
+}
+
 fn mutant_identity_hash(
     cfg: &Config,
     mutant: &Mutant,
@@ -1413,6 +1613,7 @@ fn scoped_test_fingerprint(
 
 /// Per-file artifacts for a run, keyed by source path. Built in one pass by
 /// [`analyze_unique_files`].
+#[derive(Default)]
 struct FileArtifacts {
     /// Cache-key AST hash for every unique file (byte fallback on parse/utf-8
     /// failure). Always populated.
@@ -1420,6 +1621,9 @@ struct FileArtifacts {
     /// Scope maps for the `scope` cache mode. Empty otherwise; files that fail
     /// to parse are absent (consumers fall back to the file hash).
     scope_maps: HashMap<PathBuf, ScopeMap>,
+    /// Top-level def/class positions, for [`cache_key`]. Files that failed to
+    /// parse are absent (their mutants keep `mutant.id` as the key).
+    anchors: HashMap<PathBuf, Anchors>,
     /// Source text for the equiv detector, so classification doesn't re-read
     /// the file per mutant. Empty when equiv detection is off.
     sources: HashMap<PathBuf, String>,
@@ -1437,6 +1641,7 @@ fn analyze_unique_files(
 ) -> FileArtifacts {
     let mut hashes = HashMap::new();
     let mut scope_maps = HashMap::new();
+    let mut anchors = HashMap::new();
     let mut sources = HashMap::new();
     for m in mutants {
         if hashes.contains_key(&m.file) {
@@ -1450,6 +1655,9 @@ fn analyze_unique_files(
             }
         };
         hashes.insert(m.file.clone(), analysis.ast_hash);
+        if let Some(a) = analysis.anchors {
+            anchors.insert(m.file.clone(), a);
+        }
         if want_scope {
             match analysis.scope_map {
                 Some(map) => {
@@ -1474,6 +1682,7 @@ fn analyze_unique_files(
     FileArtifacts {
         hashes,
         scope_maps,
+        anchors,
         sources,
     }
 }
@@ -2195,6 +2404,19 @@ mod tests {
         }
     }
 
+    /// Runner that reports every mutant survived.
+    struct SurviveRunner;
+    impl Runner for SurviveRunner {
+        fn run(&self, m: &Arc<Mutant>) -> Result<MutantOutcome> {
+            Ok(MutantOutcome::survived(m.clone()))
+        }
+        fn baseline(&self) -> Result<runner::BaselineStatus> {
+            Ok(runner::BaselineStatus::Passed {
+                wall: Duration::ZERO,
+            })
+        }
+    }
+
     fn eval_with_deadline(runner: &dyn Runner, deadline: Option<Instant>) -> MutantOutcome {
         let cfg = base_test_config();
         let m = Arc::new(arith_mutant("return x + 0", "+", "-"));
@@ -2206,6 +2428,7 @@ mod tests {
             cache: &cache,
             file_hashes: &HashMap::new(),
             scope_maps: &HashMap::new(),
+            anchors: &HashMap::new(),
             scope_prefix: "",
             test_tree: &TestTree::default(),
             equiv: None,
@@ -2241,6 +2464,147 @@ mod tests {
         let future = Instant::now() + Duration::from_secs(3600);
         let out = eval_with_deadline(&KillRunner, Some(future));
         assert!(matches!(out, MutantOutcome::Killed { .. }));
+    }
+
+    /// One mutant on `>=` in `source`, written to `path`, as the visitor would
+    /// emit it (absolute-offset id, 1-based line).
+    fn ge_mutant_in(path: &std::path::Path, source: &str) -> Arc<Mutant> {
+        std::fs::write(path, source).unwrap();
+        let start = source.find(">=").unwrap();
+        let line = source[..start].matches('\n').count() as u32 + 1;
+        Arc::new(Mutant {
+            id: format!("{}@{start}:boundary-shift:>=->>", path.display()),
+            file: path.to_path_buf(),
+            operator: Operator::BoundaryShift,
+            range: TextRange::new(
+                TextSize::from(start as u32),
+                TextSize::from((start + 2) as u32),
+            ),
+            original: ">=".into(),
+            replacement: ">".into(),
+            line,
+            stmt_line: line,
+            site: None,
+        })
+    }
+
+    /// Evaluate `m` against `cache` with fresh per-file artifacts, as a run
+    /// over the file's current contents would.
+    fn eval_in_file(
+        cfg: &Config,
+        cache: &Mutex<Cache>,
+        runner: &dyn Runner,
+        m: &Arc<Mutant>,
+    ) -> MutantOutcome {
+        let a = analyze_unique_files(
+            std::slice::from_ref(m),
+            matches!(cfg.cache_scope, CacheScope::Scope),
+            false,
+        );
+        let ctx = EvalCtx {
+            cfg,
+            filters: &[],
+            runner,
+            cache,
+            file_hashes: &a.hashes,
+            scope_maps: &a.scope_maps,
+            anchors: &a.anchors,
+            scope_prefix: "",
+            test_tree: &TestTree::default(),
+            equiv: None,
+            file_sources: &HashMap::new(),
+            deadline: None,
+            stats: &CacheStats::default(),
+            killer_hits: &Mutex::new(Vec::new()),
+        };
+        evaluate(&ctx, m)
+    }
+
+    const BAR: &str = "def foo():\n    return 1\n\n\ndef bar(x):\n    return x >= 18\n";
+
+    #[test]
+    fn cached_verdict_survives_a_comment_above_the_def() {
+        // File mode: a comment keeps the AST hash but moves every byte offset
+        // below it, so `mutant.id` changes. The verdict must still be found,
+        // and reported at the mutant's new line, not the cached one.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("m.py");
+        let cfg = base_test_config();
+        let cache = Mutex::new(Cache::default());
+
+        let before = ge_mutant_in(&path, BAR);
+        assert!(matches!(
+            eval_in_file(&cfg, &cache, &KillRunner, &before),
+            MutantOutcome::Killed { .. }
+        ));
+
+        let after = ge_mutant_in(&path, &format!("# a note\n{BAR}"));
+        assert_ne!(before.id, after.id, "fixture: the id moved");
+        // PanicRunner: a miss would run the mutant and panic.
+        let out = eval_in_file(&cfg, &cache, &PanicRunner, &after);
+        assert!(matches!(out, MutantOutcome::Killed { .. }), "{out:?}");
+        assert_eq!(out.mutant().id, after.id);
+        assert_eq!(out.mutant().line, after.line);
+    }
+
+    #[test]
+    fn scope_mode_verdict_survives_a_line_added_to_a_sibling() {
+        // The backlog case: a line added inside `foo` moved every `bar`
+        // mutant to a new id, so scope mode re-ran them despite `bar`'s
+        // unchanged scope hash.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("m.py");
+        let cfg = Config {
+            cache_scope: CacheScope::Scope,
+            ..base_test_config()
+        };
+        let cache = Mutex::new(Cache::default());
+
+        let before = ge_mutant_in(&path, BAR);
+        eval_in_file(&cfg, &cache, &KillRunner, &before);
+        let edited = BAR.replace("    return 1\n", "    y = 2\n    return y\n");
+        let after = ge_mutant_in(&path, &edited);
+        assert_ne!(before.id, after.id, "fixture: the id moved");
+        let out = eval_in_file(&cfg, &cache, &PanicRunner, &after);
+        assert!(matches!(out, MutantOutcome::Killed { .. }), "{out:?}");
+        assert_eq!(out.mutant().line, after.line);
+    }
+
+    #[test]
+    fn file_mode_still_reruns_after_a_code_edit() {
+        // The key no longer changes on a sibling edit; the file hash must
+        // still invalidate in the default mode.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("m.py");
+        let cfg = base_test_config();
+        let cache = Mutex::new(Cache::default());
+
+        eval_in_file(&cfg, &cache, &KillRunner, &ge_mutant_in(&path, BAR));
+        let edited = BAR.replace("    return 1\n", "    y = 2\n    return y\n");
+        let out = eval_in_file(&cfg, &cache, &SurviveRunner, &ge_mutant_in(&path, &edited));
+        assert!(
+            matches!(out, MutantOutcome::Survived { .. }),
+            "re-ran: {out:?}"
+        );
+    }
+
+    #[test]
+    fn cache_key_is_relative_to_the_top_level_def() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("m.py");
+        let m = ge_mutant_in(&path, BAR);
+        let a = analyze_unique_files(std::slice::from_ref(&m), false, false);
+        let key = cache_key(&m, &a.anchors);
+        let rel = BAR.find(">=").unwrap() - BAR.find("def bar").unwrap();
+        assert!(
+            key.ends_with(&format!("::bar@{rel}:boundary-shift:>=->>")),
+            "{key}"
+        );
+
+        // Module level: no enclosing def, the id is the key.
+        let top = ge_mutant_in(&path, "LIMIT = 1 >= 0\n");
+        let a = analyze_unique_files(std::slice::from_ref(&top), false, false);
+        assert_eq!(cache_key(&top, &a.anchors), top.id);
     }
 
     #[test]
@@ -2456,6 +2820,7 @@ mod tests {
             cache,
             file_hashes: &hashes,
             scope_maps: &HashMap::new(),
+            anchors: &HashMap::new(),
             scope_prefix: &prefix,
             test_tree: &tree,
             equiv: None,
@@ -2485,6 +2850,273 @@ mod tests {
         (second, stats)
     }
 
+    const TEST_C: &str = "tests/c/test_c.py::test_c";
+
+    /// What a fake runner answers.
+    #[derive(Clone, Copy)]
+    enum Verdict {
+        Survive,
+        KillBy(&'static str),
+        TimeOut,
+    }
+
+    impl Verdict {
+        fn outcome(self, m: &Arc<Mutant>) -> MutantOutcome {
+            match self {
+                Verdict::Survive => MutantOutcome::survived(m.clone()),
+                Verdict::KillBy(t) => MutantOutcome::killed_by(m.clone(), Some(t.to_string())),
+                Verdict::TimeOut => MutantOutcome::timed_out(m.clone()),
+            }
+        }
+    }
+
+    /// Runner for the survivor-delta tests: a full run answers `full`, a run
+    /// on selected tests answers `delta` (or can't select when `None`), and
+    /// every selection asked for is recorded.
+    struct DeltaRunner {
+        full: Verdict,
+        delta: Option<Verdict>,
+        full_runs: AtomicUsize,
+        asked: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl DeltaRunner {
+        fn new(full: Verdict, delta: Option<Verdict>) -> Self {
+            Self {
+                full,
+                delta,
+                full_runs: AtomicUsize::new(0),
+                asked: Mutex::new(Vec::new()),
+            }
+        }
+        fn full_runs(&self) -> usize {
+            self.full_runs.load(Ordering::Relaxed)
+        }
+        fn asked(&self) -> Vec<Vec<String>> {
+            lock_recover(&self.asked).clone()
+        }
+    }
+
+    impl Runner for DeltaRunner {
+        fn run(&self, m: &Arc<Mutant>) -> Result<MutantOutcome> {
+            self.full_runs.fetch_add(1, Ordering::Relaxed);
+            Ok(self.full.outcome(m))
+        }
+        fn run_tests(&self, m: &Arc<Mutant>, tests: &[String]) -> Result<Option<MutantOutcome>> {
+            lock_recover(&self.asked).push(tests.to_vec());
+            Ok(self.delta.map(|v| v.outcome(m)))
+        }
+        fn baseline(&self) -> Result<runner::BaselineStatus> {
+            Ok(runner::BaselineStatus::Passed {
+                wall: Duration::ZERO,
+            })
+        }
+    }
+
+    /// Cache a survivor of the line-1 mutant under `fx` as it is, apply
+    /// `edit`, then evaluate again with `second`.
+    fn survived_then(
+        fx: &ScopeFixture,
+        edit: impl FnOnce(&ScopeFixture),
+        second: &DeltaRunner,
+    ) -> (MutantOutcome, CacheStats) {
+        let cache = Mutex::new(Cache::default());
+        let first = DeltaRunner::new(Verdict::Survive, None);
+        let (out, _) = eval_cached(fx, &first, &cache, "src-1", None);
+        assert!(matches!(out, MutantOutcome::Survived { .. }), "{out:?}");
+        edit(fx);
+        eval_cached(fx, second, &cache, "src-1", None)
+    }
+
+    fn add_test_c(fx: &ScopeFixture) {
+        fx.write("tests/c/test_c.py", "def test_c(): assert False\n");
+        fx.write_coverage(&[(1, &[TEST_A, TEST_B, TEST_C])]);
+    }
+
+    #[test]
+    fn survivor_runs_only_a_new_covering_test() {
+        let fx = two_covering();
+        let second = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        let (out, stats) = survived_then(&fx, add_test_c, &second);
+        assert!(matches!(out, MutantOutcome::Survived { .. }), "{out:?}");
+        assert_eq!(second.full_runs(), 0);
+        assert_eq!(second.asked(), vec![vec![TEST_C.to_string()]]);
+        assert_eq!(stats.delta_hits.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.delta_tests.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.delta_full_tests.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn delta_survivor_is_stored_under_the_new_scope() {
+        // After the delta, nothing changed: a plain full hit.
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &DeltaRunner::new(Verdict::Survive, None),
+            &cache,
+            "src-1",
+            None,
+        );
+        add_test_c(&fx);
+        let delta = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        eval_cached(&fx, &delta, &cache, "src-1", None);
+        let third = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        let (_, stats) = eval_cached(&fx, &third, &cache, "src-1", None);
+        assert_eq!(stats.full_hits.load(Ordering::Relaxed), 1);
+        assert!(third.asked().is_empty());
+        assert_eq!(third.full_runs(), 0);
+    }
+
+    #[test]
+    fn survivor_runs_only_the_edited_file_tests() {
+        let fx = two_covering();
+        let second = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        survived_then(
+            &fx,
+            |fx| fx.write("tests/b/test_b.py", "def test_b(): assert 2\n"),
+            &second,
+        );
+        assert_eq!(second.asked(), vec![vec![TEST_B.to_string()]]);
+        assert_eq!(second.full_runs(), 0);
+    }
+
+    #[test]
+    fn support_file_edit_puts_every_covering_test_in_the_delta() {
+        let fx = two_covering();
+        let second = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        survived_then(
+            &fx,
+            |fx| fx.write("tests/helpers.py", "changed = 1\n"),
+            &second,
+        );
+        assert_eq!(
+            second.asked(),
+            vec![vec![TEST_A.to_string(), TEST_B.to_string()]]
+        );
+    }
+
+    #[test]
+    fn survivor_with_a_test_removed_is_reused_without_running() {
+        let fx = two_covering();
+        let second = DeltaRunner::new(Verdict::KillBy(TEST_A), Some(Verdict::KillBy(TEST_A)));
+        let (out, stats) = survived_then(&fx, |fx| fx.write_coverage(&[(1, &[TEST_A])]), &second);
+        assert!(matches!(out, MutantOutcome::Survived { .. }), "{out:?}");
+        assert_eq!(second.full_runs(), 0);
+        assert!(second.asked().is_empty());
+        assert_eq!(stats.delta_hits.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn delta_kill_is_stored_as_a_kill() {
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &DeltaRunner::new(Verdict::Survive, None),
+            &cache,
+            "src-1",
+            None,
+        );
+        add_test_c(&fx);
+        let delta = DeltaRunner::new(Verdict::Survive, Some(Verdict::KillBy(TEST_C)));
+        let (out, _) = eval_cached(&fx, &delta, &cache, "src-1", None);
+        assert_eq!(out.killer(), Some(TEST_C));
+        let third = DeltaRunner::new(Verdict::Survive, None);
+        let (out, stats) = eval_cached(&fx, &third, &cache, "src-1", None);
+        assert_eq!(out.killer(), Some(TEST_C));
+        assert_eq!(stats.full_hits.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn timed_out_verdict_takes_no_delta() {
+        // Editing the test that hung can turn a timeout into a survivor.
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &DeltaRunner::new(Verdict::TimeOut, None),
+            &cache,
+            "src-1",
+            None,
+        );
+        fx.write("tests/b/test_b.py", "def test_b(): assert 2\n");
+        let second = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        eval_cached(&fx, &second, &cache, "src-1", None);
+        assert_eq!(second.full_runs(), 1);
+        assert!(second.asked().is_empty());
+    }
+
+    #[test]
+    fn runner_that_cannot_select_runs_fully() {
+        let fx = two_covering();
+        let second = DeltaRunner::new(Verdict::Survive, None);
+        survived_then(&fx, add_test_c, &second);
+        assert_eq!(second.full_runs(), 1);
+    }
+
+    #[test]
+    fn source_edit_or_run_shape_change_takes_no_delta() {
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &DeltaRunner::new(Verdict::Survive, None),
+            &cache,
+            "src-1",
+            None,
+        );
+        add_test_c(&fx);
+        let edited = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        eval_cached(&fx, &edited, &cache, "src-2", None);
+        assert_eq!(edited.full_runs(), 1, "source changed");
+
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &DeltaRunner::new(Verdict::Survive, None),
+            &cache,
+            "src-1",
+            None,
+        );
+        add_test_c(&fx);
+        let cfg = Config {
+            timeout_secs: 99,
+            ..fx.config(RunnerKind::Pytest, true)
+        };
+        let reshaped = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        eval_with(&fx, &cfg, &reshaped, &cache, "src-1", false);
+        assert_eq!(reshaped.full_runs(), 1, "timeout changed");
+    }
+
+    #[test]
+    fn audited_delta_survivor_uses_the_full_run() {
+        // The new test only fails after an old one (order dependence): the
+        // delta says survived, the full covering set kills it.
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &DeltaRunner::new(Verdict::Survive, None),
+            &cache,
+            "src-1",
+            None,
+        );
+        add_test_c(&fx);
+        let second = DeltaRunner::new(Verdict::KillBy(TEST_A), Some(Verdict::Survive));
+        let cfg = Config {
+            cache_audit_rate: 0.05,
+            ..fx.config(RunnerKind::Pytest, true)
+        };
+        // The first delta of a run is always audited.
+        let (out, stats) = eval_with(&fx, &cfg, &second, &cache, "src-1", false);
+        assert_eq!(out.killer(), Some(TEST_A));
+        assert_eq!(second.full_runs(), 1);
+        assert_eq!(stats.delta_audited.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.delta_disagreed.load(Ordering::Relaxed), 1);
+    }
+
     #[test]
     fn is_cached_agrees_with_evaluate() {
         let fx = two_covering();
@@ -2496,8 +3128,10 @@ mod tests {
             is_cached(
                 &cfg,
                 &lock_recover(&cache),
-                &hashes,
-                &HashMap::new(),
+                &FileArtifacts {
+                    hashes,
+                    ..FileArtifacts::default()
+                },
                 &compute_scope_prefix(&cfg),
                 &TestTree::walk(&cfg.tests_path()),
                 &fx.mutant(1),
@@ -2955,6 +3589,7 @@ mod tests {
             cache: &cache,
             file_hashes: &empty_hashes,
             scope_maps: &empty_maps,
+            anchors: &HashMap::new(),
             scope_prefix: "",
             test_tree: &tree,
             equiv: None,
@@ -3245,6 +3880,7 @@ mod tests {
             cache: &cache,
             file_hashes: &empty_hashes,
             scope_maps: &empty_maps,
+            anchors: &HashMap::new(),
             scope_prefix: "",
             test_tree: &tree,
             equiv: None,

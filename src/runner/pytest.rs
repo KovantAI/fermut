@@ -213,9 +213,13 @@ impl PytestRunner {
     /// ordering (the learned-killer lift comes after, in [`select_args`] or the
     /// schemata runner): `only` when given (an audit), else the coverage
     /// selection. `None` without coverage data — run the whole suite.
-    pub(super) fn coverage_ids(&self, mutant: &Mutant, only: Option<&str>) -> Option<Vec<String>> {
+    pub(super) fn coverage_ids(
+        &self,
+        mutant: &Mutant,
+        only: Option<&[&str]>,
+    ) -> Option<Vec<String>> {
         match only {
-            Some(t) => Some(vec![t.to_string()]),
+            Some(ts) => Some(ts.iter().map(|t| (*t).to_string()).collect()),
             None => self.coverage.as_ref().and_then(|ctx| {
                 ctx.tests_for_mutant(mutant).map(|ids| {
                     self.ordered_ids(ctx, mutant, ids)
@@ -265,7 +269,7 @@ impl PytestRunner {
         mutant: &Mutant,
         key_file: &str,
         key_op: &'static str,
-        only: Option<&str>,
+        only: Option<&[&str]>,
     ) -> Result<MutantCommand> {
         let mut cmd = self.framework_command();
         cmd.arg("--tb=no").arg("-q");
@@ -840,28 +844,10 @@ fn wait_draining_stdout_with_grace(
     }
 }
 
-impl Runner for PytestRunner {
-    fn baseline_deselection(&self) -> Option<super::Deselection> {
-        lock_recover(&self.deselection).clone()
-    }
-
-    fn set_timeout(&mut self, timeout: Duration) {
-        self.timeout = timeout;
-    }
-
-    fn set_memory_cap(&mut self, bytes: u64) {
-        self.mem_cap = Some(bytes);
-    }
-
-    fn take_kill_records(&self) -> Vec<crate::kill_order::KillRecord> {
-        std::mem::take(&mut *lock_recover(&self.kill_sink))
-    }
-
-    fn take_kill_sets(&self) -> Vec<super::kill_sets::KillSetRecord> {
-        std::mem::take(&mut *lock_recover(&self.kill_set_sink))
-    }
-
-    fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
+impl PytestRunner {
+    /// One mutant run: the coverage selection, or only the tests in `only`
+    /// (a cached survivor re-checked against new or changed tests).
+    fn run_selected(&self, mutant: &Arc<Mutant>, only: Option<&[&str]>) -> Result<MutantOutcome> {
         run_patched(
             &self.tests,
             self.isolation,
@@ -873,7 +859,7 @@ impl Runner for PytestRunner {
                     mut cmd,
                     sole,
                     result,
-                } = self.build_mutant_command(mirror, mutant, &key_file, key_op, None)?;
+                } = self.build_mutant_command(mirror, mutant, &key_file, key_op, only)?;
                 let result = result.map(ResultFile);
                 let started = Instant::now();
                 let child = cmd.spawn().context("spawning test runner")?;
@@ -928,6 +914,37 @@ impl Runner for PytestRunner {
             },
         )
     }
+}
+
+impl Runner for PytestRunner {
+    fn baseline_deselection(&self) -> Option<super::Deselection> {
+        lock_recover(&self.deselection).clone()
+    }
+
+    fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
+    fn set_memory_cap(&mut self, bytes: u64) {
+        self.mem_cap = Some(bytes);
+    }
+
+    fn take_kill_records(&self) -> Vec<crate::kill_order::KillRecord> {
+        std::mem::take(&mut *lock_recover(&self.kill_sink))
+    }
+
+    fn take_kill_sets(&self) -> Vec<super::kill_sets::KillSetRecord> {
+        std::mem::take(&mut *lock_recover(&self.kill_set_sink))
+    }
+
+    fn run(&self, mutant: &Arc<Mutant>) -> Result<MutantOutcome> {
+        self.run_selected(mutant, None)
+    }
+
+    fn run_tests(&self, mutant: &Arc<Mutant>, tests: &[String]) -> Result<Option<MutantOutcome>> {
+        let tests: Vec<&str> = tests.iter().map(String::as_str).collect();
+        self.run_selected(mutant, Some(&tests)).map(Some)
+    }
 
     fn audit(&self, mutant: &Arc<Mutant>, killer: &str) -> Result<Option<MutantOutcome>> {
         // Same command as a real run, but selecting only the recorded killer.
@@ -944,7 +961,8 @@ impl Runner for PytestRunner {
                     mut cmd,
                     sole,
                     result,
-                } = self.build_mutant_command(mirror, mutant, &key_file, key_op, Some(killer))?;
+                } =
+                    self.build_mutant_command(mirror, mutant, &key_file, key_op, Some(&[killer]))?;
                 let result = result.map(ResultFile);
                 let started = Instant::now();
                 let child = cmd.spawn().context("spawning audit run")?;
@@ -1835,6 +1853,47 @@ mod tests {
         );
     }
 
+    /// A survivor's delta runs exactly the given tests, not the coverage
+    /// selection, against the patched mirror.
+    #[cfg(unix)]
+    #[test]
+    fn run_tests_passes_only_the_given_ids() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(proj.join("tests")).unwrap();
+        std::fs::write(proj.join("pyproject.toml"), "").unwrap();
+        // Stands in for `python -m pytest`: records its arguments, passes.
+        let args = tmp.path().join("args");
+        let py = tmp.path().join("python");
+        std::fs::write(
+            &py,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nexit 0\n",
+                args.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut r = runner(false, breadth_ctx(&proj));
+        r.tests = proj.join("tests");
+        r.python = Some(py);
+        let m = Arc::new(mutant_in(&proj));
+        let o = r
+            .run_tests(&m, &["tests/new.py::t1".into(), "tests/new.py::t2".into()])
+            .unwrap()
+            .unwrap();
+        assert!(matches!(o, MutantOutcome::Survived { .. }), "{o:?}");
+        let passed = std::fs::read_to_string(&args).unwrap();
+        let ids: Vec<&str> = passed.lines().filter(|a| a.contains("::")).collect();
+        assert_eq!(ids.len(), 2, "{passed}");
+        assert!(ids[0].ends_with("tests/new.py::t1") && ids[1].ends_with("tests/new.py::t2"));
+        assert!(
+            passed.lines().any(|a| a == "-x"),
+            "still stops at the first failure"
+        );
+    }
+
     /// `set_timeout` (the `--timeout-factor` budget) replaces the per-mutant
     /// cap the runner was built with.
     #[cfg(unix)]
@@ -1904,7 +1963,7 @@ mod tests {
         assert_eq!(many.sole, None);
         let killer = format!("tests/t.py::k[{}/x]", crate::runner::id_path(&proj));
         let one = r
-            .build_mutant_command(&mirror, &m, "foo.py", "op", Some(&killer))
+            .build_mutant_command(&mirror, &m, "foo.py", "op", Some(&[killer.as_str()]))
             .unwrap();
         assert_eq!(one.sole.as_deref(), Some(killer.as_str()));
         let passed = format!("tests/t.py::k[{}/x]", crate::runner::id_path(&mirror.root));

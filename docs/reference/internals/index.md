@@ -174,13 +174,17 @@ the engine tests are coarse end-to-end.
 
 ## Cache
 
-Format: a JSON object whose `entries` map is keyed by mutant id alone;
-the hash and scope live inside each entry.
+Format: a JSON object whose `entries` map is keyed by the cache key
+alone; the hash and scope live inside each entry. The key
+(`engine::cache_key`) is the mutant's position inside its top-level
+def/class (`<file>::<def>@<offset in def>:<op>:<edit>`, a redefined name
+gets `name#2`), so edits above the def don't move it; module-level
+mutants use the mutant id.
 
 ```json
 {
   "entries": {
-    "src/auth.py@812:boundary-shift:>=->>": {
+    "src/auth.py::check@46:boundary-shift:>=->>": {
       "file_hash": "…",
       "scope": "…",
       "outcome": { "status": "survived", "mutant": { … } },

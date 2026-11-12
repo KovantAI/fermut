@@ -51,6 +51,8 @@ class MutmutAdapter(Adapter):
             extras.append(f"--ignore={path}")
         if extras:
             cp.set("mutmut", "pytest_add_cli_args", "\n".join(extras))
+        if repo.mutmut_process_isolation:
+            cp.set("mutmut", "process_isolation", repo.mutmut_process_isolation)
         if repo.mutmut_also_copy:
             cp.set("mutmut", "also_copy", "\n".join(repo.mutmut_also_copy))
         # Mirror fermut_exclude → mutmut `do_not_mutate` so scoping stays
@@ -68,10 +70,15 @@ class MutmutAdapter(Adapter):
         self, repo: RepoCfg, worktree: Path, *, timeout: int | None = None
     ) -> RunResult:
         self._write_config(repo, worktree)
-        result = self._exec(["mutmut", "run"], cwd=worktree, timeout=timeout)
+        env = repo.mutmut_env
+        result = self._exec(
+            ["mutmut", "run"], cwd=worktree, timeout=timeout, extra_env=env
+        )
         # Materialize stats. Failure here doesn't sink the run — the
         # caller still gets timing + raw stdout.
-        self._exec(["mutmut", "export-cicd-stats"], cwd=worktree, timeout=120)
+        self._exec(
+            ["mutmut", "export-cicd-stats"], cwd=worktree, timeout=120, extra_env=env
+        )
         score, mutants = self._score_from_stats(worktree)
         if score is not None:
             result.score = score

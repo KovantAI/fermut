@@ -95,7 +95,11 @@ class Adapter(ABC):
                 path.unlink()
 
     def _exec(
-        self, argv: list[str], cwd: Path, timeout: int | None = None
+        self,
+        argv: list[str],
+        cwd: Path,
+        timeout: int | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> RunResult:
         start = time.perf_counter()
         # stdin=DEVNULL: prevents OpenSSL / getpass-style prompts (e.g. httpx
@@ -103,7 +107,7 @@ class Adapter(ABC):
         proc = subprocess.run(
             argv,
             cwd=cwd,
-            env=self.env(),
+            env={**self.env(), **(extra_env or {})},
             stdin=subprocess.DEVNULL,
             capture_output=True,
             check=False,

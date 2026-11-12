@@ -395,6 +395,8 @@ mod chain_order_tests {
             runner: RunnerKind::Pytest,
             python: None,
             unittest_pattern: None,
+            unittest_top_level: None,
+            unittest_cwd: None,
             isolation: IsolationMode::Auto,
             equiv_detect: false,
             cache_scope: CacheScope::File,

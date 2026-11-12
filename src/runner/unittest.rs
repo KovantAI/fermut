@@ -24,6 +24,11 @@
 //!   every mutant as surviving. The guard's message names the actual cause
 //!   ([`zero_collection_hint`]) — most often not the pattern but a pytest-style
 //!   tree whose subdirectories lack `__init__.py`, which `discover` won't enter.
+//!
+//! [`Discovery`] also carries `-t` (`unittest_top_level`, for a tests package
+//! with relative imports) and the working directory (`unittest_cwd`, for tests
+//! that open data files relative to it). The per-mutant run, the zero-test
+//! count and the schemata template all apply them the same way.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -50,6 +55,19 @@ use crate::report::{MutantOutcome, Timing};
 /// project using the `*_test.py` convention sets `unittest_pattern` instead.
 const DEFAULT_PATTERN: &str = "test*.py";
 
+/// How `unittest discover` finds and runs the tests (the `unittest_*` config
+/// keys). Paths are project paths; each run maps them into its mirror.
+#[derive(Debug, Clone, Default)]
+pub struct Discovery {
+    /// Glob for `-p`. `None` → [`DEFAULT_PATTERN`].
+    pub pattern: Option<String>,
+    /// `-t`: the directory test modules are imported relative to. `None` →
+    /// the start (tests) directory, unittest's default.
+    pub top_level: Option<PathBuf>,
+    /// Working directory of the run. `None` → the project root.
+    pub cwd: Option<PathBuf>,
+}
+
 pub struct UnittestRunner {
     pub(super) tests: PathBuf,
     pub(super) timeout: Duration,
@@ -62,8 +80,12 @@ pub struct UnittestRunner {
     /// Interpreter to run `-m unittest` with (resolved venv / `--python`, else
     /// a PATH-probed `python3`/`python`). Never a bare hardcoded `python`.
     pub(super) python: PathBuf,
-    /// Glob for `unittest discover -p`. `None` → [`DEFAULT_PATTERN`].
+    /// Glob for `unittest discover -p`.
     pub(super) pattern: String,
+    /// `unittest discover -t`, a project path. `None` → the tests dir.
+    pub(super) top_level: Option<PathBuf>,
+    /// Working directory, a project path. `None` → the project root.
+    pub(super) cwd: Option<PathBuf>,
 }
 
 impl UnittestRunner {
@@ -74,7 +96,7 @@ impl UnittestRunner {
         isolation: IsolationMode,
         private_home: bool,
         python: PathBuf,
-        pattern: Option<String>,
+        discovery: Discovery,
     ) -> Self {
         Self {
             tests,
@@ -84,14 +106,53 @@ impl UnittestRunner {
             isolation,
             private_home,
             python,
-            pattern: pattern.unwrap_or_else(|| DEFAULT_PATTERN.to_string()),
+            pattern: discovery
+                .pattern
+                .unwrap_or_else(|| DEFAULT_PATTERN.to_string()),
+            top_level: discovery.top_level,
+            cwd: discovery.cwd,
         }
     }
 
-    /// `<python> -m unittest discover -s <tests> -p <pattern>` against `mirror`,
-    /// with the mirror PYTHONPATH and the no-`.pyc` guard applied. Shared by the
+    /// The mirror copies of `-t` and the working directory.
+    pub(super) fn mirror_dirs(&self, mirror: &Mirror) -> Result<(Option<PathBuf>, PathBuf)> {
+        let map = |key: &str, p: &Path| {
+            mirror
+                .target_for(p)
+                .with_context(|| format!("`{key}` {} must be inside the project", p.display()))
+        };
+        let top = self
+            .top_level
+            .as_deref()
+            .map(|p| map("unittest_top_level", p))
+            .transpose()?;
+        let cwd = match &self.cwd {
+            Some(p) => map("unittest_cwd", p)?,
+            None => mirror.root.clone(),
+        };
+        Ok((top, cwd))
+    }
+
+    /// The discover command line as the user would type it, for messages.
+    fn describe(&self) -> String {
+        let top = self
+            .top_level
+            .as_ref()
+            .map(|t| format!(" -t {}", t.display()))
+            .unwrap_or_default();
+        format!(
+            "unittest discover -s {} -p '{}'{top}",
+            self.tests.display(),
+            self.pattern
+        )
+    }
+
+    /// `<python> -m unittest discover -s <tests> -p <pattern> [-t <top>]`
+    /// against `mirror`, from the configured working directory, with the
+    /// mirror PYTHONPATH and the no-`.pyc` guard applied. Shared by the
     /// per-mutant run and the baseline so both resolve imports identically.
     fn discover_command(&self, mirror: &Mirror) -> Result<Command> {
+        let (top, cwd) = self.mirror_dirs(mirror)?;
         let mut cmd = Command::new(super::python::absolute_program(&self.python));
         cmd.arg("-m")
             .arg("unittest")
@@ -100,7 +161,11 @@ impl UnittestRunner {
             .arg(&mirror.tests)
             .arg("-p")
             .arg(&self.pattern);
+        if let Some(top) = top {
+            cmd.arg("-t").arg(top);
+        }
         configure_mirror_cmd(&mut cmd, mirror, self.private_home)?;
+        cmd.current_dir(cwd);
         // `None` until the baseline (which shares this command) has run.
         if let Some(bytes) = self.mem_cap {
             super::memory::cap_memory(&mut cmd, bytes);
@@ -115,13 +180,16 @@ impl UnittestRunner {
     /// real baseline surface the failure rather than misreporting zero.
     fn count_tests(&self, mirror: &Mirror) -> Option<usize> {
         let script = "import sys, unittest; \
-             print(unittest.TestLoader().discover(sys.argv[1], pattern=sys.argv[2]).countTestCases())";
+             print(unittest.TestLoader().discover(sys.argv[1], pattern=sys.argv[2], \
+             top_level_dir=sys.argv[3] or None).countTestCases())";
+        let (top, cwd) = self.mirror_dirs(mirror).ok()?;
         let mut cmd = Command::new(super::python::absolute_program(&self.python));
         cmd.arg("-c")
             .arg(script)
             .arg(&mirror.tests)
             .arg(&self.pattern)
-            .current_dir(&mirror.root)
+            .arg(top.unwrap_or_default())
+            .current_dir(cwd)
             .stderr(Stdio::null());
         cmd.env("PYTHONPATH", mirror_pythonpath(mirror).ok()?);
         cmd.env("PYTHONDONTWRITEBYTECODE", "1");
@@ -205,11 +273,10 @@ impl Runner for UnittestRunner {
         if self.count_tests(&mirror) == Some(0) {
             return Ok(BaselineStatus::Failed {
                 output: format!(
-                    "no tests collected: `unittest discover -s {} -p '{}'` found 0 tests, so \
+                    "no tests collected: `{}` found 0 tests, so \
                      the suite would vacuously pass and every mutant would be reported as \
                      surviving. {}",
-                    self.tests.display(),
-                    self.pattern,
+                    self.describe(),
                     zero_collection_hint(&self.tests, &self.pattern),
                 ),
             });
@@ -221,7 +288,24 @@ impl Runner for UnittestRunner {
         if matches!(status, BaselineStatus::Passed { .. }) {
             record_clean_run(&mirror.project_root, &before);
         }
-        Ok(status)
+        Ok(match status {
+            // Discovery imports each test module by its bare name unless `-t`
+            // names the package root.
+            BaselineStatus::Failed { output }
+                if self.top_level.is_none()
+                    && output
+                        .contains("attempted relative import with no known parent package") =>
+            {
+                BaselineStatus::Failed {
+                    output: format!(
+                        "{output}\nThe tests use relative imports: set `unittest_top_level` \
+                         to the directory above the tests package (often the project root, \
+                         `\".\"`)."
+                    ),
+                }
+            }
+            status => status,
+        })
     }
 }
 
@@ -389,7 +473,10 @@ mod tests {
             IsolationMode::Auto,
             true,
             py,
-            pattern,
+            Discovery {
+                pattern,
+                ..Discovery::default()
+            },
         )
     }
 
@@ -442,7 +529,7 @@ mod tests {
             IsolationMode::Copy,
             true,
             py,
-            None,
+            Discovery::default(),
         )
     }
 
@@ -643,6 +730,86 @@ mod tests {
             r.run(&Arc::new(m)).unwrap(),
             MutantOutcome::Survived { .. }
         ));
+    }
+
+    /// `project()` with a tomli-style tests package (relative imports, needs
+    /// `-t <root>`) and a Biopython-style data file read from the cwd.
+    fn package_project() -> (TempDir, PathBuf) {
+        let (dir, calc) = project();
+        let tests = dir.path().join("tests");
+        fs::write(tests.join("__init__.py"), "").unwrap();
+        fs::write(tests.join("helper.py"), "EXPECTED = 1\n").unwrap();
+        fs::write(tests.join("expected.txt"), "1").unwrap();
+        fs::write(
+            tests.join("test_calc.py"),
+            "import unittest\n\
+             from calc import f\n\
+             from .helper import EXPECTED\n\n\
+             class T(unittest.TestCase):\n    \
+             def test_f(self):\n        \
+             self.assertEqual(f(), EXPECTED)\n        \
+             self.assertEqual(open('expected.txt').read(), str(f()))\n",
+        )
+        .unwrap();
+        (dir, calc)
+    }
+
+    fn package_runner(dir: &Path, py: PathBuf, discovery: Discovery) -> UnittestRunner {
+        UnittestRunner::new(
+            dir.join("tests"),
+            Duration::from_secs(30),
+            Duration::from_secs(60),
+            IsolationMode::Copy,
+            true,
+            py,
+            discovery,
+        )
+    }
+
+    #[test]
+    #[ignore = "requires python on PATH"]
+    fn top_level_and_cwd_reach_a_relative_import_tests_package() {
+        let Some(py) = python_or_skip() else { return };
+        let (dir, calc) = package_project();
+        let root = dir.path();
+        let plain = package_runner(root, py.clone(), Discovery::default());
+        match plain.baseline().unwrap() {
+            BaselineStatus::Failed { output } => {
+                assert!(output.contains("set `unittest_top_level`"), "{output}");
+            }
+            other => panic!("relative imports need -t: {other}"),
+        }
+        let configured = Discovery {
+            top_level: Some(root.to_path_buf()),
+            cwd: Some(root.join("tests")),
+            ..Discovery::default()
+        };
+        let r = package_runner(root, py, configured);
+        assert!(
+            matches!(r.baseline().unwrap(), BaselineStatus::Passed { .. }),
+            "-t + cwd make the suite pass"
+        );
+        let killed = r.run(&Arc::new(mutant(calc.clone(), "return 1", "return 2")));
+        assert!(matches!(killed.unwrap(), MutantOutcome::Killed { .. }));
+        let survived = r.run(&Arc::new(mutant(calc, "return 10", "return 20")));
+        assert!(matches!(survived.unwrap(), MutantOutcome::Survived { .. }));
+    }
+
+    #[test]
+    fn a_top_level_outside_the_project_is_an_error() {
+        let Some(py) = python_or_skip() else { return };
+        let (dir, _) = project();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let r = package_runner(
+            dir.path(),
+            py,
+            Discovery {
+                top_level: Some(elsewhere.path().to_path_buf()),
+                ..Discovery::default()
+            },
+        );
+        let err = r.baseline().unwrap_err().to_string();
+        assert!(err.contains("unittest_top_level"), "{err}");
     }
 
     #[cfg(unix)]

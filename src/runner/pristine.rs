@@ -8,9 +8,17 @@
 //! flipping run to run). [`Pristine::restore`] puts such files back after each
 //! mutant; the schemata runner, whose one mirror every fork shares, uses
 //! [`Pristine::drift`] to stop serving instead.
+//!
+//! "Pristine" means what a passing run leaves, not what the build copied: an
+//! app that creates its instance or upload dirs on every start (flaskbb's
+//! `os.makedirs(app.instance_path, exist_ok=True)`), gitignored and so left
+//! out of the mirror, isn't a test skipping its cleanup. The baseline records
+//! the paths it added ([`record_clean_run`]); every later snapshot of that
+//! project lets them be.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -25,28 +33,57 @@ enum Stamp {
     Other,
 }
 
+/// Per project root (`Mirror::project_root`): the paths a passing baseline
+/// added to its mirror. Keyed so one process running several projects
+/// (`fermut mcp`) keeps them apart.
+static CLEAN_RUN: LazyLock<Mutex<HashMap<PathBuf, Arc<HashSet<PathBuf>>>>> =
+    LazyLock::new(Mutex::default);
+
+/// Remember what a passing baseline added to its mirror since `before` was
+/// taken, for every later snapshot of `project_root`.
+pub(crate) fn record_clean_run(project_root: &Path, before: &Pristine) {
+    let added = scan(&before.root)
+        .into_keys()
+        .filter(|p| !before.entries.contains_key(p))
+        .collect();
+    crate::sync::lock_recover(&CLEAN_RUN).insert(project_root.to_path_buf(), Arc::new(added));
+}
+
+fn clean_run(project_root: &Path) -> Arc<HashSet<PathBuf>> {
+    crate::sync::lock_recover(&CLEAN_RUN)
+        .get(project_root)
+        .cloned()
+        .unwrap_or_default()
+}
+
 pub(crate) struct Pristine {
     root: PathBuf,
     entries: HashMap<PathBuf, Stamp>,
+    /// Paths a passing run of this project adds (see [`record_clean_run`]):
+    /// not drift while the build didn't have them.
+    clean: Arc<HashSet<PathBuf>>,
 }
 
 impl Pristine {
-    /// Snapshot the tree under `root`. Taken once the mirror is complete
-    /// (precompiled, schematized).
-    pub(crate) fn take(root: &Path) -> Self {
+    /// Snapshot the tree under `root`, a mirror of `project_root`. Taken once
+    /// the mirror is complete (precompiled, schematized).
+    pub(crate) fn take(root: &Path, project_root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
             entries: scan(root),
+            clean: clean_run(project_root),
         }
     }
 
     /// Paths (relative to the root) that were added, removed, or changed size
     /// or mtime since the snapshot, sorted (a parent before its children).
+    /// Paths a passing run adds don't count.
     pub(crate) fn drift(&self) -> Vec<PathBuf> {
         let now = scan(&self.root);
         let mut out: Vec<PathBuf> = now
             .iter()
             .filter(|(p, s)| self.entries.get(*p) != Some(s))
+            .filter(|(p, _)| self.entries.contains_key(*p) || !self.clean.contains(*p))
             .map(|(p, _)| p.clone())
             .chain(
                 self.entries
@@ -161,7 +198,7 @@ mod tests {
         let mirror = tempfile::tempdir().unwrap();
         let root = mirror.path();
         super::super::copy_dir_all(src.path(), root, IsolationMode::Copy).unwrap();
-        let mut p = Pristine::take(root);
+        let mut p = Pristine::take(root, src.path());
         assert!(p.drift().is_empty());
 
         // A test failed between its moves, another left a dir and a cache.
@@ -214,7 +251,7 @@ mod tests {
         let mirror = tempfile::tempdir().unwrap();
         let root = mirror.path();
         super::super::copy_dir_all(src.path(), root, IsolationMode::Copy).unwrap();
-        let mut p = Pristine::take(root);
+        let mut p = Pristine::take(root, src.path());
 
         std::fs::remove_dir_all(root.join("data")).unwrap();
         let dirty = p.restore(src.path(), IsolationMode::Copy).unwrap();
@@ -227,10 +264,65 @@ mod tests {
         assert!(p.drift().is_empty(), "{:?}", p.drift());
     }
 
+    /// #84: an app that creates its instance and upload dirs on every start
+    /// (gitignored, so left out of the mirror) leaves them after a passing run
+    /// too. Once the baseline recorded them they aren't drift, and restore
+    /// leaves them be; a leftover the passing run doesn't make still is.
+    #[test]
+    fn paths_a_passing_run_adds_are_not_drift() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("tests/resources")).unwrap();
+        std::fs::write(src.path().join("tests/resources/f1.txt"), "one").unwrap();
+        let mirror = || {
+            let dir = tempfile::tempdir().unwrap();
+            super::super::copy_dir_all(src.path(), dir.path(), IsolationMode::Copy).unwrap();
+            dir
+        };
+        let app_start = |root: &Path| {
+            std::fs::create_dir_all(root.join("instance")).unwrap();
+            std::fs::create_dir_all(root.join("static/uploads/avatar")).unwrap();
+            std::fs::write(root.join("instance/app.db"), "db").unwrap();
+        };
+
+        // The baseline: snapshot its mirror, a passing run, record.
+        let base = mirror();
+        let before = Pristine::take(base.path(), src.path());
+        app_start(base.path());
+        record_clean_run(src.path(), &before);
+
+        let work = mirror();
+        let root = work.path();
+        let mut p = Pristine::take(root, src.path());
+        app_start(root);
+        assert!(p.drift().is_empty(), "{:?}", p.drift());
+        std::fs::write(root.join("instance/app.db"), "db, written again").unwrap();
+        assert!(p.drift().is_empty(), "{:?}", p.drift());
+
+        std::fs::remove_file(root.join("tests/resources/f1.txt")).unwrap();
+        std::fs::create_dir_all(root.join("tests/resources/test_dir")).unwrap();
+        let rel = |s: &str| PathBuf::from(s);
+        assert_eq!(
+            p.restore(src.path(), IsolationMode::Copy).unwrap(),
+            [
+                rel("tests/resources/f1.txt"),
+                rel("tests/resources/test_dir")
+            ]
+        );
+        assert!(root.join("tests/resources/f1.txt").is_file());
+        assert!(root.join("instance/app.db").is_file());
+        assert!(root.join("static/uploads/avatar").is_dir());
+
+        // A project with no passing baseline recorded: the same dirs drift.
+        let other = mirror();
+        let q = Pristine::take(other.path(), &other.path().join("unrecorded"));
+        app_start(other.path());
+        assert!(q.drift().contains(&rel("instance")), "{:?}", q.drift());
+    }
+
     #[test]
     fn an_unreadable_root_scans_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = Pristine::take(&tmp.path().join("missing"));
+        let p = Pristine::take(&tmp.path().join("missing"), tmp.path());
         assert!(p.entries.is_empty());
         assert!(p.drift().is_empty());
     }

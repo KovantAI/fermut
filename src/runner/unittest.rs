@@ -35,6 +35,7 @@ use anyhow::{Context, Result};
 use wait_timeout::ChildExt;
 
 use super::exit::{anomaly_message, classify_exit, ExitVerdict, TestTool};
+use super::pristine::{record_clean_run, Pristine};
 use super::process_group::kill_group;
 use super::{
     build_baseline_mirror, configure_mirror_cmd, mirror_pythonpath, run_baseline_with_timeout,
@@ -214,8 +215,13 @@ impl Runner for UnittestRunner {
             });
         }
 
+        let before = Pristine::take(&mirror.root, &mirror.project_root);
         let cmd = self.discover_command(&mirror)?;
-        run_baseline_with_timeout(cmd, self.baseline_timeout)
+        let status = run_baseline_with_timeout(cmd, self.baseline_timeout)?;
+        if matches!(status, BaselineStatus::Passed { .. }) {
+            record_clean_run(&mirror.project_root, &before);
+        }
+        Ok(status)
     }
 }
 

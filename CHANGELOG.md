@@ -56,6 +56,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- `--schemata` no longer stops forking when the app creates gitignored
+  dirs on every start (flaskbb's instance and upload dirs): paths a passing
+  baseline adds aren't treated as tests leaving the tree changed. flaskbb:
+  0 → 1719 of 1796 mutants run from the schema (#84).
 - `fermut coverage` passes `-n0` when pytest-xdist is installed. With `-n`
   in the project's `addopts`, pytest-cov's per-test contexts crashed the
   xdist workers (`no such table: context`) and left an empty `.coverage`

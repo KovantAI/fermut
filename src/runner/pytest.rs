@@ -23,6 +23,7 @@ use super::exit::{
     anomaly_message, classify_exit, is_collection_failure, is_project_config_error, ExitVerdict,
     TestTool, PYTEST_INTERNAL_ERROR, PYTEST_USAGE_ERROR,
 };
+use super::pristine::{record_clean_run, Pristine};
 use super::process_group::kill_group;
 #[cfg(all(test, unix))]
 use super::process_group::with_new_process_group;
@@ -977,6 +978,7 @@ impl Runner for PytestRunner {
         // `--timeout`, which sizes a coverage-selected subset) so a hung suite
         // can't stall the whole run forever.
         let mirror = build_baseline_mirror(&self.tests, self.isolation, self.python.as_deref())?;
+        let before = Pristine::take(&mirror.root, &mirror.project_root);
         let mut cmd = self.framework_command();
         cmd.arg("--tb=line").arg("-q");
         if let Some(seed) = self.hypothesis_seed {
@@ -1016,6 +1018,7 @@ impl Runner for PytestRunner {
         }
         let status = run_baseline_with_timeout(cmd, self.baseline_timeout)?;
         if matches!(status, BaselineStatus::Passed { .. }) {
+            record_clean_run(&mirror.project_root, &before);
             *lock_recover(&self.deselection) =
                 result
                     .and_then(|f| f.read(&mirror))

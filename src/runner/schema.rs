@@ -425,7 +425,7 @@ impl<R: SchemaInner> SchemaRunner<R> {
         let mut serve_args = vec![script.into()];
         serve_args.extend(self.inner.serve_args(&mirror, &schema_json));
         Ok(Schema {
-            pristine: Pristine::take(&mirror.root),
+            pristine: Pristine::take(&mirror.root, &mirror.project_root),
             drifted: AtomicBool::new(false),
             mirror: Arc::new(mirror),
             index,
@@ -1284,7 +1284,7 @@ mod tests {
             super::super::build_mirror(&dir.join("tests"), crate::config::IsolationMode::Copy)
                 .unwrap();
         Schema {
-            pristine: Pristine::take(&mirror.root),
+            pristine: Pristine::take(&mirror.root, &mirror.project_root),
             drifted: AtomicBool::new(false),
             mirror: Arc::new(mirror),
             index: HashMap::new(),

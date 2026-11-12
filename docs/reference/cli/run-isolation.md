@@ -56,6 +56,9 @@ would keep the change for every later mutant on that worker: a false kill
 snapshots each mirror when it is built and, after every mutant, puts back
 files that were moved, deleted, rewritten or added (bytecode caches,
 `.pytest_cache` and `.hypothesis` excepted), warning once with the paths.
+Paths a passing baseline adds count as part of the clean tree: an app that
+creates its gitignored instance or upload dirs on every start (Flask's
+`os.makedirs(app.instance_path, exist_ok=True)`) isn't skipping cleanup.
 
 Under `--schemata` every fork shares one mirror, so it can't be put back
 while other forks run: once a kill leaves it changed, the rest of the

@@ -1080,6 +1080,80 @@ fn systemexit_while_importing_the_package_is_a_kill() {
 }
 
 #[test]
+#[cfg(unix)]
+#[ignore = "requires pytest on PATH; enable once env is set up"]
+fn dirs_the_app_creates_on_every_run_dont_stop_schemata() {
+    // #84: flaskbb's `create_app` does `os.makedirs(instance_path,
+    // exist_ok=True)`. The dir is gitignored, so the mirror leaves it out and
+    // the first test recreates it; the dirty-mirror check took that for a test
+    // skipping its cleanup, and schemata served nothing after the first kill
+    // (flaskbb: 0 of 1796). A passing run leaves the dir too, so it's clean.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write("pytest.ini", "[pytest]\npythonpath = src\n");
+    write(".gitignore", "instance/\n");
+    write("src/pkg/__init__.py", "");
+    write(
+        "src/pkg/calc.py",
+        "def double(x):\n    return x * 2\n\n\n\
+         def is_big(x):\n    return x > 10\n\n\n\
+         def clamp(x, lo, hi):\n    if x < lo:\n        return lo\n    if x > hi:\n        \
+         return hi\n    return x\n",
+    );
+    write(
+        "tests/conftest.py",
+        "import os\n\nimport pytest\n\n\n\
+         @pytest.fixture(autouse=True)\ndef app():\n    \
+         os.makedirs(os.path.join(os.path.dirname(__file__), \"..\", \"instance\"), exist_ok=True)\n",
+    );
+    write(
+        "tests/test_calc.py",
+        "from pkg.calc import clamp, double, is_big\n\n\n\
+         def test_double():\n    assert double(3) == 6\n\n\n\
+         def test_is_big():\n    assert is_big(11)\n    assert not is_big(10)\n\n\n\
+         def test_clamp():\n    assert clamp(-1, 0, 5) == 0\n    assert clamp(9, 0, 5) == 5\n    \
+         assert clamp(3, 0, 5) == 3\n",
+    );
+    let run = |mode: &str| {
+        let out = Command::cargo_bin("fermut")
+            .unwrap()
+            .args(["run", "--no-coverage", "--no-ty-filter", "--no-cache"])
+            .args(["--no-history", "--fail-under", "0", "--jobs", "2", mode])
+            .arg(proj.join("src"))
+            .arg("--tests")
+            .arg(proj.join("tests"))
+            .env("RUST_LOG", "info")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let score = stdout.lines().find(|l| l.contains("score:")).unwrap();
+        let log = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(!log.contains("didn't put them back"), "{mode}:\n{log}");
+        (score.to_string(), log)
+    };
+    let (normal, _) = run("--no-schemata");
+    let (schemata, log) = run("--schemata");
+    assert_eq!(schemata, normal);
+    let summary = log
+        .lines()
+        .find(|l| l.contains("mutants run from the schema"))
+        .unwrap_or_else(|| panic!("no schemata summary in:\n{log}"));
+    let served: u32 = summary
+        .split("schemata: ")
+        .nth(1)
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap();
+    assert!(served > 0, "{summary}");
+}
+
+#[test]
 #[ignore = "requires pytest on PATH; enable once env is set up"]
 fn pytest_ini_marks_the_project_root_under_an_outer_pyproject() {
     // #76: an app with only `pytest.ini` nested under a dir that has a

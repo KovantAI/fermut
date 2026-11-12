@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The fermut pipeline: source is parsed into candidate mutants; a filter chain (migrations, operator, diff-only, coverage, ruff, ty, bytecode) drops mutants before any test runs; a result cache reuses verdicts for unchanged code; the unmutated suite must pass once; the remaining mutants run against only the tests that cover them, either as forks of a warm pytest template (schemata, the default for pytest on Unix) or as a fresh process in a worker mirror, which also takes anything the fork cannot vouch for; results are sorted into killed, survived and equivalent, and survivors feed a coding agent loop that re-measures through the warm cache." viewBox="0 0 820 1170">
+<style>
+svg { --ink: #1f2427; --muted: #6b7178; --line: #a0a5ab; --box: #f4f5f6; --chip: #ffffff; --accent: #ff523b; --accent-bg: #fff1ef; }
+@media (prefers-color-scheme: dark) {
+  svg { --ink: #e2e4e9; --muted: #9aa0a6; --line: #5c6370; --box: #2a2d36; --chip: #1e2129; --accent: #ff6a55; --accent-bg: #3a2420; }
+}
+text { fill: var(--ink); text-anchor: middle; font-family: Inter, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+.fm-title { font-size: 19px; font-weight: 700; }
+.fm-sub { font-size: 14.5px; }
+.fm-sm.fm-title { font-size: 17px; }
+.fm-sm.fm-sub { font-size: 14px; }
+.fm-label { fill: var(--muted); font-size: 12.5px; font-weight: 600; text-anchor: start; }
+.fm-tag { fill: var(--accent); font-size: 12.5px; font-weight: 600; letter-spacing: 0.5px; }
+.fm-box { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+.fm-hot { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2.5; }
+.fm-loop { fill: var(--box); stroke: var(--accent); stroke-width: 2; stroke-dasharray: 7 5; }
+.fm-chips rect { fill: var(--chip); stroke: var(--accent); }
+.fm-chips text { font-size: 12px; font-weight: 600; }
+.fm-lane { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+.fm-lane.fm-hot { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2.5; }
+.fm-row { fill: var(--chip); stroke: var(--line); stroke-width: 1; }
+.fm-row-text { font-size: 13.5px; }
+.fm-note { fill: var(--muted); font-size: 12.5px; }
+.fm-line, .fm-edge { stroke: var(--ink); stroke-width: 2.5; fill: none; }
+.fm-edge { marker-end: url(#fm-arrow); }
+.fm-edge.fm-accent { stroke: var(--accent); marker-end: url(#fm-arrow-accent); }
+.fm-head { fill: var(--ink); }
+.fm-head-accent { fill: var(--accent); }
+</style>
+<defs>
+<marker id="fm-arrow" markerWidth="10" markerHeight="10" refX="7" refY="3.5" orient="auto"><path class="fm-head" d="M0 0L7 3.5L0 7"/></marker>
+<marker id="fm-arrow-accent" markerWidth="10" markerHeight="10" refX="7" refY="3.5" orient="auto"><path class="fm-head-accent" d="M0 0L7 3.5L0 7"/></marker>
+</defs>
+<rect class="fm-box" x="60" y="20" width="460" height="80" rx="14"/><text class="fm-title" x="290" y="54">Parse</text><text class="fm-sub" x="290" y="80">Rust mutator on ruff's parser: source → candidate mutants</text>
+<line class="fm-edge" x1="290" y1="100" x2="290" y2="124"/>
+<rect class="fm-box fm-hot" x="60" y="132" width="460" height="128" rx="14"/><text class="fm-title" x="290" y="166">Filter chain</text><text class="fm-sub" x="290" y="190">cheap to expensive, first reject wins</text>
+<g class="fm-chips"><rect x="72" y="208" width="76" height="32" rx="8"/><text x="110" y="229">migrations</text><rect x="154" y="208" width="62" height="32" rx="8"/><text x="185" y="229">operator</text><rect x="222" y="208" width="62" height="32" rx="8"/><text x="253" y="229">diff-only</text><rect x="290" y="208" width="66" height="32" rx="8"/><text x="323" y="229">coverage</text><rect x="362" y="208" width="40" height="32" rx="8"/><text x="382" y="229">ruff</text><rect x="408" y="208" width="32" height="32" rx="8"/><text x="424" y="229">ty</text><rect x="446" y="208" width="62" height="32" rx="8"/><text x="477" y="229">bytecode</text></g>
+<line class="fm-edge" x1="520" y1="196" x2="574" y2="196"/>
+<rect class="fm-box" x="582" y="156" width="200" height="80" rx="14"/><text class="fm-title fm-sm" x="682" y="190">Skipped</text><text class="fm-sub fm-sm" x="682" y="214">never costs a test run</text>
+<line class="fm-edge" x1="290" y1="260" x2="290" y2="284"/>
+<rect class="fm-box" x="60" y="292" width="460" height="80" rx="14"/><text class="fm-title" x="290" y="326">Result cache</text><text class="fm-sub" x="290" y="352">keyed on the AST hash and a fingerprint of the tests</text>
+<line class="fm-edge" x1="520" y1="332" x2="574" y2="332"/>
+<rect class="fm-box" x="582" y="292" width="200" height="80" rx="14"/><text class="fm-title fm-sm" x="682" y="326">Hit: reuse verdict</text><text class="fm-sub fm-sm" x="682" y="350">reformats don't invalidate</text>
+<line class="fm-edge" x1="290" y1="372" x2="290" y2="396"/>
+<text class="fm-label" x="300" y="390">miss</text>
+<rect class="fm-box" x="60" y="404" width="460" height="80" rx="14"/><text class="fm-title" x="290" y="438">Baseline check</text><text class="fm-sub" x="290" y="464">unmutated suite must pass once; its time sizes the timeout</text>
+<line class="fm-edge" x1="290" y1="484" x2="290" y2="508"/>
+<rect class="fm-box" x="60" y="516" width="460" height="80" rx="14"/><text class="fm-title" x="290" y="550">Run covering tests only</text><text class="fm-sub" x="290" y="576">parallel workers, likely killer first, stop at first failure</text>
+<path class="fm-line" d="M290 596 V612 M215 612 H605"/>
+<line class="fm-edge" x1="215" y1="612" x2="215" y2="628"/>
+<line class="fm-edge" x1="605" y1="612" x2="605" y2="628"/>
+<rect class="fm-lane fm-hot" x="40" y="636" width="350" height="250" rx="14"/>
+<text class="fm-title fm-sm" x="215" y="664">Schemata · pytest on Unix</text>
+<rect class="fm-row" x="56" y="680" width="318" height="44" rx="8"/><text class="fm-row-text" x="215" y="707">Schema: mutants behind a switch</text>
+<rect class="fm-row" x="56" y="732" width="318" height="44" rx="8"/><text class="fm-row-text" x="215" y="759">Template imports + collects once</text>
+<rect class="fm-row" x="56" y="784" width="318" height="44" rx="8"/><text class="fm-row-text" x="215" y="811">Fork a child per mutant</text>
+<text class="fm-note" x="215" y="852">kills re-checked in a clean fork</text>
+<text class="fm-note" x="215" y="870">anything a fork can’t vouch for runs regular</text>
+<rect class="fm-lane" x="430" y="636" width="350" height="250" rx="14"/>
+<text class="fm-title fm-sm" x="605" y="664">Regular · fresh process</text>
+<rect class="fm-row" x="446" y="680" width="318" height="44" rx="8"/><text class="fm-row-text" x="605" y="707">Patch the file in a worker mirror</text>
+<rect class="fm-row" x="446" y="732" width="318" height="44" rx="8"/><text class="fm-row-text" x="605" y="759">Fresh pytest / unittest run</text>
+<rect class="fm-row" x="446" y="784" width="318" height="44" rx="8"/><text class="fm-row-text" x="605" y="811">Restore the pristine file</text>
+<text class="fm-note" x="605" y="852">--no-schemata · Windows · unittest/rstest default</text>
+<line class="fm-edge fm-accent" x1="390" y1="754" x2="426" y2="754"/>
+<path class="fm-line" d="M215 886 V902 M605 886 V902 M155 902 H665"/>
+<line class="fm-edge" x1="155" y1="902" x2="155" y2="918"/>
+<line class="fm-edge fm-accent" x1="410" y1="902" x2="410" y2="918"/>
+<line class="fm-edge" x1="665" y1="902" x2="665" y2="918"/>
+<rect class="fm-box" x="40" y="926" width="230" height="84" rx="14"/><text class="fm-title fm-sm" x="155" y="960">Killed / timed out</text><text class="fm-sub fm-sm" x="155" y="984">a test noticed</text>
+<rect class="fm-box fm-hot" x="295" y="926" width="230" height="84" rx="14"/><text class="fm-title fm-sm" x="410" y="960">Survived</text><text class="fm-sub fm-sm" x="410" y="984">a real gap in the tests</text>
+<rect class="fm-box" x="550" y="926" width="230" height="84" rx="14"/><text class="fm-title fm-sm" x="665" y="960">Equivalent</text><text class="fm-sub fm-sm" x="665" y="984">proved identical, out of score</text>
+<line class="fm-edge fm-accent" x1="410" y1="1010" x2="410" y2="1038"/>
+<rect class="fm-box fm-loop" x="40" y="1046" width="740" height="104" rx="14"/><text class="fm-title" x="410" y="1078">Coding agent loop</text><text class="fm-sub" x="410" y="1106">next → explain → agent writes a test → run → score delta</text><text class="fm-tag" x="410" y="1132">CLI OR MCP · WARM RE-MEASURE IN SECONDS</text>
+<path class="fm-edge fm-accent" d="M40 1098 H18 V332 H52"/>
+</svg>

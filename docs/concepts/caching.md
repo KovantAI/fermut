@@ -4,6 +4,8 @@ The result cache is what makes iterative use of fermut viable. This
 page explains the model. The CI / agent ergonomics live in
 **[Coding agents → cache strategy](../guides/coding-agents.md#cache-strategy)**.
 
+![How the cache decides: each entry is keyed on the mutant id, the source hash and the scope. An exact match reuses the verdict; otherwise a kill is reused if its killing test is unchanged and still covers the line, with about 5% re-run as an audit; otherwise the mutant runs and its verdict is stored under the new key.](../assets/cache-lookup.svg)
+
 ## What the cache stores
 
 After every successful mutant evaluation, fermut writes one entry to

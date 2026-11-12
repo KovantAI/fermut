@@ -14,3 +14,37 @@
   vertical-align: -1px;
   margin-right: 2px;
 }
+
+/* Run pipeline figure (docs/assets/run-pipeline.svg, included via snippets). */
+.md-typeset .fm-pipeline {
+  --fm-ink: var(--md-default-fg-color);
+  --fm-muted: var(--md-default-fg-color--light);
+  --fm-line: var(--md-default-fg-color--lighter);
+  --fm-box: var(--md-code-bg-color);
+  --fm-accent: #ff523b;
+  --fm-accent-bg: #fff1ef;
+  display: block;
+  width: 100%;
+  margin: 1.5em auto;
+}
+[data-md-color-scheme="slate"] .fm-pipeline { --fm-accent-bg: rgba(255, 82, 59, 0.14); }
+.fm-pipeline a { text-decoration: none; }
+.fm-pipeline svg { display: block; width: 100%; max-width: 760px; height: auto; margin: 0 auto; }
+.fm-pipeline text { fill: var(--fm-ink); text-anchor: middle; font-family: var(--md-text-font-family); }
+.fm-pipeline .fm-title { font-size: 19px; font-weight: 700; }
+.fm-pipeline .fm-sub { font-size: 14.5px; }
+.fm-pipeline .fm-sm.fm-title { font-size: 17px; }
+.fm-pipeline .fm-sm.fm-sub { font-size: 14px; }
+.fm-pipeline .fm-label { fill: var(--fm-muted); font-size: 12.5px; font-weight: 600; text-anchor: start; }
+.fm-pipeline .fm-tag { fill: var(--fm-accent); font-size: 12.5px; font-weight: 600; letter-spacing: 0.5px; }
+.fm-pipeline .fm-box { fill: var(--fm-box); stroke: var(--fm-line); stroke-width: 1.5; transition: stroke-width 0.15s; }
+.fm-pipeline .fm-hot { fill: var(--fm-accent-bg); stroke: var(--fm-accent); stroke-width: 2.5; }
+.fm-pipeline .fm-loop { fill: none; stroke: var(--fm-accent); stroke-width: 2; stroke-dasharray: 7 5; }
+.fm-pipeline .fm-chips rect { fill: var(--md-default-bg-color); stroke: var(--fm-accent); }
+.fm-pipeline .fm-chips text { font-size: 12.5px; font-weight: 600; }
+.fm-pipeline a:hover .fm-box, .fm-pipeline a:focus .fm-box { stroke: var(--fm-accent); stroke-width: 3; }
+.fm-pipeline .fm-line, .fm-pipeline .fm-edge { stroke: var(--fm-ink); stroke-width: 2.5; fill: none; }
+.fm-pipeline .fm-edge { marker-end: url(#fm-arrow); }
+.fm-pipeline .fm-edge.fm-accent { stroke: var(--fm-accent); marker-end: url(#fm-arrow-accent); }
+.fm-pipeline .fm-head { fill: var(--fm-ink); }
+.fm-pipeline .fm-head-accent { fill: var(--fm-accent); }

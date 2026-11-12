@@ -3,24 +3,13 @@
 What `fermut run` does between reading your config and printing the summary
 line. Each step links to the page with the details.
 
-```mermaid
-flowchart TD
-    A[Find the project root and config] --> B[Generate mutants]
-    B --> C{Filter chain}
-    C -- dropped --> S[skipped, with the filter's name]
-    C -- admitted --> D{Cached verdict?}
-    D -- yes --> R[Reuse it]
-    D -- no --> E[Baseline check: unmutated suite must pass]
-    E --> F[Run the mutant's tests]
-    F --> G{Verdict}
-    G -- a test failed --> K[killed]
-    G -- time ran out --> T[timed_out]
-    G -- all passed --> V{Provably a no-op?}
-    V -- yes --> Q[equivalent]
-    V -- no --> U[survived]
-    K & T & Q & U --> W[Write to the cache]
-    R & W & S --> X[Report, summary line, history]
-```
+<figure class="fm-pipeline">
+--8<-- "docs/assets/run-pipeline.svg"
+</figure>
+
+Click a stage to jump to its section. Each section ends with the modules
+that implement it; [Internals](../reference/internals/index.md) walks the
+code in order.
 
 ## 1. Project and config
 
@@ -31,6 +20,9 @@ project marker: `pyproject.toml`, `setup.cfg`, a pytest/tox config,
 ([Configuration](configuration.md)). Paths in reports are resolved against
 it, and the coverage data must match it.
 
+**In the code:** `src/cli/build_config.rs` (flags ⊕ file ⊕ defaults), `src/config/`.
+
+
 ## 2. Generate mutants
 
 fermut parses every `.py` file under the source root with Ruff's parser and
@@ -39,6 +31,9 @@ applies each [operator](../reference/operators/index.md) wherever it fits:
 its file, byte offset, operator and edit, so the same code always yields the
 same ids. Nothing runs yet; [`fermut list`](../reference/cli/list.md) stops
 here and prints them.
+
+**In the code:** `src/mutator/` (visitor, operator catalog), `src/emit.rs` (splices the edit).
+
 
 ## 3. Filter chain
 
@@ -55,6 +50,9 @@ and the optional bytecode check (`--tce`). A dropped mutant is reported as
 On a typical run most mutants stop here. On pyjwt, 4,525 of 6,475 were
 skipped; the coverage and `ty` filters alone removed about 1,400.
 
+**In the code:** `src/filter/` (`build_chain`, one file per filter; order in `CANONICAL_ORDER`).
+
+
 ## 4. Cache
 
 For each admitted mutant, fermut looks up a verdict stored under the mutant
@@ -64,12 +62,18 @@ test file normally misses, but a cached kill still counts if the test that
 killed it hasn't changed. If every mutant is a hit, the run tests nothing
 and finishes in well under a second ([Caching](caching.md)).
 
+**In the code:** `src/cache.rs`, `src/ast_hash.rs`, `src/test_tree.rs` (test fingerprint).
+
+
 ## 5. Baseline check
 
 Before the first mutant runs, fermut runs your unmutated suite once. If it
 fails, fermut stops: a red suite would make every mutant look killed. The
 baseline's wall time also sizes the per-mutant timeout when a
 `--timeout-factor` budget is on.
+
+**In the code:** `Runner::baseline` in `src/runner/mod.rs` (pytest and unittest implement it).
+
 
 ## 6. Run each mutant
 
@@ -88,6 +92,9 @@ never touches your source tree.
 - **Limits.** Each run has a timeout, and a memory cap so a runaway mutant
   can't take the machine down ([`fermut run`](../reference/cli/run.md#memory-cap)).
 
+**In the code:** `src/engine.rs` (rayon workers), `src/runner/` (pytest, unittest, schemata fork, mirror, memory cap), `src/kill_order.rs`.
+
+
 ## 7. Verdict
 
 | Result | Status |
@@ -99,6 +106,9 @@ never touches your source tree.
 
 Verdicts go into the cache for next time.
 
+**In the code:** `src/runner/pytest_result.rs`, `src/equiv/` (AST patterns, bytecode identity).
+
+
 ## 8. Report
 
 The score is `(killed + timed_out) / (killed + timed_out + survived)`.
@@ -109,3 +119,5 @@ the survivors and the summary line, writes any reports you asked for
 `.fermut/history.jsonl` for [`trend`](../reference/cli/trend.md) and
 [`score`](../reference/cli/score.md). The exit code is non-zero if any
 mutant survived, or with `--fail-under`, if the score is below it.
+
+**In the code:** `src/report/` (writers), `src/history/` (`history.jsonl`), `src/cli/subcmd/`.

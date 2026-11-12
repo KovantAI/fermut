@@ -1,0 +1,31 @@
+<svg role="img" aria-label="The fermut pipeline: source is parsed into candidate mutants, a filter chain drops mutants before any test runs, a result cache reuses verdicts for unchanged code, the unmutated suite must pass once, the remaining mutants run against only the tests that cover them, and results are sorted into killed, survived and equivalent. Survivors feed a coding agent loop that re-measures through the warm cache." viewBox="0 0 820 880" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<marker id="fm-arrow" markerWidth="10" markerHeight="10" refX="7" refY="3.5" orient="auto"><path class="fm-head" d="M0 0L7 3.5L0 7"/></marker>
+<marker id="fm-arrow-accent" markerWidth="10" markerHeight="10" refX="7" refY="3.5" orient="auto"><path class="fm-head-accent" d="M0 0L7 3.5L0 7"/></marker>
+</defs>
+<a href="#2-generate-mutants"><rect class="fm-box" x="60" y="20" width="460" height="80" rx="14"/><text class="fm-title" x="290" y="54">Parse</text><text class="fm-sub" x="290" y="80">Rust mutator on ruff's parser: source → candidate mutants</text></a>
+<line class="fm-edge" x1="290" y1="100" x2="290" y2="124"/>
+<a href="#3-filter-chain"><rect class="fm-box fm-hot" x="60" y="132" width="460" height="128" rx="14"/><text class="fm-title" x="290" y="166">Filter chain</text><text class="fm-sub" x="290" y="190">cheap to expensive, first reject wins</text>
+<g class="fm-chips"><rect x="72" y="208" width="66" height="32" rx="8"/><text x="105" y="229">operator</text><rect x="145" y="208" width="66" height="32" rx="8"/><text x="178" y="229">diff-only</text><rect x="218" y="208" width="72" height="32" rx="8"/><text x="254" y="229">coverage</text><rect x="297" y="208" width="56" height="32" rx="8"/><text x="325" y="229">ruff</text><rect x="360" y="208" width="56" height="32" rx="8"/><text x="388" y="229">ty</text><rect x="423" y="208" width="85" height="32" rx="8"/><text x="465" y="229">bytecode</text></g></a>
+<line class="fm-edge" x1="520" y1="196" x2="574" y2="196"/>
+<a href="#3-filter-chain"><rect class="fm-box" x="582" y="156" width="200" height="80" rx="14"/><text class="fm-title fm-sm" x="682" y="190">Skipped</text><text class="fm-sub fm-sm" x="682" y="214">never costs a test run</text></a>
+<line class="fm-edge" x1="290" y1="260" x2="290" y2="284"/>
+<a href="#4-cache"><rect class="fm-box" x="60" y="292" width="460" height="80" rx="14"/><text class="fm-title" x="290" y="326">Result cache</text><text class="fm-sub" x="290" y="352">keyed on the AST hash and a fingerprint of the tests</text></a>
+<line class="fm-edge" x1="520" y1="332" x2="574" y2="332"/>
+<a href="#4-cache"><rect class="fm-box" x="582" y="292" width="200" height="80" rx="14"/><text class="fm-title fm-sm" x="682" y="326">Hit: reuse verdict</text><text class="fm-sub fm-sm" x="682" y="350">reformats don't invalidate</text></a>
+<line class="fm-edge" x1="290" y1="372" x2="290" y2="396"/>
+<text class="fm-label" x="300" y="390">miss</text>
+<a href="#5-baseline-check"><rect class="fm-box" x="60" y="404" width="460" height="80" rx="14"/><text class="fm-title" x="290" y="438">Baseline check</text><text class="fm-sub" x="290" y="464">unmutated suite must pass once; its time sizes the timeout</text></a>
+<line class="fm-edge" x1="290" y1="484" x2="290" y2="508"/>
+<a href="#6-run-each-mutant"><rect class="fm-box" x="60" y="516" width="460" height="80" rx="14"/><text class="fm-title" x="290" y="550">Run covering tests only</text><text class="fm-sub" x="290" y="576">parallel workers, fork of a warm pytest, likely killer first</text></a>
+<path class="fm-line" d="M290 596 V612 M155 612 H665"/>
+<line class="fm-edge" x1="155" y1="612" x2="155" y2="628"/>
+<line class="fm-edge fm-accent" x1="410" y1="612" x2="410" y2="628"/>
+<line class="fm-edge" x1="665" y1="612" x2="665" y2="628"/>
+<a href="#7-verdict"><rect class="fm-box" x="40" y="636" width="230" height="84" rx="14"/><text class="fm-title fm-sm" x="155" y="670">Killed / timed out</text><text class="fm-sub fm-sm" x="155" y="694">a test noticed</text></a>
+<a href="#7-verdict"><rect class="fm-box fm-hot" x="295" y="636" width="230" height="84" rx="14"/><text class="fm-title fm-sm" x="410" y="670">Survived</text><text class="fm-sub fm-sm" x="410" y="694">a real gap in the tests</text></a>
+<a href="../../guides/equivalent-mutants/"><rect class="fm-box" x="550" y="636" width="230" height="84" rx="14"/><text class="fm-title fm-sm" x="665" y="670">Equivalent</text><text class="fm-sub fm-sm" x="665" y="694">proved identical, out of score</text></a>
+<line class="fm-edge fm-accent" x1="410" y1="720" x2="410" y2="748"/>
+<a href="../../guides/inner-loop/"><rect class="fm-box fm-loop" x="40" y="756" width="740" height="104" rx="14"/><text class="fm-title" x="410" y="788">Coding agent loop</text><text class="fm-sub" x="410" y="816">next → explain → agent writes a test → run → score delta</text><text class="fm-tag" x="410" y="842">CLI OR MCP · WARM RE-MEASURE IN SECONDS</text></a>
+<path class="fm-edge fm-accent" d="M40 808 H18 V332 H52"/>
+</svg>

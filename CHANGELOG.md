@@ -56,6 +56,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- Cached verdicts survive edits above a mutant. The cache keyed each mutant
+  by its byte offset in the file, so a line added to one function, or a
+  comment added above a `def`, re-ran every mutant below it, even under
+  `cache_scope = "scope"`. Mutants inside a top-level `def`/`class` are now
+  keyed by their position within it. The first run after upgrading
+  re-runs them once.
 - Python 3.14: `fermut coverage` recorded only the first test that ran each
   line. coverage.py's default 3.14 core (`sysmon`) drops the per-test
   contexts pytest-cov switches, so fermut ran too few tests per mutant and

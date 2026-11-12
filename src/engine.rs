@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use crate::ast_hash::{self, ScopeMap};
+use crate::ast_hash::{self, Anchors, ScopeMap};
 use crate::cache::Cache;
 use crate::config::{CacheScope, Config, MemoryCap, RunnerKind};
 use crate::equiv::{EquivPipeline, EquivVerdict};
@@ -119,12 +119,13 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
         filters: &state.filters,
         runner: state.runner.as_ref(),
         cache: &state.cache,
-        file_hashes: &state.file_hashes,
-        scope_maps: &state.scope_maps,
+        file_hashes: &state.files.hashes,
+        scope_maps: &state.files.scope_maps,
+        anchors: &state.files.anchors,
         scope_prefix: &state.scope_prefix,
         test_tree: &state.test_tree,
         equiv: state.equiv.as_ref(),
-        file_sources: &state.file_sources,
+        file_sources: &state.files.sources,
         deadline: state.deadline,
         stats: &state.stats,
         killer_hits: &state.killer_hits,
@@ -311,9 +312,7 @@ struct RunState {
     filters: Vec<Box<dyn Filter>>,
     runner: Box<dyn Runner>,
     cache: Mutex<Cache>,
-    file_hashes: HashMap<PathBuf, String>,
-    scope_maps: HashMap<PathBuf, ScopeMap>,
-    file_sources: HashMap<PathBuf, String>,
+    files: FileArtifacts,
     equiv: Option<EquivPipeline>,
     scope_prefix: String,
     test_tree: TestTree,
@@ -360,11 +359,7 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
     // hash (always), the scope map (only in `scope` cache mode), and the source
     // for the equiv detector (only when it's on). Narrowing (below) changes
     // none of these, nor the scope prefix.
-    let FileArtifacts {
-        hashes: file_hashes,
-        scope_maps,
-        sources: file_sources,
-    } = analyze_unique_files(
+    let files = analyze_unique_files(
         mutants,
         matches!(cfg.cache_scope, CacheScope::Scope),
         cfg.equiv_detect,
@@ -383,17 +378,7 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
         let cache = lock_recover(&cache);
         prepare_candidates(filters, mutants)
             .into_iter()
-            .filter(|m| {
-                !is_cached(
-                    cfg,
-                    &cache,
-                    &file_hashes,
-                    &scope_maps,
-                    &scope_prefix,
-                    &test_tree,
-                    m,
-                )
-            })
+            .filter(|m| !is_cached(cfg, &cache, &files, &scope_prefix, &test_tree, m))
             .collect()
     };
     // The last baseline's deselection, when nothing that decides it changed:
@@ -467,9 +452,7 @@ fn prepare(cfg: &Config, mutants: &[Arc<Mutant>]) -> Result<RunState> {
         filters,
         runner,
         cache,
-        file_hashes,
-        scope_maps,
-        file_sources,
+        files,
         equiv,
         scope_prefix,
         test_tree,
@@ -569,19 +552,19 @@ fn prepare_candidates(filters: &[Box<dyn Filter>], mutants: &[Arc<Mutant>]) -> V
 fn is_cached(
     cfg: &Config,
     cache: &Cache,
-    file_hashes: &HashMap<PathBuf, String>,
-    scope_maps: &HashMap<PathBuf, ScopeMap>,
+    files: &FileArtifacts,
     scope_prefix: &str,
     test_tree: &TestTree,
     mutant: &Mutant,
 ) -> bool {
-    let Some(hash) = mutant_identity_hash(cfg, mutant, file_hashes, scope_maps) else {
+    let Some(hash) = mutant_identity_hash(cfg, mutant, &files.hashes, &files.scope_maps) else {
         return false;
     };
     let scope = compute_mutant_scope(scope_prefix, cfg, test_tree, mutant);
-    cache.lookup_entry(&mutant.id, &hash, &scope).is_some()
+    let key = cache_key(mutant, &files.anchors);
+    cache.lookup_entry(&key, &hash, &scope).is_some()
         || cache
-            .lookup_killer(&mutant.id, &hash, |t| {
+            .lookup_killer(&key, &hash, |t| {
                 compute_killer_scope(scope_prefix, cfg, test_tree, mutant, t)
             })
             .is_some()
@@ -880,6 +863,8 @@ struct EvalCtx<'a> {
     cache: &'a Mutex<Cache>,
     file_hashes: &'a HashMap<PathBuf, String>,
     scope_maps: &'a HashMap<PathBuf, ScopeMap>,
+    /// Top-level def/class positions per file, for [`cache_key`].
+    anchors: &'a HashMap<PathBuf, Anchors>,
     scope_prefix: &'a str,
     test_tree: &'a TestTree,
     equiv: Option<&'a EquivPipeline>,
@@ -928,10 +913,15 @@ fn precheck(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> Option<MutantOutcome> {
 fn evaluate_admitted(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
     let scope = compute_mutant_scope(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant);
     let identity_hash = mutant_identity_hash(ctx.cfg, mutant, ctx.file_hashes, ctx.scope_maps);
+    let key = cache_key(mutant, ctx.anchors);
 
     if let Some(hash) = &identity_hash {
-        let cached = lock_recover(ctx.cache).lookup_entry(&mutant.id, hash, &scope);
+        let cached = lock_recover(ctx.cache).lookup_entry(&key, hash, &scope);
         if let Some((cached, checked)) = cached {
+            // The key survives edits that move the mutant (see `cache_key`),
+            // so the stored outcome may carry an old line and range: report
+            // the mutant as it is now, and classify against today's source.
+            let cached = cached.rebind(mutant.clone());
             ctx.stats.full_hits.fetch_add(1, Ordering::Relaxed);
             // Translate the cached verdict against the current detector
             // setting before returning. The cache stores the post-equiv
@@ -948,7 +938,7 @@ fn evaluate_admitted(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
             if let Some(new_checked) = rewrite {
                 // Only a `Survived` is ever rewritten, so no killer scope.
                 lock_recover(ctx.cache).insert_checked(
-                    mutant.id.clone(),
+                    key.clone(),
                     hash.clone(),
                     scope.clone(),
                     outcome.clone(),
@@ -963,7 +953,7 @@ fn evaluate_admitted(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
         // still covers the mutant — an edit elsewhere can't un-kill it. The
         // entry keeps its old `scope`, so the next run takes this path again
         // until the mutant is re-run.
-        let killer_hit = lock_recover(ctx.cache).lookup_killer(&mutant.id, hash, |t| {
+        let killer_hit = lock_recover(ctx.cache).lookup_killer(&key, hash, |t| {
             compute_killer_scope(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant, t)
         });
         if let Some((outcome, killer)) = killer_hit {
@@ -972,12 +962,12 @@ fn evaluate_admitted(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
                 mutant: mutant.clone(),
                 killer,
             });
-            return outcome;
+            return outcome.rebind(mutant.clone());
         }
         ctx.stats.misses.fetch_add(1, Ordering::Relaxed);
     }
 
-    run_and_cache(ctx, mutant, scope, identity_hash)
+    run_and_cache(ctx, mutant, key, scope, identity_hash)
 }
 
 /// Run `mutant` for real, remap it through the equiv detector, and cache the
@@ -986,6 +976,7 @@ fn evaluate_admitted(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
 fn run_and_cache(
     ctx: &EvalCtx,
     mutant: &Arc<Mutant>,
+    key: String,
     scope: String,
     identity_hash: Option<String>,
 ) -> MutantOutcome {
@@ -1004,7 +995,7 @@ fn run_and_cache(
         // the stored outcome is already post-equiv — mark it checked so warm
         // runs never re-classify it. A detector-off run leaves it unchecked.
         lock_recover(ctx.cache).insert_checked(
-            mutant.id.clone(),
+            key,
             hash,
             scope,
             outcome.clone(),
@@ -1085,10 +1076,11 @@ fn audit_one(ctx: &EvalCtx, hit: &KillerHit) -> Option<MutantOutcome> {
         "cache audit: cached kill did not reproduce against its killer alone \
          (flaky or order-dependent test?); re-running the mutant"
     );
-    lock_recover(ctx.cache).remove(&hit.mutant.id);
+    let key = cache_key(&hit.mutant, ctx.anchors);
+    lock_recover(ctx.cache).remove(&key);
     let scope = compute_mutant_scope(ctx.scope_prefix, ctx.cfg, ctx.test_tree, &hit.mutant);
     let identity_hash = mutant_identity_hash(ctx.cfg, &hit.mutant, ctx.file_hashes, ctx.scope_maps);
-    Some(run_and_cache(ctx, &hit.mutant, scope, identity_hash))
+    Some(run_and_cache(ctx, &hit.mutant, key, scope, identity_hash))
 }
 
 /// Pick `ceil(rate × n)` of `hits` (at least one when `rate > 0`) uniformly at
@@ -1115,6 +1107,32 @@ fn sample_for_audit(mut hits: Vec<KillerHit>, rate: f64) -> Vec<KillerHit> {
 /// file-AST hash. Returns `None` when no hash is available for the file
 /// (e.g., I/O error during the eager hash pass) so the caller skips the
 /// cache for that mutant.
+/// The key a mutant's verdict is cached under.
+///
+/// `mutant.id` embeds the absolute byte offset, so any edit above a mutant —
+/// a line added to an earlier function, a comment above its `def` — gives it
+/// a new id and its cached verdict is never found again. Inside a top-level
+/// def/class the key uses the offset from that def's start instead:
+/// `file::bar@12:boundary-shift:>=->>`. Whether the verdict still holds is
+/// the identity hash's and scope's job, not the key's. Module-level mutants
+/// (and files that didn't parse) keep `mutant.id`, so their entries from
+/// before this key existed still hit.
+fn cache_key(mutant: &Mutant, anchors: &HashMap<PathBuf, Anchors>) -> String {
+    match anchors
+        .get(&mutant.file)
+        .and_then(|a| a.locate(mutant.range))
+    {
+        Some((def, offset)) => format!(
+            "{}::{def}@{offset}:{}:{}->{}",
+            mutant.file.display(),
+            mutant.operator.name(),
+            mutant.original,
+            mutant.replacement
+        ),
+        None => mutant.id.clone(),
+    }
+}
+
 fn mutant_identity_hash(
     cfg: &Config,
     mutant: &Mutant,
@@ -1413,6 +1431,7 @@ fn scoped_test_fingerprint(
 
 /// Per-file artifacts for a run, keyed by source path. Built in one pass by
 /// [`analyze_unique_files`].
+#[derive(Default)]
 struct FileArtifacts {
     /// Cache-key AST hash for every unique file (byte fallback on parse/utf-8
     /// failure). Always populated.
@@ -1420,6 +1439,9 @@ struct FileArtifacts {
     /// Scope maps for the `scope` cache mode. Empty otherwise; files that fail
     /// to parse are absent (consumers fall back to the file hash).
     scope_maps: HashMap<PathBuf, ScopeMap>,
+    /// Top-level def/class positions, for [`cache_key`]. Files that failed to
+    /// parse are absent (their mutants keep `mutant.id` as the key).
+    anchors: HashMap<PathBuf, Anchors>,
     /// Source text for the equiv detector, so classification doesn't re-read
     /// the file per mutant. Empty when equiv detection is off.
     sources: HashMap<PathBuf, String>,
@@ -1437,6 +1459,7 @@ fn analyze_unique_files(
 ) -> FileArtifacts {
     let mut hashes = HashMap::new();
     let mut scope_maps = HashMap::new();
+    let mut anchors = HashMap::new();
     let mut sources = HashMap::new();
     for m in mutants {
         if hashes.contains_key(&m.file) {
@@ -1450,6 +1473,9 @@ fn analyze_unique_files(
             }
         };
         hashes.insert(m.file.clone(), analysis.ast_hash);
+        if let Some(a) = analysis.anchors {
+            anchors.insert(m.file.clone(), a);
+        }
         if want_scope {
             match analysis.scope_map {
                 Some(map) => {
@@ -1474,6 +1500,7 @@ fn analyze_unique_files(
     FileArtifacts {
         hashes,
         scope_maps,
+        anchors,
         sources,
     }
 }
@@ -2195,6 +2222,19 @@ mod tests {
         }
     }
 
+    /// Runner that reports every mutant survived.
+    struct SurviveRunner;
+    impl Runner for SurviveRunner {
+        fn run(&self, m: &Arc<Mutant>) -> Result<MutantOutcome> {
+            Ok(MutantOutcome::survived(m.clone()))
+        }
+        fn baseline(&self) -> Result<runner::BaselineStatus> {
+            Ok(runner::BaselineStatus::Passed {
+                wall: Duration::ZERO,
+            })
+        }
+    }
+
     fn eval_with_deadline(runner: &dyn Runner, deadline: Option<Instant>) -> MutantOutcome {
         let cfg = base_test_config();
         let m = Arc::new(arith_mutant("return x + 0", "+", "-"));
@@ -2206,6 +2246,7 @@ mod tests {
             cache: &cache,
             file_hashes: &HashMap::new(),
             scope_maps: &HashMap::new(),
+            anchors: &HashMap::new(),
             scope_prefix: "",
             test_tree: &TestTree::default(),
             equiv: None,
@@ -2241,6 +2282,147 @@ mod tests {
         let future = Instant::now() + Duration::from_secs(3600);
         let out = eval_with_deadline(&KillRunner, Some(future));
         assert!(matches!(out, MutantOutcome::Killed { .. }));
+    }
+
+    /// One mutant on `>=` in `source`, written to `path`, as the visitor would
+    /// emit it (absolute-offset id, 1-based line).
+    fn ge_mutant_in(path: &std::path::Path, source: &str) -> Arc<Mutant> {
+        std::fs::write(path, source).unwrap();
+        let start = source.find(">=").unwrap();
+        let line = source[..start].matches('\n').count() as u32 + 1;
+        Arc::new(Mutant {
+            id: format!("{}@{start}:boundary-shift:>=->>", path.display()),
+            file: path.to_path_buf(),
+            operator: Operator::BoundaryShift,
+            range: TextRange::new(
+                TextSize::from(start as u32),
+                TextSize::from((start + 2) as u32),
+            ),
+            original: ">=".into(),
+            replacement: ">".into(),
+            line,
+            stmt_line: line,
+            site: None,
+        })
+    }
+
+    /// Evaluate `m` against `cache` with fresh per-file artifacts, as a run
+    /// over the file's current contents would.
+    fn eval_in_file(
+        cfg: &Config,
+        cache: &Mutex<Cache>,
+        runner: &dyn Runner,
+        m: &Arc<Mutant>,
+    ) -> MutantOutcome {
+        let a = analyze_unique_files(
+            std::slice::from_ref(m),
+            matches!(cfg.cache_scope, CacheScope::Scope),
+            false,
+        );
+        let ctx = EvalCtx {
+            cfg,
+            filters: &[],
+            runner,
+            cache,
+            file_hashes: &a.hashes,
+            scope_maps: &a.scope_maps,
+            anchors: &a.anchors,
+            scope_prefix: "",
+            test_tree: &TestTree::default(),
+            equiv: None,
+            file_sources: &HashMap::new(),
+            deadline: None,
+            stats: &CacheStats::default(),
+            killer_hits: &Mutex::new(Vec::new()),
+        };
+        evaluate(&ctx, m)
+    }
+
+    const BAR: &str = "def foo():\n    return 1\n\n\ndef bar(x):\n    return x >= 18\n";
+
+    #[test]
+    fn cached_verdict_survives_a_comment_above_the_def() {
+        // File mode: a comment keeps the AST hash but moves every byte offset
+        // below it, so `mutant.id` changes. The verdict must still be found,
+        // and reported at the mutant's new line, not the cached one.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("m.py");
+        let cfg = base_test_config();
+        let cache = Mutex::new(Cache::default());
+
+        let before = ge_mutant_in(&path, BAR);
+        assert!(matches!(
+            eval_in_file(&cfg, &cache, &KillRunner, &before),
+            MutantOutcome::Killed { .. }
+        ));
+
+        let after = ge_mutant_in(&path, &format!("# a note\n{BAR}"));
+        assert_ne!(before.id, after.id, "fixture: the id moved");
+        // PanicRunner: a miss would run the mutant and panic.
+        let out = eval_in_file(&cfg, &cache, &PanicRunner, &after);
+        assert!(matches!(out, MutantOutcome::Killed { .. }), "{out:?}");
+        assert_eq!(out.mutant().id, after.id);
+        assert_eq!(out.mutant().line, after.line);
+    }
+
+    #[test]
+    fn scope_mode_verdict_survives_a_line_added_to_a_sibling() {
+        // The backlog case: a line added inside `foo` moved every `bar`
+        // mutant to a new id, so scope mode re-ran them despite `bar`'s
+        // unchanged scope hash.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("m.py");
+        let cfg = Config {
+            cache_scope: CacheScope::Scope,
+            ..base_test_config()
+        };
+        let cache = Mutex::new(Cache::default());
+
+        let before = ge_mutant_in(&path, BAR);
+        eval_in_file(&cfg, &cache, &KillRunner, &before);
+        let edited = BAR.replace("    return 1\n", "    y = 2\n    return y\n");
+        let after = ge_mutant_in(&path, &edited);
+        assert_ne!(before.id, after.id, "fixture: the id moved");
+        let out = eval_in_file(&cfg, &cache, &PanicRunner, &after);
+        assert!(matches!(out, MutantOutcome::Killed { .. }), "{out:?}");
+        assert_eq!(out.mutant().line, after.line);
+    }
+
+    #[test]
+    fn file_mode_still_reruns_after_a_code_edit() {
+        // The key no longer changes on a sibling edit; the file hash must
+        // still invalidate in the default mode.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("m.py");
+        let cfg = base_test_config();
+        let cache = Mutex::new(Cache::default());
+
+        eval_in_file(&cfg, &cache, &KillRunner, &ge_mutant_in(&path, BAR));
+        let edited = BAR.replace("    return 1\n", "    y = 2\n    return y\n");
+        let out = eval_in_file(&cfg, &cache, &SurviveRunner, &ge_mutant_in(&path, &edited));
+        assert!(
+            matches!(out, MutantOutcome::Survived { .. }),
+            "re-ran: {out:?}"
+        );
+    }
+
+    #[test]
+    fn cache_key_is_relative_to_the_top_level_def() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("m.py");
+        let m = ge_mutant_in(&path, BAR);
+        let a = analyze_unique_files(std::slice::from_ref(&m), false, false);
+        let key = cache_key(&m, &a.anchors);
+        let rel = BAR.find(">=").unwrap() - BAR.find("def bar").unwrap();
+        assert!(
+            key.ends_with(&format!("::bar@{rel}:boundary-shift:>=->>")),
+            "{key}"
+        );
+
+        // Module level: no enclosing def, the id is the key.
+        let top = ge_mutant_in(&path, "LIMIT = 1 >= 0\n");
+        let a = analyze_unique_files(std::slice::from_ref(&top), false, false);
+        assert_eq!(cache_key(&top, &a.anchors), top.id);
     }
 
     #[test]
@@ -2456,6 +2638,7 @@ mod tests {
             cache,
             file_hashes: &hashes,
             scope_maps: &HashMap::new(),
+            anchors: &HashMap::new(),
             scope_prefix: &prefix,
             test_tree: &tree,
             equiv: None,
@@ -2496,8 +2679,10 @@ mod tests {
             is_cached(
                 &cfg,
                 &lock_recover(&cache),
-                &hashes,
-                &HashMap::new(),
+                &FileArtifacts {
+                    hashes,
+                    ..FileArtifacts::default()
+                },
                 &compute_scope_prefix(&cfg),
                 &TestTree::walk(&cfg.tests_path()),
                 &fx.mutant(1),
@@ -2955,6 +3140,7 @@ mod tests {
             cache: &cache,
             file_hashes: &empty_hashes,
             scope_maps: &empty_maps,
+            anchors: &HashMap::new(),
             scope_prefix: "",
             test_tree: &tree,
             equiv: None,
@@ -3245,6 +3431,7 @@ mod tests {
             cache: &cache,
             file_hashes: &empty_hashes,
             scope_maps: &empty_maps,
+            anchors: &HashMap::new(),
             scope_prefix: "",
             test_tree: &tree,
             equiv: None,

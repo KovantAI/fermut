@@ -13,6 +13,7 @@
 pub(crate) mod exit;
 pub mod kill_sets;
 pub(crate) mod memory;
+pub(crate) mod pristine;
 pub(crate) mod process_group;
 pub mod pytest;
 pub(crate) mod pytest_result;
@@ -83,6 +84,18 @@ pub trait Runner: Send + Sync {
     /// runner records them, and only when the flag is on.
     fn take_kill_sets(&self) -> Vec<kill_sets::KillSetRecord> {
         Vec::new()
+    }
+
+    /// Run `mutant` against only `tests`: a cached survivor re-checked against
+    /// the covering tests that are new or changed since its verdict.
+    /// `Ok(None)` when the runner can't select tests (the default), in which
+    /// case the engine runs the mutant fully.
+    fn run_tests(
+        &self,
+        _mutant: &std::sync::Arc<Mutant>,
+        _tests: &[String],
+    ) -> Result<Option<MutantOutcome>> {
+        Ok(None)
     }
 
     /// Re-run `mutant` against only the test `killer` that a cached verdict
@@ -257,7 +270,39 @@ pub(crate) fn configure_mirror_cmd(
         set_home(cmd, &mirror.home, cfg!(windows));
         cmd.env(PRIVATE_HOME_ENV, "1");
     }
+    if let Some(suffix) = db_suffix() {
+        cmd.env(DB_SUFFIX_ENV, suffix);
+    }
     Ok(())
+}
+
+/// pytest-django appends this variable's value to every test database name
+/// (`test_hc` → `test_hc_fm2`; in-memory SQLite is left alone). Without it,
+/// concurrent workers all create the same Postgres/MySQL test DB: the losers
+/// fail `database "test_hc" already exists`, every test errors, and each of
+/// those mutants is a false kill (healthchecks `--jobs 4`: 100 % vs 81.9 %).
+pub(crate) const DB_SUFFIX_ENV: &str = "TOX_PARALLEL_ENV";
+
+/// This worker's test-DB suffix: `fm<rayon worker index>`, after the user's
+/// own `TOX_PARALLEL_ENV` (inside `tox -p`) when set. Per worker, not per
+/// mutant: a worker runs one suite at a time on either path (the schemata
+/// template is sent it per request), and a DB a killed run leaves behind is
+/// clobbered by that worker's next run instead of piling up. None outside the
+/// worker pool (baseline): the user's value, unchanged.
+pub(crate) fn db_suffix() -> Option<String> {
+    db_suffix_from(
+        std::env::var(DB_SUFFIX_ENV).ok().as_deref(),
+        rayon::current_thread_index(),
+    )
+}
+
+fn db_suffix_from(user: Option<&str>, worker: Option<usize>) -> Option<String> {
+    let user = user.filter(|u| !u.is_empty());
+    match (user, worker) {
+        (Some(u), Some(k)) => Some(format!("{u}_fm{k}")),
+        (None, Some(k)) => Some(format!("fm{k}")),
+        (u, None) => u.map(str::to_string),
+    }
 }
 
 /// Tells the schemata template to give each fork its own home.
@@ -796,14 +841,16 @@ pub(crate) fn apply_patch(mirror: &Mirror, mutant: &Mutant) -> Result<PatchGuard
 }
 
 thread_local! {
-    static WORKER_MIRROR: RefCell<Option<(PathBuf, IsolationMode, Mirror)>> =
+    static WORKER_MIRROR: RefCell<Option<(PathBuf, IsolationMode, Mirror, pristine::Pristine)>> =
         const { RefCell::new(None) };
 }
 
 /// Run `f` against this worker's mirror, building one on first call.
 /// The mirror is rebuilt only if `tests` or isolation mode changes — neither
-/// should within a run. A fresh mirror is precompiled for `python` (the
-/// runner's `--python`, else pytest's interpreter); see [`precompile`].
+/// should within a run, or if putting it back after a run fails. A fresh
+/// mirror is precompiled for `python` (the runner's `--python`, else pytest's
+/// interpreter); see [`precompile`]. After `f`, files its tests left changed
+/// are restored ([`pristine`]), so the next mutant sees the tree as built.
 pub(crate) fn with_worker_mirror<F, T>(
     tests: &Path,
     mode: IsolationMode,
@@ -815,15 +862,43 @@ where
 {
     WORKER_MIRROR.with(|cell| {
         let mut slot = cell.borrow_mut();
-        let needs_build = !matches!(&*slot, Some((p, m, _)) if p == tests && *m == mode);
+        let needs_build = !matches!(&*slot, Some((p, m, ..)) if p == tests && *m == mode);
         if needs_build {
             *slot = None;
             let mirror = build_baseline_mirror(tests, mode, python)?;
-            *slot = Some((tests.to_path_buf(), mode, mirror));
+            let pristine = pristine::Pristine::take(&mirror.root, &mirror.project_root);
+            *slot = Some((tests.to_path_buf(), mode, mirror, pristine));
         }
-        let mirror = &slot.as_ref().unwrap().2;
-        f(mirror)
+        let (_, _, mirror, pristine) = slot.as_mut().unwrap();
+        let out = f(mirror);
+        match pristine.restore(&mirror.project_root, mode) {
+            Ok(dirty) if !dirty.is_empty() => warn_dirtied(&dirty),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("restoring the mirror after a run failed, rebuilding it: {e:#}");
+                *slot = None;
+            }
+        }
+        out
     })
+}
+
+fn warn_dirtied(dirty: &[PathBuf]) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    tracing::debug!("restored mirror paths a run left changed: {dirty:?}");
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let shown: Vec<_> = dirty
+            .iter()
+            .take(5)
+            .map(|p| p.display().to_string())
+            .collect();
+        tracing::warn!(
+            "tests changed files inside the project tree and didn't put them back ({}); \
+             fermut restores its copy after each mutant, but a test that leaves the tree \
+             changed when it fails isn't hermetic",
+            shown.join(", ")
+        );
+    }
 }
 
 /// Compile the mirror's sources to checked-hash `.pyc` (PEP 552), so each
@@ -860,14 +935,30 @@ fn precompile(root: &Path, python: &Path) {
     }
 }
 
+/// Files that mark a Python project root: pytest's own rootdir set plus
+/// `setup.py`. Apps without a `pyproject.toml` (Django, older packages) still
+/// carry one of these, so the walk doesn't climb into an unrelated ancestor.
+const ROOT_MARKERS: &[&str] = &[
+    "pyproject.toml",
+    "setup.cfg",
+    "pytest.ini",
+    ".pytest.ini",
+    "tox.ini",
+    "setup.py",
+];
+
+/// Whether `p` is a project root: it holds a [`ROOT_MARKERS`] file or `.git`
+/// (a file in worktrees/submodules, hence `exists`). `.git` caps the walk at
+/// the repo boundary when no marker sits inside it.
+pub(crate) fn is_project_root(p: &Path) -> bool {
+    ROOT_MARKERS.iter().any(|m| p.join(m).exists()) || p.join(".git").exists()
+}
+
 pub(crate) fn find_project_root(start: &Path) -> Option<PathBuf> {
-    let mut p = start;
-    loop {
-        if p.join("pyproject.toml").exists() || p.join("setup.cfg").exists() {
-            return Some(p.to_path_buf());
-        }
-        p = p.parent()?;
-    }
+    start
+        .ancestors()
+        .find(|p| is_project_root(p))
+        .map(Path::to_path_buf)
 }
 
 fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
@@ -890,7 +981,10 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
     //     Same-size mutations (e.g. `<`→`>`) are the worst case since the size
     //     check can't catch them. We also set PYTHONDONTWRITEBYTECODE on the test
     //     subprocess so pytest can't write fresh `.pyc` back mid-run.
-    //   - anything matched by `.gitignore` (`venv`, `node_modules`, data dirs, ...).
+    //   - directories matched by `.gitignore` (`venv`, `node_modules`, data dirs,
+    //     ...), and ignored files outside Python packages (`coverage.json`, logs).
+    //     Ignored files inside a package are build output the package imports
+    //     or reads (`*.so`, compiled `*.mo`), so `copy_ignored_files` keeps them.
     //
     // What we keep: hidden *files*. Dotfiles like `.env`, `.python-version`,
     // `.coveragerc`, `.flake8` are tiny but can change test behavior, so `hidden`
@@ -926,7 +1020,11 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
         if file_type.is_dir() {
             std::fs::create_dir_all(&target)
                 .with_context(|| format!("create mirror dir {}", target.display()))?;
-            copy_native_extensions(path, &target, mode)?;
+            let in_package = rel
+                .ancestors()
+                .take_while(|a| !a.as_os_str().is_empty())
+                .any(|a| src.join(a).join("__init__.py").is_file());
+            copy_ignored_files(path, &target, mode, in_package)?;
         } else if file_type.is_file() {
             // Skip stray compiled bytecode outside `__pycache__` (e.g. legacy
             // sidecar `.pyc`); same staleness hazard as above.
@@ -934,6 +1032,10 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
                 path.extension().and_then(|e| e.to_str()),
                 Some("pyc") | Some("pyo")
             ) {
+                continue;
+            }
+            // Already copied by its directory's `copy_ignored_files` pass.
+            if target.is_file() {
                 continue;
             }
             if let Some(parent) = target.parent() {
@@ -953,24 +1055,37 @@ fn copy_dir_all(src: &Path, dst: &Path, mode: IsolationMode) -> Result<()> {
     Ok(())
 }
 
-/// Copy the compiled extension modules (`*.so`, `*.pyd`) directly in `dir`,
-/// even when `.gitignore` excludes them: a C extension built in place
-/// (`build_ext --inplace`, editable installs) is part of the importable
-/// package. Without it the mirror imports a different package than the one
-/// coverage was recorded against, and node ids parametrized on the extension
-/// (markupsafe's `[markupsafe._speedups]`) don't exist, so pytest exits 4.
+/// Copy the files directly in `dir` that `.gitignore` excluded but that are
+/// part of the importable package:
+/// - compiled extension modules (`*.so`, `*.pyd`) anywhere. A C extension
+///   built in place (`build_ext --inplace`, editable installs) is what the
+///   project imports; without it node ids parametrized on the extension
+///   (markupsafe's `[markupsafe._speedups]`) don't exist, so pytest exits 4.
+/// - any other file when `dir` sits inside a Python package (`in_package`):
+///   build output generated into the package, like flaskbb's compiled `*.mo`
+///   catalogues, without which its translation test fails in the mirror only.
+///   Stray `.pyc`/`.pyo` stay out (stale-bytecode hazard).
+///
 /// Only directories the walk mirrors are scanned, so ignored trees (venvs,
-/// build dirs) stay out.
-fn copy_native_extensions(dir: &Path, target: &Path, mode: IsolationMode) -> Result<()> {
+/// build dirs) stay out, and out-of-package ignored files (`coverage.json`,
+/// logs at the root) aren't copied.
+fn copy_ignored_files(
+    dir: &Path,
+    target: &Path,
+    mode: IsolationMode,
+    in_package: bool,
+) -> Result<()> {
     let entries = std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
     for entry in entries {
         let path = entry?.path();
-        let native = matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("so") | Some("pyd")
-        );
+        let ext = path.extension().and_then(|e| e.to_str());
+        let keep = match ext {
+            Some("so") | Some("pyd") => true,
+            Some("pyc") | Some("pyo") => false,
+            _ => in_package,
+        };
         let to = target.join(path.file_name().unwrap());
-        if native && path.is_file() && !to.exists() {
+        if keep && path.is_file() && !to.exists() {
             clone_file(&path, &to, mode)?;
         }
     }
@@ -1012,6 +1127,39 @@ mod tests {
         apply_patch, copy_dir_all, py_unicode_escape, replace_path, sanitize_python_env,
         shown_path, tail_lines, Mirror, PatchGuard, CHILD_ENV, SANITIZED_ENV_VARS,
     };
+
+    #[test]
+    fn a_mirror_that_cant_be_restored_is_rebuilt() {
+        use crate::config::IsolationMode;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "").unwrap();
+        std::fs::write(dir.join("mod.py"), "x = 1").unwrap();
+        let tests = dir.join("tests");
+        // Precompiling is best effort; `true` skips it.
+        let py = std::path::Path::new("true");
+        // A fresh thread: the mirror is thread-local.
+        std::thread::spawn(move || {
+            let run = |edit: bool| {
+                super::with_worker_mirror(&tests, IsolationMode::Copy, Some(py), |m| {
+                    if edit {
+                        // Changed in the mirror, gone from the source: restore
+                        // has nothing to copy back and fails.
+                        std::fs::write(m.root.join("mod.py"), "x = 2").unwrap();
+                        std::fs::remove_file(dir.join("mod.py")).unwrap();
+                    }
+                    Ok(m.root.clone())
+                })
+                .unwrap()
+            };
+            let first = run(true);
+            assert!(!first.exists(), "the broken mirror was dropped");
+            assert_ne!(run(false), first);
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn hash_seed_is_pinned_unless_the_user_sets_one() {
@@ -1403,6 +1551,16 @@ mod tests {
         assert_eq!(var(&off, crate::runner::PRIVATE_HOME_ENV), None);
     }
 
+    #[test]
+    fn db_suffix_is_per_worker_after_the_users_own() {
+        use super::db_suffix_from as f;
+        assert_eq!(f(None, Some(2)).as_deref(), Some("fm2"));
+        assert_eq!(f(Some("py313"), Some(0)).as_deref(), Some("py313_fm0"));
+        assert_eq!(f(Some(""), Some(1)).as_deref(), Some("fm1"));
+        assert_eq!(f(Some("py313"), None).as_deref(), Some("py313"));
+        assert_eq!(f(None, None), None, "baseline: as a cold run");
+    }
+
     /// Windows moves `USERPROFILE` and the AppData dirs too; elsewhere they
     /// stay untouched.
     #[test]
@@ -1562,6 +1720,33 @@ mod tests {
         assert!(!dst.join("venv").exists());
     }
 
+    /// flaskbb compiles `*.mo` catalogues into its package and gitignores
+    /// them; without them its translation test fails in the mirror only.
+    #[test]
+    fn mirror_copies_gitignored_files_inside_packages_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        for d in ["pkg/tr/de/LC_MESSAGES", "pkg/build", "tests"] {
+            fs::create_dir_all(src.join(d)).unwrap();
+        }
+        fs::write(src.join(".gitignore"), "*.mo\n*.log\n*.pyc\nbuild/\n").unwrap();
+        fs::write(src.join("pkg/__init__.py"), "").unwrap();
+        fs::write(src.join("pkg/tr/de/LC_MESSAGES/m.po"), "po").unwrap();
+        fs::write(src.join("pkg/tr/de/LC_MESSAGES/m.mo"), "mo").unwrap();
+        fs::write(src.join("pkg/stale.pyc"), "pyc").unwrap();
+        fs::write(src.join("pkg/build/out.mo"), "mo").unwrap();
+        fs::write(src.join("run.log"), "log").unwrap();
+        fs::write(src.join("tests/data.mo"), "mo").unwrap();
+        let dst = tmp.path().join("dst");
+        copy_dir_all(&src, &dst, IsolationMode::Copy).unwrap();
+        assert!(dst.join("pkg/tr/de/LC_MESSAGES/m.mo").is_file());
+        assert!(dst.join("pkg/tr/de/LC_MESSAGES/m.po").is_file());
+        assert!(!dst.join("pkg/stale.pyc").exists());
+        assert!(!dst.join("pkg/build").exists(), "ignored dir stays pruned");
+        assert!(!dst.join("run.log").exists(), "root-level ignored file");
+        assert!(!dst.join("tests/data.mo").exists(), "not inside a package");
+    }
+
     #[test]
     fn baseline_exit_status_decides_passed_or_failed() {
         use super::{run_baseline_with_timeout, BaselineStatus};
@@ -1688,9 +1873,28 @@ mod tests {
     }
 
     #[test]
+    fn project_root_stops_at_any_marker_before_an_outer_pyproject() {
+        // #76: a Django app with only `pytest.ini` (or tox.ini / setup.py /
+        // a worktree's `.git` file) under a dir holding `pyproject.toml` used
+        // to resolve to the outer dir and mirror the wrong tree.
+        for marker in ["pytest.ini", ".pytest.ini", "tox.ini", "setup.py", ".git"] {
+            let tmp = tempfile::tempdir().unwrap();
+            fs::write(tmp.path().join("pyproject.toml"), "").unwrap();
+            let app = tmp.path().join("app");
+            fs::create_dir_all(app.join("tests")).unwrap();
+            fs::write(app.join(marker), "").unwrap();
+            assert_eq!(
+                super::find_project_root(&app.join("tests")),
+                Some(app),
+                "{marker}"
+            );
+        }
+    }
+
+    #[test]
     fn mirror_without_project_marker_roots_at_the_tests_parent() {
-        // No pyproject.toml/setup.cfg anywhere up the temp path: the tests
-        // dir's parent is the project.
+        // No project marker anywhere up the temp path: the tests dir's
+        // parent is the project.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("proj");
         fs::create_dir_all(root.join("tests")).unwrap();
@@ -1773,7 +1977,7 @@ mod tests {
         fs::create_dir_all(&tests).unwrap();
         fs::write(tmp.path().join("app.py"), "x = 1\n").unwrap();
         if super::find_project_root(&tests).is_some() {
-            return; // a pyproject.toml above the temp dir; can't test here
+            return; // a project marker above the temp dir; can't test here
         }
         let mirror = Mirror::build(&tests, IsolationMode::Copy).unwrap();
         assert!(mirror.root.join("app.py").is_file());

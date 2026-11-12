@@ -78,6 +78,27 @@ The run logs how many mutants the schema served and how many ran normally.
 Cached verdicts are shared with normal runs. The baseline check is always a
 normal pytest run.
 
+## Django
+
+With pytest-django, the test database is normally created on the first test
+that needs it — in every fork, so each mutant pays for creating it and running
+every migration (healthchecks: 1.0 s of a fork's 1.5 s). When every database's
+test DB is **in-memory SQLite** (the default for an SQLite `DATABASES` entry
+without `TEST.NAME`), the template creates and migrates it once before forking,
+and each fork gets its own copy: rows one mutant's tests write never reach
+another's. healthchecks `hc/api/decorators.py`: 225 s → 81 s, same verdicts.
+Mutants in code the migrations run (a `RunPython` helper, a `post_migrate`
+handler) run the normal way, like any code that ran in the template.
+
+Any other test DB — Postgres, MySQL, SQLite with `TEST.NAME` — is still created
+per fork, and per worker in a normal run, each under its own name (see
+`TOX_PARALLEL_ENV` in [environment variables](../environment-variables.md)).
+So is the DB when a conftest overrides `django_db_setup`. If creating the test
+DB fails in the template, fermut runs every mutant the normal way, where the
+same failure shows up as a red baseline. `--nomigrations` (via `--pytest-arg`)
+makes the per-fork build cheap at the cost of testing against models instead of
+migrations; `--reuse-db` has no effect on an in-memory DB.
+
 ## Turning it off, and where it doesn't apply
 
 `--no-schemata` / `schemata = false` turn it off. `--schemata` /

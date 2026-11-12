@@ -47,7 +47,7 @@ serve, serve-unittest
 
         -> {"ready": true, "unsafe": [[lo, hi], ...]}   once, after collection
         <- {"id": r, "idx": n, "ids": [nodeid, ...] | null, "all": false,
-            "timeout": secs | null}
+            "timeout": secs | null, "db_suffix": s (optional)}
         -> {"id": r, "pid": p}
         -> {"id": r, "status": <raw waitpid status>, "timed_out": bool,
             "failed": [nodeid, ...], "test_secs": s, "unfinished": nodeid | null,
@@ -56,6 +56,10 @@ serve, serve-unittest
 
     Requests are served side by side: each forks at once, and its answers
     carry its `id`.
+
+    `db_suffix`: the sending worker's test-DB name suffix, set as
+    `DB_SUFFIX_ENV` in the child (pytest-django reads it when it creates the
+    test DB, after the fork), so side-by-side children don't share one.
 
     `unfinished` is the test a child was in when it was killed (a timeout).
     Exit codes are pytest's under both runners: 0 passed, 1 failed, 4 an id
@@ -100,6 +104,8 @@ PRIVATE_HOME_ENV = "FERMUT_PRIVATE_HOME"
 # Set by fermut when the runner is rstest: run on rstest's vendored pytest,
 # which it puts first on `sys.path` and uses even beside an installed one.
 RSTEST_ENV = "FERMUT_RSTEST"
+# pytest-django's test-DB name suffix; `runner::DB_SUFFIX_ENV`.
+DB_SUFFIX_ENV = "TOX_PARALLEL_ENV"
 XDG_DIRS = (
     ("XDG_CONFIG_HOME", ".config"),
     ("XDG_CACHE_HOME", ".cache"),
@@ -569,11 +575,14 @@ class Template:
         class Plugin:
             @pytest.hookimpl(tryfirst=True)
             def pytest_runtestloop(self, session):
+                # Collection errors: a cold run would stop here too.
+                error = (
+                    session.testsfailed
+                    and f"{session.testsfailed} errors during collection"
+                )
                 template.ready(
                     PytestDriver(template, session),
-                    # Collection errors: a cold run would stop here too.
-                    session.testsfailed
-                    and f"{session.testsfailed} errors during collection",
+                    error or prewarm_django(session),
                 )
 
         rc = pytest.main(list(pytest_args), plugins=[Plugin()])
@@ -779,6 +788,8 @@ class Template:
                 os.environ["HOME"] = home
                 for var, rel in XDG_DIRS:
                     os.environ[var] = os.path.join(home, rel)
+            if req.get("db_suffix"):
+                os.environ[DB_SUFFIX_ENV] = req["db_suffix"]
             setattr(builtins, ACTIVE, req["idx"])
             os.environ["FM_ACTIVE"] = str(req["idx"])  # Python subprocesses
             # ...and those that drop the environment: they stay in this group.
@@ -808,6 +819,64 @@ class Template:
                     signal.signal(-code, signal.SIG_DFL)
                     os.kill(os.getpid(), -code)
                 os._exit(code)
+
+
+def in_memory_test_dbs(after_setup):
+    """Whether every Django database's test DB is in-memory SQLite: a fork
+    then gets its own copy of it. Any other DB would be one DB shared by
+    side-by-side children (and a socket shared across fork)."""
+    from django.db import connections
+
+    for alias in connections:
+        c = connections[alias]
+        name = (
+            c.settings_dict["NAME"] if after_setup else c.creation._get_test_db_name()
+        )
+        if c.vendor != "sqlite" or not c.creation.is_in_memory_db(name):
+            return False
+    return True
+
+
+def prewarm_django(session):
+    """Build pytest-django's test DB (`django_db_setup`) once, here, instead of
+    in every fork: it is created on the first DB test, after the fork, and
+    migrating it is most of a child's time (healthchecks: 1.0 s of 1.5 s).
+    Only for in-memory SQLite, which each fork then inherits as its own copy.
+    Runs traced, so a switched function migrations or signals call lands in
+    `unsafe`. Returns a refusal when the setup itself failed (its cached error
+    would fail every test in every fork; a cold run fails the same way);
+    None otherwise, also when it doesn't apply."""
+    if not session.config.pluginmanager.has_plugin("django") or not session.items:
+        return None
+    try:
+        if not in_memory_test_dbs(after_setup=False):
+            return None
+        fm, first = session._fixturemanager, session.items[0]
+        try:
+            defs = fm.getfixturedefs("django_db_setup", first)
+        except Exception:  # noqa: BLE001 - pytest < 8.1 takes the node id
+            defs = fm.getfixturedefs("django_db_setup", first.nodeid)
+        # A conftest override may do anything (use an existing DB, load data
+        # per worker): leave it to the children, as before.
+        if not defs or defs[-1].func.__module__ != "pytest_django.fixtures":
+            return None
+        state = session._setupstate
+        if state.stack:
+            return None
+        # Session-scoped finalizers go on the session node; a child's
+        # `SetupState.setup` takes it as already set up, as after a cold
+        # run's first test.
+        state.stack[session] = ([session.teardown], None)
+        request = first._request
+    except Exception:  # noqa: BLE001 - another pytest/Django: children build it
+        return None
+    try:
+        request.getfixturevalue("django_db_setup")
+    except BaseException:  # noqa: BLE001
+        return "django_db_setup failed in the template: " + traceback.format_exc()
+    if not in_memory_test_dbs(after_setup=True):
+        return "django_db_setup in the template built a test DB that isn't in memory"
+    return None
 
 
 def pick(items, by_id, req):

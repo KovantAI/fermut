@@ -128,6 +128,12 @@ pub(crate) struct FilterArgs {
     #[arg(long)]
     pub experimental: bool,
 
+    /// Mutate schema migrations too: Django `migrations/0001_*.py` and
+    /// Alembic `versions/*.py`. Skipped by default (`migrations` in the
+    /// summary): their survivors aren't logic gaps. Also `mutate_migrations`.
+    #[arg(long)]
+    pub mutate_migrations: bool,
+
     /// Include parity operators (expr→None, positional/element drop, string
     /// case-swap). These exist to broaden overlap with other mutation tools
     /// (mutmut) for cross-tool comparison, NOT for normal scoring — they are

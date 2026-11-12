@@ -217,6 +217,9 @@ pub fn run(opts: RunOpts) -> Result<()> {
         };
         let (report, current_entry) = crate::engine::run(&cfg)?;
         on_report(&report, &prior_snapshot)?;
+        if let Some(note) = &cfg.coverage_note {
+            eprintln!("note: {note}");
+        }
         let mut gate_failed = false;
         // `--only-dominators`: an inferred kill that didn't reproduce means
         // the recorded kill-sets are stale, so every other inference this run

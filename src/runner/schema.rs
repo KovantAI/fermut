@@ -35,6 +35,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 
+use super::pristine::Pristine;
 use super::pytest::{run_timing, PytestRunner};
 use super::pytest_result::RunResult;
 use super::python::pytest_interpreter;
@@ -127,13 +128,14 @@ impl SchemaInner for PytestRunner {
 
     fn selection(&self, mutant: &Arc<Mutant>, only: Option<&str>) -> Option<Vec<String>> {
         let (key_file, key_op) = self.kill_key(mutant);
-        self.coverage_ids(mutant, only).map(|ids| {
-            if self.smart_order {
-                self.kill_order.order(&ids, &key_file, key_op)
-            } else {
-                ids
-            }
-        })
+        self.coverage_ids(mutant, only.as_ref().map(std::slice::from_ref))
+            .map(|ids| {
+                if self.smart_order {
+                    self.kill_order.order(&ids, &key_file, key_op)
+                } else {
+                    ids
+                }
+            })
     }
 
     /// A failing test (1) or one interrupting the run (2).
@@ -285,6 +287,12 @@ struct Schema {
     template: OnceLock<Option<Template>>,
     template_starting: AtomicBool,
     template_dead: AtomicBool,
+    /// The mirror as built, and whether a run has left it changed since.
+    /// Forks share it, so a test that fails midway through moving a file
+    /// leaves it moved for every later fork: from then on mutants run
+    /// normally, in per-worker mirrors that are put back after each run.
+    pristine: Pristine,
+    drifted: AtomicBool,
 }
 
 #[derive(Deserialize)]
@@ -418,6 +426,8 @@ impl<R: SchemaInner> SchemaRunner<R> {
         let mut serve_args = vec![script.into()];
         serve_args.extend(self.inner.serve_args(&mirror, &schema_json));
         Ok(Schema {
+            pristine: Pristine::take(&mirror.root, &mirror.project_root),
+            drifted: AtomicBool::new(false),
             mirror: Arc::new(mirror),
             index,
             serve_args,
@@ -440,7 +450,7 @@ impl<R: SchemaInner> SchemaRunner<R> {
         let schema = self.schema()?;
         let idx = *schema.index.get(&mutant.id)?;
         let ids = self.inner.selection(mutant, only);
-        if schema.verified.failed() {
+        if schema.verified.failed() || schema.drifted.load(Ordering::Relaxed) {
             return None;
         }
         with_template(schema, |template| {
@@ -465,7 +475,7 @@ impl<R: SchemaInner> SchemaRunner<R> {
             let mut served = template.request(idx, ids.as_deref(), all, self.inner.timeout())?;
             // A kill or a hang must be the mutant's doing.
             if served.status.is_some_and(|s| self.inner.killed(s)) || hung_in_a_test(&served) {
-                served.unconfirmed = !self.confirm(template, &served.ran);
+                served.unconfirmed = drifted(schema) || !self.confirm(template, &served.ran);
             }
             Ok(Some(served))
         })
@@ -691,6 +701,32 @@ fn hung_in_a_test(served: &Served) -> bool {
     served.status.is_none() && served.error.is_none() && served.result.unfinished.is_some()
 }
 
+/// Whether the shared mirror has drifted from its build (see
+/// [`Schema::pristine`]); checked after each kill or hang, since a test that
+/// fails midway is what skips its cleanup.
+fn drifted(schema: &Schema) -> bool {
+    if schema.drifted.load(Ordering::Relaxed) {
+        return true;
+    }
+    let drift = schema.pristine.drift();
+    if drift.is_empty() {
+        return false;
+    }
+    if !schema.drifted.swap(true, Ordering::Relaxed) {
+        let shown: Vec<_> = drift
+            .iter()
+            .take(5)
+            .map(|p| p.display().to_string())
+            .collect();
+        warn!(
+            "--schemata: tests changed files inside the project tree and didn't put them back \
+             ({}); forks share one copy of it, so the remaining mutants run normally",
+            shown.join(", ")
+        );
+    }
+    true
+}
+
 fn warn_unconfirmed(ran: &[String]) {
     static WARNED: AtomicBool = AtomicBool::new(false);
     if !WARNED.swap(true, Ordering::Relaxed) {
@@ -751,6 +787,11 @@ impl<R: SchemaInner> Runner for SchemaRunner<R> {
                 self.inner.run(mutant)
             }
         }
+    }
+
+    fn run_tests(&self, mutant: &Arc<Mutant>, tests: &[String]) -> Result<Option<MutantOutcome>> {
+        // A delta is a handful of tests: a normal run, not worth a fork.
+        self.inner.run_tests(mutant, tests)
     }
 
     fn audit(&self, mutant: &Arc<Mutant>, killer: &str) -> Result<Option<MutantOutcome>> {
@@ -996,6 +1037,11 @@ impl Template {
         // The template kills a child past `timeout` itself: it alone knows the
         // child isn't reaped yet, so its group id can't have been recycled.
         req["timeout"] = timeout.as_secs_f64().into();
+        // The sending worker's test-DB name, as its spawns get it: children
+        // run side by side, so the template's own would be shared.
+        if let Some(suffix) = super::db_suffix() {
+            req["db_suffix"] = suffix.into();
+        }
         // Ids as pytest names them in the mirror (parametrize ids can embed
         // the project path), and results mapped back, as on the spawn path.
         let into_mirror = |v: &serde_json::Value| -> Option<serde_json::Value> {
@@ -1244,6 +1290,8 @@ mod tests {
             super::super::build_mirror(&dir.join("tests"), crate::config::IsolationMode::Copy)
                 .unwrap();
         Schema {
+            pristine: Pristine::take(&mirror.root, &mirror.project_root),
+            drifted: AtomicBool::new(false),
             mirror: Arc::new(mirror),
             index: HashMap::new(),
             serve_args: vec!["-c".into(), format!("{FAKE}{script}").into()],
@@ -1262,6 +1310,19 @@ mod tests {
     const FAKE: &str = r#"reply() { printf '{"id":%s,%s\n' "$id" "${1#\{}"; }
 idof() { id=$(printf %s "$1" | sed -n 's/.*"id":\([0-9]*\).*/\1/p'); }
 "#;
+
+    #[test]
+    fn drift_in_the_shared_mirror_stops_serving_for_good() {
+        let tmp = tempfile::tempdir().unwrap();
+        let schema = fake_schema(tmp.path(), "");
+        assert!(!drifted(&schema));
+        let left = schema.mirror.root.join("tests/left_behind.txt");
+        std::fs::write(&left, "x").unwrap();
+        assert!(drifted(&schema));
+        // Latched: putting the tree back doesn't resume serving.
+        std::fs::remove_file(&left).unwrap();
+        assert!(drifted(&schema));
+    }
 
     #[test]
     fn the_template_answers_concurrent_requests_out_of_order() {

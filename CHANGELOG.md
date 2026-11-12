@@ -31,6 +31,19 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 - MCP `fermut_run` and `fermut_score` take a `history_path` argument.
 
 ### Changed
+- A cached survivor whose covering tests changed re-runs only the tests
+  that are new or in a changed file, not every covering test: adding a
+  test for a survivor re-runs that test. The others passed before and
+  are unchanged. A sample is also run against every covering test, at
+  the `--cache-audit-rate`, and fermut warns when the two disagree.
+  Timed-out verdicts still re-run fully.
+- Schema migrations are skipped by default: Django `migrations/0001_*.py`
+  in a package and Alembic `versions/*.py` next to `env.py`, shown as
+  `migrations` in the skip summary. On healthchecks they were 55 % of
+  `hc/api`'s mutants, 76 % surviving (score 44.2 % with them, 68.9 %
+  without). `--mutate-migrations` / `mutate_migrations = true` opts back
+  in. A Django project's `trend` shows the drop in mutants under the same
+  config hash.
 - **Breaking:** a runtime error (bad config, red baseline, git or I/O
   failure, a failed `merge` check) now exits `3` instead of `1`, so CI can
   tell a broken run from a failed gate. `1` still means the gate failed
@@ -49,6 +62,54 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- Cached verdicts survive edits above a mutant. The cache keyed each mutant
+  by its byte offset in the file, so a line added to one function, or a
+  comment added above a `def`, re-ran every mutant below it, even under
+  `cache_scope = "scope"`. Mutants inside a top-level `def`/`class` are now
+  keyed by their position within it. The first run after upgrading
+  re-runs them once.
+- Python 3.14: `fermut coverage` recorded only the first test that ran each
+  line. coverage.py's default 3.14 core (`sysmon`) drops the per-test
+  contexts pytest-cov switches, so fermut ran too few tests per mutant and
+  could report false survivors. It now sets `COVERAGE_CORE=ctrace` unless
+  you set `COVERAGE_CORE` yourself (an explicit `sysmon` gets a warning).
+  Coverage built by an older fermut counts as stale: `fermut coverage` and
+  `fermut run` with auto-discovered coverage rebuild it.
+- `--schemata` no longer stops forking when the app creates gitignored
+  dirs on every start (flaskbb's instance and upload dirs): paths a passing
+  baseline adds aren't treated as tests leaving the tree changed. flaskbb:
+  0 → 1719 of 1796 mutants run from the schema.
+- `fermut coverage` passes `-n0` when pytest-xdist is installed. With `-n`
+  in the project's `addopts`, pytest-cov's per-test contexts crashed the
+  xdist workers (`no such table: context`) and left an empty `.coverage`
+  behind a "Wrote …" message.
+- `fermut run path/to/module.py` (a single file) roots the ty filter at the
+  file's directory. It handed ty the file as a project root, fell back to
+  the subprocess checker, and could reject nearly every mutant as a type
+  error (fastapi `routing.py`: 5198 of 5440, 0 tested).
+- The project root is also found by `pytest.ini`, `.pytest.ini`, `tox.ini`,
+  `setup.py`, or `.git`, not only `pyproject.toml` / `setup.cfg`. A Django
+  app with none of the latter walked up to an unrelated ancestor, mirrored
+  the wrong tree, and failed the baseline (`pytest exit 4`). Repos without
+  any config marker now anchor `.fermut/` at the git root, so a cache left
+  in a subdirectory by an earlier run is not reused once.
+- `pytest --fermut`: a fermut run that broke after writing its report (exit
+  `3`) failed the session as a gate failure (exit `1`); it now exits `3`
+  (internal error), as documented.
+- GitHub Action: a run that exited `3` with an all-errored report was treated
+  as a gate failure, so `blocking: false` downgraded it to a warning. Exit `3`
+  now always fails the job.
+- `--schemata` with pytest-django on in-memory SQLite: the test database is
+  created and migrated once in the template instead of in every fork
+  (healthchecks: 1.5 → 0.5 s per mutant, same verdicts). Other databases and
+  `django_db_setup` overrides keep the per-fork build.
+- Django on Postgres/MySQL (or SQLite with `TEST.NAME`) with `--jobs > 1`:
+  every worker created the same test database, the losers' tests all errored,
+  and their mutants counted as killed (healthchecks: 100 % vs 81.9 % at
+  `--jobs 1`). fermut now sets `TOX_PARALLEL_ENV` per worker (`fm<k>`, after
+  your own value inside `tox -p`), which pytest-django appends to test DB
+  names. Re-run with `--no-cache` if a cached run scored a Django project
+  on such a DB with several workers.
 - An explicit `.` path (`fermut run .`, `fermut list .`, `fermut hom .`, MCP
   `fermut_run` with `path: "."`) now mutates the current directory. It was
   read as "no path" and fell back to the config's `source_root`, so

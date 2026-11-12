@@ -81,6 +81,56 @@ fn list_emits_mutations() {
         .stdout(contains("boundary-shift"));
 }
 
+// FERMUT_NO_CONFIG=1 skips config discovery: a broken fermut.toml that
+// fails the plain run is never read.
+#[test]
+fn no_config_env_skips_broken_fermut_toml() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("fermut.toml"), "not = [valid toml").unwrap();
+    std::fs::write(tmp.path().join("m.py"), "def f(a):\n    return a + 1\n").unwrap();
+    let list = || {
+        let mut c = Command::cargo_bin("fermut").unwrap();
+        c.arg("list").arg(tmp.path());
+        c
+    };
+    list().env_remove("FERMUT_NO_CONFIG").assert().failure();
+    list()
+        .env("FERMUT_NO_CONFIG", " Yes ")
+        .assert()
+        .success()
+        .stdout(contains("arith-op-swap"));
+}
+
+// `fermut hom` refuses up front without coverage or with the unittest runner.
+#[test]
+fn hom_rejects_missing_coverage_and_unittest_runner() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("m.py"), "def f(a):\n    return a + 1\n").unwrap();
+    let cov = tmp.path().join("coverage.json");
+    std::fs::write(
+        &cov,
+        r#"{"files": {"m.py": {"contexts": {"2": ["t.py::test_f|run"]}}}}"#,
+    )
+    .unwrap();
+    let hom = |args: &[&str]| {
+        let mut c = Command::cargo_bin("fermut").unwrap();
+        c.env("FERMUT_NO_CONFIG", "1")
+            .arg("hom")
+            .arg(tmp.path())
+            .args(["--kill-sets", "k.jsonl"])
+            .args(args);
+        c
+    };
+    hom(&[])
+        .assert()
+        .failure()
+        .stderr(contains("needs per-test coverage"));
+    hom(&["--runner", "unittest", "--coverage", cov.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(contains("supports the pytest/rstest runner only"));
+}
+
 #[test]
 fn list_emits_mutations_monorepo() {
     Command::cargo_bin("fermut")
@@ -1027,6 +1077,135 @@ fn systemexit_while_importing_the_package_is_a_kill() {
             "{extra:?}: no exit-3 errors"
         );
     }
+}
+
+#[test]
+#[cfg(unix)]
+#[ignore = "requires pytest on PATH; enable once env is set up"]
+fn dirs_the_app_creates_on_every_run_dont_stop_schemata() {
+    // #84: flaskbb's `create_app` does `os.makedirs(instance_path,
+    // exist_ok=True)`. The dir is gitignored, so the mirror leaves it out and
+    // the first test recreates it; the dirty-mirror check took that for a test
+    // skipping its cleanup, and schemata served nothing after the first kill
+    // (flaskbb: 0 of 1796). A passing run leaves the dir too, so it's clean.
+    let tmp = tempfile::tempdir().unwrap();
+    let proj = tmp.path();
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write("pytest.ini", "[pytest]\npythonpath = src\n");
+    write(".gitignore", "instance/\n");
+    write("src/pkg/__init__.py", "");
+    write(
+        "src/pkg/calc.py",
+        "def double(x):\n    return x * 2\n\n\n\
+         def is_big(x):\n    return x > 10\n\n\n\
+         def clamp(x, lo, hi):\n    if x < lo:\n        return lo\n    if x > hi:\n        \
+         return hi\n    return x\n",
+    );
+    write(
+        "tests/conftest.py",
+        "import os\n\nimport pytest\n\n\n\
+         @pytest.fixture(autouse=True)\ndef app():\n    \
+         os.makedirs(os.path.join(os.path.dirname(__file__), \"..\", \"instance\"), exist_ok=True)\n",
+    );
+    write(
+        "tests/test_calc.py",
+        "from pkg.calc import clamp, double, is_big\n\n\n\
+         def test_double():\n    assert double(3) == 6\n\n\n\
+         def test_is_big():\n    assert is_big(11)\n    assert not is_big(10)\n\n\n\
+         def test_clamp():\n    assert clamp(-1, 0, 5) == 0\n    assert clamp(9, 0, 5) == 5\n    \
+         assert clamp(3, 0, 5) == 3\n",
+    );
+    let run = |mode: &str| {
+        let out = Command::cargo_bin("fermut")
+            .unwrap()
+            .args(["run", "--no-coverage", "--no-ty-filter", "--no-cache"])
+            .args(["--no-history", "--fail-under", "0", "--jobs", "2", mode])
+            .arg(proj.join("src"))
+            .arg("--tests")
+            .arg(proj.join("tests"))
+            .env("RUST_LOG", "info")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let score = stdout.lines().find(|l| l.contains("score:")).unwrap();
+        let log = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(!log.contains("didn't put them back"), "{mode}:\n{log}");
+        (score.to_string(), log)
+    };
+    let (normal, _) = run("--no-schemata");
+    let (schemata, log) = run("--schemata");
+    assert_eq!(schemata, normal);
+    let summary = log
+        .lines()
+        .find(|l| l.contains("mutants run from the schema"))
+        .unwrap_or_else(|| panic!("no schemata summary in:\n{log}"));
+    let served: u32 = summary
+        .split("schemata: ")
+        .nth(1)
+        .and_then(|s| s.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+        .unwrap();
+    assert!(served > 0, "{summary}");
+}
+
+#[test]
+#[ignore = "requires pytest on PATH; enable once env is set up"]
+fn pytest_ini_marks_the_project_root_under_an_outer_pyproject() {
+    // #76: an app with only `pytest.ini` nested under a dir that has a
+    // `pyproject.toml` mirrored the outer dir. The outer `.gitignore` drops
+    // the app from that mirror (the benchmark harness's cloned repos), so
+    // pytest got paths that don't exist (exit 4) and the baseline went red.
+    let tmp = tempfile::tempdir().unwrap();
+    let outer = tmp.path();
+    let proj = outer.join("app");
+    let write = |rel: &str, body: &str| {
+        let p = proj.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    std::fs::write(
+        outer.join("pyproject.toml"),
+        "[project]\nname = \"outer\"\n",
+    )
+    .unwrap();
+    std::fs::write(outer.join(".gitignore"), "app/\n").unwrap();
+    write("pytest.ini", "[pytest]\npythonpath = src\n");
+    write("src/pkg/__init__.py", "");
+    write("src/pkg/calc.py", "def double(x):\n    return x * 2\n");
+    write(
+        "tests/test_calc.py",
+        "from pkg.calc import double\n\n\ndef test_double():\n    assert double(2) == 4\n",
+    );
+    let report = proj.join("report.json");
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("run")
+        .arg(proj.join("src"))
+        .arg("--tests")
+        .arg(proj.join("tests"))
+        .args([
+            "--no-coverage",
+            "--no-ty-filter",
+            "--no-cache",
+            "--no-history",
+        ])
+        .args(["--fail-under", "0", "--json"])
+        .arg(&report)
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    let outcomes = json["outcomes"].as_array().unwrap();
+    assert!(!outcomes.is_empty());
+    assert!(
+        outcomes.iter().any(|o| o["status"] == "killed"),
+        "{outcomes:#?}"
+    );
 }
 
 #[test]
@@ -2413,6 +2592,79 @@ fn pr_comment_updates_existing_or_creates_new() {
         .stderr(contains("--pr not given"));
 }
 
+#[cfg(unix)]
+#[test]
+fn pr_comment_surfaces_env_and_gh_failures() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let md = tmp.path().join("report.md");
+    // Larger than a pipe buffer (64 KiB): a failing `gh` that exits without
+    // reading stdin always breaks the pipe, so the EPIPE path is exercised
+    // deterministically instead of racing.
+    std::fs::write(&md, format!("# report\n{}", "x".repeat(256 * 1024))).unwrap();
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    // `gh` that fails (stderr "nope") on any argv containing `fail_on`.
+    let gh = |fail_on: &str, lookup_reply: &str| {
+        let script = format!(
+            "#!/bin/sh\ncase \"$*\" in\n  *'{fail_on}'*) echo nope >&2; exit 1 ;;\n  \
+             *--paginate*) printf '{lookup_reply}' ;;\n  *) cat >/dev/null ;;\nesac\nexit 0\n"
+        );
+        std::fs::write(bin.join("gh"), script).unwrap();
+        std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    let run = |args: &[&str]| {
+        let mut c = Command::cargo_bin("fermut").unwrap();
+        c.env("PATH", &bin)
+            .env_remove("GITHUB_REPOSITORY")
+            .env_remove("GITHUB_REF")
+            .env_remove("PR_NUMBER")
+            .arg("pr-comment")
+            .arg("--markdown")
+            .arg(&md)
+            .args(args);
+        c
+    };
+
+    run(&["--pr", "1"])
+        .assert()
+        .failure()
+        .stderr(contains("--repo not given and $GITHUB_REPOSITORY not set"));
+    run(&["--repo", "o/r"])
+        .env("PR_NUMBER", "abc")
+        .assert()
+        .failure()
+        .stderr(contains("PR_NUMBER=abc is not a number"));
+    // Repo from $GITHUB_REPOSITORY, PR from $PR_NUMBER; no `gh` on PATH yet.
+    run(&[])
+        .env("GITHUB_REPOSITORY", "o/r")
+        .env("PR_NUMBER", "3")
+        .assert()
+        .failure()
+        .stderr(contains("`gh` not found on PATH"));
+
+    let ok = ["--repo", "o/r", "--pr", "3"];
+    gh("--version", "");
+    run(&ok)
+        .assert()
+        .failure()
+        .stderr(contains("`gh --version` exited"));
+    gh("--paginate", "");
+    run(&ok).assert().failure().stderr(contains(
+        "`gh api repos/o/r/issues/3/comments` failed: nope",
+    ));
+    gh("PATCH", "77");
+    run(&ok)
+        .assert()
+        .failure()
+        .stderr(contains("patching comment 77 failed: nope"));
+    gh("pr comment", "");
+    run(&ok)
+        .assert()
+        .failure()
+        .stderr(contains("creating comment on o/r#3 failed: nope"));
+}
+
 #[test]
 #[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
 fn autofix_reverts_a_test_that_does_not_kill_and_explain_llm_caches() {
@@ -2498,6 +2750,15 @@ fn autofix_reverts_a_test_that_does_not_kill_and_explain_llm_caches() {
         .success()
         .stdout(contains("\"cached\": true"))
         .stdout(contains("def test_mock_generated"));
+    // A cache miss with no key and no mock fails with setup guidance.
+    explain()
+        .env_remove("FERMUT_LLM_MOCK")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("FERMUT_ANTHROPIC_API_KEY")
+        .arg("--no-cache")
+        .assert()
+        .failure()
+        .stderr(contains("ANTHROPIC_API_KEY is not set"));
 }
 
 // ---------------------------------------------------------------------------
@@ -2722,20 +2983,91 @@ fn mcp_answers_initialize_on_stdout() {
     let out = Command::cargo_bin("fermut")
         .unwrap()
         .arg("mcp")
-        .write_stdin(
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#
-                .to_string()
-                + "\n",
-        )
+        .write_stdin(concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+            "\n\n",
+            "not json\n",
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"no/such"}"#,
+            "\n",
+        ))
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
+    // Blank line and notification get no reply; garbage gets a null-id parse
+    // error; an unknown method gets an error tied to its id.
     let stdout = String::from_utf8(out).unwrap();
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 1, "stdout: {stdout}");
-    let msg: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(msg["id"], 1);
-    assert_eq!(msg["result"]["serverInfo"]["name"], "fermut");
+    let msgs: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(msgs.len(), 3, "stdout: {stdout}");
+    assert_eq!(msgs[0]["id"], 1);
+    assert_eq!(msgs[0]["result"]["serverInfo"]["name"], "fermut");
+    assert_eq!(msgs[1]["id"], serde_json::Value::Null);
+    assert_eq!(msgs[1]["error"]["code"], -32700);
+    assert_eq!(msgs[2]["id"], 2);
+    assert_eq!(msgs[2]["error"]["code"], -32601);
+}
+
+// A zero `--max-time` budget skips every mutant: the run is partial, so the
+// regression gate says it was not evaluated, and the scoreless note explains
+// the empty score instead of passing it off as 100%.
+#[test]
+#[ignore = "requires pytest on PATH; enable once env is set up"]
+fn exhausted_time_budget_skips_regression_gate_and_notes_no_score() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .current_dir(&sample)
+        .arg("run")
+        .arg(sample.join("src"))
+        .arg("--tests")
+        .arg(sample.join("tests"))
+        .arg("--no-ty-filter")
+        .arg("--no-cache")
+        .arg("--history-path")
+        .arg(tmp.path().join("history.jsonl"))
+        .args(["--max-time", "0", "--fail-on-regression", "5"])
+        .assert()
+        .success()
+        .stderr(contains("--fail-on-regression skipped"))
+        .stderr(contains("--max-time budget expired before any mutant ran"));
+}
+
+// A stale auto-discovered `.coverage` (no fingerprint sidecar, older than the
+// sources) is dropped, and the run says so again after the summary so a slow,
+// low-scoring run explains itself.
+#[test]
+#[ignore = "requires pytest on PATH; enable once env is set up"]
+fn stale_auto_discovered_coverage_is_noted_after_the_summary() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    let db = sample.join(".coverage");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute("CREATE TABLE coverage_schema (version integer)", [])
+        .unwrap();
+    filetime::set_file_mtime(&db, filetime::FileTime::from_unix_time(1000, 0)).unwrap();
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .current_dir(&sample)
+        .arg("run")
+        .arg(sample.join("src"))
+        .arg("--tests")
+        .arg(sample.join("tests"))
+        .arg("--no-ty-filter")
+        .arg("--no-cache")
+        .arg("--no-history")
+        .arg("--fail-under")
+        .arg("0")
+        .assert()
+        .success()
+        .stderr(contains("note: this run ignored stale coverage"));
 }

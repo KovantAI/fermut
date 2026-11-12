@@ -23,7 +23,10 @@ out across a project?"), see
 Any directory containing one of:
 
 - **`pyproject.toml`** (preferred — modern Python projects).
-- **`setup.cfg`** (legacy fallback).
+- **`setup.cfg`**, **`setup.py`** (legacy packaging).
+- **`pytest.ini`**, **`.pytest.ini`**, **`tox.ini`** (test config, common
+  in Django apps without packaging metadata).
+- **`.git`** (the repo root, so the walk never leaves the repository).
 
 …is treated as a project root. fermut walks **up** from the path you
 pass on the CLI, nearest ancestor first, and stops at the first

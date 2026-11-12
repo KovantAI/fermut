@@ -326,18 +326,17 @@ for d, ds, fs in os.walk(p):
 print(c, t, p)";
 
 fn check_bytecode(python: &Path) -> Check {
-    let probed = Command::new(python)
-        .args(["-c", BYTECODE_PROBE])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            let text = String::from_utf8_lossy(&o.stdout).into_owned();
-            let mut it = text.trim_end().splitn(3, ' ');
-            let compiled = it.next()?.parse().ok()?;
-            let total = it.next()?.parse().ok()?;
-            Some((compiled, total, it.next()?.to_string()))
-        });
+    let probed =
+        crate::filter::retry_etxtbsy(|| Command::new(python).args(["-c", BYTECODE_PROBE]).output())
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                let text = String::from_utf8_lossy(&o.stdout).into_owned();
+                let mut it = text.trim_end().splitn(3, ' ');
+                let compiled = it.next()?.parse().ok()?;
+                let total = it.next()?.parse().ok()?;
+                Some((compiled, total, it.next()?.to_string()))
+            });
     match probed {
         Some((compiled, total, site)) => {
             let fix = format!("{} -m compileall -q -j 0 {site}", python.display());
@@ -638,7 +637,7 @@ fn tool_version(cmd: &[&str], venv_bin: Option<&Path>) -> Option<String> {
             command.env("PATH", joined);
         }
     }
-    let out = command.output().ok()?;
+    let out = crate::filter::retry_etxtbsy(|| command.output()).ok()?;
     if !out.status.success() {
         return None;
     }

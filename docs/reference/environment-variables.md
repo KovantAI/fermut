@@ -23,6 +23,7 @@ Precedence is the standard **CLI flag > env var > config file > built-in default
 | Variable     | Effect |
 |--------------|--------|
 | `FM_ACTIVE`  | Under [schemata](cli/run-schemata.md), the active mutant's number in the schema. Exported so a Python subprocess a test starts runs the same mutant; `0` means none. A subprocess started without it (`env={...}`) finds the mutant by its process group instead, unless it starts a new session. Don't set it yourself. |
+| `TOX_PARALLEL_ENV` | Set per worker to `fm<k>` (after your own value inside `tox -p`: `py313_fm0`). pytest-django appends it to test database names, so concurrent workers and forks each get their own Postgres/MySQL/file-SQLite test DB instead of failing on a shared one. In-memory SQLite is unaffected. |
 
 ## Inherited from the ecosystem
 

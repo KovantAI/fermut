@@ -41,6 +41,7 @@ pub struct FileConfig {
     /// to a byte-identical code object. Default false; CLI `--tce` overrides.
     pub tce: Option<bool>,
     pub experimental: Option<bool>,
+    pub mutate_migrations: Option<bool>,
     pub parity: Option<bool>,
     #[serde(deserialize_with = "operators_with_deprecated_default")]
     pub operators: Option<crate::config::OperatorProfile>,

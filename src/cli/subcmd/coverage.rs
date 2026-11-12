@@ -69,7 +69,10 @@ use crate::runner::python::absolute_program;
 ///
 /// v2: import-time lines are recorded under `<test module>|collect` instead of
 /// `""`; the rebuild gives an existing DB those contexts.
-const CURRENT_FP_V: u32 = 2;
+/// v3: recorded with a core that keeps per-test contexts (see
+/// [`set_coverage_core`]). A v2 DB built on Python 3.14 credits each line to
+/// only the first test that ran it, so it must be rebuilt, not trusted.
+const CURRENT_FP_V: u32 = 3;
 
 /// Content fingerprints of the test AND source trees, stored beside the
 /// `.coverage` DB so the incremental refresh can tell what actually changed by
@@ -136,10 +139,15 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<Refreshed> {
         .unwrap_or_else(|| base_dir.join(".coverage"));
 
     // Resolve the interpreter the same way `fermut run` does: explicit
-    // `--python` (relative anchored at the config base), else auto-discover a
+    // `--python`, else the config's `python` (relative anchored at the config
+    // base), else auto-discover a
     // venv near the source root. `None` keeps the bare-`pytest`-on-PATH path.
     let python = {
-        let explicit = opts.python.clone().map(|p| loaded.resolve_path(p));
+        let explicit = opts
+            .python
+            .clone()
+            .or_else(|| loaded.file.python.clone())
+            .map(|p| loaded.resolve_path(p));
         crate::runner::resolve_python(&source, explicit.as_deref())
     };
 
@@ -165,8 +173,9 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<Refreshed> {
     if full {
         if db_path.exists() && prior.is_none() && !opts.full {
             eprintln!(
-                "{} has no fermut fingerprint sidecar; rebuilding fully to establish an \
-                 incremental baseline.",
+                "{} has no current fermut fingerprint sidecar (missing, or written by \
+                 another fermut version); rebuilding fully to establish an incremental \
+                 baseline.",
                 display_rel(&db_path, &base_dir)
             );
         } else {
@@ -482,6 +491,33 @@ fn plan_incremental(
 
 /// Sidecar path: the DB path with `.fermut-fingerprints.json` appended, so a
 /// cache that captures the `.coverage` DB captures its baseline too.
+/// Pick a coverage.py core that records per-test contexts.
+///
+/// On CPython >= 3.14 coverage.py defaults to `core=sysmon`, which doesn't
+/// support dynamic contexts. It only falls back when its config asks for them;
+/// pytest-cov's `--cov-context=test` switches contexts through the API instead,
+/// so coverage.py keeps sysmon and credits each line to the first test that
+/// ran it (warning `no-sysmon-context`). Fewer covering tests per line means
+/// the real killer may never be selected: false survivors.
+///
+/// `current` is the caller's `COVERAGE_CORE`. Unset → `ctrace` (the default
+/// before 3.14; coverage.py falls back to `pytrace` itself where the C tracer
+/// is missing). Set → respected, with a warning for `sysmon`.
+fn set_coverage_core(cmd: &mut Command, current: Option<&std::ffi::OsStr>) {
+    match current {
+        None => {
+            cmd.env("COVERAGE_CORE", "ctrace");
+        }
+        Some(core) if core == "sysmon" => eprintln!(
+            "warning: COVERAGE_CORE=sysmon records only the first test that runs each \
+             line, so per-test coverage will be incomplete and mutants may survive \
+             tests that would kill them. Unset it (fermut then uses ctrace) or set \
+             COVERAGE_CORE=ctrace."
+        ),
+        Some(_) => {}
+    }
+}
+
 fn fingerprints_path(db_path: &Path) -> PathBuf {
     let mut s = db_path.as_os_str().to_owned();
     s.push(".fermut-fingerprints.json");
@@ -499,11 +535,54 @@ fn load_fingerprints(db_path: &Path) -> Option<Fingerprints> {
     Some(fp)
 }
 
+/// Content-based freshness of `db_path`, read from its fingerprint sidecar —
+/// the check `fermut run` uses instead of mtime, so a checkout that restores
+/// identical bytes isn't stale. `None`: no sidecar, or one sharing no test
+/// path with the current tree (tests outside `tests`, or recorded against
+/// another base dir), so content can't vouch for it; the caller falls back to
+/// mtime. `Some(None)`: every tracked file matches.
+/// `Some(Some(path))`: one changed, added or removed file, for the message —
+/// or the sidecar itself when it is from another schema version.
+pub(crate) fn content_staleness(
+    db_path: &Path,
+    source: &Path,
+    tests: &Path,
+    base_dir: &Path,
+) -> Option<Option<PathBuf>> {
+    let Some(prior) = load_fingerprints(db_path) else {
+        // A sidecar fermut wrote under another schema (say v2, which on Python
+        // 3.14 lost per-test contexts) means the DB is ours but can't be
+        // trusted: stale, so auto mode rebuilds it. With no sidecar at all
+        // (a bare pytest-cov DB) the caller falls back to mtime as before.
+        return fingerprints_path(db_path)
+            .exists()
+            .then(|| Some(fingerprints_path(db_path)));
+    };
+    let current = current_fingerprints(tests, source, base_dir);
+    if !prior.tests.keys().any(|k| current.tests.contains_key(k)) {
+        return None;
+    }
+    let changed = changed_keys(&current.tests, &prior.tests)
+        .into_iter()
+        .chain(changed_keys(&current.sources, &prior.sources))
+        .chain(deleted_keys(&current.tests, &prior.tests))
+        .chain(deleted_keys(&current.sources, &prior.sources))
+        .next();
+    Some(changed.map(|k| base_dir.join(k)))
+}
+
 fn save_fingerprints(db_path: &Path, fp: &Fingerprints) -> Result<()> {
     let path = fingerprints_path(db_path);
     let raw = serde_json::to_string_pretty(fp).context("serializing coverage fingerprints")?;
     std::fs::write(&path, raw).with_context(|| format!("writing {}", path.display()))?;
     Ok(())
+}
+
+/// Record the current trees as `db_path`'s baseline, as a passing `fermut
+/// coverage` would.
+#[cfg(test)]
+pub(crate) fn seed_fingerprints(db_path: &Path, tests: &Path, source: &Path, base_dir: &Path) {
+    save_fingerprints(db_path, &current_fingerprints(tests, source, base_dir)).unwrap();
 }
 
 /// Content fingerprints of both trees, keyed by base-dir-relative path with
@@ -737,6 +816,7 @@ fn run_pytest(
     // purge, append to and fingerprint drift apart. coverage.py lets the env
     // var override the config file's `data_file`.
     cmd.env("COVERAGE_FILE", db_path);
+    set_coverage_core(&mut cmd, std::env::var_os("COVERAGE_CORE").as_deref());
     cmd.arg(format!("--cov={}", cov_target.display()));
     cmd.arg("--cov-context=test");
     // fermut's reporter plugin records import-time coverage under
@@ -750,6 +830,13 @@ fn run_pytest(
     }
     for arg in extra {
         cmd.arg(arg);
+    }
+    // pytest-xdist (`-n auto` in addopts) crashes pytest-cov's per-test
+    // contexts (workers race on the data file: `no such table: context`,
+    // INTERNALERROR) and leaves an empty `.coverage`. Last `-n` wins over
+    // addopts; only passed when xdist is installed, or `-n` is unrecognized.
+    if crate::runner::pytest::importable(python, "xdist") {
+        cmd.arg("-n0");
     }
     for t in targets {
         // Pass targets relative to base_dir so recorded pytest node ids stay
@@ -1208,6 +1295,60 @@ mod tests {
         assert!(load_fingerprints(&db).is_some());
     }
 
+    fn core_env(current: Option<&str>) -> Option<String> {
+        let mut cmd = Command::new("pytest");
+        set_coverage_core(&mut cmd, current.map(std::ffi::OsStr::new));
+        cmd.get_envs()
+            .find(|(k, _)| *k == "COVERAGE_CORE")
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    #[test]
+    fn coverage_core_defaults_to_ctrace() {
+        // sysmon (coverage.py's default on Python 3.14) drops per-test contexts.
+        assert_eq!(core_env(None).as_deref(), Some("ctrace"));
+    }
+
+    #[test]
+    fn coverage_core_respects_an_explicit_choice() {
+        // Not overridden: the child inherits the caller's value unchanged.
+        for core in ["sysmon", "pytrace", "ctrace"] {
+            assert_eq!(core_env(Some(core)), None, "{core}");
+        }
+    }
+
+    #[test]
+    fn sidecar_from_another_version_is_stale() {
+        // A v2 sidecar may describe a DB that lost per-test contexts on Python
+        // 3.14: stale (auto mode rebuilds it), not "no sidecar" (mtime check).
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let (src, tests) = (base.join("src"), base.join("tests"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&tests).unwrap();
+        std::fs::write(tests.join("test_a.py"), "def test_a(): pass\n").unwrap();
+        let db = base.join(".coverage");
+        std::fs::write(&db, "").unwrap();
+        assert_eq!(
+            content_staleness(&db, &src, &tests, base),
+            None,
+            "no sidecar"
+        );
+
+        seed_fingerprints(&db, &tests, &src, base);
+        assert_eq!(content_staleness(&db, &src, &tests, base), Some(None));
+
+        let sidecar = fingerprints_path(&db);
+        let raw = std::fs::read_to_string(&sidecar).unwrap();
+        let old = raw.replace(&format!("\"v\": {CURRENT_FP_V}"), "\"v\": 2");
+        assert_ne!(raw, old, "sidecar layout changed: {raw}");
+        std::fs::write(&sidecar, old).unwrap();
+        assert_eq!(
+            content_staleness(&db, &src, &tests, base),
+            Some(Some(sidecar))
+        );
+    }
+
     #[test]
     fn fingerprints_roundtrip_through_sidecar() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1223,6 +1364,46 @@ mod tests {
         let loaded = load_fingerprints(&db).unwrap();
         assert_eq!(loaded.tests, fp.tests);
         assert_eq!(loaded.sources, fp.sources);
+    }
+
+    #[test]
+    fn content_staleness_ignores_mtime_and_names_changed_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let (src, tests) = (base.join("src"), base.join("tests"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&tests).unwrap();
+        std::fs::write(src.join("m.py"), "x = 1\n").unwrap();
+        std::fs::write(tests.join("test_m.py"), "def test(): pass\n").unwrap();
+        let db = base.join(".coverage");
+        assert_eq!(
+            content_staleness(&db, &src, &tests, base),
+            None,
+            "no sidecar"
+        );
+
+        save_fingerprints(&db, &current_fingerprints(&tests, &src, base)).unwrap();
+        assert_eq!(content_staleness(&db, &src, &tests, base), Some(None));
+
+        // A checkout restoring identical bytes (newer mtime) is not a change.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(src.join("m.py"), "x = 1\n").unwrap();
+        assert_eq!(content_staleness(&db, &src, &tests, base), Some(None));
+
+        std::fs::write(src.join("m.py"), "x = 2\n").unwrap();
+        assert_eq!(
+            content_staleness(&db, &src, &tests, base),
+            Some(Some(src.join("m.py")))
+        );
+
+        // A sidecar tracking no tests can't vouch for them: defer to mtime.
+        save_fingerprints(&db, &current_fingerprints(&base.join("nope"), &src, base)).unwrap();
+        assert_eq!(content_staleness(&db, &src, &tests, base), None);
+
+        // Nor can one keyed against another base dir (every key would look
+        // deleted, and a refresh would purge the whole DB).
+        save_fingerprints(&db, &current_fingerprints(&tests, &src, base)).unwrap();
+        assert_eq!(content_staleness(&db, &src, &tests, &src), None);
     }
 
     /// A coverage DB where `src/foo.py` is covered by test_foo + test_both, and

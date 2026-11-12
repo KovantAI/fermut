@@ -30,11 +30,21 @@
 //! timed-out, and equivalent verdicts never take this path. The engine audits a
 //! sample of killer hits each run to catch flaky or order-dependent kills.
 //!
+//! ## Survivor deltas
+//!
+//! A `Survived` (or `Equivalent`) entry whose covering tests were known
+//! precisely also stores a [`SurvivorBasis`]: those tests and a fingerprint of
+//! each one's file. Every one of them passed. When the full `scope` misses, the
+//! engine runs the mutant against only the covering tests that are new or
+//! whose file changed ([`Cache::lookup_survivor`]); unchanged tests still pass,
+//! and a removed test can't kill it. Timed-out verdicts never take this path:
+//! editing the test that hung can turn a timeout into a survivor.
+//!
 //! Filter-skipped outcomes are deliberately **not** cached — the filter chain
 //! changes between invocations (different `--ops`, different `--diff-only`
 //! base) and last run's skip may no longer apply.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -190,6 +200,42 @@ fn deselection_mac(key: &[u8], fingerprint: &str, d: &Deselection) -> Result<Str
     Ok(hex::encode(hmac_sha256(key, msg.as_bytes())?))
 }
 
+/// What a survivor's verdict rested on: every covering test at the time,
+/// all of which passed. See the module docs (Survivor deltas).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurvivorBasis {
+    /// Run-shape prefix of the scope (runner, interpreter, timeout, ...). A
+    /// different prefix means a different run shape: no delta.
+    pub prefix: String,
+    /// Covering node ids.
+    pub tests: BTreeSet<String>,
+    /// Test file → fingerprint of that file, its conftest chain and the shared
+    /// support files.
+    pub files: BTreeMap<String, String>,
+}
+
+impl SurvivorBasis {
+    /// The tests in `self` (the current basis) that `old` didn't vouch for:
+    /// new to the covering set, or in a file whose fingerprint changed.
+    #[must_use]
+    pub fn delta_from(&self, old: &SurvivorBasis) -> Vec<String> {
+        self.tests
+            .iter()
+            .filter(|t| {
+                let file = test_file(t);
+                !old.tests.contains(*t) || old.files.get(file) != self.files.get(file)
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+/// The file part of a pytest node id (`tests/test_a.py::test_x` → `tests/test_a.py`).
+#[must_use]
+pub fn test_file(node_id: &str) -> &str {
+    node_id.split_once("::").map_or(node_id, |(f, _)| f)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct CacheEntry {
     file_hash: String,
@@ -214,6 +260,11 @@ struct CacheEntry {
     /// entry survive edits to other covering tests via [`Cache::lookup_killer`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     killer_scope: Option<String>,
+    /// The covering tests a `Survived`/`Equivalent` verdict rested on, when
+    /// known precisely. Lets a later run re-check only new or changed tests
+    /// via [`Cache::lookup_survivor`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    basis: Option<SurvivorBasis>,
     /// Hex-encoded HMAC-SHA256 over `(mutant_id, file_hash, scope, outcome)`
     /// keyed by `FERMUT_CACHE_KEY`. Present only when the key was set at
     /// insert time. Verified at load time when the key is set; ignored when
@@ -284,6 +335,16 @@ fn compute_mac(key: &[u8], mutant_id: &str, entry: &CacheEntry) -> Result<String
         msg.push(0);
         msg.push(2);
         msg.extend_from_slice(ks.as_bytes());
+    }
+    // And for `basis`: a forged basis would let a run skip tests that kill.
+    if let Some(b) = &entry.basis {
+        msg.push(0);
+        msg.push(3);
+        msg.extend_from_slice(
+            serde_json::to_string(b)
+                .context("serializing survivor basis")?
+                .as_bytes(),
+        );
     }
     Ok(hex::encode(hmac_sha256(key, &msg)?))
 }
@@ -427,6 +488,28 @@ impl Cache {
         (current == stored).then(|| (entry.outcome.clone(), killer.to_string()))
     }
 
+    /// Survivor-delta fallback for a [`lookup_entry`](Self::lookup_entry) miss:
+    /// the cached outcome, its `equiv_checked` flag and its basis, when the
+    /// entry is a `Survived`/`Equivalent` verdict with a basis and the source
+    /// hash still matches. The caller compares bases and runs the delta.
+    pub fn lookup_survivor(
+        &self,
+        mutant_id: &str,
+        file_hash: &str,
+    ) -> Option<(MutantOutcome, bool, SurvivorBasis)> {
+        let entry = self.entries.get(mutant_id)?;
+        if entry.file_hash != file_hash
+            || !matches!(
+                entry.outcome,
+                MutantOutcome::Survived { .. } | MutantOutcome::Equivalent { .. }
+            )
+        {
+            return None;
+        }
+        let basis = entry.basis.clone()?;
+        Some((entry.outcome.clone(), entry.equiv_checked, basis))
+    }
+
     /// Drop `mutant_id`'s entry (an audit found its cached kill didn't
     /// reproduce).
     pub fn remove(&mut self, mutant_id: &str) {
@@ -441,14 +524,16 @@ impl Cache {
         scope: String,
         outcome: MutantOutcome,
     ) {
-        self.insert_checked(mutant_id, file_hash, scope, outcome, false, None);
+        self.insert_checked(mutant_id, file_hash, scope, outcome, false, None, None);
     }
 
     /// Insert with an explicit `equiv_checked` marker and optional killer
     /// scope. `insert` is the `(false, None)` shorthand; the engine calls this
     /// directly so a detector-on outcome is stored pre-classified. A
     /// `killer_scope` is kept only on a `Killed` outcome with a known killer —
-    /// on anything else it is meaningless and dropped.
+    /// on anything else it is meaningless and dropped. Likewise `basis` is kept
+    /// only on a `Survived`/`Equivalent` outcome.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert_checked(
         &mut self,
         mutant_id: String,
@@ -457,6 +542,7 @@ impl Cache {
         outcome: MutantOutcome,
         equiv_checked: bool,
         killer_scope: Option<String>,
+        basis: Option<SurvivorBasis>,
     ) {
         // Only cache deterministic outcomes — never skipped (filter-dependent)
         // and never errored (transient infra issue).
@@ -467,12 +553,19 @@ impl Cache {
             return;
         }
         let killer_scope = killer_scope.filter(|_| outcome.killer().is_some());
+        let basis = basis.filter(|_| {
+            matches!(
+                outcome,
+                MutantOutcome::Survived { .. } | MutantOutcome::Equivalent { .. }
+            )
+        });
         let mut entry = CacheEntry {
             file_hash,
             scope,
             outcome,
             equiv_checked,
             killer_scope,
+            basis,
             mac: None,
         };
         if let Some(key) = self.key.as_deref() {
@@ -861,6 +954,74 @@ mod tests {
         assert_eq!(loaded.deselection("k1"), None, "forged deselection dropped");
     }
 
+    fn basis(tests: &[(&str, &str)]) -> SurvivorBasis {
+        SurvivorBasis {
+            prefix: "p".into(),
+            tests: tests.iter().map(|(t, _)| (*t).to_string()).collect(),
+            files: tests
+                .iter()
+                .map(|(t, fp)| (test_file(t).to_string(), (*fp).to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn delta_is_new_tests_and_tests_in_changed_files() {
+        let old = basis(&[("a.py::x", "1"), ("a.py::y", "1"), ("b.py::z", "1")]);
+        let now = basis(&[("a.py::x", "1"), ("b.py::z", "2"), ("c.py::w", "1")]);
+        // a.py::y was removed: not in the delta.
+        assert_eq!(now.delta_from(&old), vec!["b.py::z", "c.py::w"]);
+        assert!(old.delta_from(&old).is_empty());
+    }
+
+    #[test]
+    fn basis_is_kept_on_survivors_only_and_signed() {
+        let key = b"test-cache-key-with-enough-entropy".to_vec();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("cache.json");
+        let b = basis(&[("a.py::x", "1")]);
+
+        let mut c = keyed_cache(&key);
+        for (id, outcome) in [
+            ("s", MutantOutcome::survived(make_mutant("s"))),
+            ("k", MutantOutcome::killed(make_mutant("k"))),
+            ("t", MutantOutcome::timed_out(make_mutant("t"))),
+        ] {
+            c.insert_checked(
+                id.into(),
+                "h".into(),
+                "sc".into(),
+                outcome,
+                false,
+                None,
+                Some(b.clone()),
+            );
+        }
+        c.save(&path).unwrap();
+        let loaded = Cache::load_with_key(&path, Some(key.clone()));
+        assert_eq!(loaded.lookup_survivor("s", "h").map(|(_, _, b)| b), Some(b));
+        assert!(loaded.lookup_survivor("k", "h").is_none(), "kill: no basis");
+        assert!(
+            loaded.lookup_survivor("t", "h").is_none(),
+            "timeout: no basis"
+        );
+        assert!(
+            loaded.lookup_survivor("s", "other").is_none(),
+            "source changed"
+        );
+
+        // Dropping a test from the basis would skip a test that kills.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let tampered = raw.replace("\"a.py::x\"", "\"a.py::zz\"");
+        assert_ne!(raw, tampered);
+        std::fs::write(&path, tampered).unwrap();
+        let loaded = Cache::load_with_key(&path, Some(key));
+        assert!(
+            loaded.lookup_survivor("s", "h").is_none(),
+            "forged basis dropped"
+        );
+    }
+
     #[test]
     fn tampered_entry_dropped_on_load() {
         let key = b"test-cache-key".to_vec();
@@ -903,6 +1064,7 @@ mod tests {
             MutantOutcome::survived(make_mutant("checked")),
             true,
             None,
+            None,
         );
         c.insert_checked(
             "unchecked".into(),
@@ -910,6 +1072,7 @@ mod tests {
             "scope-x".into(),
             MutantOutcome::survived(make_mutant("unchecked")),
             false,
+            None,
             None,
         );
         c.save(&path).unwrap();
@@ -938,6 +1101,7 @@ mod tests {
             "scope-x".into(),
             MutantOutcome::survived(make_mutant("id-1")),
             true,
+            None,
             None,
         );
         c.save(&path).unwrap();
@@ -972,6 +1136,7 @@ mod tests {
             "scope-x".into(),
             MutantOutcome::survived(make_mutant("id-1")),
             true,
+            None,
             None,
         );
         c.save(&path).unwrap();
@@ -1014,6 +1179,7 @@ mod tests {
             "scope-x".into(),
             MutantOutcome::killed(make_mutant("id-1")),
             false,
+            None,
             None,
         );
         c.save(&path).unwrap();
@@ -1098,6 +1264,7 @@ mod tests {
             killed_by_a("id-1"),
             false,
             Some(killer_scope.into()),
+            None,
         );
     }
 
@@ -1148,6 +1315,7 @@ mod tests {
                 outcome,
                 false,
                 Some("ks".into()),
+                None,
             );
             assert!(c.entries[id].killer_scope.is_none(), "{id}");
             assert!(c.lookup_killer(id, "h", |_| Some("ks".into())).is_none());

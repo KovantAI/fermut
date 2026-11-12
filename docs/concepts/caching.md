@@ -4,27 +4,31 @@ The result cache is what makes iterative use of fermut viable. This
 page explains the model. The CI / agent ergonomics live in
 **[Coding agents → cache strategy](../guides/coding-agents.md#cache-strategy)**.
 
+![How the cache decides: each entry is keyed on the mutant id, the source hash and the scope. An exact match reuses the verdict; otherwise a kill is reused if its killing test is unchanged and still covers the line, with about 5% re-run as an audit; otherwise the mutant runs and its verdict is stored under the new key.](../assets/cache-lookup.svg)
+
 ## What the cache stores
 
 After every successful mutant evaluation, fermut writes one entry to
 `.fermut/cache.json`:
 
 ```
-(mutant.id, ast_hash(source_file), scope) → outcome
+(key, ast_hash(source_file), scope) → outcome
 ```
 
-- [`mutant.id`](glossary.md#mutant-id) is the deterministic
-  identifier for one specific application of one operator to one
-  source location — `<file>@<byte-offset>:<operator>:<original>-><replacement>`
-  (e.g. `src/calculator.py@216:boundary-shift:<=-><`).
+- `key` says which mutant: its file, operator and edit, and where it
+  sits. Inside a top-level `def` or `class` that is the offset from the
+  start of that def (`src/calculator.py::total@41:boundary-shift:<=-><`),
+  so an edit above the def, or inside another function, doesn't move
+  it. At module level it is the
+  [`mutant.id`](glossary.md#mutant-id), whose byte offset is from the
+  start of the file. Reports always show the `mutant.id`.
 - `ast_hash(source_file)` is the **AST-structural** hash of the
   file containing the mutant. Whitespace, comments, and pure
-  formatting changes don't change the AST hash. They *do* move byte
-  offsets, though, and the byte offset is part of `mutant.id`, so any
-  edit that shifts bytes **above** a mutant changes its id and misses
-  (see [Why AST-hash](#why-ast-hash-not-mtime-or-raw-bytes)). With `cache_scope = "scope"`, this
-  narrows to the enclosing top-level def/class instead of the whole
-  file, so sibling-function edits keep cache hits intact (see
+  formatting changes don't change the AST hash (see
+  [Why AST-hash](#why-ast-hash-not-mtime-or-raw-bytes)). With
+  `cache_scope = "scope"`, this narrows to the enclosing top-level
+  def/class instead of the whole file, so editing one function keeps
+  the cached verdicts of its siblings (see
   [`cache_scope`](../reference/configuration.md#schema)).
 - `scope` captures every input that could change the outcome without
   touching the AST: runner kind (with or without schemata: the verdicts
@@ -53,13 +57,14 @@ On the next `run`:
 
 1. For each mutant, fermut computes the current `ast_hash` and the
    current run-shape `scope`.
-2. If `(mutant.id, current_ast_hash, current_scope)` matches a
+2. If `(key, current_ast_hash, current_scope)` matches a
    cached entry, the cached outcome is reused — **no pytest
    invocation**.
 3. If either component mismatches, the entry is ignored and the
-   mutant re-runs; the new outcome overwrites the entry for that id.
-   Entries whose id no longer exists (the mutant moved or vanished)
-   are never pruned — they accumulate until `fermut clean`.
+   mutant re-runs; the new outcome overwrites the entry for that key.
+   Entries whose key no longer exists (the mutant moved within its
+   function, or vanished) are never pruned — they accumulate until
+   `fermut clean`.
 
 Result: editing one function in one file only pays for mutants
 inside that function (under `cache_scope = "scope"`) or that file
@@ -119,8 +124,8 @@ file that also covers the mutant — the kill is still reused as long as:
 
 Editing the killing test's file (or its conftest chain, or a support
 file) re-runs the mutant. `survived` and `timed_out` verdicts never take
-this path: a survivor depends on *every* covering test, so any of them
-changing re-runs it.
+this path: a survivor depends on *every* covering test (see the next
+section for how it is re-checked).
 
 Trusting a killer hit skips the run entirely, so each run **audits** a
 random sample: `ceil(5%)` of the killer hits (at least one) are
@@ -134,10 +139,51 @@ hits, audits (and drops), and misses.
 
 | Change                                         | killed (killer known) | survived / timed_out |
 |------------------------------------------------|-----------------------|----------------------|
-| Edit another covering test file                | **kept**              | invalidated          |
-| Edit the killing test's file                   | invalidated           | invalidated          |
-| `conftest.py` above the killing test           | invalidated           | invalidated          |
-| Coverage no longer lists the killing test      | invalidated           | invalidated          |
+| Edit another covering test file                | **kept**              | see below            |
+| Edit the killing test's file                   | invalidated           | see below            |
+| `conftest.py` above the killing test           | invalidated           | see below            |
+| Coverage no longer lists the killing test      | invalidated           | see below            |
+
+### Survived verdicts: only new or changed tests run
+
+A `survived` verdict means every covering test passed. When fermut
+knows those tests (pytest/rstest with coverage contexts, every covering
+file inside the tests tree), the entry also stores them with a
+fingerprint of each one's file, its `conftest.py` chain and the shared
+support files. If the full key misses because the covering tests
+changed, the mutant runs against **only** the covering tests that are
+new, or whose file changed, as long as the source hash and the run
+settings are unchanged:
+
+- an unchanged test passed before and still passes;
+- a test that no longer covers the mutant can't kill it, so if tests
+  were only removed, the survivor is reused without running anything;
+- a new or edited test is the only thing that can kill it now.
+
+This is the inner loop's common case: you add a test for a survivor and
+re-run, and fermut runs that test, not the whole covering set again.
+A support-file edit changes every file's fingerprint, so every covering
+test runs, as before. An `equivalent` verdict takes the same path.
+
+`timed_out` verdicts don't: editing the test that hung can turn a
+timeout into a survivor, so they re-run fully.
+
+The new tests run without the old ones before them, so a test that only
+fails after another one changed shared state is missed. A sample is
+**audited**, at the same `--cache-audit-rate` as killer hits (and always
+the first one in a run): it also runs against every covering test, and
+that verdict is the one reported. When the two disagree fermut warns,
+naming the mutant and the new tests. The end-of-run `cache:` line
+counts survivor deltas, how many tests they ran out of how many the full
+covering sets hold, and the audits.
+
+| Change                                         | survived (tests known)        | timed_out   |
+|------------------------------------------------|-------------------------------|-------------|
+| New test covering the mutant's line            | runs that test only           | invalidated |
+| Edit a covering test file                      | runs that file's tests only   | invalidated |
+| `conftest.py` above a covering test            | runs the tests below it only  | invalidated |
+| Non-test file under the tests tree             | runs every covering test      | invalidated |
+| A test stops covering the line (or is deleted) | **kept**, nothing runs        | invalidated |
 
 Every `conftest.py` above the tests root (say a repo-root one with
 `tests/` as the tests root) loads for every test, so both modes fold it
@@ -189,15 +235,16 @@ AST being identical.
 
 The structural AST hash makes cache hits identical across:
 
-- Whitespace or comment edits *below* a mutant — same AST, same byte
-  offset → hit.
+- Whitespace or comment edits outside a mutant's function, above or
+  below it — same AST, same key → hit.
 - Agent run #1 → agent run #2 on the same commit.
 - Cache restored from `actions/cache` in a fresh GHA runner.
 
-It does **not** survive edits that shift bytes above a mutant —
-including a reformat or a comment added near the top of a file. The
-mutant id embeds the byte offset, so every mutant below the edit gets
-a new id and re-runs (the old entries stay in the file as orphans).
+It does **not** survive a reformat or comment edit *inside* the
+mutant's own function above the mutant: that moves its offset within
+the function, so the key changes and it re-runs (the old entry stays in
+the file as an orphan). Module-level mutants are keyed from the start of
+the file, so any edit above them does the same.
 
 The cost is one parse + hash per source file per run. On a typical
 project this is in single-digit milliseconds.

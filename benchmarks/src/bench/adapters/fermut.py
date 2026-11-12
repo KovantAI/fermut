@@ -136,7 +136,13 @@ class FermutAdapter(Adapter):
         self._ensure_coverage(repo, worktree)
 
     def run(
-        self, repo: RepoCfg, worktree: Path, *, timeout: int | None = None
+        self,
+        repo: RepoCfg,
+        worktree: Path,
+        *,
+        timeout: int | None = None,
+        extra_args: tuple[str, ...] = (),
+        report_name: str = "report.json",
     ) -> RunResult:
         self._write_fermut_toml(repo, worktree)
         # fermut's --json writer does not create parent dirs; the cache lives
@@ -154,7 +160,8 @@ class FermutAdapter(Adapter):
             # Survivor report consumed by the score_3pct scenario's
             # _survivor_dump (reads .fermut/report.json).
             "--json",
-            ".fermut/report.json",
+            f".fermut/{report_name}",
+            *extra_args,
         ]
         if coverage is not None:
             # Absolute path: fermut resolves coverage keys against the detected
@@ -169,7 +176,7 @@ class FermutAdapter(Adapter):
         # Score and mutant count come from the report, never from stdout: a run
         # that aborts (red baseline) prints pytest's `[  7%]` progress after
         # "mutation score", which the regex once scraped as a score of 7.0.
-        report = worktree / ".fermut/report.json"
+        report = worktree / ".fermut" / report_name
         report.unlink(missing_ok=True)
         result = self._exec(argv, cwd=worktree, timeout=timeout)
         try:

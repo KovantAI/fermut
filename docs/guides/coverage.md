@@ -63,23 +63,30 @@ auto-discovery and config.
 Stale coverage narrows each mutant's test set from outdated data —
 mutants on lines you edited (or tests you added) after the coverage was
 recorded get wrongly skipped, producing false survivors or a vacuous
-100%. fermut guards against this by comparing the coverage file's mtime
-against every `.py` under your source root and tests directory:
+100%. fermut guards against this before every run. When `fermut coverage`
+wrote the file, it compares **content** against the hashes in its
+`.coverage.fermut-fingerprints.json` sidecar, so a `git checkout` that
+restores identical bytes isn't a change. Otherwise (a bare pytest-cov
+`.coverage`) it compares the file's mtime against every `.py` under your
+source root and tests directory.
 
-- **Auto-discovered `.coverage` that is stale is ignored.** Since you
-  didn't opt into it, fermut declines to narrow test sets with data it
-  can't trust and runs *without* coverage selection (correct, just
-  slower), logging a warning with the refresh command. This is the
-  vacuous-100%-prevention path.
+- **Auto-discovered `.coverage` written by `fermut coverage` is refreshed.**
+  `fermut run` re-runs only the test files the change invalidated, then
+  uses it (on pyjwt, one edited function: 9 test files, a few seconds,
+  instead of a 311 s run without selection).
+- **Any other stale auto-discovered `.coverage` is ignored**, and so is one
+  whose refresh failed. Since you didn't opt into it, fermut declines to
+  narrow test sets with data it can't trust and runs *without* coverage
+  selection (correct, just slower). It logs a warning with the refresh
+  command and repeats it under the summary line.
 - **An explicitly wired coverage file (`--coverage` or `coverage = "…"`)
   that is stale is still used, with a warning.** You named the file, so
-  fermut obeys — but flags that survivors on changed lines may be false
-  and tells you to regenerate.
+  fermut obeys, but flags that survivors on changed lines may be false
+  and tells you to regenerate. It is never refreshed for you.
 
-Either way, refresh with `pytest --cov=src --cov-context=test` (or
-`fermut coverage`, which does it incrementally) before trusting results.
-The check is mtime-based and permissive: if timestamps can't be read it
-never blocks a run.
+Refresh by hand with `fermut coverage` (incremental) or
+`pytest --cov=src --cov-context=test`. The mtime check is permissive: if
+timestamps can't be read it never blocks a run.
 
 ## Reading `.coverage` directly vs `coverage.json`
 
@@ -286,9 +293,10 @@ authoritative baseline on `main` that every PR restores read-only
 
 ## Pitfalls
 
-- **Not enough contexts.** Some pytest plugins (e.g. `pytest-xdist`
-  with `-n auto`) can break context attribution. Run coverage
-  single-process at least once on each branch.
+- **Not enough contexts.** `pytest-xdist` (`-n auto`) breaks per-test
+  contexts. `fermut coverage` passes `-n0` when xdist is installed; if
+  you build coverage with your own `pytest --cov` command, add `-n0`
+  yourself.
 - **Coverage of integration tests.** If your tests hit `src/` only
   via a network call (FastAPI test client, etc.), the per-test
   context will see the right lines — but only if coverage is

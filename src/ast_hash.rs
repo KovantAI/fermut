@@ -85,8 +85,68 @@ pub struct FileAnalysis {
     /// requested" *or* "parse/utf-8 failed"; the caller distinguishes via its
     /// own `want_scope` flag to decide whether to warn.
     pub scope_map: Option<ScopeMap>,
+    /// Top-level def/class positions, for position-stable cache keys. `Some`
+    /// whenever the file parsed; cheap (names and ranges, no hashing).
+    pub anchors: Option<Anchors>,
     /// Decoded source, `Some` only when `want_source` and the file is utf-8.
     pub source: Option<String>,
+}
+
+/// The top-level `def`s and `class`es of a file, by name and source range.
+///
+/// Lets the cache key a mutant by *where it sits in its function* instead of
+/// by absolute byte offset: a line added in one function, or a comment above
+/// it, moves every mutant below in the file, but not their position within
+/// their own top-level def.
+#[derive(Debug, Clone, Default)]
+pub struct Anchors(Vec<Anchor>);
+
+#[derive(Debug, Clone)]
+struct Anchor {
+    range: TextRange,
+    /// `name` for the first top-level def/class of that name, `name#2` for
+    /// the second (a conditional redefinition), and so on.
+    label: String,
+}
+
+impl Anchors {
+    fn from_module(module: &ast::ModModule) -> Self {
+        let mut seen: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+        let mut out = Vec::new();
+        for stmt in &module.body {
+            let name = match stmt {
+                Stmt::FunctionDef(f) => f.name.as_str(),
+                Stmt::ClassDef(c) => c.name.as_str(),
+                _ => continue,
+            };
+            let n = seen.entry(name).or_insert(0);
+            *n += 1;
+            let label = if *n == 1 {
+                name.to_string()
+            } else {
+                format!("{name}#{n}")
+            };
+            out.push(Anchor {
+                range: stmt.range(),
+                label,
+            });
+        }
+        Self(out)
+    }
+
+    /// The label of the top-level def/class containing `range`, and `range`'s
+    /// start offset from that def's start. `None` at module level.
+    pub fn locate(&self, range: TextRange) -> Option<(&str, u32)> {
+        self.0
+            .iter()
+            .find(|a| a.range.start() <= range.start() && range.end() <= a.range.end())
+            .map(|a| (a.label.as_str(), u32::from(range.start() - a.range.start())))
+    }
+}
+
+#[cfg(test)]
+pub fn compute_anchors(source: &str) -> Option<Anchors> {
+    Some(Anchors::from_module(parse_module(source).ok()?.syntax()))
 }
 
 /// Read `path` once, parse it at most once, and derive the requested
@@ -107,6 +167,7 @@ pub fn analyze_file(path: &Path, want_scope: bool, want_source: bool) -> Result<
     } else {
         None
     };
+    let anchors = parsed.as_ref().map(|p| Anchors::from_module(p.syntax()));
     let source = if want_source {
         source.map(str::to_owned)
     } else {
@@ -115,6 +176,7 @@ pub fn analyze_file(path: &Path, want_scope: bool, want_source: bool) -> Result<
     Ok(FileAnalysis {
         ast_hash,
         scope_map,
+        anchors,
         source,
     })
 }
@@ -641,5 +703,40 @@ mod tests {
         let a = "x = \"1..2\"\n";
         let b = "x = \"100..200\"\n";
         assert_ne!(h(a), h(b));
+    }
+
+    #[test]
+    fn anchors_locate_by_top_level_def_and_relative_offset() {
+        let src = "import os\n\ndef f():\n    return 1\n\nclass C:\n    def m(self):\n        return 2\n\ndef f():\n    return 3\n";
+        let a = compute_anchors(src).unwrap();
+        let at = |needle: &str| {
+            let start = src.find(needle).unwrap() as u32;
+            a.locate(TextRange::new(start.into(), (start + 1).into()))
+        };
+        // Methods belong to their top-level class.
+        let class_start = src.find("class C").unwrap() as u32;
+        assert_eq!(
+            at("2"),
+            Some(("C", src.find('2').unwrap() as u32 - class_start))
+        );
+        // A redefinition gets its own label, so the two `f`s never share keys.
+        assert_eq!(at("1").map(|(l, _)| l), Some("f"));
+        assert_eq!(at("3").map(|(l, _)| l), Some("f#2"));
+        // Module level: no anchor.
+        assert_eq!(at("os"), None);
+    }
+
+    #[test]
+    fn anchor_offsets_ignore_edits_above_the_def() {
+        let body = "def g(x):\n    return x >= 18\n";
+        let a = compute_anchors(body).unwrap();
+        let b_src = format!("# comment\ndef f():\n    pass\n\n{body}");
+        let b = compute_anchors(&b_src).unwrap();
+        let in_a = body.find(">=").unwrap() as u32;
+        let in_b = b_src.find(">=").unwrap() as u32;
+        assert_eq!(
+            a.locate(TextRange::new(in_a.into(), (in_a + 2).into())),
+            b.locate(TextRange::new(in_b.into(), (in_b + 2).into())),
+        );
     }
 }

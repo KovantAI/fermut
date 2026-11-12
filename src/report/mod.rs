@@ -214,6 +214,22 @@ impl MutantOutcome {
         }
     }
 
+    /// The same verdict, about `m`: a cached outcome carries the mutant as it
+    /// was when the verdict was recorded (line, range, id), which an edit
+    /// above it can since have moved. Everything else is kept.
+    #[must_use]
+    pub fn rebind(mut self, m: Arc<Mutant>) -> Self {
+        match &mut self {
+            Self::Killed { mutant, .. }
+            | Self::Survived { mutant, .. }
+            | Self::TimedOut { mutant, .. }
+            | Self::Skipped { mutant, .. }
+            | Self::Error { mutant, .. }
+            | Self::Equivalent { mutant, .. } => *mutant = m,
+        }
+        self
+    }
+
     pub fn mutant(&self) -> &Mutant {
         match self {
             Self::Killed { mutant, .. }

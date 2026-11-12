@@ -9,6 +9,11 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Added
+- `unittest_top_level` and `unittest_cwd` config keys for the `unittest`
+  runner: `-t` for a tests package with relative imports, and the working
+  directory for tests that open files relative to it. Both apply to every
+  run, the zero-test check and `--schemata`. A baseline that fails on a
+  relative import now says to set `unittest_top_level`.
 - `--schemata` works with `--runner rstest` (opt-in; the default stays off
   for rstest). The template runs on rstest's vendored pytest.
 - `--schemata` works with `--runner unittest` (opt-in; the default stays off

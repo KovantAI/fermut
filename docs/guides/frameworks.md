@@ -8,6 +8,7 @@ what we ran to find out, and the settings to use.
 | Framework / plugin | Verdict | Use |
 |---|---|---|
 | [Django / pytest-django](#django) | Works, both modes | Nothing for migrations (skipped by default); macOS + Postgres: `PGGSSENCMODE=disable` |
+| [Flask (app factory)](#flask) | Works, both modes | Nothing; dirs the app creates on every start are fine |
 | [FastAPI / Starlette `TestClient`, anyio](#fastapi) | Works, both modes | Fix order-dependent tests, or `--no-smart-order` with `--no-schemata` |
 | [pytest-asyncio](#pytest-asyncio) | Forks work | Prefer `tmp_path` for files tests write ([below](#tests-that-write-into-the-repo)) |
 | [trio](#trio) | Works, both modes | Pass the suite's own plugin flags as usual |
@@ -27,11 +28,14 @@ One representative repo per row, each run with `--schemata` and
 A diff counts only when one run detected a mutant (killed or timed out) and
 the other didn't. MacBook Pro M4 Max, macOS 26, Python 3.13, `--timeout 30`,
 November 2026. The Starlette, trio and markupsafe rows are from a Linux
-container (Ubuntu 24.04, 8 workers).
+container (Ubuntu 24.04, 8 workers). The Flask row ran once per mode with
+the time limit sized from the baseline (`--timeout-factor`), not
+`--timeout 30`.
 
 | Row | Repo | Mutants run | Detection diffs, schemata vs spawn | Wall, schemata / spawn |
 |---|---|---|---|---|
 | Django | healthchecks v5.0.3, `hc/api` | 9341 | 0 | 839 s / 1249 s |
+| Flask | flaskbb v3.0.0, `flaskbb/forum` | 1796 | 9, all slow tests at the time limit (both directions) | 251 s / 325 s |
 | FastAPI | fastapi 0.162.2, 10 % sample | 1125 | 0 apart from order-dependent tests (see below) | 670 s / 561 s |
 | Starlette | starlette (benchmark pin) | 5960 | 0 (Linux, 3 rounds) | 203 s / 469 s |
 | pytest-asyncio | aiofiles @9d1acc1 | 1664 | not measured: spawn runs still differ by 18, all one timing-flaky test | 29 s / 35 s |
@@ -67,6 +71,34 @@ Their full numbers are in the
 
 - **Transactional tests** (`TestCase`, `TransactionTestCase`) ran
   unchanged.
+
+Against mutmut on the same scope, healthchecks' `hc/api` runs ~1.2×
+faster cold and ~14× faster warm; see
+[Benchmarks](../reference/benchmarks.md#application-repos-healthchecks-and-flaskbb).
+
+## Flask (app factory) { #flask }
+
+flaskbb builds a fresh app per test from `create_app`, against SQLite.
+Forked runs work: 1719 of 1796 mutants in `flaskbb/forum` ran from the
+schema, and the survivor audit agreed 45 of 45. The rest ran the normal
+way: class-body mutants outside the schema, and kills by a few tests that
+also fail in a fork with no mutant active (re-checked the normal way). Kills were identical to
+`--no-schemata`; the only differences were 9 slow tests flipping between
+survived and timed out at the time limit, in both directions.
+
+- **Instance and upload dirs.** `create_app` calls
+  `os.makedirs(app.instance_path, exist_ok=True)` and creates the upload
+  dirs on every start. They're gitignored, so fermut's copy of the project
+  starts without them. fermut counts whatever a passing baseline creates as
+  part of the clean tree, so these don't stop forked runs
+  ([below](#tests-that-write-into-the-repo)).
+- **pytest-xdist in `addopts`.** flaskbb sets `--numprocesses auto`; see
+  [xdist](#xdist).
+
+Against mutmut, flaskbb's `forum` ties cold (~260 s each) and runs
+~85× faster warm. mutmut needs `process_isolation = "forkserver"` (and
+`OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES` on macOS) to run flaskbb at all;
+see [Benchmarks](../reference/benchmarks.md#application-repos-healthchecks-and-flaskbb).
 
 ## FastAPI / Starlette `TestClient`, anyio { #fastapi }
 
@@ -202,6 +234,11 @@ puts back files that were moved, deleted, rewritten or added, warning once
 with the paths ([details](../reference/cli/run-isolation.md#tree-writes)).
 On aiofiles, whose `test_rename` moves `tests/resources/test_file1.txt`
 away and back, run-to-run diffs dropped from 128 to 18.
+
+Files and dirs that a **passing** baseline run creates count as part of
+the clean tree, not as leftovers: an app that creates its instance or
+upload dirs on every start (Flask's `create_app`, above) is fine in both
+modes.
 
 Under schemata all forks share one mirror, which can't be put back while
 other forks run. Once a kill leaves it changed, the rest of the mutants

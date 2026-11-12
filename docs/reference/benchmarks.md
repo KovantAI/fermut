@@ -89,18 +89,24 @@ figure.
 
 The four repos above are small libraries. werkzeug 3.1.8 is closer to the
 size a team migrating off a long mutmut nightly runs: 21.5k lines of
-source, 10.2k lines of tests. Same machine, same session (2026-11-10):
-Apple M4 Max (14 cores, 36 GB), Python 3.13.13, pytest 9.2.0, fermut 0.7.0
-(`main` e6579ce448) vs mutmut 3.8.1, clone and install excluded.
+source, 10.2k lines of tests.
 
-| Run                      | fermut                            | mutmut  |
-|--------------------------|-----------------------------------|---------|
-| Cold                     | ~146s (~6s coverage + ~140s run)  | ~155s   |
-| Warm, nothing changed    | **~1.5s**                         | ~12s    |
-| Cold, 4 shards (wall)    | **~56s** (slowest shard + merge)  | —       |
-| Cold, 4 shards (summed)  | ~206s machine time                | —       |
-| Scored mutants           | 7982 (0 errored)                  | 10511   |
-| Score                    | 71.2                              | 68.1    |
+**Setup for this section and the next** (2026-11-12): Apple M4 Max
+(14 cores, 36 GB), Python 3.13.13, pytest 9.2.0, fermut 0.7.0 (`main`
+b9862b8bef) vs mutmut 3.8.1, `benchmarks/corpus.sh`. Clone and install
+are excluded. Each cold run ran twice, in the order mutmut, fermut,
+fermut, mutmut, so neither tool always gets the cooler machine; the two
+runs of every cell agree within ~4%. fermut's cold time includes building
+its per-test coverage data.
+
+| Run                      | fermut                           | mutmut          |
+|--------------------------|----------------------------------|-----------------|
+| Cold (run 1 / run 2)     | ~157s / ~161s (~6s coverage)     | ~163s / ~161s   |
+| Warm, nothing changed    | **~1.5s**                        | ~12s            |
+| Cold, 4 shards (wall)    | **~55s** (slowest shard + merge) | —               |
+| Cold, 4 shards (summed)  | ~202s machine time               | —               |
+| Scored mutants           | 7982 (0 errored)                 | 10511           |
+| Score                    | 71.2                             | 68.0            |
 
 - **Cold is a tie.** On one machine with every core, fermut and mutmut
   take about the same time to do a first full pass.
@@ -129,48 +135,52 @@ mutating them breaks mutmut itself.
 ### Application repos: healthchecks and flaskbb
 
 werkzeug is a library with fast, isolated tests. These two are web apps
-whose tests set up a database and an app for each test, measured the same
-way on the same machine (2026-11-10). Each is **scoped to one package**,
-with the rest of the package excluded from mutation for both tools; the
-whole suite still runs.
+whose tests set up a database and an app for each test. Same setup as
+werkzeug above. Each is **scoped to one package**, with the rest of the
+app excluded from mutation for both tools; the whole suite still runs.
 
 - **healthchecks v5.0.3** (Django, SQLite test DB): `hc/api`, ~4.2k of
   the app's ~17k source lines; 1780 tests (~8s for the whole suite).
 - **flaskbb v3.0.0** (Flask + SQLAlchemy, SQLite): `flaskbb/forum`, ~3.7k
   of ~24k source lines; 809 tests (~45s for the whole suite, one process).
 
-| Run                     | healthchecks fermut       | healthchecks mutmut | flaskbb fermut           | flaskbb mutmut |
-|-------------------------|---------------------------|---------------------|--------------------------|----------------|
-| Cold                    | ~779s (~25s cov + ~754s)  | **~263s**           | ~254s (~54s cov + ~201s) | fails†         |
-| Warm, nothing changed   | **~0.9s**                 | ~11s                | **~0.6s**                | —              |
-| 4 shards, wall / summed | ~244s / ~919s             | —                   | ~105s / ~387s            | —              |
-| Scored                  | 5292 (0 errored)          | 2117 (+465 no tests)| 1796 (0 errored)         | —              |
-| Score                   | 72.7                      | 78.0                | 56.2                     | —              |
+| Run                     | healthchecks fermut     | healthchecks mutmut | flaskbb fermut          | flaskbb mutmut  |
+|-------------------------|-------------------------|---------------------|-------------------------|-----------------|
+| Cold (run 1 / run 2)    | **~215s / ~210s**       | ~259s / ~262s       | ~254s / ~273s           | ~262s / ~267s   |
+| of which coverage       | ~22s                    | —                   | ~51s                    | —               |
+| Warm, nothing changed   | **~0.8s**               | ~11s                | **~0.5s**               | ~40s            |
+| 4 shards, wall / summed | **~75s** / ~282s        | —                   | **~109s** / ~409s       | —               |
+| Scored                  | 5292 (0 errored)        | 2117 (+465 no tests)| 1796 (0 errored)        | 2383            |
+| Score                   | 72.7                    | 78.0                | 56.3                    | 58.5 / 57.5     |
 
-- **healthchecks: mutmut is ~3× faster cold, fermut scores ~2.5× more
-  mutants.** Per scored mutant the two are close (~0.14s vs ~0.12s).
-  Each of fermut's forks re-creates the Django test database, because
-  pytest-django sets it up in the first test, after the fork. That makes
-  it ~2s per mutant per worker, against tens of milliseconds on werkzeug.
+- **Cold: fermut ~1.2× faster on healthchecks, a tie on flaskbb.** The
+  Django test database is built once in the template process before it
+  forks, not again in every mutant's run; flaskbb's app creates its
+  instance and upload dirs on every start, which fermut counts as part of
+  a clean run rather than as a test leaving the tree changed.
 - **Warm re-runs and sharding are where fermut pulls ahead**, as on
-  werkzeug: under a second warm, and a quarter of the cold wall time on
-  four runners.
-- † **mutmut 3.8.1 can't run flaskbb.** Its stats pass succeeds, then
-  its clean-test run errors in collection: `The setup method 'add_url_rule'
-  can no longer be called on the blueprint '_themes'` (flask-themes2's
-  module-level blueprint). The same suite passes under plain pytest. The
-  likely cause is mutmut running pytest again in the same process with
-  Flask's state still live. Not patched: that would benchmark a modified
-  flaskbb.
+  werkzeug: under a second warm against 11–40s, and 30–43% of the cold
+  wall time on four runners.
+- **mutmut's flaskbb score moves by about a point between runs** (58.5,
+  57.5); fermut's was the same in every run on all three repos.
+- **mutmut needs two settings to run flaskbb.** With its default
+  `process_isolation = "fork"`, the stats pass and the clean test share
+  one process, and the second pytest run fails collection on
+  flask-themes2's module-level blueprint (`The setup method 'add_url_rule'
+  can no longer be called on the blueprint '_themes'`). With
+  `"forkserver"` each runs in a fresh child; on macOS that child then hits
+  the Objective-C fork-safety check (`+[NSNumber initialize] may have been
+  in progress in another thread when fork() was called`) unless
+  `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES` is set. Both are mutmut
+  settings a user would set, not changes to flaskbb.
 
 Fixture notes (`benchmarks/configs/repos.toml`): healthchecks runs under
 pytest-django with a `bench_settings.py` that re-applies its test-only
 settings (upstream gates them on `manage.py test`), plus a `pytest.ini`
-that is also its project-root marker. mutmut also copies `CHANGELOG.md` and
-`search.db`, which the settings and search view read. flaskbb replaces
-its xdist `addopts`, and deselects `test_flaskbbdomain_translations` for
-both tools: it needs the compiled `*.mo` files, which `.gitignore` lists
-and fermut's mirror therefore drops.
+that is also its project-root marker. mutmut also copies `CHANGELOG.md`
+and `search.db`, which the settings and search view read. flaskbb replaces
+its xdist `addopts` so coverage runs in one process. Migrations are
+excluded for both tools (fermut skips them by default).
 
 ### Full fermut sweep (coverage-on cold)
 
@@ -393,6 +403,11 @@ cd benchmarks
 # One scenario, one tool, one repo.
 ./scripts/run_cold.sh fermut more-itertools
 ./scripts/run_cold.sh mutmut more-itertools
+
+# The werkzeug + app-repo comparison (~1.5 h): cold runs twice per tool,
+# alternating mutmut/fermut, then warm and 4 shards. Run it on a quiet
+# machine; swap or other heavy processes skew every later cell.
+./corpus.sh
 
 # Everything (hours — cold first so warm/loop/score have fixtures).
 ./scripts/run_all.sh

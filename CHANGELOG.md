@@ -9,6 +9,11 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Added
+- `unittest_top_level` and `unittest_cwd` config keys for the `unittest`
+  runner: `-t` for a tests package with relative imports, and the working
+  directory for tests that open files relative to it. Both apply to every
+  run, the zero-test check and `--schemata`. A baseline that fails on a
+  relative import now says to set `unittest_top_level`.
 - `--schemata` works with `--runner rstest` (opt-in; the default stays off
   for rstest). The template runs on rstest's vendored pytest.
 - `--schemata` works with `--runner unittest` (opt-in; the default stays off
@@ -38,8 +43,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   old `file` default missed. Import-time code (imports, module constants,
   decorators) re-runs everything. Without coverage it acts as `file`. The
   first run after upgrading misses the whole cache.
+- Cached kills and survivors are keyed on individual tests, not whole test
+  files: adding or editing a test keeps every verdict that other tests in
+  the same file (or `Test*` class) produced. A test still counts its file's
+  imports, constants, fixtures and helpers, and a method its class's header
+  and non-test methods. A file that doesn't parse counts as a whole.
 - A cached survivor whose covering tests changed re-runs only the tests
-  that are new or in a changed file, not every covering test: adding a
+  that are new or changed, not every covering test: adding a
   test for a survivor re-runs that test. The others passed before and
   are unchanged. A sample is also run against every covering test, at
   the `--cache-audit-rate`, and fermut warns when the two disagree.
@@ -167,6 +177,14 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [0.7.0] - 2026-11-04
 
 ### Added
+- Monorepo aggregation: `fermut merge DIR=REPORT ...` pools several
+  projects into one report with a scored-weighted score, repo-relative mutant
+  paths and a per-project breakdown (`projects` in JSON and history, a table
+  in Markdown/HTML). Each project keeps its own `config_hash`;
+  `fermut trend --project DIR` / `--by project` show one or all projects, and
+  `--fail-on-regression` also gates each project. A project that scored
+  nothing fails the merge. Actions: `sweep` takes `project`, `merge`/`trend`
+  take `projects`.
 - **Per-mutant memory cap on Linux, macOS and Windows** (`--max-memory`, on by default). A
   runaway mutant (an endless append) used to grow until its timeout — 4–8 GB
   per process, 10–18 GB per run on markupsafe, more-itertools and trio. Each

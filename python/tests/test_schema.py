@@ -966,7 +966,7 @@ UNITTEST_PROJECT = {
 
 @pytest.fixture
 def served_unittest(tmp_path):
-    def start(extra=None):
+    def start(extra=None, top_cwd=None):
         for rel, text in {**UNITTEST_PROJECT, **(extra or {})}.items():
             (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
             (tmp_path / rel).write_text(text)
@@ -985,6 +985,7 @@ def served_unittest(tmp_path):
         (tmp_path / "schema.json").write_text(json.dumps(result))
         args = ["serve-unittest", str(tmp_path), str(tmp_path / "schema.json")]
         args += [str(tmp_path / "tests"), "test*.py"]
+        args += [str(tmp_path / p) for p in top_cwd or ()]
         server = Server(tmp_path, tmp_path / "schema.json", args=args)
         servers.append(server)
         return server, {k: v["idx"] for k, v in result["mutants"].items()}
@@ -1036,6 +1037,25 @@ def test_serve_unittest_refuses_a_suite_with_import_errors(served_unittest):
     server, _ = served_unittest({"tests/test_broken.py": "import nope\n"})
     ready = server.recv()
     assert ready == {"ready": False, "error": "1 errors during collection"}, ready
+
+
+def test_serve_unittest_takes_a_top_level_dir_and_cwd(served_unittest):
+    # A tests package using relative imports needs `-t <root>`; a test that
+    # opens a file relative to the cwd needs `cwd`.
+    rel = {
+        "tests/helper.py": "VALUE = 1\n",
+        "tests/data.txt": "ok",
+        "tests/test_rel.py": "import unittest\n\nfrom .helper import VALUE\n\n\n"
+        "class R(unittest.TestCase):\n    def test_rel(self):\n"
+        "        self.assertEqual(VALUE, 1)\n"
+        "        self.assertEqual(open('data.txt').read(), 'ok')\n",
+    }
+    server, _ = served_unittest(rel)
+    assert server.recv()["ready"] is False, "relative import without -t"
+    server, _ = served_unittest(rel, top_cwd=(".", "tests"))
+    assert server.recv()["ready"] is True
+    assert server.run(0, ["tests.test_rel.R.test_rel"])["exit"] == 0
+    server.close()
 
 
 DJANGO_PROJECT = {

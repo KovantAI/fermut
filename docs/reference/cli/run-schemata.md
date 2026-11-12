@@ -113,7 +113,12 @@ silent normal run. It needs:
   `unittest discover` once, and each fork runs the whole suite, stopping at
   the first failure, as `python -m unittest discover -f` does. unittest
   never narrows to covering tests, so a survivor still runs every test: the
-  fork saves the interpreter start, imports and discovery only;
+  fork saves the interpreter start, imports and discovery only. That's why
+  it stays off by default: on every open-source unittest suite measured
+  (markdown, simplejson, idna, more-itertools, tomli, tornado, Biopython),
+  those take 0.3 s or less, and runs with and without schemata take the same
+  time. Turn it on if your test modules import something heavy at load time;
+  verdicts match either way;
 - **Unix** (it forks; on Windows every mutant runs the normal way);
 - a project interpreter of **Python 3.10 or newer**. Use `--python` /
   `python` when pytest runs under an interpreter other than the one behind

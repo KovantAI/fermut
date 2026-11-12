@@ -38,6 +38,24 @@ impl Report {
             c.errored,
             c.score_label()
         ));
+        if !self.projects.is_empty() {
+            body.push_str(
+                "<table class='projects'><tr><th>project</th><th>score</th>\
+                 <th>scored</th><th>survived</th><th>errored</th></tr>",
+            );
+            for p in &self.projects {
+                let c = &p.counts;
+                body.push_str(&format!(
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                    html_escape(&p.dir),
+                    c.score_label(),
+                    c.scored(),
+                    c.survived,
+                    c.errored
+                ));
+            }
+            body.push_str("</table>");
+        }
 
         for (file, outcomes) in &by_file {
             let killed = outcomes
@@ -137,6 +155,9 @@ h1 { margin: 0 0 .5em; }
 .summary .x { color: #757575; }
 .summary .e { color: #6a1b9a; }
 .summary .score { float: right; }
+.projects { border-collapse: collapse; margin-bottom: 1.5em; }
+.projects th, .projects td { padding: .2em .8em; text-align: right; }
+.projects th:first-child, .projects td:first-child { text-align: left; }
 details { margin-bottom: .8em; }
 summary { cursor: pointer; padding: .4em 0; }
 .mutants { list-style: none; padding: 0 0 0 1em; margin: 0; }
@@ -287,5 +308,29 @@ mod tests {
         assert!(h.contains("<details class='diff'>"));
         assert!(h.contains("-x = 1 + 2"));
         assert!(h.contains("+x = 1 - 2"));
+    }
+
+    #[test]
+    fn html_lists_projects_escaped_only_when_aggregated() {
+        let mut r = Report::new(vec![]);
+        assert!(!read(&r).contains("<table class='projects'>"));
+        r.projects = vec![crate::report::ProjectSummary {
+            dir: "pkg/<a>".into(),
+            config_hash: None,
+            counts: crate::report::Counts {
+                killed: 3,
+                survived: 1,
+                errored: 2,
+                ..Default::default()
+            },
+        }];
+        let h = read(&r);
+        assert!(h.contains("<table class='projects'>"));
+        assert!(
+            h.contains(
+                "<tr><td>pkg/&lt;a&gt;</td><td>75.0%</td><td>4</td><td>1</td><td>2</td></tr>"
+            ),
+            "{h}"
+        );
     }
 }

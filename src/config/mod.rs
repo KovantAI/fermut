@@ -120,6 +120,11 @@ pub struct Config {
     /// rather than silently reporting every mutant as surviving. Ignored by the
     /// pytest/rstest runners. `None` = the unittest default `test*.py`.
     pub unittest_pattern: Option<String>,
+    /// `unittest discover -t`, absolute. `None` = the tests dir. Unittest only.
+    pub unittest_top_level: Option<PathBuf>,
+    /// Working directory of the unittest runner, absolute. `None` = the
+    /// project root. Unittest only.
+    pub unittest_cwd: Option<PathBuf>,
     pub isolation: IsolationMode,
     /// Run the equivalent-mutant detector on `Survived` outcomes. Provably-
     /// equivalent mutants are remapped to `Equivalent` and excluded from the

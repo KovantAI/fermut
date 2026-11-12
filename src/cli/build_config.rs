@@ -576,6 +576,11 @@ pub(crate) fn build_config(
         runner,
         python,
         unittest_pattern: file.unittest_pattern.clone(),
+        unittest_top_level: file
+            .unittest_top_level
+            .clone()
+            .map(|p| loaded.resolve_path(p)),
+        unittest_cwd: file.unittest_cwd.clone().map(|p| loaded.resolve_path(p)),
         isolation,
         equiv_detect,
         cache_scope,

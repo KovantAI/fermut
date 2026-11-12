@@ -232,15 +232,59 @@ upload.
 | `limit` | `20` | Trend rows in the job summary |
 
 `trend` also takes `working-directory`, `artifact-name`, `blocking` and
-`fermut-version`. It outputs `score`, `scored`, `killed`, `survived`,
+`fermut-version`, and `projects` (see [Monorepo](#monorepo)). It outputs `score`, `scored`, `killed`, `survived`,
 `errored` and `report-json` (no `report-markdown`), plus `delta`
 (points vs the previous comparable run, empty when there is
 none), `recorded`, and `history` (the history file path).
 
+## Monorepo
+
+To pool several projects into one score, trend and PR comment, add a
+`project` axis to the sweep matrix and list the same dirs in `merge` (or
+`trend`) as `projects`:
+
+```yaml
+jobs:
+  sweep:
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [packages/auth, packages/billing]
+        shard: [1, 2]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<sha>
+      - uses: KovantAI/fermut/sweep@v0.7.0
+        with:
+          project: ${{ matrix.project }}
+          shard: ${{ matrix.shard }}/2
+  merge:
+    needs: sweep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: KovantAI/fermut/merge@v0.7.0
+        with:
+          fail-under: "70"
+          projects: |
+            packages/auth
+            packages/billing
+```
+
+`project` replaces `working-directory` and names the artifact
+`<artifact-name>-proj-<dir with / as -->[-shard-<i>-of-<n>]`. A project
+run never gates, sharded or not. `projects` downloads those artifacts and
+runs [`fermut merge DIR=REPORT`](../reference/cli/merge.md#projects-dirreport).
+It fails when a listed project has no report, or a report belongs to no
+listed project. The gate and outputs use the pooled score; the Markdown
+report adds a per-project table. With `trend`, the regression gate also
+checks every project on its own `config_hash`. Each project keeps its own
+coverage cache key. Projects can't share the PR-gate action's `warm-only`
+coverage DB.
+
 ## Inputs
 
 Inputs shared by `KovantAI/fermut` and `sweep` (`merge` takes only
-`fail-under`, `blocking`, `artifact-name` and `fermut-version`):
+`fail-under`, `blocking`, `artifact-name`, `projects` and `fermut-version`):
 
 | Input | Default | Purpose |
 |---|---|---|
@@ -258,7 +302,7 @@ Inputs shared by `KovantAI/fermut` and `sweep` (`merge` takes only
 | `args` | — | Extra `fermut run` flags, e.g. `--ops arith-op-swap,compare-op-swap` |
 
 PR gate only: `base-ref` (default `origin/<PR base>`), `comment`
-(default `true`), `github-token`, `warm-only`. Sweep only: `shard`.
+(default `true`), `github-token`, `warm-only`. Sweep only: `shard`, `project`.
 
 Outputs on the first three: `score` (empty when N/A), `scored`, `killed`,
 `survived`, `errored`, `report-json` and `report-markdown`. The PR gate

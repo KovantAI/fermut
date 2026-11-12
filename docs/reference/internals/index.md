@@ -131,7 +131,9 @@ both built from the same crate root. The module structure:
   go to the wrapped `PytestRunner`. A stable ~5% sample of survivors and
   timeouts is re-run there too (`AUDIT_RATE`), and that verdict is reported.
 - `UnittestRunner` — invokes `<python> -m unittest discover -s
-  <mirrored-tests> -p <unittest_pattern>` (default `test*.py`).
+  <mirrored-tests> -p <unittest_pattern>` (default `test*.py`), plus
+  `-t <unittest_top_level>` and from `unittest_cwd` when set (both mapped
+  into the mirror).
 
 `build(cfg)` returns a `Box<dyn Runner>` based on `cfg.runner`. To add
 a new runner, implement the trait and add a `RunnerKind` variant — the

@@ -130,16 +130,16 @@ A `killed` verdict only depends on the test that killed it. When fermut
 knows that test (pytest/rstest with coverage contexts — the runner reads
 it from pytest's summary, or it's the only selected test), the entry
 also stores a **killer scope**: the killer's node id plus the
-fingerprint of *its* file, its `conftest.py` chain, and the shared
-support files. If the full key misses — say you edited another test
+fingerprint of *that test*, its `conftest.py` chain, and the shared
+support files (see [Test fingerprints](#test-fingerprints)). If the full key misses — say you edited another test
 file that also covers the mutant — the kill is still reused as long as:
 
 - the mutant's source hash is unchanged;
 - the killing test still covers the mutant's line;
 - the killer scope is unchanged.
 
-Editing the killing test's file (or its conftest chain, or a support
-file) re-runs the mutant. `survived` and `timed_out` verdicts never take
+Editing the killing test, a non-test statement in its file (or its
+conftest chain, or a support file) re-runs the mutant. `survived` and `timed_out` verdicts never take
 this path: a survivor depends on *every* covering test (see the next
 section for how it is re-checked).
 
@@ -156,7 +156,9 @@ hits, audits (and drops), and misses.
 | Change                                         | killed (killer known) | survived / timed_out |
 |------------------------------------------------|-----------------------|----------------------|
 | Edit another covering test file                | **kept**              | see below            |
-| Edit the killing test's file                   | invalidated           | see below            |
+| Add or edit another test in the killer's file  | **kept**              | see below            |
+| Edit the killing test                          | invalidated           | see below            |
+| Edit an import/fixture/helper in its file      | invalidated           | see below            |
 | `conftest.py` above the killing test           | invalidated           | see below            |
 | Coverage no longer lists the killing test      | invalidated           | see below            |
 
@@ -165,10 +167,10 @@ hits, audits (and drops), and misses.
 A `survived` verdict means every covering test passed. When fermut
 knows those tests (pytest/rstest with coverage contexts, every covering
 file inside the tests tree), the entry also stores them with a
-fingerprint of each one's file, its `conftest.py` chain and the shared
-support files. If the full key misses because the covering tests
-changed, the mutant runs against **only** the covering tests that are
-new, or whose file changed, as long as the source hash and the run
+fingerprint of each one (see [Test fingerprints](#test-fingerprints)),
+its `conftest.py` chain and the shared support files. If the full key
+misses because the covering tests changed, the mutant runs against
+**only** the covering tests that are new or changed, as long as the source hash and the run
 settings are unchanged:
 
 - an unchanged test passed before and still passes;
@@ -196,10 +198,37 @@ covering sets hold, and the audits.
 | Change                                         | survived (tests known)        | timed_out   |
 |------------------------------------------------|-------------------------------|-------------|
 | New test covering the mutant's line            | runs that test only           | invalidated |
-| Edit a covering test file                      | runs that file's tests only   | invalidated |
+| Edit a covering test                           | runs that test only           | invalidated |
+| Edit an import/fixture/helper in a test file   | runs that file's tests only   | invalidated |
 | `conftest.py` above a covering test            | runs the tests below it only  | invalidated |
 | Non-test file under the tests tree             | runs every covering test      | invalidated |
 | A test stops covering the line (or is deleted) | **kept**, nothing runs        | invalidated |
+
+### Test fingerprints
+
+Killer scopes and survivor bases fingerprint each test on its own, not
+its whole file. A test (a `test*` function, or a `test*` method of a
+`Test*` class) counts:
+
+- its own source, decorators included;
+- every statement in its file that isn't a test: imports, constants
+  (`parametrize` data), fixtures, helpers, `pytestmark`;
+- for a method, its class's header (decorators, bases) and every
+  non-test member (`setup_method`, class attributes, helpers);
+- any other test it names, whole: a base class, a test it calls.
+
+Other tests in the file don't count, so adding a test next to a killer
+keeps its kills. Comments between statements don't count either. An
+inherited method (`class TestB(TestA)` running `TestA.test_m`) counts
+its whole class and the bases it names. A file that doesn't parse, or
+a test that isn't defined there (generated, imported), counts the
+whole file. Names follow pytest's defaults (`test` prefix, `Test`
+classes); tests matched by a custom `python_functions` count as shared
+statements, which only re-runs more.
+
+Not tracked: another test's decorator runs at import, so one that
+changes module state or breaks collection doesn't invalidate. The
+killer audit sample still re-runs kills that don't reproduce.
 
 Every `conftest.py` above the tests root (say a repo-root one with
 `tests/` as the tests root) loads for every test, so both modes fold it

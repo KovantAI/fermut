@@ -209,21 +209,22 @@ pub struct SurvivorBasis {
     pub prefix: String,
     /// Covering node ids.
     pub tests: BTreeSet<String>,
-    /// Test file → fingerprint of that file, its conftest chain and the shared
-    /// support files.
+    /// Test unit ([`test_unit`]) → fingerprint of that test, its conftest
+    /// chain and the shared support files. Older entries key whole files;
+    /// those lookups miss, so every test counts as changed once.
     pub files: BTreeMap<String, String>,
 }
 
 impl SurvivorBasis {
     /// The tests in `self` (the current basis) that `old` didn't vouch for:
-    /// new to the covering set, or in a file whose fingerprint changed.
+    /// new to the covering set, or in a unit whose fingerprint changed.
     #[must_use]
     pub fn delta_from(&self, old: &SurvivorBasis) -> Vec<String> {
         self.tests
             .iter()
             .filter(|t| {
-                let file = test_file(t);
-                !old.tests.contains(*t) || old.files.get(file) != self.files.get(file)
+                let unit = test_unit(t);
+                !old.tests.contains(*t) || old.files.get(unit) != self.files.get(unit)
             })
             .cloned()
             .collect()
@@ -234,6 +235,14 @@ impl SurvivorBasis {
 #[must_use]
 pub fn test_file(node_id: &str) -> &str {
     node_id.split_once("::").map_or(node_id, |(f, _)| f)
+}
+
+/// A pytest node id without its parameters, the unit a test is fingerprinted
+/// by: `tests/t.py::TestA::test_m[1]` → `tests/t.py::TestA::test_m`.
+/// Parametrized cases share their function's source.
+#[must_use]
+pub fn test_unit(node_id: &str) -> &str {
+    node_id.find('[').map_or(node_id, |at| &node_id[..at])
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -960,13 +969,21 @@ mod tests {
             tests: tests.iter().map(|(t, _)| (*t).to_string()).collect(),
             files: tests
                 .iter()
-                .map(|(t, fp)| (test_file(t).to_string(), (*fp).to_string()))
+                .map(|(t, fp)| (test_unit(t).to_string(), (*fp).to_string()))
                 .collect(),
         }
     }
 
     #[test]
-    fn delta_is_new_tests_and_tests_in_changed_files() {
+    fn test_unit_drops_parameters() {
+        assert_eq!(test_unit("t.py::TestA::test_m[1]"), "t.py::TestA::test_m");
+        assert_eq!(test_unit("t.py::test_x[a::b]"), "t.py::test_x");
+        assert_eq!(test_unit("t.py::test_x"), "t.py::test_x");
+        assert_eq!(test_unit("t.py"), "t.py");
+    }
+
+    #[test]
+    fn delta_is_new_tests_and_tests_in_changed_units() {
         let old = basis(&[("a.py::x", "1"), ("a.py::y", "1"), ("b.py::z", "1")]);
         let now = basis(&[("a.py::x", "1"), ("b.py::z", "2"), ("c.py::w", "1")]);
         // a.py::y was removed: not in the delta.

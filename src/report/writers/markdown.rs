@@ -51,6 +51,23 @@ impl Report {
         md.push_str(&format!("| skipped    | {} |\n", c.skipped));
         md.push_str(&format!("| equivalent | {} |\n", c.equivalent));
         md.push_str(&format!("| errored    | {} |\n", c.errored));
+        if !self.projects.is_empty() {
+            md.push_str(
+                "\n| Project | Score | Scored | Survived | Errored |\n\
+                 |---------|------:|-------:|---------:|--------:|\n",
+            );
+            for p in &self.projects {
+                let c = &p.counts;
+                md.push_str(&format!(
+                    "| `{}` | {} | {} | {} | {} |\n",
+                    p.dir.replace('`', "'"),
+                    c.score_label(),
+                    c.scored(),
+                    c.survived,
+                    c.errored
+                ));
+            }
+        }
 
         let survivors: Vec<&MutantOutcome> = self
             .outcomes
@@ -224,6 +241,7 @@ mod tests {
             survivor_ids: None,
             baseline: false,
             partial: false,
+            projects: Vec::new(),
             fermut_version: None,
         }];
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -263,6 +281,7 @@ mod tests {
             survivor_ids: None,
             baseline: false,
             partial: false,
+            projects: Vec::new(),
         }];
         let tmp = tempfile::NamedTempFile::new().unwrap();
         r.write_markdown_with_history(tmp.path(), &prior).unwrap();
@@ -305,6 +324,7 @@ mod tests {
             survivor_ids: None,
             baseline: false,
             partial: true,
+            projects: Vec::new(),
         };
         // Scored (killed>0) so it is NOT scoreless — the skip must be driven by
         // `partial` alone, not the zero-denominator guard.
@@ -342,6 +362,7 @@ mod tests {
             survivor_ids: None,
             baseline: false,
             partial,
+            projects: Vec::new(),
         }
     }
 
@@ -389,6 +410,32 @@ mod tests {
         r.write_markdown_with_history(tmp.path(), &[]).unwrap();
         let written = std::fs::read_to_string(tmp.path()).unwrap();
         assert!(!written.contains("**Trend:**"));
+    }
+
+    #[test]
+    fn write_markdown_lists_projects_worst_first() {
+        let mut r = Report::new(vec![]);
+        let p = |dir: &str, killed, survived| crate::report::ProjectSummary {
+            dir: dir.into(),
+            config_hash: None,
+            counts: crate::report::Counts {
+                killed,
+                survived,
+                ..Default::default()
+            },
+        };
+        r.projects = vec![p("packages/b", 1, 3), p("packages/a", 4, 0)];
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("r.md");
+        r.write_markdown(&path).unwrap();
+        let md = std::fs::read_to_string(&path).unwrap();
+        assert!(md.contains("| `packages/b` | 25.0% | 4 | 3 | 0 |"), "{md}");
+        assert!(md.find("packages/b").unwrap() < md.find("packages/a").unwrap());
+        // Single-project report: no table.
+        Report::new(vec![]).write_markdown(&path).unwrap();
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("| Project"));
     }
 
     #[test]

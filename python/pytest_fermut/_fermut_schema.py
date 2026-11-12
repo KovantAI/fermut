@@ -5,7 +5,7 @@ interpreter; stdlib only (plus pytest, which the pytest runner already needs).
 
     python _fermut_schema.py schematize <mirror_root>   < mutants.json
     python _fermut_schema.py serve <mirror_root> <schema.json> [pytest args...]
-    python _fermut_schema.py serve-unittest <mirror_root> <schema.json> <tests> <pattern>
+    python _fermut_schema.py serve-unittest <mirror_root> <schema.json> <tests> <pattern> [<top> <cwd>]
 
 schematize
     stdin: [{"id", "file", "start", "end", "replacement"}] — file relative to
@@ -591,10 +591,11 @@ class Template:
         self.untrace()
         self.refuse(f"pytest exited {int(rc)} before the test loop")
 
-    def run_unittest(self, tests, pattern):
-        """`python -m unittest discover -s <tests> -p <pattern>`, up to the
-        point where it would start running tests."""
-        os.chdir(self.mirror_root)
+    def run_unittest(self, tests, pattern, top="", cwd=""):
+        """`python -m unittest discover -s <tests> -p <pattern> [-t <top>]`
+        from `cwd` (default: the mirror root), up to the point where it would
+        start running tests."""
+        os.chdir(cwd or self.mirror_root)
         # `python -m` puts the working directory first on sys.path; this
         # script's own directory is there instead.
         sys.path[0] = os.getcwd()
@@ -603,7 +604,7 @@ class Template:
         import unittest
 
         loader = unittest.TestLoader()
-        items = list(flatten(loader.discover(tests, pattern)))
+        items = list(flatten(loader.discover(tests, pattern, top or None)))
         # Import errors (each also a `_FailedTest` item): a cold run would
         # fail the baseline there anyway.
         broken = len(loader.errors)
@@ -1223,7 +1224,7 @@ def main(argv):
         Template(argv[2], argv[3]).run_pytest(argv[4:])
         return 0
     if cmd == "serve-unittest":
-        Template(argv[2], argv[3]).run_unittest(argv[4], argv[5])
+        Template(argv[2], argv[3]).run_unittest(*argv[4:8])
         return 0
     sys.stderr.write(__doc__)
     return 2

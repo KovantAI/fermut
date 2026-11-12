@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Kill-sets and subsumption. A grid shows which of four tests fail on each of six mutants: m1 is killed by t1; m2 by t1 and t2; m3 by t1, t2 and t3; m4 and m5 by t4 only; m6 by none, so it survived. Every test that kills m1 also kills m2 and m3, so m1 subsumes them; m4 and m5 have the same kill-set and form one class. m1 and the m4/m5 class are the dominators: killing those two guarantees all five kills. The plain score is 5 of 6, 83%; the dominator score is 2 of 2 plus 1 survivor, 67%." viewBox="0 0 820 488">
+<style>
+svg { --ink: #1f2427; --muted: #6b7178; --line: #a0a5ab; --box: #f4f5f6; --chip: #ffffff; --accent: #ff523b; --accent-bg: #fff1ef; }
+@media (prefers-color-scheme: dark) {
+  svg { --ink: #e2e4e9; --muted: #9aa0a6; --line: #5c6370; --box: #2a2d36; --chip: #1e2129; --accent: #ff6a55; --accent-bg: #3a2420; }
+}
+text { fill: var(--ink); text-anchor: middle; font-family: Inter, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+.fm-title { font-size: 19px; font-weight: 700; }
+.fm-sub { font-size: 14.5px; }
+.fm-sm.fm-title { font-size: 17px; }
+.fm-sm.fm-sub { font-size: 14px; }
+.fm-label { fill: var(--muted); font-size: 12.5px; font-weight: 600; text-anchor: start; }
+.fm-tag { fill: var(--accent); font-size: 12.5px; font-weight: 600; letter-spacing: 0.5px; }
+.fm-box { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+.fm-hot { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2.5; }
+.fm-loop { fill: var(--box); stroke: var(--accent); stroke-width: 2; stroke-dasharray: 7 5; }
+.fm-chips rect { fill: var(--chip); stroke: var(--accent); }
+.fm-chips text { font-size: 12px; font-weight: 600; }
+.fm-lane { fill: var(--box); stroke: var(--line); stroke-width: 1.5; }
+.fm-lane.fm-hot { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2.5; }
+.fm-row { fill: var(--chip); stroke: var(--line); stroke-width: 1; }
+.fm-row-text { font-size: 13.5px; }
+.fm-note { fill: var(--muted); font-size: 12.5px; }
+.fm-line, .fm-edge { stroke: var(--ink); stroke-width: 2.5; fill: none; }
+.fm-edge { marker-end: url(#fm-arrow); }
+.fm-edge.fm-accent { stroke: var(--accent); marker-end: url(#fm-arrow-accent); }
+.fm-head { fill: var(--ink); }
+.fm-head-accent { fill: var(--accent); }
+.fm-code { font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 15px; }
+.fm-code-accent { fill: var(--accent); font-weight: 700; }
+.fm-left { text-anchor: start; }
+.fm-on { fill: var(--accent); }
+.fm-off { fill: none; stroke: var(--line); stroke-width: 1.5; }
+.fm-grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
+.fm-venn-a { fill: var(--accent-bg); stroke: var(--accent); stroke-width: 2; fill-opacity: 0.6; }
+.fm-venn-b { fill: var(--box); stroke: var(--ink); stroke-width: 2; fill-opacity: 0.6; }
+.fm-row { fill: var(--chip); stroke: var(--line); stroke-width: 1; }
+.fm-note { fill: var(--muted); font-size: 12.5px; }
+</style>
+
+<defs>
+<marker id="fm-arrow" markerWidth="10" markerHeight="10" refX="7" refY="3.5" orient="auto"><path class="fm-head" d="M0 0L7 3.5L0 7"/></marker>
+<marker id="fm-arrow-accent" markerWidth="10" markerHeight="10" refX="7" refY="3.5" orient="auto"><path class="fm-head-accent" d="M0 0L7 3.5L0 7"/></marker>
+</defs>
+<rect class="fm-box" x="20" y="20" width="370" height="350" rx="14"/>
+<text class="fm-title fm-sm" x="205" y="50">Kill-sets: which tests fail</text>
+<text class="fm-label" x="144" y="84">t1</text>
+<text class="fm-label" x="199" y="84">t2</text>
+<text class="fm-label" x="254" y="84">t3</text>
+<text class="fm-label" x="309" y="84">t4</text>
+<text class="fm-code fm-left" x="48" y="117">m1</text>
+<line class="fm-grid" x1="100" y1="112" x2="340" y2="112"/>
+<circle class="fm-on" cx="150" cy="112" r="9"/>
+<circle class="fm-off" cx="205" cy="112" r="5"/>
+<circle class="fm-off" cx="260" cy="112" r="5"/>
+<circle class="fm-off" cx="315" cy="112" r="5"/>
+<text class="fm-code fm-left" x="48" y="157">m2</text>
+<line class="fm-grid" x1="100" y1="152" x2="340" y2="152"/>
+<circle class="fm-on" cx="150" cy="152" r="9"/>
+<circle class="fm-on" cx="205" cy="152" r="9"/>
+<circle class="fm-off" cx="260" cy="152" r="5"/>
+<circle class="fm-off" cx="315" cy="152" r="5"/>
+<text class="fm-code fm-left" x="48" y="197">m3</text>
+<line class="fm-grid" x1="100" y1="192" x2="340" y2="192"/>
+<circle class="fm-on" cx="150" cy="192" r="9"/>
+<circle class="fm-on" cx="205" cy="192" r="9"/>
+<circle class="fm-on" cx="260" cy="192" r="9"/>
+<circle class="fm-off" cx="315" cy="192" r="5"/>
+<text class="fm-code fm-left" x="48" y="237">m4</text>
+<line class="fm-grid" x1="100" y1="232" x2="340" y2="232"/>
+<circle class="fm-off" cx="150" cy="232" r="5"/>
+<circle class="fm-off" cx="205" cy="232" r="5"/>
+<circle class="fm-off" cx="260" cy="232" r="5"/>
+<circle class="fm-on" cx="315" cy="232" r="9"/>
+<text class="fm-code fm-left" x="48" y="277">m5</text>
+<line class="fm-grid" x1="100" y1="272" x2="340" y2="272"/>
+<circle class="fm-off" cx="150" cy="272" r="5"/>
+<circle class="fm-off" cx="205" cy="272" r="5"/>
+<circle class="fm-off" cx="260" cy="272" r="5"/>
+<circle class="fm-on" cx="315" cy="272" r="9"/>
+<text class="fm-code fm-left" x="48" y="317">m6</text>
+<line class="fm-grid" x1="100" y1="312" x2="340" y2="312"/>
+<circle class="fm-off" cx="150" cy="312" r="5"/>
+<circle class="fm-off" cx="205" cy="312" r="5"/>
+<circle class="fm-off" cx="260" cy="312" r="5"/>
+<circle class="fm-off" cx="315" cy="312" r="5"/>
+<text class="fm-note" x="205" y="352">m6 survived: no test fails, no kill-set</text>
+<line class="fm-edge" x1="390" y1="195" x2="426" y2="195"/>
+<rect class="fm-box" x="434" y="20" width="366" height="350" rx="14"/>
+<text class="fm-title fm-sm" x="617" y="50">Subsumption</text>
+<text class="fm-note" x="617" y="72">a → b: every test that kills a also kills b</text>
+<rect class="fm-box fm-hot" x="460" y="96" width="140" height="44" rx="10"/>
+<text class="fm-sub" x="530" y="123">m1 · dominator</text>
+<line class="fm-edge" x1="530" y1="140" x2="530" y2="176"/>
+<rect class="fm-box" x="460" y="184" width="140" height="44" rx="10"/>
+<text class="fm-sub" x="530" y="211">m2</text>
+<line class="fm-edge" x1="530" y1="228" x2="530" y2="264"/>
+<rect class="fm-box" x="460" y="272" width="140" height="44" rx="10"/>
+<text class="fm-sub" x="530" y="299">m3</text>
+<rect class="fm-box fm-hot" x="620" y="96" width="160" height="44" rx="10"/>
+<text class="fm-sub" x="700" y="123">m4 = m5 · dominator</text>
+<text class="fm-note" x="700" y="158">same kill-set: one class</text>
+<rect class="fm-box" x="620" y="272" width="160" height="44" rx="10"/>
+<text class="fm-sub" x="700" y="299">m6 survived</text>
+<text class="fm-note" x="700" y="338">counts as its own class</text>
+<rect class="fm-box fm-loop" x="20" y="392" width="780" height="76" rx="14"/>
+<text class="fm-sub" x="410" y="424">Kill m1 and one of m4/m5, and every other kill follows: 2 of 5 mutants certify them all.</text>
+<text class="fm-sub" x="410" y="450">score 5/6 = 83% · dominator score 2/(2+1) = 67%: each independent fault counts once</text>
+</svg>

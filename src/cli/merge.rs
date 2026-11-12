@@ -260,7 +260,7 @@ fn group_by_project(inputs: &[PathBuf]) -> Result<Option<Groups>> {
         };
         let dir = dir.trim_end_matches('/');
         let p = Path::new(dir);
-        if dir.is_empty() || p.is_absolute() || p.components().any(|c| c == Component::ParentDir) {
+        if dir.is_empty() || p.has_root() || p.components().any(|c| c == Component::ParentDir) {
             bail!("project dir {dir:?} must be a non-empty repo-relative path without `..`");
         }
         match groups.iter_mut().find(|(d, _)| d == dir) {
@@ -307,7 +307,8 @@ fn aggregate(groups: Groups, expect_shards: Option<u32>) -> Result<Report> {
             // Ids start with the file path; swap it so ids match the file.
             let old = m.file.display().to_string();
             m.id = match m.id.strip_prefix(&old) {
-                Some(rest) => format!("{}{rest}", file.display()),
+                // `/` on every OS: ids are compared across platforms.
+                Some(rest) => format!("{}{rest}", file.display().to_string().replace('\\', "/")),
                 None => format!("{dir}/{}", m.id),
             };
             m.file = file;
@@ -338,7 +339,8 @@ fn aggregate(groups: Groups, expect_shards: Option<u32>) -> Result<Report> {
 /// `dir`'s components first appear; a relative path is project-relative.
 /// `None` when an absolute path doesn't contain `dir`.
 fn repo_relative(file: &Path, dir: &str) -> Option<PathBuf> {
-    if file.is_relative() {
+    // `has_root`, not `is_absolute`: `/ci/x.py` has no drive on Windows.
+    if !file.has_root() {
         return Some(Path::new(dir).join(file));
     }
     let parts: Vec<Component> = file.components().collect();

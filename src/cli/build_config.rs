@@ -299,7 +299,10 @@ pub(crate) fn build_config(
                 ));
                 coverage_path = None;
             } else {
-                stale_kept = true;
+                // Test edits leave source line numbers alone, and the
+                // `coverage` cache mode leaves tests to the test fingerprint.
+                let canon = |q: &Path| q.canonicalize().unwrap_or_else(|_| q.to_path_buf());
+                stale_kept = !canon(&newer).starts_with(canon(&tests_dir));
                 warn!(
                     "coverage {} looks stale — it is older than e.g. {} (and possibly \
                      other sources/tests). Survivors on changed lines may be false, and \
@@ -2009,6 +2012,28 @@ mod tests {
         let cfg = out.unwrap();
         assert_eq!(cfg.coverage_path, Some(root.join(".coverage")));
         assert_eq!(cfg.cache_scope, CacheScope::File);
+    }
+
+    #[test]
+    fn coverage_stale_only_by_a_test_edit_keeps_the_coverage_cache_scope() {
+        // Source line numbers still match, and test edits are the test
+        // fingerprint's job: an edited test mustn't re-key every mutant.
+        let (_tmp, root) = sidecar_stale_project(
+            "CREATE TABLE coverage_schema (version integer);
+             CREATE TABLE context (id integer primary key, context text, unique(context));
+             CREATE TABLE file (id integer primary key, path text, unique(path));
+             CREATE TABLE line_bits (file_id integer, context_id integer, numbits blob);
+             INSERT INTO context VALUES (1, 'tests/test_m.py::test|run');
+             INSERT INTO file VALUES (1, 'm.py');
+             INSERT INTO line_bits VALUES (1, 1, x'02');",
+        );
+        std::fs::write(root.join("m.py"), "x = 1\n").unwrap();
+        std::fs::write(root.join("tests/test_m.py"), "def test(): assert 1\n").unwrap();
+        std::fs::write(root.join("fermut.toml"), "coverage = \".coverage\"\n").unwrap();
+        let mut out = None;
+        let log = logged(|| out = Some(call(root.clone(), None).unwrap()));
+        assert!(log.contains("test_m.py"), "{log}");
+        assert_eq!(out.unwrap().cache_scope, CacheScope::Coverage);
     }
 
     #[test]

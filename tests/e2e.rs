@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 
 fn sample_path() -> PathBuf {
@@ -2285,6 +2286,61 @@ fn coverage_output_flag_receives_the_data() {
         .unwrap();
     assert!(extra > 0, "incremental re-run must append into --output");
     assert!(!sample.join(".coverage").exists());
+}
+
+#[test]
+#[ignore = "requires pytest + pytest-cov + coverage on PATH; enable once env is set up"]
+fn coverage_credits_a_line_to_every_test_that_runs_it() {
+    // From Python 3.14 coverage.py defaults to core=sysmon, which keeps only
+    // the first test per line: the tests below, which run `add` after the
+    // sample's own tests, would own no lines and never be selected for its
+    // mutants. `fermut coverage` must pick a
+    // core that records both. (Passes trivially before 3.14; CI runs it on
+    // 3.14 too.)
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    for name in ["one", "two"] {
+        std::fs::write(
+            sample.join(format!("tests/test_shared_{name}.py")),
+            format!(
+                "from src.calculator import add\n\n\ndef test_shared_{name}():\n    \
+                 assert add(2, 3) == 5\n"
+            ),
+        )
+        .unwrap();
+    }
+    let coverage = |core: Option<&str>| {
+        let mut cmd = Command::cargo_bin("fermut").unwrap();
+        cmd.arg("coverage").arg(&sample).arg("--full");
+        match core {
+            Some(c) => cmd.env("COVERAGE_CORE", c),
+            None => cmd.env_remove("COVERAGE_CORE"),
+        };
+        cmd.assert().success()
+    };
+    let owns_lines = |test: &str| -> bool {
+        rusqlite::Connection::open(sample.join(".coverage"))
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM line_bits JOIN context ON context.id = line_bits.context_id \
+                 WHERE context.context LIKE ?1",
+                [format!("%::{test}|run")],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0
+    };
+
+    coverage(None).stderr(contains("COVERAGE_CORE=sysmon").not());
+    for test in ["test_shared_one", "test_shared_two"] {
+        // Each runs `add`, as earlier sample tests do: no lines means only the
+        // first test to run a line was credited with it.
+        assert!(owns_lines(test), "{test} has no lines");
+    }
+
+    // An explicit choice is the user's: kept, and warned about.
+    coverage(Some("sysmon")).stderr(contains("COVERAGE_CORE=sysmon records only the first test"));
 }
 
 #[test]

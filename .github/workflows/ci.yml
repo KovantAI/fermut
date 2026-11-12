@@ -101,6 +101,24 @@ jobs:
       - name: CLI reference covers every flag
         run: scripts/check-cli-docs.sh target/debug/fermut
 
+  e2e-coverage-py314:
+    # Python 3.14 changed coverage.py's default core to sys.monitoring, which
+    # drops per-test contexts; every other job runs 3.12 and can't see that.
+    # Only the coverage e2e tests (names containing `coverage`) run here.
+    name: e2e coverage (Python 3.14)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: e2e
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+      - run: pip install --require-hashes -r .github/requirements/e2e.txt
+      - run: cargo test --all-features --locked --test e2e coverage -- --include-ignored
+
   python-plugin:
     # The pytest plugins shipped in the wheel (python/pytest_fermut): the
     # `pytest --fermut` front-end and the per-run reporter fermut injects into

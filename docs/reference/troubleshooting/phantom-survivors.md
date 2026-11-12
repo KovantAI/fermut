@@ -13,13 +13,18 @@ the file by hand and re-run pytest, the test fails.
   the line. A stale `.coverage` — including one fermut auto-discovered
   at the project root — silently narrows the test set (the same holds
   for a legacy `coverage.json` export). Re-generate.
+- The coverage database was built on Python 3.14 without
+  `COVERAGE_CORE=ctrace`, so each line names only the first test that ran
+  it and the test that would kill the mutant was never selected.
+  `fermut run` usually warns that the coverage "looks incomplete". Re-generate
+  with `fermut coverage`, which sets it.
 
 ## Fix
 
 ```sh
 fermut clean                                              # evict cache
 # pin Hypothesis seed in fermut.toml
-pytest --cov=src --cov-context=test                       # rebuild .coverage
+COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test  # rebuild .coverage
 fermut run src/ --tests tests/                            # auto-discovers .coverage
 ```
 

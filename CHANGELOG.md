@@ -62,7 +62,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   could report false survivors. It now sets `COVERAGE_CORE=ctrace` unless
   you set `COVERAGE_CORE` yourself (an explicit `sysmon` gets a warning).
   Coverage built by an older fermut counts as stale: `fermut coverage` and
-  `fermut run` with auto-discovered coverage rebuild it.
+  `fermut run` with auto-discovered coverage rebuild it. `fermut run` warns
+  when a coverage database looks recorded that way (at least 10 tests, no
+  line credited to two of them), and the suggested pytest-cov commands now
+  set `COVERAGE_CORE=ctrace`.
 - `--schemata` no longer stops forking when the app creates gitignored
   dirs on every start (flaskbb's instance and upload dirs): paths a passing
   baseline adds aren't treated as tests leaving the tree changed. flaskbb:

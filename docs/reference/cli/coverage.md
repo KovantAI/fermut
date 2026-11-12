@@ -29,6 +29,14 @@ rebuild. fermut reads the
 | `--python <path>`    | auto-discover                            | Interpreter or virtualenv to run pytest with (`<python> -m pytest`) — coverage generation with no `pytest` on PATH. Same discovery as [`fermut run`](run.md#python-interpreter). |
 | `--pytest-arg <arg>` | none                                     | Extra argument forwarded to pytest. Repeatable.                                                 |
 
+## Python 3.14
+
+The pytest run gets `COVERAGE_CORE=ctrace` unless you set `COVERAGE_CORE`
+yourself. From Python 3.14, coverage.py's default core (`sysmon`) can't
+record per-test contexts and credits each line to the first test that ran
+it. A `.coverage` built by an older fermut counts as stale, so the next
+`fermut coverage`, or `fermut run` with auto-discovered coverage, rebuilds it.
+
 ## Import-time lines
 
 Lines that run when a module is imported (module-level code, decorators,

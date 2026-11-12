@@ -3,7 +3,7 @@
 //! consult. Auto-detects format, rebases pytest node ids onto `project_root`,
 //! and computes the per-test breadth maps.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -51,7 +51,7 @@ impl CoverageContexts {
                 "coverage file `{}` not found.\n\n\
                  fermut uses per-test coverage to pick which tests to run for each \
                  mutant. Generate it first (needs pytest-cov):\n  \
-                 pytest --cov={src} --cov-context=test\n\n\
+                 COVERAGE_CORE=ctrace pytest --cov={src} --cov-context=test\n\n\
                  That writes coverage.py's `.coverage` SQLite DB, which fermut reads \
                  directly — no `coverage json` export needed (though a \
                  `coverage json --show-contexts` export works too).\n\n\
@@ -309,13 +309,24 @@ impl CoverageContexts {
             }
             return Err(anyhow::anyhow!(
                 "coverage file {} has no per-test contexts. Regenerate it with \
-                 `fermut coverage` (or `pytest --cov=src --cov-context=test`, \
+                 `fermut coverage` (or `COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test`, \
                  which needs pytest-cov). `coverage run --context=LABEL` sets \
                  only a static label and won't produce per-test selectors. \
                  More: {}",
                 path.display(),
                 crate::TROUBLESHOOTING_URL
             ));
+        }
+
+        if one_test_per_line(&map) {
+            warn!(
+                "coverage {} looks incomplete: every line is credited to a single \
+                 test, as coverage.py records it under core=sysmon (its default on \
+                 Python 3.14), which drops per-test contexts. fermut then runs too few \
+                 tests per mutant and can report false survivors. Regenerate it with \
+                 `fermut coverage`, or with COVERAGE_CORE=ctrace set.",
+                path.display()
+            );
         }
 
         Ok(Arc::new(Self::from_map(map, canonical_project)))
@@ -384,6 +395,30 @@ fn widen_import_time(per_line: &mut HashMap<u32, Vec<String>>) {
 /// `|teardown`. Strip it so we get a stable pytest nodeid back. Empty contexts
 /// (the `""` covering import-time execution) are dropped — they don't map to
 /// a test we can run.
+/// Fewest distinct tests before [`one_test_per_line`] judges a DB: a tiny
+/// suite can honestly have no line two tests share.
+const MIN_TESTS_FOR_SHARING_CHECK: usize = 10;
+
+/// Whether `map` looks recorded under coverage.py's `sysmon` core, which keeps
+/// only the first test that ran each line: at least
+/// [`MIN_TESTS_FOR_SHARING_CHECK`] tests, and no line credited to two of them.
+/// Real suites share lines (a helper two tests call), so a DB where none do has
+/// lost contexts. Only test node ids count (`path::name`); import-time
+/// contexts (a bare module path, see `widen_import_time`) are left out.
+pub(super) fn one_test_per_line(map: &HashMap<PathBuf, HashMap<u32, Vec<String>>>) -> bool {
+    let mut tests: HashSet<&str> = HashSet::new();
+    for lines in map.values() {
+        for ids in lines.values() {
+            let mut on_line = ids.iter().filter(|id| id.contains("::"));
+            if on_line.clone().nth(1).is_some() {
+                return false;
+            }
+            tests.extend(on_line.next().map(String::as_str));
+        }
+    }
+    tests.len() >= MIN_TESTS_FOR_SHARING_CHECK
+}
+
 fn clean_test_ids(raw: &[String]) -> Vec<String> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for id in raw {

@@ -9,8 +9,8 @@ explained in depth.
 ## Coverage filter
 
 Filter stage that drops mutants on lines no test executes. Requires a
-per-test-context coverage database — run `pytest --cov=src
---cov-context=test`, which writes coverage.py's native `.coverage`
+per-test-context coverage database — run `fermut coverage` (or
+`COVERAGE_CORE=ctrace pytest --cov=src --cov-context=test`), which writes coverage.py's native `.coverage`
 SQLite DB. fermut reads that DB directly (auto-discovering `.coverage`
 at the project root, or via `--coverage .coverage`), so it knows
 **which** tests reach each line. Without per-test

@@ -282,7 +282,7 @@ pub(crate) fn build_config(
                      (and possibly other sources/tests). Using stale coverage would \
                      wrongly skip mutants on changed lines, so this run proceeds \
                      without coverage selection. Refresh it with \
-                     `pytest --cov={src} --cov-context=test` (or `fermut coverage`).",
+                     `COVERAGE_CORE=ctrace pytest --cov={src} --cov-context=test` (or `fermut coverage`).",
                     p.display(),
                     newer.display(),
                     src = source_root.display(),
@@ -300,7 +300,7 @@ pub(crate) fn build_config(
                     "coverage {} looks stale — it is older than e.g. {} (and possibly \
                      other sources/tests). Survivors on changed lines may be false; \
                      regenerate before trusting results: \
-                     `pytest --cov={src} --cov-context=test` (or `fermut coverage`).",
+                     `COVERAGE_CORE=ctrace pytest --cov={src} --cov-context=test` (or `fermut coverage`).",
                     p.display(),
                     newer.display(),
                     src = source_root.display(),

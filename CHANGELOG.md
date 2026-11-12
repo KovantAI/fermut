@@ -56,6 +56,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- Cached verdicts survive edits above a mutant. The cache keyed each mutant
+  by its byte offset in the file, so a line added to one function, or a
+  comment added above a `def`, re-ran every mutant below it, even under
+  `cache_scope = "scope"`. Mutants inside a top-level `def`/`class` are now
+  keyed by their position within it. The first run after upgrading
+  re-runs them once.
 - `--schemata` no longer stops forking when the app creates gitignored
   dirs on every start (flaskbb's instance and upload dirs): paths a passing
   baseline adds aren't treated as tests leaving the tree changed. flaskbb:

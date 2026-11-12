@@ -10,21 +10,23 @@ After every successful mutant evaluation, fermut writes one entry to
 `.fermut/cache.json`:
 
 ```
-(mutant.id, ast_hash(source_file), scope) → outcome
+(key, ast_hash(source_file), scope) → outcome
 ```
 
-- [`mutant.id`](glossary.md#mutant-id) is the deterministic
-  identifier for one specific application of one operator to one
-  source location — `<file>@<byte-offset>:<operator>:<original>-><replacement>`
-  (e.g. `src/calculator.py@216:boundary-shift:<=-><`).
+- `key` says which mutant: its file, operator and edit, and where it
+  sits. Inside a top-level `def` or `class` that is the offset from the
+  start of that def (`src/calculator.py::total@41:boundary-shift:<=-><`),
+  so an edit above the def, or inside another function, doesn't move
+  it. At module level it is the
+  [`mutant.id`](glossary.md#mutant-id), whose byte offset is from the
+  start of the file. Reports always show the `mutant.id`.
 - `ast_hash(source_file)` is the **AST-structural** hash of the
   file containing the mutant. Whitespace, comments, and pure
-  formatting changes don't change the AST hash. They *do* move byte
-  offsets, though, and the byte offset is part of `mutant.id`, so any
-  edit that shifts bytes **above** a mutant changes its id and misses
-  (see [Why AST-hash](#why-ast-hash-not-mtime-or-raw-bytes)). With `cache_scope = "scope"`, this
-  narrows to the enclosing top-level def/class instead of the whole
-  file, so sibling-function edits keep cache hits intact (see
+  formatting changes don't change the AST hash (see
+  [Why AST-hash](#why-ast-hash-not-mtime-or-raw-bytes)). With
+  `cache_scope = "scope"`, this narrows to the enclosing top-level
+  def/class instead of the whole file, so editing one function keeps
+  the cached verdicts of its siblings (see
   [`cache_scope`](../reference/configuration.md#schema)).
 - `scope` captures every input that could change the outcome without
   touching the AST: runner kind (with or without schemata: the verdicts
@@ -53,13 +55,14 @@ On the next `run`:
 
 1. For each mutant, fermut computes the current `ast_hash` and the
    current run-shape `scope`.
-2. If `(mutant.id, current_ast_hash, current_scope)` matches a
+2. If `(key, current_ast_hash, current_scope)` matches a
    cached entry, the cached outcome is reused — **no pytest
    invocation**.
 3. If either component mismatches, the entry is ignored and the
-   mutant re-runs; the new outcome overwrites the entry for that id.
-   Entries whose id no longer exists (the mutant moved or vanished)
-   are never pruned — they accumulate until `fermut clean`.
+   mutant re-runs; the new outcome overwrites the entry for that key.
+   Entries whose key no longer exists (the mutant moved within its
+   function, or vanished) are never pruned — they accumulate until
+   `fermut clean`.
 
 Result: editing one function in one file only pays for mutants
 inside that function (under `cache_scope = "scope"`) or that file
@@ -189,15 +192,16 @@ AST being identical.
 
 The structural AST hash makes cache hits identical across:
 
-- Whitespace or comment edits *below* a mutant — same AST, same byte
-  offset → hit.
+- Whitespace or comment edits outside a mutant's function, above or
+  below it — same AST, same key → hit.
 - Agent run #1 → agent run #2 on the same commit.
 - Cache restored from `actions/cache` in a fresh GHA runner.
 
-It does **not** survive edits that shift bytes above a mutant —
-including a reformat or a comment added near the top of a file. The
-mutant id embeds the byte offset, so every mutant below the edit gets
-a new id and re-runs (the old entries stay in the file as orphans).
+It does **not** survive a reformat or comment edit *inside* the
+mutant's own function above the mutant: that moves its offset within
+the function, so the key changes and it re-runs (the old entry stays in
+the file as an orphan). Module-level mutants are keyed from the start of
+the file, so any edit above them does the same.
 
 The cost is one parse + hash per source file per run. On a typical
 project this is in single-digit milliseconds.

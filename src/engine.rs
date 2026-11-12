@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::ast_hash::{self, Anchors, ScopeMap};
-use crate::cache::Cache;
+use crate::cache::{Cache, SurvivorBasis};
 use crate::config::{CacheScope, Config, MemoryCap, RunnerKind};
 use crate::equiv::{EquivPipeline, EquivVerdict};
 use crate::filter::{self, Filter};
@@ -339,6 +339,17 @@ struct CacheStats {
     audited: AtomicUsize,
     /// Audited killer hits whose kill didn't reproduce (entry dropped).
     dropped: AtomicUsize,
+    /// Cached survivors re-checked against only their new or changed tests.
+    delta_hits: AtomicUsize,
+    /// Tests those re-checks ran, and the covering tests a full run would have.
+    delta_tests: AtomicUsize,
+    delta_full_tests: AtomicUsize,
+    /// Delta survivors also run against every covering test, and those where
+    /// that full run detected the mutant.
+    delta_audited: AtomicUsize,
+    delta_disagreed: AtomicUsize,
+    /// The first delta survivor of a run is always audited.
+    delta_first_audit_done: std::sync::atomic::AtomicBool,
 }
 
 /// A mutant served from the cache by its killer scope, queued for the
@@ -840,6 +851,11 @@ fn summarize_integrity(cfg: &Config, cache: &Mutex<Cache>, stats: &CacheStats) {
     let audited = stats.audited.load(Ordering::Relaxed);
     let audit_dropped = stats.dropped.load(Ordering::Relaxed);
     let misses = stats.misses.load(Ordering::Relaxed);
+    let deltas = stats.delta_hits.load(Ordering::Relaxed);
+    let delta_tests = stats.delta_tests.load(Ordering::Relaxed);
+    let delta_full = stats.delta_full_tests.load(Ordering::Relaxed);
+    let delta_audited = stats.delta_audited.load(Ordering::Relaxed);
+    let delta_disagreed = stats.delta_disagreed.load(Ordering::Relaxed);
     info!(
         entries,
         dropped_on_load = dropped,
@@ -847,9 +863,16 @@ fn summarize_integrity(cfg: &Config, cache: &Mutex<Cache>, stats: &CacheStats) {
         killer_hits = killer,
         audited,
         audit_dropped,
+        survivor_deltas = deltas,
+        delta_tests,
+        delta_full_tests = delta_full,
+        delta_audited,
+        delta_disagreed,
         misses,
         "cache: {full} full hits, {killer} killer hits, {audited} audited \
-         ({audit_dropped} dropped), {misses} misses"
+         ({audit_dropped} dropped), {deltas} survivor deltas ({delta_tests} of \
+         {delta_full} tests run, {delta_audited} audited, {delta_disagreed} \
+         disagreed), {misses} misses"
     );
 }
 
@@ -944,6 +967,7 @@ fn evaluate_admitted(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
                     outcome.clone(),
                     new_checked,
                     None,
+                    survivor_basis(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant),
                 );
             }
             return outcome;
@@ -963,6 +987,11 @@ fn evaluate_admitted(ctx: &EvalCtx, mutant: &Arc<Mutant>) -> MutantOutcome {
                 killer,
             });
             return outcome.rebind(mutant.clone());
+        }
+        // A cached survivor whose covering tests changed: every test it
+        // passed before still passes, so run only the new or changed ones.
+        if let Some(outcome) = survivor_delta(ctx, mutant, &key, hash, &scope) {
+            return outcome;
         }
         ctx.stats.misses.fetch_add(1, Ordering::Relaxed);
     }
@@ -984,13 +1013,32 @@ fn run_and_cache(
         .runner
         .run(mutant)
         .unwrap_or_else(|e| MutantOutcome::error(mutant.clone(), e.to_string()));
+    record(ctx, mutant, key, scope, identity_hash, outcome)
+}
 
+/// Remap a fresh `outcome` through the equiv detector and cache it under
+/// `(key, identity_hash, scope)`, with the killer scope for a kill and the
+/// survivor basis for a survivor.
+fn record(
+    ctx: &EvalCtx,
+    mutant: &Arc<Mutant>,
+    key: String,
+    scope: String,
+    identity_hash: Option<String>,
+    outcome: MutantOutcome,
+) -> MutantOutcome {
     let outcome = maybe_remap_equivalent(outcome, ctx.equiv, ctx.file_sources);
 
     if let Some(hash) = identity_hash {
         let killer_scope = outcome.killer().and_then(|t| {
             compute_killer_scope(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant, t)
         });
+        let basis = matches!(
+            outcome,
+            MutantOutcome::Survived { .. } | MutantOutcome::Equivalent { .. }
+        )
+        .then(|| survivor_basis(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant))
+        .flatten();
         // A detector-on run classified any surviving mutant just above, so
         // the stored outcome is already post-equiv — mark it checked so warm
         // runs never re-classify it. A detector-off run leaves it unchecked.
@@ -1001,10 +1049,144 @@ fn run_and_cache(
             outcome.clone(),
             ctx.equiv.is_some(),
             killer_scope,
+            basis,
         );
     }
 
     outcome
+}
+
+/// The covering tests a survivor's verdict rests on (see
+/// [`SurvivorBasis`]), when they are known precisely: coverage contexts name
+/// them and every one's file can be fingerprinted (the same conditions as
+/// [`scoped_test_fingerprint`]). `None` otherwise — no delta then.
+fn survivor_basis(
+    prefix: &str,
+    cfg: &Config,
+    tree: &TestTree,
+    mutant: &Mutant,
+) -> Option<SurvivorBasis> {
+    let cov = cfg.coverage.as_ref()?;
+    let ids = cov.tests_for_mutant(mutant)?;
+    let mut files = std::collections::BTreeMap::new();
+    for id in ids {
+        let file = crate::cache::test_file(id);
+        if !files.contains_key(file) {
+            let fp = scoped_test_fingerprint(cfg, tree, cov.node_root(), std::slice::from_ref(id))?;
+            files.insert(file.to_string(), fp);
+        }
+    }
+    Some(SurvivorBasis {
+        prefix: prefix.to_string(),
+        tests: ids.iter().cloned().collect(),
+        files,
+    })
+}
+
+/// Seed for the survivor-delta audit sample (see [`survivor_delta`]).
+const DELTA_AUDIT_SEED: u64 = 0xde17_a5ed;
+
+/// Re-check a cached survivor against only the covering tests that are new or
+/// changed since its verdict. `None` when there is no usable cached survivor,
+/// the run shape changed, or the runner can't select tests: the caller then
+/// runs the mutant fully.
+///
+/// A survivor passed every covering test; an unchanged test still passes and a
+/// removed one can't kill it. The delta runs new tests without the old ones
+/// before them, so an order-dependent kill can be missed: a deterministic
+/// sample (`--cache-audit-rate`, and the first delta of each run) also runs
+/// against every covering test, and that verdict stands.
+fn survivor_delta(
+    ctx: &EvalCtx,
+    mutant: &Arc<Mutant>,
+    key: &str,
+    hash: &str,
+    scope: &str,
+) -> Option<MutantOutcome> {
+    // Recording needs every covering test's verdict, not a subset.
+    if ctx.cfg.record_kill_sets.is_some() {
+        return None;
+    }
+    let (cached, checked, old) = lock_recover(ctx.cache).lookup_survivor(key, hash)?;
+    let current = survivor_basis(ctx.scope_prefix, ctx.cfg, ctx.test_tree, mutant)?;
+    if current.prefix != old.prefix {
+        return None;
+    }
+    let delta = current.delta_from(&old);
+    let full = current.tests.len();
+
+    if delta.is_empty() {
+        // Covering tests only went away: everything left already passed.
+        let cached = cached.rebind(mutant.clone());
+        let (outcome, rewrite) = remap_cached_outcome(cached, checked, ctx.equiv, ctx.file_sources);
+        ctx.stats.delta_hits.fetch_add(1, Ordering::Relaxed);
+        ctx.stats
+            .delta_full_tests
+            .fetch_add(full, Ordering::Relaxed);
+        lock_recover(ctx.cache).insert_checked(
+            key.to_string(),
+            hash.to_string(),
+            scope.to_string(),
+            outcome.clone(),
+            rewrite.unwrap_or(checked),
+            None,
+            Some(current),
+        );
+        return Some(outcome);
+    }
+
+    let ran = match ctx.runner.run_tests(mutant, &delta) {
+        Ok(Some(o)) if !matches!(o, MutantOutcome::Error { .. }) => o,
+        _ => return None,
+    };
+    ctx.stats.delta_hits.fetch_add(1, Ordering::Relaxed);
+    ctx.stats
+        .delta_tests
+        .fetch_add(delta.len(), Ordering::Relaxed);
+    ctx.stats
+        .delta_full_tests
+        .fetch_add(full, Ordering::Relaxed);
+
+    let rate = ctx.cfg.cache_audit_rate;
+    let audit = matches!(ran, MutantOutcome::Survived { .. })
+        && rate > 0.0
+        && (!ctx
+            .stats
+            .delta_first_audit_done
+            .swap(true, Ordering::Relaxed)
+            || crate::filter::sample::score(DELTA_AUDIT_SEED, key) < rate);
+    let ran = if audit {
+        ctx.stats.delta_audited.fetch_add(1, Ordering::Relaxed);
+        match ctx.runner.run(mutant) {
+            Ok(full_run) if !matches!(full_run, MutantOutcome::Error { .. }) => {
+                if matches!(
+                    full_run,
+                    MutantOutcome::Killed { .. } | MutantOutcome::TimedOut { .. }
+                ) {
+                    ctx.stats.delta_disagreed.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        mutant = %mutant.id,
+                        new_tests = ?delta,
+                        "cache audit: a survivor re-checked against only its new tests \
+                         survived, but the full covering set detects it (order-dependent \
+                         tests?); using the full run"
+                    );
+                }
+                full_run
+            }
+            _ => ran,
+        }
+    } else {
+        ran
+    };
+    Some(record(
+        ctx,
+        mutant,
+        key.to_string(),
+        scope.to_string(),
+        Some(hash.to_string()),
+        ran,
+    ))
 }
 
 /// Re-verify a random sample of this run's killer hits by re-running each
@@ -2666,6 +2848,273 @@ mod tests {
         let second = ScriptRunner::killing(Some(TEST_A));
         let (_, stats) = eval_cached(&fx, &second, &cache, "src-1", None);
         (second, stats)
+    }
+
+    const TEST_C: &str = "tests/c/test_c.py::test_c";
+
+    /// What a fake runner answers.
+    #[derive(Clone, Copy)]
+    enum Verdict {
+        Survive,
+        KillBy(&'static str),
+        TimeOut,
+    }
+
+    impl Verdict {
+        fn outcome(self, m: &Arc<Mutant>) -> MutantOutcome {
+            match self {
+                Verdict::Survive => MutantOutcome::survived(m.clone()),
+                Verdict::KillBy(t) => MutantOutcome::killed_by(m.clone(), Some(t.to_string())),
+                Verdict::TimeOut => MutantOutcome::timed_out(m.clone()),
+            }
+        }
+    }
+
+    /// Runner for the survivor-delta tests: a full run answers `full`, a run
+    /// on selected tests answers `delta` (or can't select when `None`), and
+    /// every selection asked for is recorded.
+    struct DeltaRunner {
+        full: Verdict,
+        delta: Option<Verdict>,
+        full_runs: AtomicUsize,
+        asked: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl DeltaRunner {
+        fn new(full: Verdict, delta: Option<Verdict>) -> Self {
+            Self {
+                full,
+                delta,
+                full_runs: AtomicUsize::new(0),
+                asked: Mutex::new(Vec::new()),
+            }
+        }
+        fn full_runs(&self) -> usize {
+            self.full_runs.load(Ordering::Relaxed)
+        }
+        fn asked(&self) -> Vec<Vec<String>> {
+            lock_recover(&self.asked).clone()
+        }
+    }
+
+    impl Runner for DeltaRunner {
+        fn run(&self, m: &Arc<Mutant>) -> Result<MutantOutcome> {
+            self.full_runs.fetch_add(1, Ordering::Relaxed);
+            Ok(self.full.outcome(m))
+        }
+        fn run_tests(&self, m: &Arc<Mutant>, tests: &[String]) -> Result<Option<MutantOutcome>> {
+            lock_recover(&self.asked).push(tests.to_vec());
+            Ok(self.delta.map(|v| v.outcome(m)))
+        }
+        fn baseline(&self) -> Result<runner::BaselineStatus> {
+            Ok(runner::BaselineStatus::Passed {
+                wall: Duration::ZERO,
+            })
+        }
+    }
+
+    /// Cache a survivor of the line-1 mutant under `fx` as it is, apply
+    /// `edit`, then evaluate again with `second`.
+    fn survived_then(
+        fx: &ScopeFixture,
+        edit: impl FnOnce(&ScopeFixture),
+        second: &DeltaRunner,
+    ) -> (MutantOutcome, CacheStats) {
+        let cache = Mutex::new(Cache::default());
+        let first = DeltaRunner::new(Verdict::Survive, None);
+        let (out, _) = eval_cached(fx, &first, &cache, "src-1", None);
+        assert!(matches!(out, MutantOutcome::Survived { .. }), "{out:?}");
+        edit(fx);
+        eval_cached(fx, second, &cache, "src-1", None)
+    }
+
+    fn add_test_c(fx: &ScopeFixture) {
+        fx.write("tests/c/test_c.py", "def test_c(): assert False\n");
+        fx.write_coverage(&[(1, &[TEST_A, TEST_B, TEST_C])]);
+    }
+
+    #[test]
+    fn survivor_runs_only_a_new_covering_test() {
+        let fx = two_covering();
+        let second = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        let (out, stats) = survived_then(&fx, add_test_c, &second);
+        assert!(matches!(out, MutantOutcome::Survived { .. }), "{out:?}");
+        assert_eq!(second.full_runs(), 0);
+        assert_eq!(second.asked(), vec![vec![TEST_C.to_string()]]);
+        assert_eq!(stats.delta_hits.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.delta_tests.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.delta_full_tests.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn delta_survivor_is_stored_under_the_new_scope() {
+        // After the delta, nothing changed: a plain full hit.
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &DeltaRunner::new(Verdict::Survive, None),
+            &cache,
+            "src-1",
+            None,
+        );
+        add_test_c(&fx);
+        let delta = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        eval_cached(&fx, &delta, &cache, "src-1", None);
+        let third = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        let (_, stats) = eval_cached(&fx, &third, &cache, "src-1", None);
+        assert_eq!(stats.full_hits.load(Ordering::Relaxed), 1);
+        assert!(third.asked().is_empty());
+        assert_eq!(third.full_runs(), 0);
+    }
+
+    #[test]
+    fn survivor_runs_only_the_edited_file_tests() {
+        let fx = two_covering();
+        let second = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        survived_then(
+            &fx,
+            |fx| fx.write("tests/b/test_b.py", "def test_b(): assert 2\n"),
+            &second,
+        );
+        assert_eq!(second.asked(), vec![vec![TEST_B.to_string()]]);
+        assert_eq!(second.full_runs(), 0);
+    }
+
+    #[test]
+    fn support_file_edit_puts_every_covering_test_in_the_delta() {
+        let fx = two_covering();
+        let second = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        survived_then(
+            &fx,
+            |fx| fx.write("tests/helpers.py", "changed = 1\n"),
+            &second,
+        );
+        assert_eq!(
+            second.asked(),
+            vec![vec![TEST_A.to_string(), TEST_B.to_string()]]
+        );
+    }
+
+    #[test]
+    fn survivor_with_a_test_removed_is_reused_without_running() {
+        let fx = two_covering();
+        let second = DeltaRunner::new(Verdict::KillBy(TEST_A), Some(Verdict::KillBy(TEST_A)));
+        let (out, stats) = survived_then(&fx, |fx| fx.write_coverage(&[(1, &[TEST_A])]), &second);
+        assert!(matches!(out, MutantOutcome::Survived { .. }), "{out:?}");
+        assert_eq!(second.full_runs(), 0);
+        assert!(second.asked().is_empty());
+        assert_eq!(stats.delta_hits.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn delta_kill_is_stored_as_a_kill() {
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &DeltaRunner::new(Verdict::Survive, None),
+            &cache,
+            "src-1",
+            None,
+        );
+        add_test_c(&fx);
+        let delta = DeltaRunner::new(Verdict::Survive, Some(Verdict::KillBy(TEST_C)));
+        let (out, _) = eval_cached(&fx, &delta, &cache, "src-1", None);
+        assert_eq!(out.killer(), Some(TEST_C));
+        let third = DeltaRunner::new(Verdict::Survive, None);
+        let (out, stats) = eval_cached(&fx, &third, &cache, "src-1", None);
+        assert_eq!(out.killer(), Some(TEST_C));
+        assert_eq!(stats.full_hits.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn timed_out_verdict_takes_no_delta() {
+        // Editing the test that hung can turn a timeout into a survivor.
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &DeltaRunner::new(Verdict::TimeOut, None),
+            &cache,
+            "src-1",
+            None,
+        );
+        fx.write("tests/b/test_b.py", "def test_b(): assert 2\n");
+        let second = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        eval_cached(&fx, &second, &cache, "src-1", None);
+        assert_eq!(second.full_runs(), 1);
+        assert!(second.asked().is_empty());
+    }
+
+    #[test]
+    fn runner_that_cannot_select_runs_fully() {
+        let fx = two_covering();
+        let second = DeltaRunner::new(Verdict::Survive, None);
+        survived_then(&fx, add_test_c, &second);
+        assert_eq!(second.full_runs(), 1);
+    }
+
+    #[test]
+    fn source_edit_or_run_shape_change_takes_no_delta() {
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &DeltaRunner::new(Verdict::Survive, None),
+            &cache,
+            "src-1",
+            None,
+        );
+        add_test_c(&fx);
+        let edited = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        eval_cached(&fx, &edited, &cache, "src-2", None);
+        assert_eq!(edited.full_runs(), 1, "source changed");
+
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &DeltaRunner::new(Verdict::Survive, None),
+            &cache,
+            "src-1",
+            None,
+        );
+        add_test_c(&fx);
+        let cfg = Config {
+            timeout_secs: 99,
+            ..fx.config(RunnerKind::Pytest, true)
+        };
+        let reshaped = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        eval_with(&fx, &cfg, &reshaped, &cache, "src-1", false);
+        assert_eq!(reshaped.full_runs(), 1, "timeout changed");
+    }
+
+    #[test]
+    fn audited_delta_survivor_uses_the_full_run() {
+        // The new test only fails after an old one (order dependence): the
+        // delta says survived, the full covering set kills it.
+        let fx = two_covering();
+        let cache = Mutex::new(Cache::default());
+        eval_cached(
+            &fx,
+            &DeltaRunner::new(Verdict::Survive, None),
+            &cache,
+            "src-1",
+            None,
+        );
+        add_test_c(&fx);
+        let second = DeltaRunner::new(Verdict::KillBy(TEST_A), Some(Verdict::Survive));
+        let cfg = Config {
+            cache_audit_rate: 0.05,
+            ..fx.config(RunnerKind::Pytest, true)
+        };
+        // The first delta of a run is always audited.
+        let (out, stats) = eval_with(&fx, &cfg, &second, &cache, "src-1", false);
+        assert_eq!(out.killer(), Some(TEST_A));
+        assert_eq!(second.full_runs(), 1);
+        assert_eq!(stats.delta_audited.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.delta_disagreed.load(Ordering::Relaxed), 1);
     }
 
     #[test]

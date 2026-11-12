@@ -122,8 +122,8 @@ file that also covers the mutant — the kill is still reused as long as:
 
 Editing the killing test's file (or its conftest chain, or a support
 file) re-runs the mutant. `survived` and `timed_out` verdicts never take
-this path: a survivor depends on *every* covering test, so any of them
-changing re-runs it.
+this path: a survivor depends on *every* covering test (see the next
+section for how it is re-checked).
 
 Trusting a killer hit skips the run entirely, so each run **audits** a
 random sample: `ceil(5%)` of the killer hits (at least one) are
@@ -137,10 +137,51 @@ hits, audits (and drops), and misses.
 
 | Change                                         | killed (killer known) | survived / timed_out |
 |------------------------------------------------|-----------------------|----------------------|
-| Edit another covering test file                | **kept**              | invalidated          |
-| Edit the killing test's file                   | invalidated           | invalidated          |
-| `conftest.py` above the killing test           | invalidated           | invalidated          |
-| Coverage no longer lists the killing test      | invalidated           | invalidated          |
+| Edit another covering test file                | **kept**              | see below            |
+| Edit the killing test's file                   | invalidated           | see below            |
+| `conftest.py` above the killing test           | invalidated           | see below            |
+| Coverage no longer lists the killing test      | invalidated           | see below            |
+
+### Survived verdicts: only new or changed tests run
+
+A `survived` verdict means every covering test passed. When fermut
+knows those tests (pytest/rstest with coverage contexts, every covering
+file inside the tests tree), the entry also stores them with a
+fingerprint of each one's file, its `conftest.py` chain and the shared
+support files. If the full key misses because the covering tests
+changed, the mutant runs against **only** the covering tests that are
+new, or whose file changed, as long as the source hash and the run
+settings are unchanged:
+
+- an unchanged test passed before and still passes;
+- a test that no longer covers the mutant can't kill it, so if tests
+  were only removed, the survivor is reused without running anything;
+- a new or edited test is the only thing that can kill it now.
+
+This is the inner loop's common case: you add a test for a survivor and
+re-run, and fermut runs that test, not the whole covering set again.
+A support-file edit changes every file's fingerprint, so every covering
+test runs, as before. An `equivalent` verdict takes the same path.
+
+`timed_out` verdicts don't: editing the test that hung can turn a
+timeout into a survivor, so they re-run fully.
+
+The new tests run without the old ones before them, so a test that only
+fails after another one changed shared state is missed. A sample is
+**audited**, at the same `--cache-audit-rate` as killer hits (and always
+the first one in a run): it also runs against every covering test, and
+that verdict is the one reported. When the two disagree fermut warns,
+naming the mutant and the new tests. The end-of-run `cache:` line
+counts survivor deltas, how many tests they ran out of how many the full
+covering sets hold, and the audits.
+
+| Change                                         | survived (tests known)        | timed_out   |
+|------------------------------------------------|-------------------------------|-------------|
+| New test covering the mutant's line            | runs that test only           | invalidated |
+| Edit a covering test file                      | runs that file's tests only   | invalidated |
+| `conftest.py` above a covering test            | runs the tests below it only  | invalidated |
+| Non-test file under the tests tree             | runs every covering test      | invalidated |
+| A test stops covering the line (or is deleted) | **kept**, nothing runs        | invalidated |
 
 Every `conftest.py` above the tests root (say a repo-root one with
 `tests/` as the tests root) loads for every test, so both modes fold it

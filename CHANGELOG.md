@@ -31,6 +31,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 - MCP `fermut_run` and `fermut_score` take a `history_path` argument.
 
 ### Changed
+- A cached survivor whose covering tests changed re-runs only the tests
+  that are new or in a changed file, not every covering test: adding a
+  test for a survivor re-runs that test. The others passed before and
+  are unchanged. A sample is also run against every covering test, at
+  the `--cache-audit-rate`, and fermut warns when the two disagree.
+  Timed-out verdicts still re-run fully.
 - Schema migrations are skipped by default: Django `migrations/0001_*.py`
   in a package and Alembic `versions/*.py` next to `env.py`, shown as
   `migrations` in the skip summary. On healthchecks they were 55 % of

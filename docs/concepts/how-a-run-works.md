@@ -3,11 +3,9 @@
 What `fermut run` does between reading your config and printing the summary
 line. Each step links to the page with the details.
 
-<figure class="fm-pipeline">
---8<-- "docs/assets/run-pipeline.svg"
-</figure>
+![The fermut pipeline: parse, filter chain, result cache, baseline check, run covering tests, then killed, survived or equivalent; survivors feed the coding agent loop.](../assets/run-pipeline.svg)
 
-Click a stage to jump to its section. Each section ends with the modules
+Each section below ends with the modules
 that implement it; [Internals](../reference/internals/index.md) walks the
 code in order.
 

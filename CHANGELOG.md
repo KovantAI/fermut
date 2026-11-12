@@ -68,10 +68,17 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   `cache_scope = "scope"`. Mutants inside a top-level `def`/`class` are now
   keyed by their position within it. The first run after upgrading
   re-runs them once.
+- Python 3.14: `fermut coverage` recorded only the first test that ran each
+  line. coverage.py's default 3.14 core (`sysmon`) drops the per-test
+  contexts pytest-cov switches, so fermut ran too few tests per mutant and
+  could report false survivors. It now sets `COVERAGE_CORE=ctrace` unless
+  you set `COVERAGE_CORE` yourself (an explicit `sysmon` gets a warning).
+  Coverage built by an older fermut counts as stale: `fermut coverage` and
+  `fermut run` with auto-discovered coverage rebuild it.
 - `--schemata` no longer stops forking when the app creates gitignored
   dirs on every start (flaskbb's instance and upload dirs): paths a passing
   baseline adds aren't treated as tests leaving the tree changed. flaskbb:
-  0 → 1719 of 1796 mutants run from the schema (#84).
+  0 → 1719 of 1796 mutants run from the schema.
 - `fermut coverage` passes `-n0` when pytest-xdist is installed. With `-n`
   in the project's `addopts`, pytest-cov's per-test contexts crashed the
   xdist workers (`no such table: context`) and left an empty `.coverage`

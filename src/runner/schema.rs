@@ -128,13 +128,14 @@ impl SchemaInner for PytestRunner {
 
     fn selection(&self, mutant: &Arc<Mutant>, only: Option<&str>) -> Option<Vec<String>> {
         let (key_file, key_op) = self.kill_key(mutant);
-        self.coverage_ids(mutant, only).map(|ids| {
-            if self.smart_order {
-                self.kill_order.order(&ids, &key_file, key_op)
-            } else {
-                ids
-            }
-        })
+        self.coverage_ids(mutant, only.as_ref().map(std::slice::from_ref))
+            .map(|ids| {
+                if self.smart_order {
+                    self.kill_order.order(&ids, &key_file, key_op)
+                } else {
+                    ids
+                }
+            })
     }
 
     /// A failing test (1) or one interrupting the run (2).
@@ -786,6 +787,11 @@ impl<R: SchemaInner> Runner for SchemaRunner<R> {
                 self.inner.run(mutant)
             }
         }
+    }
+
+    fn run_tests(&self, mutant: &Arc<Mutant>, tests: &[String]) -> Result<Option<MutantOutcome>> {
+        // A delta is a handful of tests: a normal run, not worth a fork.
+        self.inner.run_tests(mutant, tests)
     }
 
     fn audit(&self, mutant: &Arc<Mutant>, killer: &str) -> Result<Option<MutantOutcome>> {

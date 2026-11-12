@@ -1070,10 +1070,16 @@ fn survivor_basis(
     let ids = cov.tests_for_mutant(mutant)?;
     let mut files = std::collections::BTreeMap::new();
     for id in ids {
-        let file = crate::cache::test_file(id);
-        if !files.contains_key(file) {
-            let fp = scoped_test_fingerprint(cfg, tree, cov.node_root(), std::slice::from_ref(id))?;
-            files.insert(file.to_string(), fp);
+        let unit = crate::cache::test_unit(id);
+        if !files.contains_key(unit) {
+            let fp = scoped_test_fingerprint(
+                cfg,
+                tree,
+                cov.node_root(),
+                std::slice::from_ref(id),
+                true,
+            )?;
+            files.insert(unit.to_string(), fp);
         }
     }
     Some(SurvivorBasis {
@@ -1556,8 +1562,8 @@ fn compute_mutant_scope(prefix: &str, cfg: &Config, tree: &TestTree, mutant: &Mu
             h.update(t.as_bytes());
         }
     }
-    let scoped =
-        covering.and_then(|(ctx, ids)| scoped_test_fingerprint(cfg, tree, ctx.node_root(), ids));
+    let scoped = covering
+        .and_then(|(ctx, ids)| scoped_test_fingerprint(cfg, tree, ctx.node_root(), ids, false));
     match scoped {
         Some(fp) => {
             h.update(b"|tests:scoped=");
@@ -1572,13 +1578,14 @@ fn compute_mutant_scope(prefix: &str, cfg: &Config, tree: &TestTree, mutant: &Mu
 }
 
 /// Killer scope for `mutant` killed by test `killer`: the run-shape prefix,
-/// the killer's node id, and the scoped fingerprint of just the killer's file
-/// (plus its conftest chain and shared support files). A cached kill stays
-/// valid while this is unchanged, whatever happens to the other covering
-/// tests. `None` — no killer-keyed reuse — when `killer` no longer covers the
-/// mutant (deleted, renamed, or a refreshed coverage DB that doesn't reach the
-/// line) or its file can't be fingerprinted precisely (see
-/// [`scoped_test_fingerprint`]).
+/// the killer's node id, and the scoped fingerprint of just the killer's test
+/// (its source, the non-test statements around it, its conftest chain and
+/// shared support files; see [`TestTree::scoped`]). A cached kill stays valid
+/// while this is unchanged, whatever happens to the other covering tests,
+/// including ones in the killer's file. `None` — no killer-keyed reuse — when
+/// `killer` no longer covers the mutant (deleted, renamed, or a refreshed
+/// coverage DB that doesn't reach the line) or its file can't be fingerprinted
+/// precisely (see [`scoped_test_fingerprint`]).
 fn compute_killer_scope(
     prefix: &str,
     cfg: &Config,
@@ -1589,10 +1596,17 @@ fn compute_killer_scope(
     let ctx = cfg.coverage.as_ref()?;
     let ids = ctx.tests_for_mutant(mutant)?;
     let killer_id = ids.iter().find(|t| *t == killer)?;
-    let fp = scoped_test_fingerprint(cfg, tree, ctx.node_root(), std::slice::from_ref(killer_id))?;
+    let fp = scoped_test_fingerprint(
+        cfg,
+        tree,
+        ctx.node_root(),
+        std::slice::from_ref(killer_id),
+        true,
+    )?;
     let mut h = Sha256::new();
     h.update(prefix.as_bytes());
-    h.update(b"|killer=");
+    // v2: the fingerprint narrows the killer's file to the killer's test.
+    h.update(b"|killer:v2=");
     h.update(killer.as_bytes());
     h.update(b"|tests:scoped=");
     h.update(fp.as_bytes());
@@ -1606,22 +1620,32 @@ fn compute_killer_scope(
 /// - `unittest` runner — it ignores coverage selection and runs the full suite;
 /// - empty selection — the runner then sweeps the whole tests dir;
 /// - a covering file outside the tests tree, or one the walk didn't hash.
+///
+/// `by_test` narrows each file to the tests in `ids` (see [`TestTree::scoped`]).
 fn scoped_test_fingerprint(
     cfg: &Config,
     tree: &TestTree,
     node_root: &Path,
     ids: &[String],
+    by_test: bool,
 ) -> Option<String> {
     if matches!(cfg.runner, RunnerKind::Unittest) || ids.is_empty() {
         return None;
     }
     let abs: Vec<PathBuf> = ids
         .iter()
-        .map(|id| node_root.join(id.split_once("::").map_or(id.as_str(), |(p, _)| p)))
+        .map(|id| node_root.join(crate::cache::test_file(id)))
         .collect();
-    let rel: Vec<&Path> = abs
+    let rel: Vec<(&Path, Option<&str>)> = abs
         .iter()
-        .map(|p| tree.relative(p))
+        .zip(ids)
+        .map(|(p, id)| {
+            let test = by_test
+                .then(|| crate::cache::test_unit(id).split_once("::"))
+                .flatten()
+                .map(|(_, t)| t);
+            tree.relative(p).map(|r| (r, test))
+        })
         .collect::<Option<_>>()?;
     Some(tree.scoped(rel))
 }
@@ -2999,6 +3023,25 @@ mod tests {
     }
 
     #[test]
+    fn survivor_ignores_a_new_uncovering_test_in_a_covering_file() {
+        let fx = two_covering();
+        let second = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
+        let (out, _) = survived_then(
+            &fx,
+            |fx| {
+                fx.write(
+                    "tests/b/test_b.py",
+                    "def test_b(): pass\n\ndef test_b2(): pass\n",
+                )
+            },
+            &second,
+        );
+        assert!(matches!(out, MutantOutcome::Survived { .. }), "{out:?}");
+        assert!(second.asked().is_empty(), "test_b is unchanged");
+        assert_eq!(second.full_runs(), 0);
+    }
+
+    #[test]
     fn support_file_edit_puts_every_covering_test_in_the_delta() {
         let fx = two_covering();
         let second = DeltaRunner::new(Verdict::Survive, Some(Verdict::Survive));
@@ -3181,6 +3224,26 @@ mod tests {
         );
         assert_eq!(stats.killer_hits.load(Ordering::Relaxed), 1);
         assert_eq!(stats.full_hits.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn killer_hit_survives_new_test_in_killer_file() {
+        let (runner, stats) = killed_then(|fx| {
+            fx.write(
+                "tests/a/test_a.py",
+                "def test_a(): pass\n\ndef test_a2(): assert 1\n",
+            );
+        });
+        assert_eq!(runner.runs(), 0, "test_a is unchanged");
+        assert_eq!(stats.killer_hits.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn killer_file_import_edit_invalidates() {
+        let (runner, _) = killed_then(|fx| {
+            fx.write("tests/a/test_a.py", "import os\n\ndef test_a(): pass\n");
+        });
+        assert_eq!(runner.runs(), 1, "shared statements count");
     }
 
     #[test]

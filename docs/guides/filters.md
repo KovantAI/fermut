@@ -147,6 +147,8 @@ CLI `--exclude` (when passed at least once) replaces the config
 Useful for:
 
 - Auto-generated code (protobuf stubs).
+- Vendor / third-party trees checked into the source tree.
+- Integration test directories where mutation testing is too coarse.
 
 Schema migrations are skipped without any config: Django
 `migrations/0001_*.py` (in a package) and Alembic `versions/*.py` (next to
@@ -154,8 +156,6 @@ Schema migrations are skipped without any config: Django
 "no test reads this column's `max_length`", not a logic gap, and on a Django
 app they can be half the mutants. `--mutate-migrations` (or
 `mutate_migrations = true`) mutates them anyway.
-- Vendor / third-party trees checked into the source tree.
-- Integration test directories where mutation testing is too coarse.
 
 There is no file-level inline marker: `--exclude` is the only way to
 skip a whole file. (`# fermut: ignore` applies to its own line only.)

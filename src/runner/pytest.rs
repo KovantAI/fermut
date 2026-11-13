@@ -292,6 +292,7 @@ impl PytestRunner {
         for arg in &self.extra_args {
             cmd.arg(arg);
         }
+        single_worker(&mut cmd, self.exe, &self.extra_args);
         // Coverage-driven selection: when contexts are available we know
         // exactly which tests cross the mutated line. Pass them as positional
         // node ids and skip the default "whole tests dir" sweep. The filter
@@ -1112,9 +1113,39 @@ pub(crate) fn framework_command(python: Option<&Path>, exe: &str) -> Command {
     }
 }
 
+/// One rstest worker per mutant run. rstest defaults to a pool of one
+/// worker per core (`-n auto`), each collecting the suite, but fermut
+/// already runs a mutant per core: agent-library ran ~200 interpreters at
+/// once and every mutant hit its 30 s timeout. The baseline, a single run,
+/// keeps the pool. A `-n` the user passes wins.
+pub(crate) fn single_worker(cmd: &mut Command, exe: &str, user_args: &[String]) {
+    let set = user_args
+        .iter()
+        .any(|a| a.starts_with("-n") || a.starts_with("--numprocesses"));
+    if exe == "rstest" && !set {
+        cmd.arg("-n").arg("0");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rstest_mutant_runs_use_one_worker_unless_the_user_sets_n() {
+        let args = |exe, user: &[&str]| {
+            let mut cmd = Command::new("x");
+            let user: Vec<String> = user.iter().map(|s| s.to_string()).collect();
+            single_worker(&mut cmd, exe, &user);
+            cmd.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(args("rstest", &[]), ["-n", "0"]);
+        assert!(args("rstest", &["-n4"]).is_empty());
+        assert!(args("rstest", &["--numprocesses=2"]).is_empty());
+        assert!(args("pytest", &[]).is_empty());
+    }
 
     // --- should_capture: locks the #4 wiring (no capture unless it can pay off).
 

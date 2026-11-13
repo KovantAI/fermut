@@ -950,6 +950,10 @@ class PytestDriver:
         session.config.hook.pytest_collection_modifyitems(
             session=session, config=session.config, items=items
         )
+        # A cold run's session holds only its selection. Fixtures read it:
+        # an autouse session fixture starting the containers "the session's
+        # tests" need (kovant-agent-tools) started all of them in every fork.
+        session.items = items
         items = resume(items, req.get("after"), lambda item: item.nodeid)
         if not items:
             return 0 if req.get("chunk") else 5  # an empty slice checks nothing

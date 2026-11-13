@@ -418,6 +418,11 @@ PROJECT = {
             check = "from pkg.core import add; assert add(2, 3) == 5"
             env = {"PYTHONPATH": os.getcwd()}  # no FM_ACTIVE
             subprocess.run([sys.executable, "-c", check], env=env, check=True)
+
+
+        def test_session_items(request):
+            with open("session-items", "w") as f:
+                f.write(str(len(request.session.items)))
         """
     ),
 }
@@ -614,6 +619,17 @@ def test_serve_checks_one_slice_of_the_suite_per_chunk(served):
         idx["add"], None, chunk=[0, n // 2], after="tests/test_core.py::test_add"
     )
     assert after["exit"] == 0
+    server.close()
+
+
+def test_fork_session_holds_only_its_selection(served):
+    # As in a cold `pytest <id>`: fixtures that size work by the session's
+    # tests (start the containers they need) mustn't see the whole suite.
+    server, idx = served
+    assert server.recv()["ready"] is True
+    ran = server.run(idx["add"], ["tests/test_core.py::test_session_items"])
+    assert ran["exit"] == 0
+    assert (server.root / "session-items").read_text() == "1"
     server.close()
 
 

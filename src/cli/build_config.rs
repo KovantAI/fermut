@@ -236,6 +236,9 @@ pub(crate) fn build_config(
     // 100%). Detect it by content (fingerprint sidecar) or mtime, and act on
     // provenance.
     let mut coverage_note = None;
+    // An explicit DB kept despite being stale: its line numbers may no longer
+    // match the source, so the `coverage` cache mode can't trust them.
+    let mut stale_kept = false;
     if let Some(p) = coverage_path.clone() {
         // Anchor the content check where `fermut coverage` would for this DB,
         // so sidecar keys and the refresh below agree on the base dir.
@@ -296,10 +299,14 @@ pub(crate) fn build_config(
                 ));
                 coverage_path = None;
             } else {
+                // Test edits leave source line numbers alone, and the
+                // `coverage` cache mode leaves tests to the test fingerprint.
+                let canon = |q: &Path| q.canonicalize().unwrap_or_else(|_| q.to_path_buf());
+                stale_kept = !canon(&newer).starts_with(canon(&tests_dir));
                 warn!(
                     "coverage {} looks stale — it is older than e.g. {} (and possibly \
-                     other sources/tests). Survivors on changed lines may be false; \
-                     regenerate before trusting results: \
+                     other sources/tests). Survivors on changed lines may be false, and \
+                     the cache keys on whole files this run; regenerate before trusting results: \
                      `COVERAGE_CORE=ctrace pytest --cov={src} --cov-context=test` (or `fermut coverage`).",
                     p.display(),
                     newer.display(),
@@ -479,7 +486,10 @@ pub(crate) fn build_config(
     } else {
         file.equiv_detect.unwrap_or(true)
     };
-    let cache_scope = cli_cache_scope.or(file.cache_scope).unwrap_or_default();
+    let cache_scope = match cli_cache_scope.or(file.cache_scope).unwrap_or_default() {
+        CacheScope::Coverage if stale_kept => CacheScope::File,
+        scope => scope,
+    };
     // CLI flag presence forces off; otherwise config wins, defaulting on.
     let verify_baseline = if cli_no_verify_baseline {
         false
@@ -1980,6 +1990,50 @@ mod tests {
         let cfg = out.unwrap();
         assert_eq!(cfg.coverage_path, Some(root.join(".coverage")));
         assert!(cfg.coverage_note.is_none());
+    }
+
+    #[test]
+    fn stale_explicit_coverage_is_kept_but_cache_keys_on_files() {
+        // Its line numbers may be off after the edit, so the `coverage`
+        // cache mode can't map them to the code each test ran.
+        let (_tmp, root) = sidecar_stale_project(
+            "CREATE TABLE coverage_schema (version integer);
+             CREATE TABLE context (id integer primary key, context text, unique(context));
+             CREATE TABLE file (id integer primary key, path text, unique(path));
+             CREATE TABLE line_bits (file_id integer, context_id integer, numbits blob);
+             INSERT INTO context VALUES (1, 'tests/test_m.py::test|run');
+             INSERT INTO file VALUES (1, 'm.py');
+             INSERT INTO line_bits VALUES (1, 1, x'02');",
+        );
+        std::fs::write(root.join("fermut.toml"), "coverage = \".coverage\"\n").unwrap();
+        let mut out = None;
+        let log = logged(|| out = Some(call(root.clone(), None).unwrap()));
+        assert!(log.contains("looks stale"), "{log}");
+        let cfg = out.unwrap();
+        assert_eq!(cfg.coverage_path, Some(root.join(".coverage")));
+        assert_eq!(cfg.cache_scope, CacheScope::File);
+    }
+
+    #[test]
+    fn coverage_stale_only_by_a_test_edit_keeps_the_coverage_cache_scope() {
+        // Source line numbers still match, and test edits are the test
+        // fingerprint's job: an edited test mustn't re-key every mutant.
+        let (_tmp, root) = sidecar_stale_project(
+            "CREATE TABLE coverage_schema (version integer);
+             CREATE TABLE context (id integer primary key, context text, unique(context));
+             CREATE TABLE file (id integer primary key, path text, unique(path));
+             CREATE TABLE line_bits (file_id integer, context_id integer, numbits blob);
+             INSERT INTO context VALUES (1, 'tests/test_m.py::test|run');
+             INSERT INTO file VALUES (1, 'm.py');
+             INSERT INTO line_bits VALUES (1, 1, x'02');",
+        );
+        std::fs::write(root.join("m.py"), "x = 1\n").unwrap();
+        std::fs::write(root.join("tests/test_m.py"), "def test(): assert 1\n").unwrap();
+        std::fs::write(root.join("fermut.toml"), "coverage = \".coverage\"\n").unwrap();
+        let mut out = None;
+        let log = logged(|| out = Some(call(root.clone(), None).unwrap()));
+        assert!(log.contains("test_m.py"), "{log}");
+        assert_eq!(out.unwrap().cache_scope, CacheScope::Coverage);
     }
 
     #[test]

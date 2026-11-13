@@ -22,14 +22,29 @@ After every successful mutant evaluation, fermut writes one entry to
   it. At module level it is the
   [`mutant.id`](glossary.md#mutant-id), whose byte offset is from the
   start of the file. Reports always show the `mutant.id`.
-- `ast_hash(source_file)` is the **AST-structural** hash of the
-  file containing the mutant. Whitespace, comments, and pure
-  formatting changes don't change the AST hash (see
-  [Why AST-hash](#why-ast-hash-not-mtime-or-raw-bytes)). With
-  `cache_scope = "scope"`, this narrows to the enclosing top-level
-  def/class instead of the whole file, so editing one function keeps
-  the cached verdicts of its siblings (see
-  [`cache_scope`](../reference/configuration.md#schema)).
+- `ast_hash(source_file)` is an **AST-structural** hash of the source
+  the mutant's verdict depends on. Whitespace, comments, and pure
+  formatting changes don't change it (see
+  [Why AST-hash](#why-ast-hash-not-mtime-or-raw-bytes)). Which source
+  depends on [`cache_scope`](../reference/configuration.md#schema):
+    - `coverage` (default): the top-level defs and classes the mutant's
+      covering tests ran in the coverage DB, in **any** file, plus the
+      import-time code (imports, module constants, decorators) of every
+      source file. Editing a function re-runs only the mutants whose
+      tests run it, wherever they sit; editing import-time code re-runs
+      everything. Without coverage it acts as `file`.
+    - `file`: the whole file containing the mutant. Edits to other
+      files aren't seen, even ones the mutant's tests call.
+    - `scope`: the file's prelude plus the enclosing top-level
+      def/class. Can return a stale verdict when a test for one
+      function calls another.
+
+  `coverage` mode needs a DB that matches the source. An auto-discovered
+  `.coverage` is refreshed incrementally when a source file changed; an
+  explicit `--coverage` DB that looks stale is used as is, so that run
+  keys the cache on whole files instead. One gap remains: a mutant that
+  steers a test into code the baseline never ran keeps its verdict when
+  that code changes, until the DB is refreshed.
 - `scope` captures every input that could change the outcome without
   touching the AST: runner kind (with or without schemata: the verdicts
   match, so they share the cache), interpreter, timeout, hypothesis
@@ -66,9 +81,10 @@ On the next `run`:
    function, or vanished) are never pruned — they accumulate until
    `fermut clean`.
 
-Result: editing one function in one file only pays for mutants
-inside that function (under `cache_scope = "scope"`) or that file
-(default `cache_scope = "file"`). Everything else is reused.
+Result: editing one function only pays for the mutants whose tests
+run it (default `cache_scope = "coverage"`), the mutants inside it
+(`"scope"`), or the mutants in its file (`"file"`). Everything else
+is reused.
 
 ## Test-suite invalidation
 

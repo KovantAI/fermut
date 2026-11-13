@@ -40,6 +40,7 @@ both built from the same crate root. The module structure:
 | `engine`      | Top-level orchestration: parse → mutate → filter → run → report. Parallel via rayon. |
 | `cache`       | `(mutant.id, ast_hash(file), scope) → outcome` cache, plus killer-scoped lookup for kills. |
 | `ast_hash`    | Structural AST hash per file (and per top-level scope for `cache_scope = "scope"`).    |
+| `cov_identity` | `cache_scope = "coverage"`: per-test digest of the top-level scopes each test ran.    |
 | `history`     | `.fermut/history.jsonl` append + load, plus the `sparkline` helper shared with `trend`. |
 | `report`      | Outcome types + writers (json / junit / html / markdown). GHA annotation output.       |
 | `watch`       | File-system watch loop for `--watch` mode.                                              |

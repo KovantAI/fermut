@@ -36,6 +36,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 - MCP `fermut_run` and `fermut_score` take a `history_path` argument.
 
 ### Changed
+- The verdict cache now keys each mutant on the code its covering tests ran,
+  from the coverage DB (`cache_scope = "coverage"`, the new default). Editing
+  a function re-runs only the mutants whose tests run it, in any file. An
+  edit in another file that those tests call now re-runs them too, which the
+  old `file` default missed. Import-time code (imports, module constants,
+  decorators) re-runs everything. Without coverage it acts as `file`. The
+  first run after upgrading misses the whole cache.
 - Cached kills and survivors are keyed on individual tests, not whole test
   files: adding or editing a test keeps every verdict that other tests in
   the same file (or `Test*` class) produced. A test still counts its file's

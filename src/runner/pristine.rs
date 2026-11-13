@@ -231,8 +231,9 @@ mod tests {
         assert!(!root.join("tests/resources/test_dir").exists());
         assert!(p.drift().is_empty(), "{:?}", p.drift());
 
-        // A file a test rewrote in place gets its content back.
-        std::fs::write(root.join("mod.py"), "x = 2").unwrap();
+        // A file a test rewrote in place gets its content back. A new size:
+        // Windows mtimes can tick slower than the two writes.
+        std::fs::write(root.join("mod.py"), "x = 22").unwrap();
         assert_eq!(
             p.restore(src.path(), IsolationMode::Copy).unwrap(),
             [rel("mod.py")]

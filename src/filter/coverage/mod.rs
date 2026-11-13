@@ -125,6 +125,11 @@ impl CoverageContexts {
         &self.node_root
     }
 
+    /// Every covered file (canonical path) with the test ids per line.
+    pub fn files(&self) -> impl Iterator<Item = (&Path, &HashMap<u32, Vec<String>>)> {
+        self.map.iter().map(|(p, lines)| (p.as_path(), lines))
+    }
+
     /// Every test node id that executed some covered line.
     pub fn test_ids(&self) -> impl Iterator<Item = &String> {
         self.test_breadth.keys()

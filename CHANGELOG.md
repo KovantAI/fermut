@@ -79,6 +79,15 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- `fermut coverage` runs pytest from the project root `fermut run` uses,
+  not from the config's directory or the PATH argument. Under a
+  monorepo-root config, a package's coverage was written at the monorepo root
+  and `fermut run` couldn't find it, or its test ids carried the package
+  prefix and every mutant errored. With no config, `fermut coverage src` ran
+  pytest inside `src/`. It also puts the project on `PYTHONPATH` as `run`
+  does, reads relative `--source`/`--tests` from your working directory,
+  prints paths relative to it, and fails when pytest collects no tests
+  instead of reporting an empty database as written.
 - `--runner rstest` without an activated venv: fermut ran the venv's `rstest`
   in its copy of the project, which has no `.venv`, so rstest found no Python
   and the baseline failed. fermut now passes that venv's interpreter with

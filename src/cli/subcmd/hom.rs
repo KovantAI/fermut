@@ -432,6 +432,7 @@ fn any_test_fails(
 ) -> Result<bool> {
     let mut cmd = crate::runner::pytest::framework_command(python, exe);
     cmd.arg("-x").arg("--tb=no").arg("-q");
+    crate::runner::pytest::single_worker(&mut cmd, exe, &[]);
     for t in tests {
         cmd.arg(t);
     }

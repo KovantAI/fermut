@@ -79,6 +79,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- `--runner rstest` without an activated venv: fermut ran the venv's `rstest`
+  in its copy of the project, which has no `.venv`, so rstest found no Python
+  and the baseline failed. fermut now passes that venv's interpreter with
+  `--python`.
 - Cached verdicts survive edits above a mutant. The cache keyed each mutant
   by its byte offset in the file, so a line added to one function, or a
   comment added above a `def`, re-ran every mutant below it, even under

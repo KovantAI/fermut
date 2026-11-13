@@ -9,6 +9,7 @@
 //! compatible drop-in). Both accept the same flags and node-id positionals, so
 //! one implementation drives either; only the program name differs.
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -87,6 +88,9 @@ pub struct PytestRunner {
     deselection: Mutex<Option<super::Deselection>>,
     /// A private `HOME` per mirror (and per schemata fork).
     pub(super) private_home: bool,
+    /// Whether a killing run's ordered test ids pass with no mutant applied,
+    /// by id list (see [`Self::confirms`]).
+    confirmed: Mutex<HashMap<Vec<String>, bool>>,
 }
 
 /// Construction parameters for [`PytestRunner`], bundled so the runner is
@@ -169,6 +173,7 @@ impl PytestRunner {
             plugin,
             baseline_ids,
             deselection: Mutex::new(None),
+            confirmed: Mutex::new(HashMap::new()),
         }
     }
 
@@ -311,6 +316,7 @@ impl PytestRunner {
         // With the plugin the killer comes from its result file, so stdout is
         // never captured for it.
         let capture_killer = (self.smart_order || self.learn_killer) && !self.plugin;
+        let mut ids = Vec::new();
         let (capture, sole) = match select_args(
             ordered.as_deref(),
             self.smart_order,
@@ -327,6 +333,7 @@ impl PytestRunner {
                     args.push("-rfE".to_string());
                 }
                 let sole = (!capture && args.len() == 1).then(|| args[0].clone());
+                ids = args.iter().filter(|a| *a != "-rfE").cloned().collect();
                 for a in &args {
                     cmd.arg(mirror.id_into_mirror(a));
                 }
@@ -363,7 +370,12 @@ impl PytestRunner {
             Stdio::null()
         };
         cmd.stdout(stdout_cfg).stderr(Stdio::null());
-        Ok(MutantCommand { cmd, sole, result })
+        Ok(MutantCommand {
+            cmd,
+            ids,
+            sole,
+            result,
+        })
     }
 
     /// Record this mutant's full kill-set (the covering tests that failed) into
@@ -541,6 +553,9 @@ pub(super) fn run_timing(wall: Duration, reported: Option<&RunResult>) -> Timing
 /// A per-mutant command ready to spawn, from [`PytestRunner::build_mutant_command`].
 struct MutantCommand {
     cmd: Command,
+    /// The selected node ids, in the order the run passes them; empty for a
+    /// whole-suite sweep.
+    ids: Vec<String>,
     /// The one selected node id, when exactly one test was selected.
     sole: Option<String>,
     /// Where the reporter plugin writes this run's result (plugin on).
@@ -848,7 +863,10 @@ impl PytestRunner {
     /// One mutant run: the coverage selection, or only the tests in `only`
     /// (a cached survivor re-checked against new or changed tests).
     fn run_selected(&self, mutant: &Arc<Mutant>, only: Option<&[&str]>) -> Result<MutantOutcome> {
-        run_patched(
+        // The ordered ids of a run a failing test killed, confirmed below once
+        // the patch is reverted.
+        let mut killed_by: Option<Vec<String>> = None;
+        let outcome = run_patched(
             &self.tests,
             self.isolation,
             self.python.as_deref(),
@@ -857,6 +875,7 @@ impl PytestRunner {
                 let (key_file, key_op) = self.kill_key(mutant);
                 let MutantCommand {
                     mut cmd,
+                    ids,
                     sole,
                     result,
                 } = self.build_mutant_command(mirror, mutant, &key_file, key_op, only)?;
@@ -900,7 +919,7 @@ impl PytestRunner {
                         key_op,
                     );
                 }
-                Ok(self
+                let outcome = self
                     .classify_run(
                         mutant,
                         waited,
@@ -910,9 +929,73 @@ impl PytestRunner {
                         &key_file,
                         key_op,
                     )
-                    .with_timing(run_timing(wall, reported.as_ref())))
+                    .with_timing(run_timing(wall, reported.as_ref()));
+                // pytest exit 1: a selected test failed. A broken import or a
+                // timeout is the mutant's however the tests behave.
+                if code == Some(1) && !import_broke && !ids.is_empty() {
+                    killed_by = Some(ids);
+                }
+                Ok(outcome)
+            },
+        )?;
+        match killed_by {
+            Some(ids)
+                if matches!(outcome, MutantOutcome::Killed { .. }) && !self.confirms(&ids) =>
+            {
+                Ok(MutantOutcome::error(
+                    mutant.clone(),
+                    format!(
+                        "killed, but the same tests fail with no mutant applied \
+                         (an order-dependent or broken test): {}",
+                        ids.join(" ")
+                    ),
+                ))
+            }
+            _ => Ok(outcome),
+        }
+    }
+
+    /// Whether `ids`, run in this order, pass with no mutant applied. A kill
+    /// whose tests fail anyway says nothing about the mutant: the baseline
+    /// only proved the whole suite passes in its own order, and a test that
+    /// needs an earlier test's setup fails in a narrower selection
+    /// (agent-library: 3 of 386 kills). Schemata confirms its kills the same
+    /// way (`Schema::confirm`). Cached per id list; most kills share a few.
+    /// A run that can't finish (spawn error, timeout) keeps the kill.
+    fn confirms(&self, ids: &[String]) -> bool {
+        if let Some(&ok) = lock_recover(&self.confirmed).get(ids) {
+            return ok;
+        }
+        let ok = super::with_worker_mirror(
+            &self.tests,
+            self.isolation,
+            self.python.as_deref(),
+            |mirror| {
+                let mut cmd = self.framework_command();
+                cmd.arg("--tb=no").arg("-q").arg("-x");
+                if let Some(seed) = self.hypothesis_seed {
+                    cmd.arg(format!("--hypothesis-seed={seed}"));
+                }
+                cmd.args(&self.extra_args);
+                cmd.args(ids.iter().map(|id| mirror.id_into_mirror(id)));
+                configure_mirror_cmd(&mut cmd, mirror, self.private_home)?;
+                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                let child = cmd.spawn().context("spawning kill confirmation")?;
+                let (status, _) = wait_draining_stdout(child, self.timeout, kill_group)?;
+                Ok(status.is_none_or(|s| s.success()))
             },
         )
+        .unwrap_or(true);
+        if !ok {
+            tracing::warn!(
+                "these tests fail with no mutant applied, run in this order: {}; \
+                 the mutants they kill are reported as errors. Run them on their own \
+                 to find the test that depends on another",
+                ids.join(" ")
+            );
+        }
+        lock_recover(&self.confirmed).insert(ids.to_vec(), ok);
+        ok
     }
 }
 
@@ -961,6 +1044,7 @@ impl Runner for PytestRunner {
                     mut cmd,
                     sole,
                     result,
+                    ..
                 } =
                     self.build_mutant_command(mirror, mutant, &key_file, key_op, Some(&[killer]))?;
                 let result = result.map(ResultFile);
@@ -1864,6 +1948,53 @@ mod tests {
             src,
             "patched in the mirror"
         );
+    }
+
+    /// A kill stands only when the same tests pass with no mutant applied;
+    /// otherwise it's an error naming them, and the check runs once per list.
+    #[cfg(unix)]
+    #[test]
+    fn a_kill_the_tests_cause_without_the_mutant_is_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let run = |script: &str| {
+            let tmp = tempfile::tempdir().unwrap();
+            let proj = tmp.path().join("proj");
+            std::fs::create_dir_all(proj.join("tests")).unwrap();
+            std::fs::write(proj.join("pyproject.toml"), "").unwrap();
+            // Stands in for `python`, run in the mirror; `calls` logs its
+            // arguments.
+            let calls = tmp.path().join("calls");
+            let py = tmp.path().join("python");
+            std::fs::write(
+                &py,
+                format!("#!/bin/sh\necho \"$*\" >> {}\n{script}", calls.display()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let mut r = runner(false, breadth_ctx(&proj));
+            r.tests = proj.join("tests");
+            r.python = Some(py);
+            let ids = ["tests/t.py::a".to_string(), "tests/t.py::b".to_string()];
+            let m = Arc::new(mutant_in(&proj));
+            let first = r.run_tests(&m, &ids).unwrap().unwrap();
+            let second = r.run_tests(&m, &ids).unwrap().unwrap();
+            let log = std::fs::read_to_string(&calls).unwrap();
+            let runs = log.lines().filter(|l| l.starts_with("-m pytest")).count();
+            (first, second, runs)
+        };
+        // Fails whether or not `foo.py` is patched (`a` → `-`).
+        let (o, again, runs) = run("echo FAILED tests/t.py::b\nexit 1\n");
+        let MutantOutcome::Error { message, .. } = &o else {
+            panic!("{o:?}")
+        };
+        assert!(message.contains("tests/t.py::a tests/t.py::b"), "{message}");
+        assert!(matches!(again, MutantOutcome::Error { .. }), "{again:?}");
+        assert_eq!(runs, 3, "two mutant runs, one confirmation");
+        // Fails only on the patched file: a real kill.
+        let (o, _, runs) =
+            run("if head -c1 foo.py | grep -q -- -; then echo FAILED tests/t.py::b; exit 1; fi\n");
+        assert!(matches!(o, MutantOutcome::Killed { .. }), "{o:?}");
+        assert_eq!(runs, 3);
     }
 
     /// A survivor's delta runs exactly the given tests, not the coverage

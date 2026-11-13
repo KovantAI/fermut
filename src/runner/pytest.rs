@@ -1079,7 +1079,10 @@ pub(crate) fn importable(python: Option<&Path>, module: &str) -> bool {
 ///
 /// rstest is a native binary with no importable `rstest` module, so
 /// `-m rstest` can't work: use the `rstest` next to the interpreter (the
-/// venv's `bin/`/`Scripts/`) when present, else the one on PATH.
+/// venv's `bin/`/`Scripts/`) when present, else the one on PATH. The venv's
+/// rstest gets `--python` too: it otherwise looks for a `.venv` in its cwd,
+/// and the mirror it runs in has none, so without an activated venv it finds
+/// no interpreter at all.
 ///
 /// Programs are resolved against `PATH` here (see
 /// [`super::python::absolute_program`]): the run happens from the mirror.
@@ -1090,9 +1093,13 @@ pub(crate) fn framework_command(python: Option<&Path>, exe: &str) -> Command {
             d.join("rstest")
                 .with_extension(std::env::consts::EXE_EXTENSION)
         });
-        return match beside.filter(|p| p.is_file()) {
-            Some(p) => Command::new(p),
-            None => Command::new(absolute_program(Path::new("rstest"))),
+        return match (beside.filter(|p| p.is_file()), python) {
+            (Some(p), Some(py)) => {
+                let mut cmd = Command::new(p);
+                cmd.arg("--python").arg(absolute_program(py));
+                cmd
+            }
+            _ => Command::new(absolute_program(Path::new("rstest"))),
         };
     }
     match python {
@@ -1630,7 +1637,13 @@ mod tests {
             .join("rstest")
             .with_extension(std::env::consts::EXE_EXTENSION);
         std::fs::write(&bin, "").unwrap();
-        assert_eq!(r.framework_command().get_program(), bin.as_os_str());
+        let cmd = r.framework_command();
+        assert_eq!(cmd.get_program(), bin.as_os_str());
+        // The mirror has no `.venv` for rstest to find: name the interpreter.
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            [std::ffi::OsStr::new("--python"), py.as_os_str()]
+        );
         // pytest keeps `<python> -m pytest`.
         r.exe = "pytest";
         let cmd = r.framework_command();

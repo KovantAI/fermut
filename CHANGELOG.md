@@ -79,6 +79,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- A test that fails without any mutant no longer scores kills. fermut runs
+  each mutant's covering tests on their own, and a test that only passes
+  after another test's setup failed there, crediting a kill to every mutant
+  it covers. A kill now stands only when the same tests, in the same order,
+  pass with no mutant applied; otherwise the mutant is reported as an error
+  (left out of the score) and a warning names the tests. The check runs once
+  per list of killing tests.
 - `--runner rstest` without an activated venv: fermut ran the venv's `rstest`
   in its copy of the project, which has no `.venv`, so rstest found no Python
   and the baseline failed. fermut now passes that venv's interpreter with

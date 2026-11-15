@@ -59,7 +59,10 @@ the verdict is the same either way:
   forked child — on macOS, DNS lookups, Kerberos (psycopg2 connecting) and
   some native libraries crash it. (System proxy settings, which aiohttp,
   httpx and requests look up on every request, are read once before forking,
-  so those work.)
+  so those work. On macOS fermut also starts the template with
+  `OS_ACTIVITY_MODE=disable` and `PGGSSENCMODE=disable`, so unified logging
+  and libpq's Kerberos encryption, which crash a fork, stay off; a value you
+  export wins.)
 
 Before serving mutants, fermut runs the suite on the schema with no mutant
 active, split across the workers. Tests that fail, crash or hang there are

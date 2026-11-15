@@ -89,7 +89,9 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   it covers. A kill now stands only when the same tests, in the same order,
   pass with no mutant applied; otherwise the mutant is reported as an error
   (left out of the score) and a warning names the tests. The check runs once
-  per list of killing tests.
+  per list of killing tests, on one rstest worker, and only a test failure
+  (exit 1) counts against the kill: a check that can't collect the tests or
+  times out leaves it standing.
 - `--runner rstest` without an activated venv: fermut ran the venv's `rstest`
   in its copy of the project, which has no `.venv`, so rstest found no Python
   and the baseline failed. fermut now passes that venv's interpreter with

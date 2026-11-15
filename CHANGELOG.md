@@ -79,6 +79,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- `--schemata` with testcontainers: every forked run shared the session id
+  testcontainers draws at import, so concurrent forks all created the same
+  reaper container and all but one failed at setup, and whole slices of the
+  suite were run the normal way. Each fork now gets its own session id.
 - A test that fails without any mutant no longer scores kills. fermut runs
   each mutant's covering tests on their own, and a test that only passes
   after another test's setup failed there, crediting a kill to every mutant

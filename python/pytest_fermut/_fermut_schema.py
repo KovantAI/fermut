@@ -780,6 +780,7 @@ class Template:
             # test's self-sent SIGINT (trio) into a dead child.
             signal.signal(signal.SIGINT, signal.default_int_handler)
             driver.child_start()
+            fresh_testcontainers_session()
             if os.environ.get(PRIVATE_HOME_ENV) == "1":
                 # Siblings run at once: one shared private home would race
                 # like the real one (an app dir one test removes under
@@ -1158,6 +1159,28 @@ def thread_code(t):
         f"{getattr(fn, '__module__', '?')}.{getattr(fn, '__qualname__', code.co_name)}"
     )
     return origin, code.co_filename
+
+
+def fresh_testcontainers_session():
+    """testcontainers names its reaper container after a session id drawn at
+    import (`testcontainers.core.labels.SESSION_ID`) and copied into the
+    modules that use it. Forks of one template share it, so concurrent
+    children all create `testcontainers-ryuk-<id>` and all but one fail with
+    409 Conflict (kovant-agent-tools: whole slices failing at setup). Give
+    each child its own, as a cold run has."""
+    labels = sys.modules.get("testcontainers.core.labels")
+    old = getattr(labels, "SESSION_ID", None)
+    if old is None:
+        return
+    import uuid
+
+    new = str(uuid.uuid4())
+    for name, mod in list(sys.modules.items()):
+        if (
+            name.startswith("testcontainers")
+            and getattr(mod, "SESSION_ID", None) == old
+        ):
+            mod.SESSION_ID = new
 
 
 def freeze_macos_proxies():

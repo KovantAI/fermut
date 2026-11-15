@@ -79,6 +79,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- `--schemata` with testcontainers: every forked run shared the session id
+  testcontainers draws at import, so concurrent forks all created the same
+  reaper container and all but one failed at setup, and whole slices of the
+  suite were run the normal way. Each fork now gets its own session id.
 - `--runner rstest` without an activated venv: fermut ran the venv's `rstest`
   in its copy of the project, which has no `.venv`, so rstest found no Python
   and the baseline failed. fermut now passes that venv's interpreter with

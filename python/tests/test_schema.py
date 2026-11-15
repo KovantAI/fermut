@@ -1177,3 +1177,29 @@ def test_a_failing_django_db_setup_refuses_the_template(django_project):
     server.close()
     assert ready["ready"] is False
     assert "django_db_setup failed" in ready["error"] and "boom" in ready["error"]
+
+
+def test_each_fork_gets_its_own_testcontainers_session(monkeypatch):
+    # The reaper container is named after SESSION_ID, copied into the modules
+    # that import it; forks sharing it collide on the name (409 Conflict).
+    import types
+
+    old = "template-session"
+    mods = {
+        name: types.ModuleType(name)
+        for name in (
+            "testcontainers.core.labels",
+            "testcontainers.core.container",
+            "testcontainers.core.docker_client",
+        )
+    }
+    for mod in mods.values():
+        mod.SESSION_ID = old
+    other = types.ModuleType("unrelated")
+    other.SESSION_ID = old
+    for name, mod in {**mods, "unrelated": other}.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+    schema.fresh_testcontainers_session()
+    new = {mod.SESSION_ID for mod in mods.values()}
+    assert len(new) == 1 and old not in new
+    assert other.SESSION_ID == old  # only testcontainers' copies

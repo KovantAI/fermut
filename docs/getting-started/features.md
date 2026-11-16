@@ -23,7 +23,7 @@ guide or reference page.
 - **Native-Rust mutator.** Mutation generation runs on
   [`ruff_python_parser`](https://github.com/astral-sh/ruff), not a
   Python AST walker.
-- **Schemata.** On by default with the pytest runner on Unix: one pytest
+- **Schemata.** On by default with the pytest and rstest runners on Unix: one pytest
   process imports and collects your suite once, and each mutant runs in a
   fork of it instead of a fresh pytest. 1.5–3.9× faster whole runs on most
   suites tested, with the same verdicts; anything it can't vouch for runs the

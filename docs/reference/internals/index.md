@@ -115,7 +115,7 @@ both built from the same crate root. The module structure:
   per mutant. `-x` is dropped under `--record-kill-sets`; `-p` loads the
   injected JSONL reporter when the pytest plugin is on. The same runner
   drives `rstest` (`runner = "rstest"`), swapping only the executable.
-- `SchemaRunner` — the default for the pytest runner on Unix
+- `SchemaRunner` — the default for the pytest and rstest runners on Unix
   (`--no-schemata` turns it off; see [Schemata](../cli/run-schemata.md)).
   Wraps a `PytestRunner`. `Runner::prepare` hands it the mutants the cheap
   filters admit; it builds one schema mirror from them (every function-body

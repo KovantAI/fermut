@@ -40,9 +40,11 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   from the coverage DB (`cache_scope = "coverage"`, the new default). Editing
   a function re-runs only the mutants whose tests run it, in any file. An
   edit in another file that those tests call now re-runs them too, which the
-  old `file` default missed. Import-time code (imports, module constants,
-  decorators) re-runs everything. Without coverage it acts as `file`. The
-  first run after upgrading misses the whole cache.
+  old `file` default missed. Import-time code re-runs everything: imports,
+  module constants, decorators, class bodies (dataclass fields, enum
+  members) and functions called while a module is imported
+  (`app = create_app()`). Without coverage it acts as `file`. The first run
+  after upgrading misses the whole cache.
 - Cached kills and survivors are keyed on individual tests, not whole test
   files: adding or editing a test keeps every verdict that other tests in
   the same file (or `Test*` class) produced. A test still counts its file's

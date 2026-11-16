@@ -926,6 +926,27 @@ struct Template {
     mirror: Arc<Mirror>,
 }
 
+/// Set on the macOS template, from its start, so forked children never reach
+/// system code that isn't fork-safe. A value the user exports wins.
+const MACOS_FORK_ENV: &[(&str, &str)] = &[
+    // Unified logging: a child that reads a system preference (PDFium's
+    // CoreGraphics, psycopg's Kerberos) dies in `_os_log_preferences_refresh`.
+    ("OS_ACTIVITY_MODE", "disable"),
+    // libpq negotiates GSS encryption when the user holds Kerberos tickets,
+    // and that init segfaults in a fork (`connect_start`): healthchecks on
+    // Postgres crashed 12/12 forks, 0/12 with this. Test databases don't need
+    // GSS encryption.
+    ("PGGSSENCMODE", "disable"),
+];
+
+fn set_unless_exported(cmd: &mut Command, vars: &[(&str, &str)], exported: impl Fn(&str) -> bool) {
+    for (key, value) in vars {
+        if !exported(key) {
+            cmd.env(key, value);
+        }
+    }
+}
+
 impl Template {
     fn start(schema: &Schema) -> Result<Self> {
         let mut cmd = Command::new(&schema.python);
@@ -935,12 +956,8 @@ impl Template {
         if schema.rstest {
             cmd.env(RSTEST_ENV, "1");
         }
-        // macOS unified logging isn't fork-safe: a forked child that reads a
-        // system preference (PDFium's CoreGraphics, psycopg's Kerberos) dies
-        // in `_os_log_preferences_refresh`. Off from the template's start, the
-        // children never reach it. A value the user exports wins.
-        if cfg!(target_os = "macos") && std::env::var_os("OS_ACTIVITY_MODE").is_none() {
-            cmd.env("OS_ACTIVITY_MODE", "disable");
+        if cfg!(target_os = "macos") {
+            set_unless_exported(&mut cmd, MACOS_FORK_ENV, |k| std::env::var_os(k).is_some());
         }
         // The template stays uncapped; each forked child caps itself.
         match schema.mem_cap {
@@ -1174,6 +1191,21 @@ fn tail(text: &str, lines: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macos_fork_env_keeps_what_the_user_exported() {
+        let mut cmd = Command::new("python");
+        set_unless_exported(&mut cmd, MACOS_FORK_ENV, |k| k == "PGGSSENCMODE");
+        let set: Vec<_> = cmd.get_envs().collect();
+        assert_eq!(
+            set,
+            [(
+                std::ffi::OsStr::new("OS_ACTIVITY_MODE"),
+                Some(std::ffi::OsStr::new("disable"))
+            )]
+        );
+        assert!(MACOS_FORK_ENV.contains(&("PGGSSENCMODE", "disable")));
+    }
 
     fn served(code: Option<i32>, error: Option<&str>) -> Served {
         Served {

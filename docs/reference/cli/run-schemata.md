@@ -68,6 +68,21 @@ Before serving mutants, fermut runs the suite on the schema with no mutant
 active, split across the workers. Tests that fail, crash or hang there are
 logged, and mutants they kill run the normal way.
 
+Two common reasons a test passes in a normal run but fails in a fork with no
+mutant active:
+
+- **it reads your source files as data** (`ast.parse`, hashing, generating
+  code or docs from them). In the schema those files hold fermut's rewritten
+  functions, not your source;
+- **it snapshots global state at import** (`BASELINE = dict(REGISTRY)`) and
+  compares against it later. The template imported every test module, so the
+  snapshot already holds what the rest of the suite registered.
+
+Neither changes a verdict: the mutants those tests kill run the normal way,
+and only they lose the speed-up. Taking the snapshot in a fixture instead of at
+import wins it back for the second kind. Don't skip such a test in a fork: a
+test that can't run there can't kill a mutant there either.
+
 Confirmation guards one direction; an **audit** spot-checks the other. About
 5% of survivors and timeouts from the schema (picked by mutant id, so the same
 ones every run, plus the first one) are re-run the normal way, and that run's

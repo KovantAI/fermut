@@ -429,13 +429,24 @@ fn body_fingerprint(body: &[Stmt]) -> String {
 /// each top-level def/class a test can execute.
 #[derive(Debug, Clone)]
 pub struct ScopeLayout {
-    /// Every top-level statement that isn't a def/class, plus each def's and
-    /// class's decorators: code that runs at import time, so no per-test
-    /// coverage context can attribute it.
+    /// Code that runs at import time, so no per-test coverage context can
+    /// attribute it: every top-level statement that isn't a def/class, each
+    /// def's and class's decorators, and each class body's own statements
+    /// (fields, enum members, class attributes, nested classes; not methods).
     pub globals: String,
-    /// Top-level defs/classes in source order: `(first body line, last line,
-    /// hash of the whole statement)`. Lines are 1-based, as coverage records them.
-    pub scopes: Vec<(u32, u32, String)>,
+    /// Top-level defs/classes in source order.
+    pub scopes: Vec<Scope>,
+}
+
+/// A top-level def or class. Lines are 1-based, as coverage records them.
+#[derive(Debug, Clone)]
+pub struct Scope {
+    /// First line of the body: header lines run at import, not in a test.
+    pub start: u32,
+    pub end: u32,
+    /// Hash of the whole statement.
+    pub hash: String,
+    pub class: bool,
 }
 
 impl ScopeLayout {
@@ -444,8 +455,8 @@ impl ScopeLayout {
     /// module runs every `def` line, so a header line is no sign the function
     /// ran; its decorators are in `globals`.
     pub fn scope_at(&self, line: u32) -> Option<usize> {
-        let i = self.scopes.partition_point(|s| s.0 <= line);
-        (i > 0 && line <= self.scopes[i - 1].1).then(|| i - 1)
+        let i = self.scopes.partition_point(|s| s.start <= line);
+        (i > 0 && line <= self.scopes[i - 1].end).then(|| i - 1)
     }
 }
 
@@ -462,9 +473,9 @@ pub fn scope_layout(path: &Path) -> Option<ScopeLayout> {
     globals.update(b"globals:v1\n");
     let mut scopes = Vec::new();
     for stmt in &parsed.syntax().body {
-        let (decorators, body) = match stmt {
-            Stmt::FunctionDef(f) => (&f.decorator_list, &f.body),
-            Stmt::ClassDef(c) => (&c.decorator_list, &c.body),
+        let (decorators, body, class) = match stmt {
+            Stmt::FunctionDef(f) => (&f.decorator_list, &f.body, false),
+            Stmt::ClassDef(c) => (&c.decorator_list, &c.body, true),
             other => {
                 globals.update(strip_ranges(&format!("{:#?}", other)).as_bytes());
                 globals.update(b"\n");
@@ -477,15 +488,24 @@ pub fn scope_layout(path: &Path) -> Option<ScopeLayout> {
             globals.update(strip_ranges(&format!("{:#?}", decorators)).as_bytes());
             globals.update(b"\n");
         }
+        // A class body runs at import: its fields and attributes shape every
+        // instance, but a test that only builds one runs none of its lines.
+        if class {
+            for member in body.iter().filter(|m| !matches!(m, Stmt::FunctionDef(_))) {
+                globals.update(strip_ranges(&format!("{:#?}", member)).as_bytes());
+                globals.update(b"\n");
+            }
+        }
         let range = stmt.range();
         let mut h = Sha256::new();
         h.update(b"scope:v1\n");
         h.update(strip_ranges(&format!("{:#?}", stmt)).as_bytes());
-        scopes.push((
-            line_of(body[0].start()),
-            line_of(range.end()),
-            hex::encode(h.finalize()),
-        ));
+        scopes.push(Scope {
+            start: line_of(body[0].start()),
+            end: line_of(range.end()),
+            hash: hex::encode(h.finalize()),
+            class,
+        });
     }
     Some(ScopeLayout {
         globals: hex::encode(globals.finalize()),

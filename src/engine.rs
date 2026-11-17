@@ -2775,6 +2775,54 @@ mod tests {
         assert_eq!(cov_hashes(&helper, UTIL), all);
     }
 
+    /// Identity hash of a mutant on line 9 (`bar`, run by test_a) of `module`,
+    /// where import ran lines 2 (a class field) and 6 (`make`, called at
+    /// module level) and test_b ran line 4 (a method body).
+    fn import_time_hash(module: &str) -> String {
+        use crate::filter::coverage::CoverageContexts;
+        let tmp = tempfile::tempdir().unwrap();
+        let py = tmp.path().join("mod.py");
+        std::fs::write(&py, module).unwrap();
+        let doc = r#"{"files": {"mod.py": {"contexts": {
+            "2": ["tests/t.py|collect"], "6": ["tests/t.py|collect"],
+            "7": ["tests/t.py|collect"], "4": ["tests/t.py::test_b|run"],
+            "9": ["tests/t.py::test_a|run"]}}}}"#;
+        let cov_path = tmp.path().join("coverage.json");
+        std::fs::write(&cov_path, doc).unwrap();
+        let cov = CoverageContexts::from_json(&cov_path, tmp.path(), tmp.path()).unwrap();
+        let cfg = Config {
+            coverage: Some(cov.clone()),
+            ..base_test_config()
+        };
+        let id = CovIdentity::build(&cov, &tmp.path().join("tests"), [py.as_path()]);
+        let mut m = arith_mutant("x + 1", "+", "-");
+        m.file = py.clone();
+        m.line = 9;
+        m.stmt_line = 9;
+        mutant_identity_hash(&cfg, &m, &HashMap::new(), &HashMap::new(), Some(&id)).unwrap()
+    }
+
+    const IMPORT_TIME: &str = "class Cfg:\n    LIMIT = 1\n    def get(self):\n        return 1\ndef make():\n    return 1\nAPP = make()\ndef bar():\n    return Cfg.LIMIT + APP\n";
+
+    #[test]
+    fn coverage_identity_sees_code_that_ran_at_import() {
+        let bar = import_time_hash(IMPORT_TIME);
+        // A class field: runs at import, shapes what bar reads.
+        assert_ne!(
+            bar,
+            import_time_hash(&IMPORT_TIME.replace("LIMIT = 1", "LIMIT = 2"))
+        );
+        // A function called at module level: `APP` is what bar reads.
+        let make = IMPORT_TIME.replace("def make():\n    return 1", "def make():\n    return 2");
+        assert_ne!(bar, import_time_hash(&make));
+        // A method body bar's test never ran stays out of it.
+        let get = IMPORT_TIME.replace(
+            "def get(self):\n        return 1",
+            "def get(self):\n        return 2",
+        );
+        assert_eq!(bar, import_time_hash(&get));
+    }
+
     #[test]
     fn order_by_value_puts_covered_mutants_first() {
         use crate::filter::coverage::CoverageContexts;

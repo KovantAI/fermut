@@ -5,24 +5,7 @@
 version = 2
 # v2 defaults: RustSec vulnerabilities and yanked crates fail the check;
 # unmaintained/unsound warn. The advisory DB is fetched fresh each run.
-# zip 8.x arrives via ruff_db/ty_vendored (git dep), which pins `zip = "8.0"`
-# even on ruff main, so the >=9 fix is unreachable. All three advisories are in
-# `ZipArchive::extract`/`ZipStreamReader::extract`; ruff only reads its embedded
-# typeshed zip from memory and writes it at build time, never extracts to disk.
-# Drop these once ruff moves to zip >=9.
 ignore = [
-    { id = "RUSTSEC-2026-0367", reason = "zip extract() only; unused via ruff_db" },
-    { id = "RUSTSEC-2026-0368", reason = "zip extract() only; unused via ruff_db" },
-    { id = "RUSTSEC-2026-0369", reason = "zip extract() only; unused via ruff_db" },
-    { id = "RUSTSEC-2026-0429", reason = "zip extract() symlink size abort; unused via ruff_db" },
-    # zstd 0.13 / zstd-safe 7 arrive via the same zip 8.x (ty_vendored's
-    # `zip/zstd` feature); fixes need zstd 0.14 / zstd-safe 8, unreachable
-    # until ruff moves to zip >=9. zstd only decompresses ty's own typeshed zip,
-    # built and embedded at compile time: no untrusted input, no reused stream
-    # contexts, no seekable API, no legacy frames.
-    { id = "RUSTSEC-2026-0391", reason = "zstd with_context reuse; unused, input is embedded typeshed" },
-    { id = "RUSTSEC-2026-0398", reason = "zstd seekable API; unused via zip" },
-    { id = "RUSTSEC-2026-0403", reason = "zstd legacy frames; embedded typeshed is modern zstd" },
     # ctutils (via digest -> hmac/sha2, cache MAC). Fix is >=0.4.4, published
     # 2026-10 but still inside the Aikido package-age quarantine, so cargo only
     # resolves 0.4.3. MAC compare uses subtle::ct_eq, and verification is an
@@ -36,7 +19,8 @@ version = 2
 # Allow-list derived from the current dependency tree (all permissive).
 # A dependency introducing a license outside this set fails the check.
 # `Unicode-DFS-2016` comes from unicode_names2 (via the ruff parser);
-# `CDLA-Permissive-2.0` from webpki-roots (via ureq's TLS root bundle).
+# `CDLA-Permissive-2.0` from webpki-roots (via ureq's TLS root bundle);
+# `BSD-2-Clause` from zstd-sys (via ruff_db -> zip 9 -> zstd).
 allow = [
     "MIT",
     "Apache-2.0",
@@ -47,6 +31,7 @@ allow = [
     "CDLA-Permissive-2.0",
     "CC0-1.0",
     "Unlicense",
+    "BSD-2-Clause",
     "BSD-3-Clause",
     "MPL-2.0",
     "Zlib",

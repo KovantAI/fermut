@@ -9,8 +9,14 @@ interpreter; stdlib only (plus pytest, which the pytest runner already needs).
 
 schematize
     stdin: [{"id", "file", "start", "end", "replacement"}] — file relative to
-    <mirror_root>, start/end byte offsets. Every mutant inside a function
-    body becomes one case of a switch in its *innermost* function:
+    <mirror_root>, start/end byte offsets. A higher-order mutant gives
+    "edits": [{"start", "end", "replacement"}, ...] instead, and goes in the
+    innermost function holding all of them. Edits that share no function
+    (a *split* mutant) get one index and, in each of their functions, a
+    `case _ if _fm_b._fm_active in {idx, ...}:` shared by every split mutant
+    with the same edits there; the gate also tests that set.
+    Every mutant inside a function body becomes one case of a switch in its
+    *innermost* function:
 
         def f(self, x):
             "doc"                         # kept first: __doc__ unchanged
@@ -96,6 +102,7 @@ import time
 import traceback
 import warnings
 from collections import defaultdict
+from itertools import pairwise
 
 ACTIVE = "_fm_active"  # attribute on the builtins module
 # Set by fermut (`runner::PRIVATE_HOME_ENV`) when tests run with a private home;
@@ -264,87 +271,223 @@ def compile_problem(src):
     return None
 
 
-def mutated_function(src, starts, fn, m):
+def edits_of(m):
+    """A mutant's edits, ascending: `edits`, or its own start/end/replacement."""
+    return sorted(m.get("edits") or [m], key=lambda e: e["start"])
+
+
+def splice(src, edits, offset=0):
+    """`src` (starting at byte `offset` of the file) with `edits` applied,
+    last first so earlier offsets stay valid."""
+    for e in reversed(edits):
+        a, b = e["start"] - offset, e["end"] - offset
+        src = src[:a] + e["replacement"].encode() + src[b:]
+    return src
+
+
+def placement(tree, starts, edits):
+    """(index path to the innermost def whose body holds every edit, None),
+    else (None, reason). One edit: its innermost function."""
+    found = [innermost_function(tree, starts, e["start"]) for e in edits]
+    for path, why in found:
+        if path is None:
+            return None, why
+    common = found[0][0]
+    for path, _ in found[1:]:
+        n = 0
+        while n < min(len(common), len(path)) and common[n] == path[n]:
+            n += 1
+        common = common[:n]
+    while common and not isinstance(
+        resolve(tree, common), (ast.FunctionDef, ast.AsyncFunctionDef)
+    ):
+        common = common[:-1]
+    return (common, None) if common else (None, "split")
+
+
+def parts(tree, starts, edits):
+    """([(path, edits)], None): the defs to switch and the edits in each, one
+    unless the edits share no def; else (None, reason). An edit in a def
+    nested in another part's def joins that part: its case holds the inner
+    def's source."""
+    path, why = placement(tree, starts, edits)
+    if path is not None:
+        return [(tuple(path), edits)], None
+    if why != "split":
+        return None, why
+    groups = defaultdict(list)
+    for e in edits:
+        groups[tuple(innermost_function(tree, starts, e["start"])[0])].append(e)
+    merged = defaultdict(list)
+    for p in sorted(groups, key=len):
+        outer = next((q for q in merged if p[: len(q)] == q), p)
+        merged[outer].extend(groups[p])
+    return [(p, sorted(es, key=lambda e: e["start"])) for p, es in merged.items()], None
+
+
+def variant(src, starts, fn, edits):
+    """(the mutated def, None) if it can be a case of `fn`'s switch, else
+    (None, why)."""
+    try:
+        mut_fn, problem = mutated_function(src, starts, fn, edits)
+    except (SyntaxError, ValueError, IndexError):
+        return None, "unparsable"
+    # A compile-time warning (`x is ''`) is an import *error* under
+    # `filterwarnings = error`. Cold, that kills one mutant; in a shared
+    # schema it would break every mutant in the file.
+    # (A warning made an error surfaces as SyntaxError on 3.12+, so
+    # both kinds of problem land here.)
+    if problem:
+        return None, "compile-warning"
+    if dump(docstring(mut_fn.body)) != dump(docstring(fn.body)):
+        return None, "docstring"
+    if (
+        type(mut_fn) is not type(fn)
+        or mut_fn.name != fn.name
+        or is_generator(mut_fn) != is_generator(fn)
+    ):
+        return None, "structure"
+    return mut_fn, None
+
+
+def in_set(idxs):
+    """`_fm_b._fm_active in {...}`: one frozenset constant, an O(1) test."""
+    return ast.Compare(
+        active_expr(), [ast.In()], [ast.Set([ast.Constant(i) for i in idxs])]
+    )
+
+
+def gate(lo, hi, extra):
+    """`lo <= active <= hi` (this def's own contiguous indices), or-ed with
+    `active in {...}` for the split mutants it holds."""
+    tests = []
+    if lo is not None:
+        tests.append(
+            ast.Compare(
+                ast.Constant(lo),
+                [ast.LtE(), ast.LtE()],
+                [active_expr(), ast.Constant(hi)],
+            )
+        )
+    if extra:
+        tests.append(in_set(extra))
+    return tests[0] if len(tests) == 1 else ast.BoolOp(ast.Or(), tests)
+
+
+def gate_ranges(test):
+    """The [(lo, hi)] a `gate` covers; [] for any other test."""
+    found = []
+    for t in test.values if isinstance(test, ast.BoolOp) else [test]:
+        if not isinstance(t, ast.Compare):
+            return []
+        if (
+            len(t.comparators) == 2
+            and getattr(t.comparators[0], "attr", None) == ACTIVE
+        ):
+            found.append((t.left.value, t.comparators[1].value))
+        elif (
+            isinstance(t.ops[0], ast.In)
+            and getattr(t.left, "attr", None) == ACTIVE
+            and isinstance(t.comparators[0], ast.Set)
+        ):
+            for i in sorted(c.value for c in t.comparators[0].elts):
+                if found and found[-1][1] == i - 1:
+                    found[-1] = (found[-1][0], i)
+                else:
+                    found.append((i, i))
+        else:
+            return []
+    return found
+
+
+def mutated_function(src, starts, fn, edits):
     """(the mutated def parsed on its own, its compile problem). Parsing one
     function instead of the whole file keeps schematizing linear in mutants,
     not mutants x file size. An `if 1:` header lets an indented def stand
     alone; a def that only compiles inside its file (`nonlocal`) is checked
     against the whole mutated file instead."""
     start, end = starts[fn.lineno - 1], span(fn, starts)[1]
-    seg = src[start : m["start"]] + m["replacement"].encode() + src[m["end"] : end]
+    seg = splice(src[start:end], edits, start)
     text = b"if 1:\n" + seg if fn.col_offset else seg
     tree = ast.parse(text)
     mut_fn = tree.body[0].body[0] if fn.col_offset else tree.body[0]
     problem = compile_problem(text)
     if problem == "error":
-        problem = compile_problem(
-            src[: m["start"]] + m["replacement"].encode() + src[m["end"] :]
-        )
+        problem = compile_problem(splice(src, edits))
     return mut_fn, problem
 
 
 def schematize_file(src, mutants, next_idx, active_dir=os.devnull):
     """(new source | None, {id: entry}, [(co_firstlineno, lo, hi)])."""
     tree, starts = ast.parse(src), line_starts(src)
-    entries, by_fn = {}, defaultdict(list)
+    entries, by_fn, variants = {}, defaultdict(list), {}
     for m in mutants:
-        path, why = innermost_function(tree, starts, m["start"])
-        if path is None:
+        edits = edits_of(m)
+        if any(a["end"] > b["start"] for a, b in pairwise(edits)):
+            entries[m["id"]] = {"fallback": "overlap"}
+            continue
+        ps, why = parts(tree, starts, edits)
+        built = []
+        for path, es in ps or []:
+            # A split pair's parts recur across pairs (one first-order edit
+            # each): build each once. Cases may share the result; the tree is
+            # only unparsed.
+            key = (path, tuple((e["start"], e["end"], e["replacement"]) for e in es))
+            if key not in variants:
+                variants[key] = variant(src, starts, resolve(tree, path), es)
+            mut_fn, why = variants[key]
+            if why:
+                break
+            built.append((path, key, mut_fn))
+        if why:
             entries[m["id"]] = {"fallback": why}
-        else:
-            by_fn[tuple(path)].append(m)
+            continue
+        for path, key, mut_fn in built:
+            by_fn[path].append((m["id"], key, mut_fn, len(built) > 1))
 
     # Deepest first: an enclosing def's original branch then carries its
     # already-switched inner defs. Its mutant branches come from the plain
     # spliced source, which is right — only one mutant is ever active.
+    # A def numbers its own mutants consecutively. A split mutant keeps the
+    # index its first def gave it (after that def's own), and each of its
+    # defs runs its part under a guard listing every split mutant that shares
+    # the part: one body per distinct part, not one per pair.
     for path, ms in sorted(by_fn.items(), key=lambda kv: -len(kv[0])):
         fn = resolve(tree, path)
         orig_doc = docstring(fn.body)
-        cases = []
-        for m in ms:
-            try:
-                mut_fn, problem = mutated_function(src, starts, fn, m)
-            except (SyntaxError, ValueError, IndexError):
-                entries[m["id"]] = {"fallback": "unparsable"}
-                continue
-            # A compile-time warning (`x is ''`) is an import *error* under
-            # `filterwarnings = error`. Cold, that kills one mutant; in a shared
-            # schema it would break every mutant in the file.
-            # (A warning made an error surfaces as SyntaxError on 3.12+, so
-            # both kinds of problem land here.)
-            if problem:
-                entries[m["id"]] = {"fallback": "compile-warning"}
-            elif dump(docstring(mut_fn.body)) != dump(orig_doc):
-                entries[m["id"]] = {"fallback": "docstring"}
-            elif (
-                type(mut_fn) is not type(fn)
-                or mut_fn.name != fn.name
-                or is_generator(mut_fn) != is_generator(fn)
-            ):
-                entries[m["id"]] = {"fallback": "structure"}
-            else:
+        cases, own, split, parts_of = [], [], [], {}
+        for mid, key, mut_fn, is_split in ms:
+            if not is_split:
                 idx = next_idx()
-                entries[m["id"]] = {"idx": idx}
+                entries[mid] = {"idx": idx}
+                own.append(idx)
                 cases.append(
                     ast.match_case(
                         pattern=ast.MatchValue(ast.Constant(idx)),
                         body=branch_body(mut_fn.body),
                     )
                 )
-        if not cases:
-            continue
+        for mid, key, mut_fn, is_split in ms:
+            if is_split:
+                entries.setdefault(mid, {"idx": next_idx()})
+                split.append(entries[mid]["idx"])
+                parts_of.setdefault(key, (mut_fn, []))[1].append(entries[mid]["idx"])
+        for mut_fn, idxs in parts_of.values():
+            cases.append(
+                ast.match_case(
+                    pattern=ast.MatchAs(),
+                    guard=in_set(idxs),
+                    body=branch_body(mut_fn.body),
+                )
+            )
         # `match` tests cases one by one, so gate on this def's contiguous idx
         # range first: an unmutated call pays one chained compare, not N.
-        lo, hi = cases[0].pattern.value.value, cases[-1].pattern.value.value
+        lo, hi = (own[0], own[-1]) if own else (None, None)
         # Before `branch_body(fn.body)`: StripDecls edits nested statements in
         # place, so afterwards a `nonlocal` inside a try/if would be gone.
         decls = hoisted(scope_decls(fn.body))
         switch = ast.If(
-            test=ast.Compare(
-                ast.Constant(lo),
-                [ast.LtE(), ast.LtE()],
-                [active_expr(), ast.Constant(hi)],
-            ),
+            test=gate(lo, hi, split),
             body=[ast.Match(subject=active_expr(), cases=cases)],
             orelse=branch_body(fn.body),
         )
@@ -381,26 +524,22 @@ def schematize_file(src, mutants, next_idx, active_dir=os.devnull):
     out = ast.unparse(ast.fix_missing_locations(tree))
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        compile(out, "<schema>", "exec")
-    return out, entries, switched_functions(out)
+        final = ast.parse(out)
+        compile(final, "<schema>", "exec")
+    return out, entries, switched_functions(final)
 
 
-def switched_functions(out):
-    """[(co_firstlineno, lo, hi)] per switched def; co_firstlineno is the first
+def switched_functions(tree):
+    """[(co_firstlineno, lo, hi)] per switched def in the schema's `tree`, one
+    more per run of split mutants it holds; co_firstlineno is the first
     decorator's line when decorated."""
     found = []
-    for node in ast.walk(ast.parse(out)):
+    for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for stmt in node.body:
-                test = getattr(stmt, "test", None)
-                if (
-                    isinstance(stmt, ast.If)
-                    and isinstance(test, ast.Compare)
-                    and len(test.comparators) == 2
-                    and getattr(test.comparators[0], "attr", None) == ACTIVE
-                ):
+                if isinstance(stmt, ast.If):
                     first = min([d.lineno for d in node.decorator_list] + [node.lineno])
-                    found.append((first, test.left.value, test.comparators[1].value))
+                    found += [(first, lo, hi) for lo, hi in gate_ranges(stmt.test)]
     return found
 
 
@@ -449,10 +588,11 @@ class Template:
         os.makedirs(self.active_dir, exist_ok=True)
         with open(schema_path) as f:
             functions = json.load(f)["functions"]
-        self.switched = {
-            path: {first: (lo, hi) for first, lo, hi in fns}
-            for path, fns in functions.items()
-        }
+        self.switched = {}
+        for path, fns in functions.items():
+            by_first = self.switched[path] = defaultdict(list)
+            for first, lo, hi in fns:
+                by_first[first].append((lo, hi))
         self.by_filename = {}  # co_filename -> switched map (realpath memo)
         self.ran = set()
         self.allowed_threads = []
@@ -489,9 +629,7 @@ class Template:
             fns = self.by_filename[code.co_filename] = self.switched.get(
                 os.path.realpath(code.co_filename), {}
             )
-        hit = fns.get(code.co_firstlineno)
-        if hit:
-            self.ran.add(hit)
+        self.ran.update(fns.get(code.co_firstlineno, ()))
 
     def profile(self, frame, event, arg):
         if event == "call":

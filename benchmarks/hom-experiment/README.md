@@ -63,6 +63,28 @@ interactions are high-value test-writing targets — not compute reduction.
 Caveats: markupsafe is a tiny sample (19 FOMs → 47.4% is noisy); reduction is a
 greedy set-cover upper bound over the killed set; one module per repo.
 
+## Schemata vs spawn (2026-11-17, fermut 0.8.0+)
+
+`hom` now runs each pair's stages on the schemata template (backlog #74).
+Re-recorded FOM kill sets with the current catalogue (so pair counts differ
+from the tables above), same-function gate, no `--max-pairs` cut. Pair
+classes joined on `(f1_id, f2_id)` with `hom_diff.py`.
+
+| module | pairs | SSHOMs | schemata | spawn run 1 / 2 | diffs spawn/spawn | diffs spawn/schemata |
+|---|---|---|---|---|---|---|
+| pyjwt `api_jws` | 4189 | 210 | 74 s | 264 / 156 s | 0 | 0 |
+| markupsafe `_native` | 180 | 61 | 3.5 s | 6.1 / 6.1 s | 0 | 0 |
+| more-itertools `recipes` | 3781 | 1692 | 166 s | 228 / 229 s | 0 | 0 |
+
+`--cross-function` (Phase 2), pyjwt `api_jws`: 19,606 pairs, 248 SSHOMs,
+schemata 233 s vs spawn 838 s, 0 diffs spawn/spawn and spawn/schemata. After
+it, the same-function pyjwt run above takes 34 s (schema built once, parsed
+once).
+
+The cost column above (8.5–12.3× a FOM pass) was measured on the spawn path.
+Since then, `hom` counts only pytest exit 1|2 as a kill (it used to count any
+non-zero exit). No pair in these runs exited otherwise.
+
 ## Definitions
 
 For first-order mutants (FOMs) `f1`, `f2` and the second-order mutant

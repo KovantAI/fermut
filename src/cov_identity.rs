@@ -11,11 +11,17 @@
 //!
 //! Import-time code goes into one global layer, not per test: coverage credits
 //! a module's import to whichever test file happened to import it first (a
-//! collect context), not to the tests that read its constants. So an edit to
-//! an import, a module constant or a decorator anywhere re-runs everything.
+//! collect context), not to the tests that read its constants. That layer is
+//! every module-level statement and decorator, every class body's own
+//! statements (fields, enum members: a test that builds a dataclass runs none
+//! of their lines), and every function coverage saw run under a collect
+//! context (`app = create_app()` runs `create_app` at import). An edit to any
+//! of those re-runs everything.
 //!
-//! Gap: a mutant that steers a test into code the baseline never ran, which
-//! is then edited, keeps its stale verdict until the coverage DB is refreshed.
+//! Gaps: a module imported lazily inside a test credits its import-time
+//! calls to that one test; and a mutant that steers a test into code the
+//! baseline never ran, which is then edited, keeps its stale verdict until the
+//! coverage DB is refreshed.
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -57,7 +63,10 @@ impl CovIdentity {
         }
 
         let mut globals = Sha256::new();
-        globals.update(b"cov-globals:v1\n");
+        globals.update(b"cov-globals:v2\n");
+        // Functions that ran at import (`app = create_app()`): credited to a
+        // collect context, not to the tests that use what they built.
+        let mut import_time: BTreeSet<(usize, usize)> = BTreeSet::new();
         let mut ran: HashMap<&str, BTreeSet<(usize, usize)>> = HashMap::new();
         let mut scope_hashes: Vec<Vec<String>> = Vec::with_capacity(files.len());
         for (i, (name, (path, lines))) in files.iter().enumerate() {
@@ -79,12 +88,21 @@ impl CovIdentity {
                 };
                 for id in ids {
                     ran.entry(id.as_str()).or_default().insert((i, s));
+                    if !id.contains("::") && !layout.scopes[s].class {
+                        import_time.insert((i, s));
+                    }
                 }
             }
-            scope_hashes.push(layout.scopes.into_iter().map(|s| s.2).collect());
+            scope_hashes.push(layout.scopes.into_iter().map(|s| s.hash).collect());
         }
 
         let names: Vec<&String> = files.keys().collect();
+        for &(f, s) in &import_time {
+            globals.update(names[f].as_bytes());
+            globals.update(b"|");
+            globals.update(scope_hashes[f][s].as_bytes());
+            globals.update(b"\n");
+        }
         let tests = ran
             .into_iter()
             .map(|(id, set)| {

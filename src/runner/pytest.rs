@@ -963,18 +963,41 @@ impl PytestRunner {
     /// (agent-library: 3 of 386 kills). Schemata confirms its kills the same
     /// way (`Schema::confirm`). Cached per id list; most kills share a few.
     /// A re-check that doesn't run the tests (spawn error, timeout, any exit
-    /// but 1) keeps the kill.
+    /// but 1) keeps the kill, and so does one that fails only once: a flaky
+    /// test can fail it under load (apb, `--jobs 14`), so a second failure is
+    /// needed before the kill becomes an error.
     fn confirms(&self, ids: &[String]) -> bool {
         if let Some(&ok) = lock_recover(&self.confirmed).get(ids) {
             return ok;
         }
-        let ok = super::with_worker_mirror(
+        let failure = self
+            .no_mutant_failure(ids)
+            .and_then(|_| self.no_mutant_failure(ids));
+        if let Some(tail) = &failure {
+            tracing::warn!(
+                "these tests fail with no mutant applied, run in this order: {}; \
+                 the mutants they kill are reported as errors. Run them on their own \
+                 to find the test that depends on another. The run's last lines:\n{tail}",
+                ids.join(" ")
+            );
+        }
+        let ok = failure.is_none();
+        lock_recover(&self.confirmed).insert(ids.to_vec(), ok);
+        ok
+    }
+
+    /// Run `ids` in this order with no mutant applied: the tail of the output
+    /// when they failed (exit 1), `None` otherwise. Only exit 1 says the tests
+    /// failed; 4, 5, 2 and 3 never ran them, and a spawn error or timeout is
+    /// no evidence either.
+    fn no_mutant_failure(&self, ids: &[String]) -> Option<String> {
+        super::with_worker_mirror(
             &self.tests,
             self.isolation,
             self.python.as_deref(),
             |mirror| {
                 let mut cmd = self.framework_command();
-                cmd.arg("--tb=no").arg("-q").arg("-x");
+                cmd.arg("--tb=short").arg("-q").arg("-x");
                 if let Some(seed) = self.hypothesis_seed {
                     cmd.arg(format!("--hypothesis-seed={seed}"));
                 }
@@ -982,26 +1005,22 @@ impl PytestRunner {
                 single_worker(&mut cmd, self.exe, &self.extra_args);
                 cmd.args(ids.iter().map(|id| mirror.id_into_mirror(id)));
                 configure_mirror_cmd(&mut cmd, mirror, self.private_home)?;
-                cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                let log = tempfile::NamedTempFile::new().context("creating kill check log")?;
+                cmd.stdout(log.as_file().try_clone()?)
+                    .stderr(log.as_file().try_clone()?);
                 let child = cmd.spawn().context("spawning kill confirmation")?;
                 let (status, _) = wait_draining_stdout(child, self.timeout, kill_group)?;
-                // Only exit 1 says the tests failed. 4 (ids that straddle
-                // modules come back "not found": apb), 5, 2 and 3 never ran
-                // them, so they say nothing against the kill.
-                Ok(status.is_none_or(|s| s.code() != Some(1)))
+                if !status.is_some_and(|s| s.code() == Some(1)) {
+                    return Ok(None);
+                }
+                let out = std::fs::read(log.path()).unwrap_or_default();
+                Ok(Some(super::tail_lines(
+                    &mirror.text_from_mirror(&String::from_utf8_lossy(&out)),
+                    15,
+                )))
             },
         )
-        .unwrap_or(true);
-        if !ok {
-            tracing::warn!(
-                "these tests fail with no mutant applied, run in this order: {}; \
-                 the mutants they kill are reported as errors. Run them on their own \
-                 to find the test that depends on another",
-                ids.join(" ")
-            );
-        }
-        lock_recover(&self.confirmed).insert(ids.to_vec(), ok);
-        ok
+        .unwrap_or(None)
     }
 }
 
@@ -2025,7 +2044,10 @@ mod tests {
         };
         assert!(message.contains("tests/t.py::a tests/t.py::b"), "{message}");
         assert!(matches!(again, MutantOutcome::Error { .. }), "{again:?}");
-        assert_eq!(runs, 3, "two mutant runs, one confirmation");
+        assert_eq!(
+            runs, 4,
+            "two mutant runs, the check and its retry, then cached"
+        );
         // Fails only on the patched file: a real kill.
         let (o, _, runs) =
             run("if head -c1 foo.py | grep -q -- -; then echo FAILED tests/t.py::b; exit 1; fi\n");
@@ -2037,6 +2059,14 @@ mod tests {
             "if head -c1 foo.py | grep -q -- -; then echo FAILED tests/t.py::b; exit 1; fi\nexit 4\n",
         );
         assert!(matches!(o, MutantOutcome::Killed { .. }), "{o:?}");
+        // The check fails once (a flaky test), then passes: the kill stands.
+        let (o, _, runs) = run(
+            "if head -c1 foo.py | grep -q -- -; then echo FAILED tests/t.py::b; exit 1; fi\n\
+             case \"$*\" in *pytest*) ;; *) exit 0;; esac\n\
+             f=\"$(dirname \"$0\")/flaked\"\nif [ -e \"$f\" ]; then exit 0; fi\ntouch \"$f\"\nexit 1\n",
+        );
+        assert!(matches!(o, MutantOutcome::Killed { .. }), "{o:?}");
+        assert_eq!(runs, 4, "two mutant runs, the check and its retry");
     }
 
     /// A survivor's delta runs exactly the given tests, not the coverage

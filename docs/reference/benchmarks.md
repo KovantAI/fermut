@@ -32,7 +32,7 @@ per-phase timing, mutant total, score, and return code.
 
 ## Cold runs (pinned OSS repos)
 
-The numbers below are `cold`-scenario runs of fermut 0.7.0 (pre-release
+The numbers below are `cold`-scenario runs of fermut v0.7.0 (pre-release
 `main`, 2026-11-03) vs mutmut 3.8.1, **both re-run back-to-back on the same
 machine (2026-11-03)**, excluding clone / install. fermut runs its
 defaults: coverage filter on, [schemata](cli/run-schemata.md) on,
@@ -92,7 +92,7 @@ size a team migrating off a long mutmut nightly runs: 21.5k lines of
 source, 10.2k lines of tests.
 
 **Setup for this section and the next** (2026-11-12): Apple M4 Max
-(14 cores, 36 GB), Python 3.13.13, pytest 9.2.0, fermut 0.7.0 (`main`
+(14 cores, 36 GB), Python 3.13.13, pytest 9.2.0, fermut v0.7.0 (`main`
 b9862b8bef) vs mutmut 3.8.1, `benchmarks/corpus.sh`. Clone and install
 are excluded. Each cold run ran twice, in the order mutmut, fermut,
 fermut, mutmut, so neither tool always gets the cooler machine; the two

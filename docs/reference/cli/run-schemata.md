@@ -1,8 +1,8 @@
 # Schemata
 
 How [`fermut run`](run.md) runs mutants in forks of one pytest process
-instead of a fresh pytest each. On by default with the pytest runner on
-Unix; `--no-schemata` turns it off.
+instead of a fresh pytest each. On by default with the pytest and rstest
+runners on Unix; `--no-schemata` turns it off.
 
 By default every mutant gets a fresh `pytest` process: start Python, import
 pytest and your package, collect the selected tests, then run them. On most
@@ -108,10 +108,9 @@ migrations; `--reuse-db` has no effect on an in-memory DB.
 `schemata = true` require it, so an unsupported setup is an error instead of a
 silent normal run. It needs:
 
-- the **pytest runner**, or **rstest** when asked for (`--runner rstest
-  --schemata`; off by default there). Under rstest the template runs the
-  suite on rstest's own vendored pytest, as rstest does, on the `python`
-  beside the `rstest` binary. Or **unittest** when asked for (`--runner
+- the **pytest runner** or **rstest** (on by default with both). Under
+  rstest the template runs the suite on rstest's own vendored pytest, as
+  rstest does, on the `python` beside the `rstest` binary. Or **unittest** when asked for (`--runner
   unittest --schemata`; off by default there). The template runs
   `unittest discover` once, and each fork runs the whole suite, stopping at
   the first failure, as `python -m unittest discover -f` does. unittest

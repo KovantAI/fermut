@@ -626,8 +626,8 @@ fn resolve_max_memory(cli_no: bool, cli: Option<u64>, file: Option<&str>) -> Res
     })
 }
 
-/// Schemata is on by default wherever it can run (rstest and unittest: opt-in
-/// only, until their parity with a normal run is measured). `--no-schemata` /
+/// Schemata is on by default wherever it can run (unittest: opt-in only, as a
+/// fork saves it too little to be worth the risk). `--no-schemata` /
 /// `schemata = false` turn it off; `--schemata` / `schemata = true` demand it,
 /// so an unsupported runner or platform is an error rather than a silent
 /// normal run.
@@ -647,7 +647,8 @@ fn resolve_schemata(
     match requested {
         Some(false) => Ok(false),
         Some(true) => check_schemata(runner).map(|()| true),
-        None => Ok(runner == RunnerKind::Pytest && check_schemata(runner).is_ok()),
+        None => Ok(matches!(runner, RunnerKind::Pytest | RunnerKind::Rstest)
+            && check_schemata(runner).is_ok()),
     }
 }
 
@@ -1344,11 +1345,11 @@ mod tests {
     fn schemata_is_on_wherever_it_can_run_unless_turned_off() {
         let (py, rs, ut) = (RunnerKind::Pytest, RunnerKind::Rstest, RunnerKind::Unittest);
         let on = |no, yes, file, runner| resolve_schemata(no, yes, file, runner).ok();
-        // Default: on with pytest on Unix, quietly off elsewhere.
+        // Default: on with pytest and rstest on Unix, quietly off elsewhere.
         assert_eq!(on(false, false, None, py), Some(cfg!(unix)));
+        assert_eq!(on(false, false, None, rs), Some(cfg!(unix)));
         assert_eq!(on(false, false, None, ut), Some(false));
-        // rstest and unittest are opt-in: off by default, on when asked for.
-        assert_eq!(on(false, false, None, rs), Some(false));
+        // unittest is opt-in: off by default, on when asked for.
         assert_eq!(on(false, true, None, rs), cfg!(unix).then_some(true));
         assert_eq!(on(false, true, None, ut), cfg!(unix).then_some(true));
         assert_eq!(on(false, false, Some(true), ut), cfg!(unix).then_some(true));

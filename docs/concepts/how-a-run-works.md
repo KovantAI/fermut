@@ -86,7 +86,7 @@ never touches your source tree.
   ordered so the test that killed this code before runs first. pytest stops
   at the first failure (`-x`).
 - **How.** Two ways, same verdict:
-    - **Schemata** (default with pytest on Unix; unittest and rstest opt in
+    - **Schemata** (default with pytest and rstest on Unix; unittest opts in
       with `--schemata`). Before the first mutant, fermut builds one
       *schema*: a copy of the project where every mutant inside a function
       body sits behind a switch. One *template* pytest session imports and

@@ -344,7 +344,7 @@ pub(crate) struct RunConfigArgs {
 
     /// Turn schemata mode off: start a fresh pytest per mutant instead of
     /// forking one that already imported and collected the suite. Schemata is
-    /// on by default with the pytest runner on Unix; it builds every
+    /// on by default with the pytest and rstest runners on Unix; it builds every
     /// function-body mutant into one schema up front, and anything it can't
     /// serve safely (module/class level, code that ran during import or
     /// collection, a test that crashes or fails in a fork) runs the normal way.

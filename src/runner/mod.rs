@@ -257,6 +257,15 @@ pub(crate) fn configure_mirror_cmd(
     // a passing suite at 14 workers, each a false kill. A mirror runs one
     // pytest at a time, so its own root can't race.
     cmd.env("PYTEST_DEBUG_TEMPROOT", &mirror.pytest_temproot);
+    // rstest keeps its cache (`flakes.json`, `durations.json`) in
+    // `.rstest_cache` under the project, so every run with a failing test
+    // changed the copy and fermut restored it, warning each time. Beside the
+    // copy instead, per mirror; set over the user's own, so mutated runs never
+    // write into their real flake history.
+    cmd.env(
+        "RSTEST_CACHE",
+        mirror.pytest_temproot.with_file_name("rstest-cache"),
+    );
     // Both roots, so the reporter plugin can give a parametrize value holding
     // the copy's path the id pytest gives it in the project (pytest 9.2 ids a
     // value over 100 characters by name, so the path's length can change it).
@@ -1509,6 +1518,12 @@ mod tests {
             "outside the project copy"
         );
         assert_ne!(a.pytest_temproot, b.pytest_temproot);
+        // rstest's cache too: out of the copy, so no run changes it.
+        let cache = std::path::Path::new(env[std::ffi::OsStr::new("RSTEST_CACHE")].unwrap());
+        assert!(
+            cache.is_absolute() && !cache.starts_with(&a.root),
+            "{cache:?}"
+        );
         let seed = env[std::ffi::OsStr::new("PYTHONHASHSEED")].unwrap();
         assert_eq!(
             seed,

@@ -40,9 +40,11 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   from the coverage DB (`cache_scope = "coverage"`, the new default). Editing
   a function re-runs only the mutants whose tests run it, in any file. An
   edit in another file that those tests call now re-runs them too, which the
-  old `file` default missed. Import-time code (imports, module constants,
-  decorators) re-runs everything. Without coverage it acts as `file`. The
-  first run after upgrading misses the whole cache.
+  old `file` default missed. Import-time code re-runs everything: imports,
+  module constants, decorators, class bodies (dataclass fields, enum
+  members) and functions called while a module is imported
+  (`app = create_app()`). Without coverage it acts as `file`. The first run
+  after upgrading misses the whole cache.
 - Cached kills and survivors are keyed on individual tests, not whole test
   files: adding or editing a test keeps every verdict that other tests in
   the same file (or `Test*` class) produced. A test still counts its file's
@@ -79,6 +81,19 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- `fermut coverage` runs pytest from the project root `fermut run` uses,
+  not from the config's directory or the PATH argument. Under a
+  monorepo-root config, a package's coverage was written at the monorepo root
+  and `fermut run` couldn't find it, or its test ids carried the package
+  prefix and every mutant errored. With no config, `fermut coverage src` ran
+  pytest inside `src/`. It also puts the project on `PYTHONPATH` as `run`
+  does, reads relative `--source`/`--tests` from your working directory,
+  prints paths relative to it, and fails when pytest collects no tests
+  instead of reporting an empty database as written.
+- `--schemata` on macOS with Postgres: a user holding Kerberos tickets had
+  every forked run crash when the tests connected (libpq's GSS encryption
+  setup isn't fork-safe), so those mutants ran the slow way. The template now
+  sets `PGGSSENCMODE=disable` unless you export it.
 - `--schemata` with testcontainers: every forked run shared the session id
   testcontainers draws at import, so concurrent forks all created the same
   reaper container and all but one failed at setup, and whole slices of the
@@ -89,7 +104,9 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   it covers. A kill now stands only when the same tests, in the same order,
   pass with no mutant applied; otherwise the mutant is reported as an error
   (left out of the score) and a warning names the tests. The check runs once
-  per list of killing tests.
+  per list of killing tests, on one rstest worker, and only a test failure
+  (exit 1) counts against the kill: a check that can't collect the tests or
+  times out leaves it standing.
 - `--runner rstest` without an activated venv: fermut ran the venv's `rstest`
   in its copy of the project, which has no `.venv`, so rstest found no Python
   and the baseline failed. fermut now passes that venv's interpreter with

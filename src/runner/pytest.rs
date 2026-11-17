@@ -962,7 +962,8 @@ impl PytestRunner {
     /// needs an earlier test's setup fails in a narrower selection
     /// (agent-library: 3 of 386 kills). Schemata confirms its kills the same
     /// way (`Schema::confirm`). Cached per id list; most kills share a few.
-    /// A run that can't finish (spawn error, timeout) keeps the kill.
+    /// A re-check that doesn't run the tests (spawn error, timeout, any exit
+    /// but 1) keeps the kill.
     fn confirms(&self, ids: &[String]) -> bool {
         if let Some(&ok) = lock_recover(&self.confirmed).get(ids) {
             return ok;
@@ -978,12 +979,16 @@ impl PytestRunner {
                     cmd.arg(format!("--hypothesis-seed={seed}"));
                 }
                 cmd.args(&self.extra_args);
+                single_worker(&mut cmd, self.exe, &self.extra_args);
                 cmd.args(ids.iter().map(|id| mirror.id_into_mirror(id)));
                 configure_mirror_cmd(&mut cmd, mirror, self.private_home)?;
                 cmd.stdout(Stdio::null()).stderr(Stdio::null());
                 let child = cmd.spawn().context("spawning kill confirmation")?;
                 let (status, _) = wait_draining_stdout(child, self.timeout, kill_group)?;
-                Ok(status.is_none_or(|s| s.success()))
+                // Only exit 1 says the tests failed. 4 (ids that straddle
+                // modules come back "not found": apb), 5, 2 and 3 never ran
+                // them, so they say nothing against the kill.
+                Ok(status.is_none_or(|s| s.code() != Some(1)))
             },
         )
         .unwrap_or(true);
@@ -2026,6 +2031,12 @@ mod tests {
             run("if head -c1 foo.py | grep -q -- -; then echo FAILED tests/t.py::b; exit 1; fi\n");
         assert!(matches!(o, MutantOutcome::Killed { .. }), "{o:?}");
         assert_eq!(runs, 3);
+        // The re-check can't collect the ids (exit 4) while the patched run
+        // failed: no evidence against the kill.
+        let (o, _, _) = run(
+            "if head -c1 foo.py | grep -q -- -; then echo FAILED tests/t.py::b; exit 1; fi\nexit 4\n",
+        );
+        assert!(matches!(o, MutantOutcome::Killed { .. }), "{o:?}");
     }
 
     /// A survivor's delta runs exactly the given tests, not the coverage

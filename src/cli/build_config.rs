@@ -240,11 +240,10 @@ pub(crate) fn build_config(
     // match the source, so the `coverage` cache mode can't trust them.
     let mut stale_kept = false;
     if let Some(p) = coverage_path.clone() {
-        // Anchor the content check where `fermut coverage` would for this DB,
-        // so sidecar keys and the refresh below agree on the base dir.
+        // `fermut coverage` keys its sidecar on the same project root `run`
+        // uses, so the content check and the refresh below agree.
         let cov_path = p.parent().unwrap_or(&project_root).to_path_buf();
-        let cov_base =
-            LoadedConfig::load(&cov_path).map_or_else(|_| cov_path.clone(), |l| l.base_dir);
+        let cov_base = project_root.clone();
         let tests_dir = tests.clone().unwrap_or_else(|| source_root.join("tests"));
         let by_content = || {
             crate::cli::subcmd::coverage::content_staleness(&p, &source_root, &tests_dir, &cov_base)

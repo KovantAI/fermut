@@ -81,6 +81,11 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- `--runner rstest`: rstest wrote its cache (`.rstest_cache/flakes.json`,
+  `durations.json`) into fermut's copy of the project, so every run with a
+  failing test changed the copy, fermut restored it and warned each time.
+  fermut now points rstest's cache (`RSTEST_CACHE`) beside the copy, which
+  also keeps mutated runs out of your own rstest flake history.
 - `fermut coverage` runs pytest from the project root `fermut run` uses,
   not from the config's directory or the PATH argument. Under a
   monorepo-root config, a package's coverage was written at the monorepo root

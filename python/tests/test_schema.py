@@ -773,16 +773,21 @@ def test_startup_tracebacks_reach_stderr(tmp_path):
 
 def test_children_get_private_tmp_roots_of_cold_length(served, tmp_path):
     server, _ = served
+
+    def leftovers():
+        return {
+            os.path.join(root, d)
+            for root in (server.temproot, schema.tempfile.gettempdir())
+            for d in os.listdir(root)
+            if d.startswith("pytest-of-f")
+        }
+
+    # The system temp dir is shared: only what this run adds counts.
+    before = leftovers()
     assert server.recv()["ready"] is True
     assert server.run(0, ["tests/test_core.py::test_tmp"])["exit"] == 0
     server.close()  # the template cleans up after answering
-    leftovers = [
-        d
-        for root in (server.temproot, schema.tempfile.gettempdir())
-        for d in os.listdir(root)
-        if d.startswith("pytest-of-f")
-    ]
-    assert leftovers == []
+    assert leftovers() - before == set()
 
 
 def test_each_child_gets_a_private_home_removed_after(served):

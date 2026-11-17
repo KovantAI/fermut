@@ -79,6 +79,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   hung is now killed instead of timed out (both count as detected).
 
 ### Fixed
+- `--schemata` on macOS with Postgres: a user holding Kerberos tickets had
+  every forked run crash when the tests connected (libpq's GSS encryption
+  setup isn't fork-safe), so those mutants ran the slow way. The template now
+  sets `PGGSSENCMODE=disable` unless you export it.
 - `--schemata` with testcontainers: every forked run shared the session id
   testcontainers draws at import, so concurrent forks all created the same
   reaper container and all but one failed at setup, and whole slices of the

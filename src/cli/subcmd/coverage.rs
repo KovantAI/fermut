@@ -54,7 +54,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -113,8 +113,11 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<Refreshed> {
     let loaded = LoadedConfig::load(&opts.path)?;
     let base_dir = loaded.base_dir.clone();
 
+    // CLI paths are relative to the user's cwd; pytest runs elsewhere.
+    let absolute = |p: PathBuf| std::path::absolute(&p).unwrap_or(p);
     let source = opts
         .source
+        .map(absolute)
         .or_else(|| {
             loaded
                 .file
@@ -123,9 +126,15 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<Refreshed> {
                 .map(|p| loaded.resolve_path(p))
         })
         .unwrap_or_else(|| base_dir.clone());
+    // Run pytest where `fermut run` does, the project root above the source,
+    // so recorded node ids, the default DB location and the sidecar keys are
+    // the ones `run` looks for. The config's directory can be an ancestor (a
+    // monorepo root config) or, with no config, the PATH argument itself.
+    let base_dir = crate::runner::find_project_root(&source).unwrap_or(base_dir);
 
     let tests = opts
         .tests
+        .map(absolute)
         .or_else(|| loaded.file.tests.clone().map(|p| loaded.resolve_path(p)))
         .unwrap_or_else(|| source.join("tests"));
 
@@ -176,7 +185,7 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<Refreshed> {
                 "{} has no current fermut fingerprint sidecar (missing, or written by \
                  another fermut version); rebuilding fully to establish an incremental \
                  baseline.",
-                display_rel(&db_path, &base_dir)
+                shown(&db_path)
             );
         } else {
             eprintln!("Running full test suite under coverage…");
@@ -214,7 +223,7 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<Refreshed> {
         eprintln!(
             "{} is up to date (no test or source content changed since it was written). \
              Nothing to do.",
-            display_rel(&db_path, &base_dir)
+            shown(&db_path)
         );
         return Ok(Refreshed {
             path: db_path,
@@ -247,7 +256,7 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<Refreshed> {
                 "warning: {uncovered} source file(s) changed but no re-runnable test covers \
                  them in {} — their coverage may be stale. Run `fermut coverage --full` \
                  to rebuild.",
-                display_rel(&db_path, &base_dir)
+                shown(&db_path)
             );
         }
         if !tests_for_sources.is_empty() {
@@ -261,7 +270,7 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<Refreshed> {
     if !rerun.is_empty() {
         eprintln!("appending coverage for {} test file(s):", rerun.len());
         for f in &rerun {
-            eprintln!("  {}", display_rel(f, &base_dir));
+            eprintln!("  {}", shown(f));
         }
     }
     if !deleted_tests.is_empty() {
@@ -323,7 +332,7 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<Refreshed> {
                 "warning: {missing} of {total} source file(s) recorded in {} are missing on \
                  disk — likely a coverage DB restored onto a different checkout root, not \
                  real deletions. Not pruning; run `fermut coverage --full` to rebuild.",
-                display_rel(&db_path, &base_dir)
+                shown(&db_path)
             );
             0
         }
@@ -824,7 +833,7 @@ fn run_pytest(
     // mutants in module-level code get a test module to run. Must outlive
     // the pytest run.
     let plugin_dir = tempfile::tempdir().context("creating reporter plugin dir")?;
-    inject_collect_context(&mut cmd, plugin_dir.path())?;
+    inject_collect_context(&mut cmd, plugin_dir.path(), base_dir)?;
     if append {
         cmd.arg("--cov-append");
     }
@@ -855,6 +864,25 @@ fn run_pytest(
     // `.coverage` either way. Returns whether it succeeded so the caller can
     // decide whether to advance the fingerprint baseline (a failed run must not
     // mark files as freshly measured).
+    // 4: a target path doesn't exist; 5: nothing collected. Either way no
+    // test ran, so there is no coverage to keep, only a wrong path to fix.
+    if let Some(code @ (4 | 5)) = status.code() {
+        bail!(
+            "pytest exited {code} ({}) running from {} with {}; no coverage was \
+             recorded. Check `--tests` / `tests`",
+            if code == 4 {
+                "a test path wasn't found"
+            } else {
+                "no tests were collected"
+            },
+            base_dir.display(),
+            targets
+                .iter()
+                .map(|t| t.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+    }
     if !status.success() {
         eprintln!(
             "warning: pytest exited with a failure status; coverage was still \
@@ -868,14 +896,22 @@ fn run_pytest(
 /// `FERMUT_COLLECT_CONTEXT` set, so collecting a test module records the
 /// lines its imports run as `<module>|collect`. The plugin dir goes last on
 /// `PYTHONPATH` so it never shadows project modules.
-fn inject_collect_context(cmd: &mut Command, plugin_dir: &Path) -> Result<()> {
+fn inject_collect_context(cmd: &mut Command, plugin_dir: &Path, root: &Path) -> Result<()> {
     use crate::runner::pytest_result::{REPORTER_MODULE, REPORTER_SOURCE};
     let file = plugin_dir.join(format!("{REPORTER_MODULE}.py"));
     std::fs::write(&file, REPORTER_SOURCE)
         .with_context(|| format!("writing {}", file.display()))?;
-    let mut paths: Vec<PathBuf> = std::env::var_os("PYTHONPATH")
-        .map(|v| std::env::split_paths(&v).collect())
-        .unwrap_or_default();
+    // The project first, as `fermut run` puts its mirror (`mirror_pythonpath`),
+    // so a package that isn't installed still imports.
+    let mut paths: Vec<PathBuf> = [root.join("src"), root.to_path_buf()]
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .collect();
+    paths.extend(
+        std::env::var_os("PYTHONPATH")
+            .map(|v| std::env::split_paths(&v).collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
     paths.push(plugin_dir.to_path_buf());
     cmd.env(
         "PYTHONPATH",
@@ -1064,7 +1100,7 @@ enum Done {
 /// coverage, tell the user the one thing they need to do.
 fn report_done(loaded: &LoadedConfig, db_path: &Path, done: Done) {
     match done {
-        Done::Full => eprintln!("\nWrote {}.", display_rel(db_path, &loaded.base_dir)),
+        Done::Full => eprintln!("\nWrote {}.", shown(db_path)),
         Done::Incremental {
             reran,
             removed,
@@ -1093,10 +1129,12 @@ fn report_done(loaded: &LoadedConfig, db_path: &Path, done: Done) {
     if configured {
         eprintln!("`fermut run` will use it.");
     } else {
-        let rel = display_rel(db_path, &loaded.base_dir);
+        // The config resolves paths from its own directory.
         eprintln!(
-            "To use it, run `fermut run --coverage {rel}` \
-             (or add `coverage = \"{rel}\"` to your fermut config so it's automatic)."
+            "To use it, run `fermut run --coverage {}` \
+             (or add `coverage = \"{}\"` to your fermut config so it's automatic).",
+            shown(db_path),
+            display_rel(db_path, &loaded.base_dir)
         );
     }
 }
@@ -1109,6 +1147,14 @@ fn rel_to(path: &Path, base: &Path) -> Option<PathBuf> {
 }
 
 /// Display `path` relative to `base` when possible, else as given.
+/// `path` as the user should type it: relative to their cwd when under it.
+fn shown(path: &Path) -> String {
+    std::env::current_dir().map_or_else(
+        |_| path.display().to_string(),
+        |cwd| display_rel(path, &cwd),
+    )
+}
+
 fn display_rel(path: &Path, base: &Path) -> String {
     rel_to(path, base)
         .unwrap_or_else(|| path.to_path_buf())
@@ -1927,6 +1973,92 @@ mod tests {
             got,
             vec!["src/foo.py".to_string(), "tests/test_new.py".to_string()]
         );
+    }
+
+    /// `coverage(path, source)` on a project whose root is `proj` (it has the
+    /// `pyproject.toml`), with a stand-in interpreter exiting `code` that logs
+    /// its working directory and arguments. Returns the result and the log.
+    #[cfg(unix)]
+    fn run_in_project(
+        proj: &Path,
+        path: PathBuf,
+        source: Option<PathBuf>,
+        code: u8,
+    ) -> (Result<Refreshed>, String) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = proj.join("log");
+        let py = proj.join("python");
+        std::fs::write(
+            &py,
+            format!(
+                "#!/bin/sh\ncase \"$*\" in *pytest*) {{ pwd; echo \"$@\"; }} >> '{}';; esac\nexit {code}\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let got = coverage(CoverageArgs {
+            path,
+            source,
+            tests: Some(proj.join("tests")),
+            full: false,
+            output: None,
+            python: Some(py),
+            pytest_args: vec![],
+        });
+        (got, std::fs::read_to_string(&log).unwrap_or_default())
+    }
+
+    fn layout(proj: &Path) {
+        std::fs::create_dir_all(proj.join("src/pkg")).unwrap();
+        std::fs::create_dir_all(proj.join("tests")).unwrap();
+        std::fs::write(proj.join("pyproject.toml"), "").unwrap();
+        std::fs::write(proj.join("src/pkg/a.py"), "x = 1\n").unwrap();
+        std::fs::write(proj.join("tests/test_a.py"), "def test_a(): pass\n").unwrap();
+    }
+
+    /// No config, PATH = `src` (as `fermut run src`): pytest still runs from
+    /// the project root `run` uses, and the DB lands where `run` looks.
+    #[cfg(unix)]
+    #[test]
+    fn without_config_coverage_runs_from_the_project_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().canonicalize().unwrap();
+        layout(&proj);
+        let (got, log) = run_in_project(&proj, proj.join("src"), None, 0);
+        assert_eq!(got.unwrap().path, proj.join(".coverage"));
+        let mut lines = log.lines();
+        assert_eq!(lines.next(), Some(proj.to_str().unwrap()), "{log}");
+        assert!(lines.next().unwrap().contains("--cov=src"), "{log}");
+    }
+
+    /// A monorepo-root config with a package below it: pytest runs from the
+    /// package, as `fermut run packages/b/src` does, so node ids match.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_config_runs_each_package_from_its_own_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("fermut.toml"), "").unwrap();
+        std::fs::write(root.join("pyproject.toml"), "").unwrap();
+        let pkg = root.join("packages/b");
+        layout(&pkg);
+        let (got, log) = run_in_project(&pkg, root.clone(), Some(pkg.join("src")), 0);
+        assert_eq!(got.unwrap().path, pkg.join(".coverage"));
+        assert_eq!(log.lines().next(), Some(pkg.to_str().unwrap()), "{log}");
+    }
+
+    /// pytest found nothing to run: an error naming where it ran, not a
+    /// "Wrote .coverage" for an empty file.
+    #[cfg(unix)]
+    #[test]
+    fn no_tests_collected_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().canonicalize().unwrap();
+        layout(&proj);
+        let (got, _) = run_in_project(&proj, proj.join("src"), None, 5);
+        let err = got.err().expect("exit 5 fails").to_string();
+        assert!(err.contains("no tests were collected"), "{err}");
     }
 
     /// Full rebuild of a sidecar-less `.coverage` with a stand-in interpreter

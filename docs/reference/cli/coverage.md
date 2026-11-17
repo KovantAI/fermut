@@ -100,9 +100,15 @@ somewhere other than the project root (via `--output`).
 ## Requirements
 
 `pytest` and `pytest-cov` must be installed (`fermut doctor` checks
-both). The command runs pytest from the project root; your project's
-own pytest configuration must make the source importable, exactly as a
-normal `pytest` run would.
+both). The command runs pytest from the same project root `fermut run`
+uses: the nearest directory above the source with a `pyproject.toml`,
+`setup.cfg`, `pytest.ini`, `tox.ini`, `setup.py` or `.git`. That holds
+under a monorepo-root config too: each package's coverage runs from the
+package and lands in its `.coverage`. Like `run`, it puts `<root>/src` and
+`<root>` first on `PYTHONPATH`, so a package that isn't installed still
+imports. Relative `--source` and `--tests` are relative to your working
+directory. If pytest collects nothing (exit 5) or can't find a test path
+(exit 4), the command fails instead of writing an empty database.
 
 ## See also
 

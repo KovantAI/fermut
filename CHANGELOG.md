@@ -8,6 +8,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+### Fixed
+- Incremental `fermut coverage` no longer hands a changed `conftest.py` or
+  helper module to pytest as a test file (which collected nothing and failed
+  the run). A changed `conftest.py` re-measures its directory; any other
+  non-test module under the tests tree re-measures the whole tree. An
+  incremental re-run that collects no tests is no longer an error.
+
 ## [0.8.0] - 2026-11-17
 
 ### Added

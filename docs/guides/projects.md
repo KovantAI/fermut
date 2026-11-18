@@ -134,7 +134,7 @@ Run the gate on every PR, but don't let it block merges yet. With the
 gate becomes a warning, while a broken setup still fails the job.
 
 ```yaml
-      - uses: KovantAI/fermut@v0.8.0
+      - uses: KovantAI/fermut@v0.8.1
         with:
           blocking: "false"
 ```

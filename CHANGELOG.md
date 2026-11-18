@@ -8,6 +8,8 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-18
+
 ### Fixed
 - Incremental `fermut coverage` no longer hands a changed `conftest.py` or
   helper module to pytest as a test file (which collected nothing and failed
@@ -555,7 +557,8 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 Baseline release. Earlier history is recorded in the git log and release notes.
 
-[Unreleased]: https://github.com/KovantAI/fermut/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/KovantAI/fermut/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/KovantAI/fermut/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/KovantAI/fermut/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/KovantAI/fermut/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/KovantAI/fermut/compare/v0.6.0...v0.6.1

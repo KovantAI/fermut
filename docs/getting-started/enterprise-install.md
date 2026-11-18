@@ -30,8 +30,8 @@ devpi, a GitLab package registry) serves them like any other package.
 Point the installer at it:
 
 ```sh
-pip install --index-url https://pypi.internal.example/simple fermut==0.8.0
-uv tool install --index-url https://pypi.internal.example/simple fermut==0.8.0
+pip install --index-url https://pypi.internal.example/simple fermut==0.8.1
+uv tool install --index-url https://pypi.internal.example/simple fermut==0.8.1
 ```
 
 `PIP_INDEX_URL` / `UV_INDEX_URL` work too. Installing a wheel needs no

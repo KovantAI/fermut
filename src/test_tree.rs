@@ -341,13 +341,13 @@ fn fold_file(h: &mut Sha256, rel: &Path, fh: &[u8; 32]) {
 /// Pytest's default test-module patterns: `test_*.py` and `*_test.py`. A
 /// project with a custom `python_files` gets its modules classed as support
 /// files — over-invalidation only, never a stale hit.
-fn is_test_module(rel: &Path) -> bool {
+pub(crate) fn is_test_module(rel: &Path) -> bool {
     rel.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|n| (n.starts_with("test_") && n.ends_with(".py")) || n.ends_with("_test.py"))
 }
 
-fn is_conftest(rel: &Path) -> bool {
+pub(crate) fn is_conftest(rel: &Path) -> bool {
     rel.file_name().is_some_and(|n| n == "conftest.py")
 }
 

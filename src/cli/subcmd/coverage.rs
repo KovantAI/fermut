@@ -219,7 +219,7 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<Refreshed> {
     }
     let prior = prior.unwrap_or_default();
 
-    let Some(plan) = plan_incremental(&current, &prior, &db_path, &base_dir)? else {
+    let Some(plan) = plan_incremental(&current, &prior, &db_path, &base_dir, &tests)? else {
         eprintln!(
             "{} is up to date (no test or source content changed since it was written). \
              Nothing to do.",
@@ -237,6 +237,7 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<Refreshed> {
         tests_for_sources,
         reimported,
         rerun,
+        purge,
     } = plan;
 
     let touched_sources = changed_sources.len() + deleted_sources.len();
@@ -268,7 +269,7 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<Refreshed> {
         }
     }
     if !rerun.is_empty() {
-        eprintln!("appending coverage for {} test file(s):", rerun.len());
+        eprintln!("appending coverage for {} test path(s):", rerun.len());
         for f in &rerun {
             eprintln!("  {}", shown(f));
         }
@@ -282,11 +283,7 @@ pub(crate) fn coverage(opts: CoverageArgs) -> Result<Refreshed> {
 
     // Purge stale contexts for every file we're about to re-run (a modified test
     // covering fewer lines must not keep old bits) plus removed tests.
-    let mut prefixes: Vec<String> = rerun
-        .iter()
-        .filter_map(|f| rel_to(f, &base_dir))
-        .filter_map(|p| p.to_str().map(|s| s.replace('\\', "/")))
-        .collect();
+    let mut prefixes = purge;
     prefixes.extend(deleted_tests.iter().cloned());
     let purged = purge_contexts(&db_path, &prefixes)
         .with_context(|| format!("purging stale contexts from {}", db_path.display()))?;
@@ -398,8 +395,11 @@ struct IncrementalPlan {
     /// again: every changed test, plus each changed source with at least one
     /// existing coverer in `rerun`. Their stale import-time bits get purged.
     reimported: Vec<String>,
-    /// Deduplicated, existing test files to re-run under `--cov-append`.
+    /// Deduplicated, existing test files and directories to re-run under
+    /// `--cov-append`.
     rerun: Vec<PathBuf>,
+    /// Base-dir-relative test files whose contexts the re-run replaces.
+    purge: Vec<String>,
 }
 
 /// Diff `current` against `prior` and work out which tests to re-measure.
@@ -418,6 +418,7 @@ fn plan_incremental(
     prior: &Fingerprints,
     db_path: &Path,
     base_dir: &Path,
+    tests: &Path,
 ) -> Result<Option<IncrementalPlan>> {
     let changed_tests = changed_paths(&current.tests, &prior.tests, base_dir);
     let changed_sources = changed_keys(&current.sources, &prior.sources);
@@ -471,12 +472,37 @@ fn plan_incremental(
     tests_for_sources.extend(coverers(&deleted_sources)?);
     let tests_for_sources: Vec<PathBuf> = tests_for_sources.into_iter().collect();
 
-    // Union the two re-run sets by base-dir-relative key, skipping any path that
-    // no longer exists on disk (see above).
-    let mut rerun: Vec<PathBuf> = Vec::new();
+    // A changed or removed support file under the tests tree holds no tests of
+    // its own: pytest collects nothing from it and exits 5. Re-run what it
+    // affects instead, scoped like `test_tree`: a `conftest.py` its directory,
+    // any other module (a helper some unknown tests import) the whole tree.
+    let mut dirs = std::collections::BTreeSet::<PathBuf>::new();
+    let mut test_files: Vec<PathBuf> = Vec::new();
+    for f in changed_tests.into_iter().chain(
+        deleted_keys(&current.tests, &prior.tests)
+            .into_iter()
+            .map(|k| base_dir.join(k)),
+    ) {
+        if crate::test_tree::is_test_module(&f) {
+            test_files.push(f);
+        } else if crate::test_tree::is_conftest(&f) {
+            dirs.extend(f.parent().map(Path::to_path_buf));
+        } else {
+            dirs.insert(tests.to_path_buf());
+        }
+    }
+    let dirs: Vec<PathBuf> = dirs
+        .iter()
+        .filter(|d| d.is_dir() && !dirs.iter().any(|o| o != *d && d.starts_with(o)))
+        .cloned()
+        .collect();
+
+    // Union the re-run sets by base-dir-relative key, skipping any path that no
+    // longer exists on disk (see above) or that a re-run directory already holds.
+    let mut rerun: Vec<PathBuf> = dirs.clone();
     let mut seen = std::collections::BTreeSet::new();
-    for f in changed_tests.iter().chain(tests_for_sources.iter()) {
-        if !f.exists() {
+    for f in test_files.iter().chain(tests_for_sources.iter()) {
+        if !f.exists() || dirs.iter().any(|d| f.starts_with(d)) {
             continue;
         }
         if let Some(key) =
@@ -487,6 +513,16 @@ fn plan_incremental(
             }
         }
     }
+    // Contexts are keyed by test file, so a re-run directory purges every
+    // tracked file under it.
+    let mut purge: Vec<String> = seen.into_iter().collect();
+    purge.extend(
+        current
+            .tests
+            .keys()
+            .filter(|k| dirs.iter().any(|d| base_dir.join(k).starts_with(d)))
+            .cloned(),
+    );
 
     Ok(Some(IncrementalPlan {
         changed_sources,
@@ -495,6 +531,7 @@ fn plan_incremental(
         tests_for_sources,
         reimported,
         rerun,
+        purge,
     }))
 }
 
@@ -864,6 +901,13 @@ fn run_pytest(
     // `.coverage` either way. Returns whether it succeeded so the caller can
     // decide whether to advance the fingerprint baseline (a failed run must not
     // mark files as freshly measured).
+    // An incremental re-run that collects nothing (a re-run directory or an
+    // edited test file left with no tests) has nothing to re-measure: its stale
+    // contexts are already purged, so the DB is current.
+    if append && status.code() == Some(5) {
+        eprintln!("no tests collected from the re-run paths; nothing to re-measure.");
+        return Ok(true);
+    }
     // 4: a target path doesn't exist; 5: nothing collected. Either way no
     // test ran, so there is no coverage to keep, only a wrong path to fix.
     if let Some(code @ (4 | 5)) = status.code() {
@@ -1826,9 +1870,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = make_db_with_files(tmp.path());
         let same = fp(&["tests/test_foo.py"], &["src/foo.py"]);
-        assert!(plan_incremental(&same, &same, &db, tmp.path())
-            .unwrap()
-            .is_none());
+        assert!(
+            plan_incremental(&same, &same, &db, tmp.path(), &tmp.path().join("tests"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1837,7 +1883,7 @@ mod tests {
         let db = make_db_with_files(tmp.path());
         let prior = fp(&[], &["src/foo.py", "src/bar.py"]);
         let current = fp(&[], &["src/foo.py"]);
-        let plan = plan_incremental(&current, &prior, &db, tmp.path())
+        let plan = plan_incremental(&current, &prior, &db, tmp.path(), &tmp.path().join("tests"))
             .unwrap()
             .expect("a deletion-only change must not short-circuit as up to date");
         assert_eq!(plan.deleted_sources, vec!["src/bar.py".to_string()]);
@@ -1861,7 +1907,7 @@ mod tests {
         let prior = fp(&tests, &["src/foo.py", "src/bar.py"]);
         let current = fp(&tests, &["src/foo.py"]);
 
-        let plan = plan_incremental(&current, &prior, &db, base)
+        let plan = plan_incremental(&current, &prior, &db, base, &base.join("tests"))
             .unwrap()
             .unwrap();
         let rerun: Vec<String> = plan
@@ -1962,7 +2008,7 @@ mod tests {
         current.sources.insert("src/foo.py".into(), "h2".into());
         current.sources.insert("src/orphan.py".into(), "h2".into());
 
-        let plan = plan_incremental(&current, &prior, &db, base)
+        let plan = plan_incremental(&current, &prior, &db, base, &base.join("tests"))
             .unwrap()
             .unwrap();
         let mut got = plan.reimported.clone();
@@ -1973,6 +2019,61 @@ mod tests {
             got,
             vec!["src/foo.py".to_string(), "tests/test_new.py".to_string()]
         );
+    }
+
+    /// A changed `conftest.py` or helper holds no tests: re-run the directory it
+    /// scopes (the conftest's, or the whole tree for a helper), never the file.
+    #[test]
+    fn changed_support_file_reruns_its_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let db = make_db_with_files(base);
+        std::fs::create_dir_all(base.join("tests/sub")).unwrap();
+        let files = [
+            "tests/conftest.py",
+            "tests/_helpers.py",
+            "tests/test_a.py",
+            "tests/sub/conftest.py",
+            "tests/sub/test_b.py",
+        ];
+        for f in files {
+            std::fs::write(base.join(f), "\n").unwrap();
+        }
+        let prior = fp(&files, &[]);
+        let plan_for = |changed: &[&str]| {
+            let mut current = fp(&files, &[]);
+            for f in changed {
+                current.tests.insert(f.to_string(), "h2".into());
+            }
+            let plan = plan_incremental(&current, &prior, &db, base, &base.join("tests"))
+                .unwrap()
+                .unwrap();
+            let rel = |p: &PathBuf| {
+                rel_to(p, base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            };
+            let mut purge = plan.purge.clone();
+            purge.sort();
+            (plan.rerun.iter().map(rel).collect::<Vec<_>>(), purge)
+        };
+
+        // The issue's case: only a conftest changed.
+        let (rerun, purge) = plan_for(&["tests/sub/conftest.py"]);
+        assert_eq!(rerun, vec!["tests/sub"]);
+        assert_eq!(purge, vec!["tests/sub/conftest.py", "tests/sub/test_b.py"]);
+        // A test file inside a re-run directory isn't passed twice.
+        let (rerun, _) = plan_for(&[
+            "tests/sub/conftest.py",
+            "tests/sub/test_b.py",
+            "tests/test_a.py",
+        ]);
+        assert_eq!(rerun, vec!["tests/sub", "tests/test_a.py"]);
+        // A helper's importers are unknown: the whole tree, nested dirs collapsed.
+        let (rerun, purge) = plan_for(&["tests/_helpers.py", "tests/sub/conftest.py"]);
+        assert_eq!(rerun, vec!["tests"]);
+        assert_eq!(purge.len(), files.len());
     }
 
     /// `coverage(path, source)` on a project whose root is `proj` (it has the
@@ -2191,6 +2292,59 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::write(path, format!("#!/bin/sh\nexit {code}\n")).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A changed `conftest.py` re-runs its directory, never the conftest as a
+    /// test path; a re-run that collects nothing (exit 5) has nothing left to
+    /// measure, so it passes and advances the baseline rather than failing.
+    #[cfg(unix)]
+    #[test]
+    fn incremental_conftest_change_collecting_nothing_passes() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        std::fs::write(
+            base.join("fermut.toml"),
+            "source_root = \"src\"\ntests = \"tests\"\ncoverage = \".coverage\"\n",
+        )
+        .unwrap();
+        let db = make_db_with_files(&base);
+        write_sources(&base, false);
+        std::fs::create_dir(base.join("tests")).unwrap();
+        std::fs::write(base.join("tests/conftest.py"), "\n").unwrap();
+        std::fs::write(base.join("tests/test_foo.py"), "def test_t(): pass\n").unwrap();
+        let py = base.join("python");
+        fake_python(&py, 0);
+        let args = |full: bool| CoverageArgs {
+            path: base.clone(),
+            source: None,
+            tests: None,
+            full,
+            output: None,
+            python: Some(py.clone()),
+            pytest_args: vec![],
+        };
+        assert!(coverage(args(true)).unwrap().passed);
+
+        std::fs::write(base.join("tests/conftest.py"), "# autouse fixture\n").unwrap();
+        let log = base.join("args.txt");
+        std::fs::write(
+            &py,
+            format!("#!/bin/sh\necho \"$@\" > '{}'\nexit 5\n", log.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&py, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(coverage(args(false)).unwrap().passed);
+        let ran = std::fs::read_to_string(&log).unwrap();
+        assert!(ran.contains("--cov-append"), "{ran}");
+        assert!(ran.trim_end().ends_with(" tests"), "{ran}");
+        assert!(!ran.contains("conftest.py"), "{ran}");
+        assert_eq!(
+            load_fingerprints(&db).unwrap().tests,
+            current_fingerprints(&base.join("tests"), &base.join("src"), &base).tests,
+            "baseline advanced"
+        );
     }
 
     #[cfg(unix)]

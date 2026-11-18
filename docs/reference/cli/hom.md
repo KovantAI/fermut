@@ -55,7 +55,10 @@ filter flags, and the rest). The flags below are specific to `hom`:
    so dropping the other pairs loses nothing.
 3. Applies both edits and runs two stages, both with `-x`: first the shared
    killing tests (`K(f1) ∩ K(f2)`), then the remaining tests that cover
-   either mutant. The second stage is skipped when there are none.
+   either mutant. The second stage is skipped when there are none. A stage
+   kills the pair when a test fails (pytest exit 1 or 2). Any other exit
+   (an internal error, ids not collected, nothing ran) skips the pair with a
+   warning.
 4. Classifies each pair as `sshom`, `decoupled` (`K(h) = ∅`) or
    `non-subsuming`.
 
@@ -66,6 +69,17 @@ Each line of `--out` is one pair: `f1_id`, `f2_id`, `file`, `line1`, `line2`,
 - SSHOM density, as a percentage of the pairs that ran;
 - the number of mutants that appear in at least one SSHOM. This is a loose
   upper bound on how many mutants could be removed.
+
+## Schemata
+
+With [schemata](run-schemata.md) on (the default where it can run), each
+pair is compiled into the schema as one more case of its function's switch,
+with both edits in it, and each stage runs in a fork of the shared template
+instead of a fresh pytest. A pair whose edits are in different functions
+(`--cross-function`) gets one case in each, under one number. The kill
+confirmation and the survivor audit work as in `run`. A pair the schema
+can't hold (an edit outside a function body, one that would warn at compile
+time) runs the normal way. `--no-schemata` runs every pair the normal way.
 
 See also [`subsume`](subsume.md) for first-order dominator pruning, which
 needs no extra test runs.

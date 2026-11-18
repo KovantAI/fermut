@@ -15,9 +15,11 @@
 //!      yield an SSHOM — pruning it loses nothing and collapses the O(n²) pairing
 //!      to the few pairs that could matter (the portable stand-in for the Java
 //!      CPDA/variational search).
-//!   3. Build each second-order mutant (both edits spliced into the mirror) and
-//!      run the coverage union `T_cov(f1) ∪ T_cov(f2)` without `-x` to capture the
-//!      full `K(h)`.
+//!   3. Build each second-order mutant and run it in two `-x` stages: the
+//!      shared killers `K(f1) ∩ K(f2)`, then the rest of `T_cov(f1) ∪ T_cov(f2)`.
+//!      With schemata on, each pair is one case of its function's switch and
+//!      each stage a fork of the template; otherwise (and for pairs the schema
+//!      can't hold) both edits are spliced into a worker mirror.
 //!   4. Classify sshom / decoupled (`K(h)=∅`) / non-subsuming, write a JSONL, and
 //!      print SSHOM density + a first-cut net-FOM-reduction estimate.
 //!
@@ -246,6 +248,22 @@ pub(crate) fn run(args: HomArgs) -> Result<()> {
     let python = cfg.python.as_deref();
     let source_root = &cfg.source_root;
 
+    // Schemata: each pair is one more case in its function's switch (in each
+    // of its two, for a cross-function pair), and each stage a fork of a
+    // template that imported and collected the suite once. Pairs the schema
+    // can't hold and runs it can't answer go to the spawn path below.
+    #[cfg(unix)]
+    let schema = crate::runner::schema_runner(&cfg);
+    #[cfg(unix)]
+    if let Some(r) = &schema {
+        r.prepare_entries(
+            candidates
+                .iter()
+                .map(|&(i, j, _)| hom_entry(&killed[i].mutant, &killed[j].mutant))
+                .collect(),
+        );
+    }
+
     let writer = std::sync::Mutex::new(open_writer(&out)?);
     let done = std::sync::atomic::AtomicUsize::new(0);
     let total = candidates.len();
@@ -271,11 +289,25 @@ pub(crate) fn run(args: HomArgs) -> Result<()> {
             if inter_vec.is_empty() && outside.is_empty() {
                 return None; // no tests to run — cannot classify
             }
-            let staged = crate::runner::with_worker_mirror(&tests, cfg.isolation, python, |mirror| {
-                run_hom_staged(
-                    mirror, cfg.private_home, python, exe, timeout, &a.mutant, &b.mutant, &inter_vec, &outside,
-                )
-            });
+            #[cfg(unix)]
+            let id = hom_id(&a.mutant, &b.mutant);
+            let stage = |stage_tests: &[String]| -> Result<bool> {
+                if stage_tests.is_empty() {
+                    return Ok(false);
+                }
+                let spawn = || {
+                    crate::runner::with_worker_mirror(&tests, cfg.isolation, python, |mirror| {
+                        let _patched = apply_both(mirror, &a.mutant, &b.mutant)?;
+                        any_test_fails(mirror, cfg.private_home, python, exe, timeout, stage_tests)
+                    })
+                };
+                #[cfg(unix)]
+                if let Some(r) = &schema {
+                    return r.probe(&id, stage_tests, spawn);
+                }
+                spawn()
+            };
+            let staged = stage(&inter_vec).and_then(|i| Ok((i, stage(&outside)?)));
             let (inter_kill, outside_kill) = match staged {
                 Ok(v) => v,
                 Err(e) => {
@@ -373,55 +405,49 @@ fn ranges_overlap(a: &Mutant, b: &Mutant) -> bool {
     a0 < b1 && b0 < a1
 }
 
-/// Splice both edits into the mirror, then classify the HOM in two staged runs.
-/// Returns `(inter_kill, outside_kill)`: whether any test in the intersection
-/// kills the HOM, and whether any test outside it does.
-///
-/// The two patches are applied via [`apply_patch`] guards in **descending
-/// start-offset order**: patching the later edit first leaves the earlier edit's
-/// byte offsets valid (bytes before it are untouched), so a length-changing
-/// replacement can't shift the second range. The guards restore the mirror on
-/// scope exit, so the next candidate starts from clean source.
-///
-/// Both stages run with `-x` (stop at the first failure) because each only needs
-/// a boolean "did any of these tests kill it?" — far cheaper than the full
-/// no-`-x` union. The outside stage is skipped when there are no outside tests.
-#[allow(clippy::too_many_arguments)]
-fn run_hom_staged(
+/// The schema id of the pair's higher-order mutant.
+#[cfg(unix)]
+fn hom_id(f1: &Mutant, f2: &Mutant) -> String {
+    format!("hom:{}+{}", f1.id, f2.id)
+}
+
+/// The pair's higher-order mutant as one schema entry: both edits.
+#[cfg(unix)]
+fn hom_entry(f1: &Mutant, f2: &Mutant) -> crate::runner::schema::SchemaEntry {
+    let mut entry = crate::runner::schema::SchemaEntry::from(f1);
+    entry
+        .edits
+        .extend(crate::runner::schema::SchemaEntry::from(f2).edits);
+    entry.id = hom_id(f1, f2);
+    entry
+}
+
+/// Splice both edits into the mirror via [`apply_patch`] guards in
+/// **descending start-offset order**: patching the later edit first leaves the
+/// earlier edit's byte offsets valid (bytes before it are untouched), so a
+/// length-changing replacement can't shift the second range. Each guard
+/// restores the bytes it found, so they must drop in reverse: a tuple drops
+/// its first field first, hence `(earlier, later)`.
+fn apply_both(
     mirror: &Mirror,
-    private_home: bool,
-    python: Option<&Path>,
-    exe: &str,
-    timeout: Duration,
     f1: &Mutant,
     f2: &Mutant,
-    inter_tests: &[String],
-    outside_tests: &[String],
-) -> Result<(bool, bool)> {
+) -> Result<(crate::runner::PatchGuard, crate::runner::PatchGuard)> {
     let (later, earlier) = if f1.range.start() >= f2.range.start() {
         (f1, f2)
     } else {
         (f2, f1)
     };
-    let _g_later = apply_patch(mirror, later)?;
-    let _g_earlier = apply_patch(mirror, earlier)?;
-
-    let inter_kill = if inter_tests.is_empty() {
-        false
-    } else {
-        any_test_fails(mirror, private_home, python, exe, timeout, inter_tests)?
-    };
-    let outside_kill = if outside_tests.is_empty() {
-        false
-    } else {
-        any_test_fails(mirror, private_home, python, exe, timeout, outside_tests)?
-    };
-    Ok((inter_kill, outside_kill))
+    let later = apply_patch(mirror, later)?;
+    Ok((apply_patch(mirror, earlier)?, later))
 }
 
 /// Run `tests` against the already-patched `mirror` with `-x` and report whether
-/// any failed (exit non-zero). `-x` short-circuits at the first failure, so this
-/// is a cheap "any killer?" probe.
+/// any failed. `-x` short-circuits at the first failure, so this is a cheap
+/// "any killer?" probe. Both stages of a pair are classified alike here and on
+/// the schemata path: a failing (1) or interrupting (2) test is a kill, and
+/// anything else pytest exits with (3 internal error, 4 ids not collected, 5
+/// nothing ran, a signal) fails the pair rather than counting as one.
 fn any_test_fails(
     mirror: &Mirror,
     private_home: bool,
@@ -441,10 +467,13 @@ fn any_test_fails(
 
     let child = cmd.spawn().context("spawning HOM test run")?;
     let (status, _output) = wait_draining_stdout(child, timeout, kill_group)?;
-    // Non-zero exit → at least one selected test failed (the HOM was killed by
-    // this test set). A timeout (`None`) counts as not-killed for this stage —
-    // conservative: it can only understate a kill, never fabricate one.
-    Ok(matches!(status, Some(s) if !s.success()))
+    // A timeout (`None`) counts as not-killed for this stage — conservative:
+    // it can only understate a kill, never fabricate one.
+    match status.map(|s| s.code()) {
+        None | Some(Some(0)) => Ok(false),
+        Some(Some(1 | 2)) => Ok(true),
+        Some(code) => anyhow::bail!("{exe} exited {code:?}"),
+    }
 }
 
 fn load_kill_sets(path: &Path) -> Result<HashMap<String, Vec<String>>> {
@@ -668,6 +697,76 @@ def outer():
             "src/m.py"
         );
         assert_eq!(rel_file(Path::new("/x/m.py"), Path::new("/r")), "/x/m.py");
+    }
+
+    #[test]
+    fn both_edits_apply_and_drop_back_to_the_original() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "").unwrap();
+        let src = "def f(a, b):\n    return a + b * 2\n";
+        std::fs::write(dir.join("m.py"), src).unwrap();
+        let mirror =
+            crate::runner::build_mirror(&dir.join("tests"), crate::config::IsolationMode::Copy)
+                .unwrap();
+        let edit = |needle: &str, replacement: &str| {
+            let start = src.find(needle).unwrap() as u32;
+            Mutant {
+                file: dir.join("m.py"),
+                range: TextRange::new(
+                    TextSize::from(start),
+                    TextSize::from(start + needle.len() as u32),
+                ),
+                replacement: replacement.into(),
+                ..mutant_at(0, 0)
+            }
+        };
+        // A length-changing earlier edit: the later one's offsets must hold.
+        let (plus, two) = (edit("+", " - 1 -"), edit("2", "3"));
+        let target = mirror.root.join("m.py");
+        for (f1, f2) in [(&plus, &two), (&two, &plus)] {
+            {
+                let _patched = apply_both(&mirror, f1, f2).unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(&target).unwrap(),
+                    "def f(a, b):\n    return a  - 1 - b * 3\n"
+                );
+            }
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), src, "restored");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_stage_kills_only_on_a_failing_test() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "").unwrap();
+        let mirror =
+            crate::runner::build_mirror(&dir.join("tests"), crate::config::IsolationMode::Copy)
+                .unwrap();
+        // A fake interpreter exiting with the code its "test id" names.
+        let fake = dir.join("fake-python");
+        std::fs::write(&fake, "#!/bin/sh\nfor a; do last=$a; done; exit $last\n").unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let run = |code: &str| {
+            any_test_fails(
+                &mirror,
+                true,
+                Some(&fake),
+                "pytest",
+                Duration::from_secs(10),
+                &[code.to_string()],
+            )
+        };
+        assert!(!run("0").unwrap());
+        assert!(run("1").unwrap() && run("2").unwrap());
+        for code in ["3", "4", "5"] {
+            assert!(run(code).is_err(), "exit {code} fails the pair");
+        }
     }
 
     #[test]

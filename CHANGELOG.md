@@ -8,6 +8,17 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+### Added
+- `fermut hom` runs on schemata: each pair is one case of its function's
+  switch (a `--cross-function` pair, one case in each of its two functions),
+  and each stage a fork of the template. `--no-schemata` turns it off; pairs
+  the schema can't hold run the normal way.
+
+### Changed
+- `fermut hom` counts a stage as a kill only on pytest exit 1 or 2, as `run`
+  does. Other exits (3, 4, 5, a signal) used to count as kills; they now skip
+  the pair with a warning.
+
 ## [0.8.0] - 2026-11-17
 
 ### Added

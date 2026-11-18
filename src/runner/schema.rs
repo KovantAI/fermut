@@ -230,11 +230,51 @@ impl SchemaInner for UnittestRunner {
     }
 }
 
+/// One schema case: a mutant's edits (a higher-order mutant has several).
+pub(crate) struct SchemaEntry {
+    pub(crate) id: String,
+    pub(crate) file: PathBuf,
+    /// `(start, end, replacement)` byte edits in `file`.
+    pub(crate) edits: Vec<(u32, u32, String)>,
+}
+
+impl From<&Mutant> for SchemaEntry {
+    fn from(m: &Mutant) -> Self {
+        Self {
+            id: m.id.clone(),
+            file: m.file.clone(),
+            edits: vec![(
+                u32::from(m.range.start()),
+                u32::from(m.range.end()),
+                m.replacement.clone(),
+            )],
+        }
+    }
+}
+
+impl SchemaEntry {
+    /// The helper's input: a single edit keeps the first-order shape.
+    fn to_json(&self, rel: &Path) -> serde_json::Value {
+        match self.edits.as_slice() {
+            [(start, end, replacement)] => serde_json::json!({
+                "id": self.id, "file": rel,
+                "start": start, "end": end, "replacement": replacement,
+            }),
+            edits => serde_json::json!({
+                "id": self.id, "file": rel,
+                "edits": edits.iter().map(|(start, end, replacement)| serde_json::json!({
+                    "start": start, "end": end, "replacement": replacement,
+                })).collect::<Vec<_>>(),
+            }),
+        }
+    }
+}
+
 pub struct SchemaRunner<R> {
     inner: R,
     /// Mutants handed over by [`Runner::prepare`]; the schema is built from
     /// them on the first `run`, so a fully cached run never pays for it.
-    mutants: Mutex<Vec<Arc<Mutant>>>,
+    mutants: Mutex<Vec<SchemaEntry>>,
     schema: OnceLock<Option<Schema>>,
     /// Set by the worker that builds the schema; the others run their
     /// mutants normally meanwhile instead of waiting on it.
@@ -364,7 +404,12 @@ impl<R: SchemaInner> SchemaRunner<R> {
         self.schema.get().and_then(Option::as_ref)
     }
 
-    fn build_schema(&self, mutants: &[Arc<Mutant>]) -> Result<Schema> {
+    /// Hand over schema entries directly (higher-order mutants, `fermut hom`).
+    pub(crate) fn prepare_entries(&self, entries: Vec<SchemaEntry>) {
+        *lock_recover(&self.mutants) = entries;
+    }
+
+    fn build_schema(&self, mutants: &[SchemaEntry]) -> Result<Schema> {
         let env = self.inner.schema_env();
         let mirror = Mirror::build(&env.tests, env.isolation)?;
         let script = mirror.plugin_dir.join("_fermut_schema.py");
@@ -378,13 +423,7 @@ impl<R: SchemaInner> SchemaRunner<R> {
             let Ok(rel) = target.strip_prefix(&mirror.root) else {
                 continue;
             };
-            input.push(serde_json::json!({
-                "id": m.id,
-                "file": rel,
-                "start": u32::from(m.range.start()),
-                "end": u32::from(m.range.end()),
-                "replacement": m.replacement,
-            }));
+            input.push(m.to_json(rel));
         }
         let python = env.python;
         let mut cmd = Command::new(&python);
@@ -457,6 +496,16 @@ impl<R: SchemaInner> SchemaRunner<R> {
         let schema = self.schema()?;
         let idx = *schema.index.get(&mutant.id)?;
         let ids = self.inner.selection(mutant, only);
+        self.serve_idx(schema, idx, ids, all)
+    }
+
+    fn serve_idx(
+        &self,
+        schema: &Schema,
+        idx: u64,
+        ids: Option<Vec<String>>,
+        all: bool,
+    ) -> Option<Served> {
         if schema.verified.failed() || schema.drifted.load(Ordering::Relaxed) {
             return None;
         }
@@ -511,6 +560,48 @@ impl<R: SchemaInner> SchemaRunner<R> {
         }
         lock_recover(&self.confirmed).insert(ran.to_vec(), ok);
         ok
+    }
+
+    /// Whether any of `ids` fails, under `-x`, with entry `id` active: from
+    /// the template when it can say, else from `spawn`, which runs the same
+    /// tests the normal way. A kill is pytest's exit 1|2, confirmed as in
+    /// [`Self::serve`]; a timeout is not a kill (as on the spawn path). A
+    /// sample of "not killed" answers is re-run on `spawn`, whose answer
+    /// stands, like [`Self::audit_normal`].
+    pub(crate) fn probe(
+        &self,
+        id: &str,
+        ids: &[String],
+        spawn: impl FnOnce() -> Result<bool>,
+    ) -> Result<bool> {
+        let served = self.schema().and_then(|schema| {
+            let idx = *schema.index.get(id)?;
+            self.serve_idx(schema, idx, Some(ids.to_vec()), false)
+        });
+        let killed = match served {
+            Some(s) if usable(&s) && s.status.is_none_or(|st| matches!(st.code(), Some(0..=2))) => {
+                s.status.is_some_and(|st| self.inner.killed(st))
+            }
+            _ => {
+                self.spawned.fetch_add(1, Ordering::Relaxed);
+                return spawn();
+            }
+        };
+        self.served.fetch_add(1, Ordering::Relaxed);
+        if killed || !self.audit_pick(id) {
+            return Ok(killed);
+        }
+        self.audited.fetch_add(1, Ordering::Relaxed);
+        let normal = spawn()?;
+        if normal {
+            self.disagreed.fetch_add(1, Ordering::Relaxed);
+            warn!(
+                "--schemata: {id} survives {} test(s) in a fork but not in a normal run; using \
+                 the normal run. Please report this (and compare with --no-schemata).",
+                ids.len()
+            );
+        }
+        Ok(normal)
     }
 
     fn audit_pick(&self, id: &str) -> bool {
@@ -762,7 +853,7 @@ fn crash_signal(status: ExitStatus) -> bool {
 
 impl<R: SchemaInner> Runner for SchemaRunner<R> {
     fn prepare(&self, mutants: &[Arc<Mutant>]) -> Result<()> {
-        *lock_recover(&self.mutants) = mutants.to_vec();
+        *lock_recover(&self.mutants) = mutants.iter().map(|m| m.as_ref().into()).collect();
         Ok(())
     }
 
@@ -1886,6 +1977,113 @@ done"#
         assert!(
             !matches!(runner.audit(&m, "t.py::a"), Ok(Some(_))),
             "not scored from the fork"
+        );
+    }
+
+    /// [`SchemaRunner::probe`] on [`serving`]'s mutant: its answer, and
+    /// whether it fell back to `spawn` (which says "killed").
+    fn probe(done: &str, audit_first: bool) -> (bool, bool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let (runner, m) = serving(tmp.path(), done);
+        runner.first_audited.store(!audit_first, Ordering::Relaxed);
+        let spawned = std::cell::Cell::new(false);
+        let ids = ["t.py::a".to_string()];
+        let killed = runner
+            .probe(&m.id, &ids, || {
+                spawned.set(true);
+                Ok(true)
+            })
+            .unwrap();
+        (killed, spawned.get())
+    }
+
+    #[test]
+    fn a_probe_answers_from_the_fork_or_falls_back_to_spawn() {
+        let kill = r#"{"status":256,"failed":["t.py::a"],"ran":["t.py::a"]}"#;
+        assert_eq!(probe(kill, false), (true, false), "a confirmed kill");
+        assert_eq!(probe(r#"{"status":0}"#, false), (false, false), "survived");
+        assert_eq!(
+            probe(r#"{"status":0}"#, true),
+            (true, true),
+            "an audited survivor: the normal run stands"
+        );
+        for done in [
+            r#"{"status":1024}"#,
+            r#"{"status":1280}"#,
+            r#"{"status":768,"error":"Traceback"}"#,
+            r#"{"status":11}"#,
+        ] {
+            assert_eq!(probe(done, false), (true, true), "{done}: spawn decides");
+        }
+        let hung = r#"{"status":9,"timed_out":true,"unfinished":"t.py::a","ran":["t.py::a"]}"#;
+        assert_eq!(probe(hung, false), (false, false), "a timeout is no kill");
+    }
+
+    #[test]
+    fn a_probe_of_an_entry_outside_the_schema_spawns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (runner, _) = serving(tmp.path(), r#"{"status":0}"#);
+        assert!(runner.probe("hom:x+y", &[], || Ok(true)).unwrap());
+        assert_eq!(runner.spawned.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_probe_kill_the_no_mutant_run_reproduces_spawns() {
+        // Every request, the no-mutant one included, fails t.py::a.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = some_mutant();
+        let mut schema = fake_schema(
+            tmp.path(),
+            &answering(
+                r#"{"status":256,"failed":["t.py::a"],"ran":["t.py::a"]}"#,
+                "0",
+            ),
+        );
+        schema.index.insert(m.id.clone(), 5);
+        let runner = fake_runner(&tmp.path().canonicalize().unwrap());
+        assert!(runner.schema.set(Some(schema)).is_ok());
+        let ids = ["t.py::a".to_string()];
+        assert!(
+            !runner.probe(&m.id, &ids, || Ok(false)).unwrap(),
+            "spawn's answer"
+        );
+        assert_eq!(runner.spawned.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_probe_in_a_function_that_ran_before_the_fork_spawns() {
+        // `answering` reports indices 2..=4 unsafe; this entry is 3.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = some_mutant();
+        let mut schema = fake_schema(tmp.path(), &answering(r#"{"status":0}"#, "0"));
+        schema.index.insert(m.id.clone(), 3);
+        let runner = fake_runner(&tmp.path().canonicalize().unwrap());
+        assert!(runner.schema.set(Some(schema)).is_ok());
+        let ids = ["t.py::a".to_string()];
+        assert!(
+            runner.probe(&m.id, &ids, || Ok(true)).unwrap(),
+            "spawn's answer"
+        );
+        assert_eq!(runner.spawned.load(Ordering::Relaxed), 1);
+        assert_eq!(runner.served.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_single_edit_entry_keeps_the_first_order_shape() {
+        let mut m = (*some_mutant()).clone();
+        m.range = ruff_text_size::TextRange::new(3.into(), 4.into());
+        let entry = SchemaEntry::from(&m);
+        assert_eq!(
+            entry.to_json(Path::new("m.py")),
+            serde_json::json!({"id": m.id, "file": "m.py", "start": 3, "end": 4, "replacement": "-"})
+        );
+        let hom = SchemaEntry {
+            edits: vec![(3, 4, "-".into()), (9, 10, "0".into())],
+            ..entry
+        };
+        assert_eq!(
+            hom.to_json(Path::new("m.py"))["edits"][1],
+            serde_json::json!({"start": 9, "end": 10, "replacement": "0"})
         );
     }
 

@@ -264,6 +264,89 @@ def test_unparsable_file_falls_back_without_failing(tmp_path):
     assert result["mutants"]["plain-cmp"]["fallback"].startswith("file:")
 
 
+def hom(id_, *ms):
+    """A higher-order mutant made of the edits of first-order mutants `ms`."""
+    edits = [{k: m[k] for k in ("start", "end", "replacement")} for m in ms]
+    return {"id": id_, "file": "mod.py", "edits": edits}
+
+
+def spliced_all(*ms):
+    raw = SOURCE.encode()
+    for m in sorted(ms, key=lambda m: -m["start"]):
+        raw = raw[: m["start"]] + m["replacement"].encode() + raw[m["end"] :]
+    return raw.decode()
+
+
+HOM_PARTS = {
+    "same-fn": (mutant("a", "x > 2", "x >= 2"), mutant("b", "x + 1", "x - 1")),
+    # outer + inner: lands in the outer def, whose branch holds the inner one.
+    "nested": (mutant("c", "n = 0", "n = 1"), mutant("d", "n += 2", "n += 7")),
+    # No shared def: one index, a case in each def.
+    "split": (mutant("e", "x + 1", "x - 1"), mutant("f", "x * 2", "x * 3")),
+    "split-methods": (mutant("g", '"base"', '"BASE"'), mutant("h", '"-"', '"+"')),
+    # step's edit joins make_counter's part; plain's is the other part.
+    "split-nested": (
+        mutant("i", "n = 0", "n = 1"),
+        mutant("j", "n += 2", "n += 7"),
+        mutant("k", "x > 2", "x >= 2"),
+    ),
+}
+
+
+@pytest.fixture(scope="module")
+def built_hom():
+    counter = iter(range(1, 1000))
+    homs = [hom(k, *ms) for k, ms in HOM_PARTS.items()] + [
+        hom("overlap", mutant("o1", "x > 2", "x >= 2"), mutant("o2", "2", "3")),
+        # One part can't be a case: the whole mutant falls back.
+        hom(
+            "bad-part",
+            mutant("b1", '"""Plain doc."""', '"""X"""'),
+            mutant("b2", "x * 2", "x * 3"),
+        ),
+    ]
+    return schema.schematize_file(SOURCE.encode(), homs, lambda: next(counter))
+
+
+def test_hom_fallbacks(built_hom):
+    _, entries, _ = built_hom
+    assert entries["overlap"] == {"fallback": "overlap"}
+    assert entries["bad-part"] == {"fallback": "docstring"}
+
+
+def test_split_indices_are_covered_by_each_of_their_defs(built_hom):
+    out, entries, fns = built_hom
+    idxs = {e["idx"] for e in entries.values() if "idx" in e}
+    assert {i for _, lo, hi in fns for i in range(lo, hi + 1)} == idxs
+    lines = out.splitlines()
+    holders = lambda idx: sorted(
+        lines[first - 1].split("(")[0] for first, lo, hi in fns if lo <= idx <= hi
+    )
+    assert holders(entries["split"]["idx"]) == ["async def coro", "def plain"]
+    assert holders(entries["split-nested"]["idx"]) == ["def make_counter", "def plain"]
+
+
+@pytest.mark.parametrize("key", HOM_PARTS)
+def test_a_hom_index_behaves_like_both_edits_spliced(built_hom, key):
+    out, entries, _ = built_hom
+    assert load(out, entries[key]["idx"]) == load(spliced_all(*HOM_PARTS[key]), 0)
+    assert load(out, 0) == load(SOURCE, 0)
+
+
+def test_a_nested_hom_switches_in_the_outer_def(built_hom):
+    out, entries, fns = built_hom
+    idx = entries["nested"]["idx"]
+    first = next(first for first, lo, hi in fns if lo <= idx <= hi)
+    assert out.splitlines()[first - 1].startswith("def make_counter")
+
+
+def test_single_edits_in_edits_form_build_the_same_schema():
+    as_edits = [dict(hom(m["id"], m)) for m in MUTANTS]
+    a = schema.schematize_file(SOURCE.encode(), MUTANTS, iter(range(1, 999)).__next__)
+    b = schema.schematize_file(SOURCE.encode(), as_edits, iter(range(1, 999)).__next__)
+    assert a == b
+
+
 # --- serve (end to end over the stdio protocol) ---------------------------------
 
 PROJECT = {
@@ -1208,3 +1291,21 @@ def test_each_fork_gets_its_own_testcontainers_session(monkeypatch):
     new = {mod.SESSION_ID for mod in mods.values()}
     assert len(new) == 1 and old not in new
     assert other.SESSION_ID == old  # only testcontainers' copies
+
+
+def test_split_pairs_sharing_an_edit_share_one_case():
+    shared = mutant("s", "x + 1", "x - 1")
+    homs = [
+        hom("p1", shared, mutant("t", "x * 2", "x * 3")),
+        hom("p2", shared, mutant("u", "i * 3", "i * 4")),
+    ]
+    out, entries, _ = schema.schematize_file(
+        SOURCE.encode(), homs, iter(range(1, 99)).__next__
+    )
+    assert out.count("case _ if") == 3, "plain holds one case for both pairs"
+    assert load(out, entries["p1"]["idx"]) == load(
+        spliced_all(shared, mutant("t", "x * 2", "x * 3")), 0
+    )
+    assert load(out, entries["p2"]["idx"]) == load(
+        spliced_all(shared, mutant("u", "i * 3", "i * 4")), 0
+    )

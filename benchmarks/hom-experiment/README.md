@@ -76,12 +76,34 @@ classes joined on `(f1_id, f2_id)` with `hom_diff.py`.
 | markupsafe `_native` | 180 | 61 | 3.5 s | 6.1 / 6.1 s | 0 | 0 |
 | more-itertools `recipes` | 3781 | 1692 | 166 s | 228 / 229 s | 0 | 0 |
 
-`--cross-function` (Phase 2), pyjwt `api_jws`: 19,606 pairs, 248 SSHOMs,
-schemata 233 s vs spawn 838 s, 0 diffs spawn/spawn and spawn/schemata. After
-it, the same-function pyjwt run above takes 34 s (schema built once, parsed
-once).
+`--cross-function` (Phase 2), full pairs, 0 class diffs spawn/spawn and
+spawn/schemata on both:
 
-The cost column above (8.5–12.3× a FOM pass) was measured on the spawn path.
+| module | pairs | SSHOMs | schemata | spawn run 1 / 2 |
+|---|---|---|---|---|
+| pyjwt `api_jws` | 19,606 | 248 | 233 s | 838 s / 6,243 s (outlier, cause not checked) |
+| more-itertools `recipes` | 5,968 | 1,891 | 532 s | 495 / 488 s |
+
+Schemata doesn't pay on more-itertools cross-function: the template serves
+97% of stages, but forks run no faster than spawned pytest there. Not
+dispatch: bisecting big `match`es (`sieve` holds 1,313 cases) changed
+nothing (520 s), so it was reverted. Likely test-bound stages plus kill
+confirmations, whose test lists rarely repeat across cross-function pairs.
+
+**Cost in wall time.** The cost column above (8.5–12.3×) counts test runs:
+`(FOM runs + HOM runs) / FOM runs`, which schemata doesn't change. In wall
+time, `(FOM pass + hom) / FOM pass`, same-function gate, FOM pass with
+`--record-kill-sets` (2026-11-18, 0 class diffs in every hom run):
+
+| module | FOM pass (schemata / spawn) | hom (schemata / spawn) | cost schemata | cost spawn |
+|---|---|---|---|---|
+| pyjwt `api_jws` | 15.1 / 17.2 s | 46.8 / 161.0 s | **4.1×** | 10.4× |
+| markupsafe `_native` | 2.9 / 2.7 s | 3.7 / 6.1 s | **2.3×** | 3.3× |
+| more-itertools `recipes` | 24.2 / 28.1 s | 193.1 / 278.0 s | **9.0×** | 10.9× |
+
+Schemata cuts the cost 1.2–2.5×, but it stays far above break-even (a
+16–47% FOM reduction pays back only under ~1.2–1.5×). The PIVOT verdict
+holds.
 Since then, `hom` counts only pytest exit 1|2 as a kill (it used to count any
 non-zero exit). No pair in these runs exited otherwise.
 

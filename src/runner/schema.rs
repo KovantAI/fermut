@@ -2051,6 +2051,24 @@ done"#
     }
 
     #[test]
+    fn a_probe_in_a_function_that_ran_before_the_fork_spawns() {
+        // `answering` reports indices 2..=4 unsafe; this entry is 3.
+        let tmp = tempfile::tempdir().unwrap();
+        let m = some_mutant();
+        let mut schema = fake_schema(tmp.path(), &answering(r#"{"status":0}"#, "0"));
+        schema.index.insert(m.id.clone(), 3);
+        let runner = fake_runner(&tmp.path().canonicalize().unwrap());
+        assert!(runner.schema.set(Some(schema)).is_ok());
+        let ids = ["t.py::a".to_string()];
+        assert!(
+            runner.probe(&m.id, &ids, || Ok(true)).unwrap(),
+            "spawn's answer"
+        );
+        assert_eq!(runner.spawned.load(Ordering::Relaxed), 1);
+        assert_eq!(runner.served.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn a_single_edit_entry_keeps_the_first_order_shape() {
         let mut m = (*some_mutant()).clone();
         m.range = ruff_text_size::TextRange::new(3.into(), 4.into());

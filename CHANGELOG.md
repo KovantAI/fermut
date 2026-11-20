@@ -8,6 +8,13 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+### Changed
+- Mutants from operators the run didn't ask for (experimental, parity, and
+  those outside the operator profile) no longer appear in the report as
+  `skipped`. They inflated `total` and `skipped` (and the trend history) by
+  roughly half on a default run; the score is unchanged. `--experimental`,
+  `--parity` and `--operators` still bring them in.
+
 ## [0.8.1] - 2026-11-18
 
 ### Fixed

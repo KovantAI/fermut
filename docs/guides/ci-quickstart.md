@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@<sha>
-      - uses: KovantAI/fermut@v0.8.0
+      - uses: KovantAI/fermut@v0.8.1
         with:
           blocking: "false"   # warn only, while you watch the score
 ```

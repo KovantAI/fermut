@@ -18,6 +18,20 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 - `fermut hom` counts a stage as a kill only on pytest exit 1 or 2, as `run`
   does. Other exits (3, 4, 5, a signal) used to count as kills; they now skip
   the pair with a warning.
+- Mutants from operators the run didn't ask for (experimental, parity, and
+  those outside the operator profile) no longer appear in the report as
+  `skipped`. They inflated `total` and `skipped` (and the trend history) by
+  roughly half on a default run; the score is unchanged. `--experimental`,
+  `--parity` and `--operators` still bring them in.
+
+## [0.8.1] - 2026-11-18
+
+### Fixed
+- Incremental `fermut coverage` no longer hands a changed `conftest.py` or
+  helper module to pytest as a test file (which collected nothing and failed
+  the run). A changed `conftest.py` re-measures its directory; any other
+  non-test module under the tests tree re-measures the whole tree. An
+  incremental re-run that collects no tests is no longer an error.
 
 ## [0.8.0] - 2026-11-17
 
@@ -559,7 +573,8 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 Baseline release. Earlier history is recorded in the git log and release notes.
 
-[Unreleased]: https://github.com/KovantAI/fermut/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/KovantAI/fermut/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/KovantAI/fermut/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/KovantAI/fermut/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/KovantAI/fermut/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/KovantAI/fermut/compare/v0.6.0...v0.6.1

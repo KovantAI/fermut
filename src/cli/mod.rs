@@ -245,6 +245,14 @@ pub(crate) struct RunConfigArgs {
     #[arg(long, value_name = "I/N", value_parser = merge::parse_shard_spec)]
     pub shard: Option<(u32, u32)>,
 
+    /// Leftover wave: test only the mutants a (merged) JSON report left
+    /// unresolved, i.e. `skipped/time-budget` (a shard hit `--max-time`) or a
+    /// `shard` placeholder. Every other mutant is a `shard` placeholder in
+    /// this run's report, so `fermut merge` combines it with the report it
+    /// came from.
+    #[arg(long, value_name = "REPORT")]
+    pub mutants_from: Option<PathBuf>,
+
     /// Test runner. `pytest` (default), `rstest` (pytest-compatible
     /// drop-in), or `unittest`.
     #[arg(long, value_enum)]

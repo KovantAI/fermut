@@ -1979,6 +1979,99 @@ fn explain_emits_hint_and_skeleton_for_target() {
         .stdout(contains("suggested test skeleton"));
 }
 
+/// `fermut run` on the sample with `extra` args, writing a JSON report to `out`.
+fn sample_run(sample: &std::path::Path, out: &std::path::Path, extra: &[&str]) {
+    Command::cargo_bin("fermut")
+        .unwrap()
+        .arg("run")
+        .arg(sample.join("src"))
+        .arg("--tests")
+        .arg(sample.join("tests"))
+        .args([
+            "--no-ty-filter",
+            "--no-cache",
+            "--no-history",
+            "--fail-under",
+            "0",
+        ])
+        .arg("--json")
+        .arg(out)
+        .args(extra)
+        .assert()
+        .success();
+}
+
+/// `mutant id -> status` from a JSON report.
+fn statuses(report: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(report).unwrap()).unwrap();
+    json["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| {
+            (
+                o["mutant"]["id"].as_str().unwrap().to_string(),
+                o["status"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "requires pytest on PATH; enable once env is set up"]
+fn leftover_wave_completes_a_sweep_a_shard_ran_out_of_time_on() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sample = tmp.path().join("sample");
+    copy_dir(&sample_path(), &sample);
+    let p = |name: &str| tmp.path().join(name);
+
+    sample_run(&sample, &p("full.json"), &[]);
+    // Shard 1 hits its budget before testing anything.
+    sample_run(
+        &sample,
+        &p("s1.json"),
+        &["--shard", "1/2", "--max-time", "0"],
+    );
+    sample_run(&sample, &p("s2.json"), &["--shard", "2/2"]);
+
+    let merge = |inputs: &[&str], extra: &[&str]| {
+        let mut cmd = Command::cargo_bin("fermut").unwrap();
+        cmd.arg("merge");
+        for i in inputs {
+            cmd.arg(p(i));
+        }
+        cmd.args(extra);
+        cmd.assert()
+    };
+    merge(&["s1.json", "s2.json"], &["--require-complete"])
+        .failure()
+        .stderr(contains("never tested"));
+    merge(
+        &["s1.json", "s2.json"],
+        &["--json", p("merged.json").to_str().unwrap()],
+    )
+    .success();
+
+    let merged = p("merged.json");
+    sample_run(
+        &sample,
+        &p("wave2.json"),
+        &["--mutants-from", merged.to_str().unwrap()],
+    );
+    merge(
+        &["merged.json", "wave2.json"],
+        &[
+            "--require-complete",
+            "--json",
+            p("final.json").to_str().unwrap(),
+        ],
+    )
+    .success();
+
+    assert_eq!(statuses(&p("final.json")), statuses(&p("full.json")));
+}
+
 #[test]
 fn merge_combines_reports() {
     let dir = tempfile::tempdir().unwrap();

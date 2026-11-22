@@ -2433,6 +2433,7 @@ mod tests {
             sample_ratio: None,
             sample_seed: None,
             shard: None,
+            mutants_from: None,
             runner: RunnerKind::Pytest,
             python: None,
             unittest_pattern: None,

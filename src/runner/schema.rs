@@ -2007,6 +2007,12 @@ done"#
             (true, true),
             "an audited survivor: the normal run stands"
         );
+        let tmp = tempfile::tempdir().unwrap();
+        let (runner, m) = serving(tmp.path(), r#"{"status":0}"#);
+        runner.first_audited.store(false, Ordering::Relaxed);
+        let ids = ["t.py::a".to_string()];
+        assert!(!runner.probe(&m.id, &ids, || Ok(false)).unwrap());
+        assert_eq!(runner.disagreed.load(Ordering::Relaxed), 0, "spawn agreed");
         for done in [
             r#"{"status":1024}"#,
             r#"{"status":1280}"#,

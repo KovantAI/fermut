@@ -82,7 +82,7 @@ ruff_text_size     = { git = "https://github.com/astral-sh/ruff", tag = "0.17.5"
 # `src/filter/ty.rs` covers the cases where `ty_project` construction
 # fails (pre-release API surface).
 ruff_db            = { git = "https://github.com/astral-sh/ruff", tag = "0.17.5", features = ["os"], optional = true }
-ruff_notebook      = { git = "https://github.com/astral-sh/ruff", tag = "0.17.5", optional = true }
+ruff_notebook      = { git = "https://github.com/astral-sh/ruff", tag = "0.17.6", optional = true }
 ty_project         = { git = "https://github.com/astral-sh/ruff", tag = "0.17.5", optional = true }
 ty_python_semantic = { git = "https://github.com/astral-sh/ruff", tag = "0.17.5", optional = true }
 

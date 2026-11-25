@@ -9,7 +9,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
-use crate::filter::shard::SHARD_FILTER_NAME;
+use crate::filter::shard::{is_unresolved, SHARD_FILTER_NAME};
 use crate::report::{MutantOutcome, ProjectSummary, Report, ReportFormat, ReportSinks, Shard};
 
 /// A `Skipped { filter: "shard" }` outcome is not a verdict — it is the
@@ -20,6 +20,21 @@ use crate::report::{MutantOutcome, ProjectSummary, Report, ReportFormat, ReportS
 /// shared `SHARD_FILTER_NAME` const so this cannot drift from `ShardFilter`.
 fn is_shard_placeholder(o: &MutantOutcome) -> bool {
     matches!(o, MutantOutcome::Skipped { filter, .. } if filter == SHARD_FILTER_NAME)
+}
+
+/// How much an outcome says about its mutant: a `shard` placeholder nothing
+/// (another slice owns it), a `time-budget` skip that its owner never got to
+/// it, a verdict everything. Merge keeps the highest, so a leftover wave's
+/// verdict replaces a budget skip, and a budget skip still beats the
+/// placeholders the other shards emitted for the same mutant.
+fn rank(o: &MutantOutcome) -> u8 {
+    if is_shard_placeholder(o) {
+        0
+    } else if is_unresolved(o) {
+        1
+    } else {
+        2
+    }
 }
 
 /// Do two real (non-placeholder) outcomes for the same mutant id carry the same
@@ -147,6 +162,9 @@ pub(super) struct MergeGates {
     pub expect_shards: Option<u32>,
     /// `--max-errored`: fail when more mutants than this errored.
     pub max_errored: Option<usize>,
+    /// `--require-complete`: fail when a mutant is still `time-budget`
+    /// skipped, so the score would cover only part of the universe.
+    pub require_complete: bool,
 }
 
 pub(super) fn merge_reports(
@@ -171,6 +189,20 @@ pub(super) fn merge_reports(
 
     // Gates run after the reports are written, so a failed merge still leaves
     // them to inspect, but before the history entry, so it's never recorded.
+    let unresolved = merged.outcomes.iter().filter(|o| is_unresolved(o)).count();
+    if unresolved > 0 {
+        let hint = "re-run them with `fermut run --mutants-from <merged report>` and merge again";
+        if gates.require_complete {
+            bail!(
+                "{unresolved} mutant(s) were never tested (a shard hit --max-time) \
+                 (--require-complete): {hint}"
+            );
+        }
+        tracing::warn!(
+            "{unresolved} mutant(s) were never tested (a shard hit --max-time) and are left \
+             out of the score; {hint}"
+        );
+    }
     let errored = merged.counts().errored;
     if let Some(max) = gates.max_errored.filter(|&max| errored > max) {
         bail!(
@@ -419,22 +451,19 @@ fn combine_outcomes(
                 by_id.insert(id, outcome);
                 continue;
             };
-            match (
-                is_shard_placeholder(existing),
-                is_shard_placeholder(&outcome),
-            ) {
-                // Incoming placeholder must never overwrite a verdict a prior
+            match rank(existing).cmp(&rank(&outcome)) {
+                // An incoming placeholder must never overwrite what a prior
                 // shard already produced — this is the bug.
-                (false, true) => {}
-                // Upgrade a placeholder to the owning shard's verdict.
-                (true, false) => *existing = outcome,
-                // Both placeholders — keep the first, still a placeholder.
-                (true, true) => {}
+                std::cmp::Ordering::Greater => {}
+                // Upgrade a placeholder (or a budget skip) to the better outcome.
+                std::cmp::Ordering::Less => *existing = outcome,
+                // Same unresolved rank: keep the first.
+                std::cmp::Ordering::Equal if rank(existing) < 2 => {}
                 // Two real outcomes for one id: the same verdict is an
                 // idempotent re-merge; a differing verdict — including same
                 // status with a different skip filter or error message — is a
                 // genuine conflict and must not be silently resolved.
-                (false, false) => {
+                std::cmp::Ordering::Equal => {
                     if !same_verdict(existing, &outcome) {
                         bail!(
                             "conflicting verdicts for mutant {:?}: {} vs {}. \
@@ -808,6 +837,89 @@ mod tests {
         );
     }
 
+    fn budget_skip(id: &str) -> MutantOutcome {
+        MutantOutcome::skipped(mutant(id), crate::engine::TIME_BUDGET_FILTER)
+    }
+
+    fn filter_of(o: &MutantOutcome) -> Option<&str> {
+        match o {
+            MutantOutcome::Skipped { filter, .. } => Some(filter),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_budget_skip_beats_placeholders_and_loses_to_a_leftover_verdict() {
+        let universe = ["a", "b"];
+        // Shard "a" owns a but ran out of time; the placeholder from shard "b"
+        // comes first and must not read as a missing shard.
+        let wave1 = vec![
+            shard_report("b", MutantOutcome::killed(mutant("b")), &universe),
+            shard_report("a", budget_skip("a"), &universe),
+        ];
+        let merged = combine_outcomes(wave1.clone().into_iter().map(Ok)).unwrap();
+        assert_eq!(
+            filter_of(&merged[0]),
+            Some(crate::engine::TIME_BUDGET_FILTER)
+        );
+
+        // The leftover wave (--mutants-from): a verdict for a, placeholder for b.
+        let wave2 = shard_report("a", MutantOutcome::survived(mutant("a")), &universe);
+        for reports in [
+            vec![merged.clone(), wave2.clone()],
+            vec![wave2.clone(), merged.clone()],
+        ] {
+            let merged = combine_outcomes(reports.into_iter().map(Ok)).unwrap();
+            assert_eq!(labels(&merged), vec![("a", "survived"), ("b", "killed")]);
+        }
+    }
+
+    #[test]
+    fn a_slow_shards_budget_skip_never_conflicts_with_another_shards_verdict() {
+        // Past its deadline a shard skips every remaining mutant as
+        // `time-budget` before its filters run, other shards' slices and
+        // filter rejects included. Those must lose to the real outcome, not
+        // read as a conflicting verdict.
+        let slow = vec![budget_skip("a"), budget_skip("b"), budget_skip("c")];
+        let other = vec![
+            shard_skip("a"),
+            MutantOutcome::killed(mutant("b")),
+            MutantOutcome::skipped(mutant("c"), "profile"),
+        ];
+        for reports in [
+            vec![slow.clone(), other.clone()],
+            vec![other.clone(), slow.clone()],
+        ] {
+            let merged = combine_outcomes(reports.into_iter().map(Ok)).unwrap();
+            assert_eq!(
+                merged.iter().map(filter_of).collect::<Vec<_>>(),
+                vec![
+                    Some(crate::engine::TIME_BUDGET_FILTER),
+                    None,
+                    Some("profile")
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn require_complete_fails_on_a_budget_skip_after_writing_reports() {
+        let r = Report::new(vec![MutantOutcome::killed(mutant("a")), budget_skip("b")]);
+        // Default: merges (warns), and the history entry is written.
+        let dir = merge_one(r.clone(), true, &MergeGates::default()).unwrap();
+        assert!(dir.path().join("entry.json").exists());
+
+        let gates = MergeGates {
+            require_complete: true,
+            ..MergeGates::default()
+        };
+        let err = merge_one(r, true, &gates).unwrap_err();
+        assert!(
+            err.to_string().contains("1 mutant(s) were never tested"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn missing_shard_leaves_a_placeholder_and_errors() {
         let universe = ["a", "b", "c"];
@@ -1176,6 +1288,14 @@ pub(crate) struct MergeArgs {
     /// reports are still written; the `--history` entry is not.
     #[arg(long, value_name = "N")]
     pub(crate) max_errored: Option<usize>,
+
+    /// Fail when a mutant is still `skipped/time-budget` (its shard hit
+    /// `--max-time` first), so the score would cover only part of the
+    /// universe. Re-run those with `fermut run --mutants-from <merged
+    /// report>` and merge that report in. The reports are still written; the
+    /// `--history` entry is not. Without it merge only warns.
+    #[arg(long)]
+    pub(crate) require_complete: bool,
 }
 
 /// Dispatch handler: nests the output-path flags into a [`ReportSinks`] and
@@ -1192,6 +1312,7 @@ pub(crate) fn run(args: MergeArgs) -> Result<()> {
         project,
         expect_shards,
         max_errored,
+        require_complete,
     } = args;
     merge_reports(
         &inputs,
@@ -1207,6 +1328,7 @@ pub(crate) fn run(args: MergeArgs) -> Result<()> {
         &MergeGates {
             expect_shards,
             max_errored,
+            require_complete,
         },
     )
 }

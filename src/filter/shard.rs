@@ -6,11 +6,16 @@
 //! matrix, separate hosts, anything), then `fermut merge` to combine the
 //! per-shard JSON reports.
 
-use anyhow::Result;
+use std::collections::HashSet;
+use std::path::Path;
+
+use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use super::Filter;
+use crate::engine::TIME_BUDGET_FILTER;
 use crate::mutator::Mutant;
+use crate::report::MutantOutcome;
 
 /// Filter name a sharded run stamps on every mutant *outside* its slice. The
 /// merge step keys its placeholder detection off this exact string, so the two
@@ -42,6 +47,48 @@ impl Filter for ShardFilter {
 
     fn admits(&self, mutant: &Mutant) -> Result<bool> {
         Ok(shard_of(&mutant.id, self.total) == self.index)
+    }
+}
+
+/// Is `o` an unresolved mutant: the `shard` placeholder for another slice, or
+/// a mutant its owning shard never started before `--max-time`? `fermut merge`
+/// lets any real verdict replace either, and `--mutants-from` re-runs them.
+pub fn is_unresolved(o: &MutantOutcome) -> bool {
+    matches!(o, MutantOutcome::Skipped { filter, .. }
+        if filter == SHARD_FILTER_NAME || filter == TIME_BUDGET_FILTER)
+}
+
+/// `--mutants-from REPORT`: admits only the mutants `REPORT` left unresolved.
+/// Named like [`ShardFilter`] on purpose: everything else is outside this
+/// run's slice, so its `shard` placeholder merges under the report's verdicts.
+pub struct MutantsFromFilter {
+    ids: HashSet<String>,
+}
+
+impl MutantsFromFilter {
+    pub fn load(report: &Path) -> Result<Self> {
+        let report = crate::report::load(report)
+            .with_context(|| format!("reading --mutants-from {}", report.display()))?;
+        Ok(Self::from_outcomes(&report.outcomes))
+    }
+
+    fn from_outcomes(outcomes: &[MutantOutcome]) -> Self {
+        let ids = outcomes
+            .iter()
+            .filter(|o| is_unresolved(o))
+            .map(|o| o.mutant().id.clone())
+            .collect();
+        Self { ids }
+    }
+}
+
+impl Filter for MutantsFromFilter {
+    fn name(&self) -> &'static str {
+        SHARD_FILTER_NAME
+    }
+
+    fn admits(&self, mutant: &Mutant) -> Result<bool> {
+        Ok(self.ids.contains(&mutant.id))
     }
 }
 
@@ -123,5 +170,26 @@ mod tests {
             let m = make_mutant(&format!("id-{i}"));
             assert_eq!(f1.admits(&m).unwrap(), f2.admits(&m).unwrap());
         }
+    }
+
+    #[test]
+    fn mutants_from_admits_only_unresolved_mutants_and_reads_as_a_shard_placeholder() {
+        let outcomes = vec![
+            MutantOutcome::killed(make_mutant("killed")),
+            MutantOutcome::skipped(make_mutant("budget"), TIME_BUDGET_FILTER),
+            MutantOutcome::skipped(make_mutant("other-slice"), SHARD_FILTER_NAME),
+            MutantOutcome::skipped(make_mutant("ruff"), "ruff"),
+        ];
+        let f = MutantsFromFilter::from_outcomes(&outcomes);
+        let admitted: Vec<_> = ["killed", "budget", "other-slice", "ruff", "new"]
+            .into_iter()
+            .filter(|id| f.admits(&make_mutant(id)).unwrap())
+            .collect();
+        assert_eq!(admitted, ["budget", "other-slice"]);
+        assert_eq!(
+            f.name(),
+            SHARD_FILTER_NAME,
+            "merge must read its skips as placeholders"
+        );
     }
 }

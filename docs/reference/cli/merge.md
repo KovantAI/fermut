@@ -7,7 +7,7 @@ monorepo into one pooled report.
 fermut merge [<DIR>=]<input.json> [[<DIR>=]<input.json> ...] \
     [--json <p>] [--junit <p>] [--html <p>] [--markdown <p>] \
     [--history <p>] [--config-hash <hex>] [--project <dir>] \
-    [--expect-shards <n>] [--max-errored <n>]
+    [--expect-shards <n>] [--max-errored <n>] [--require-complete]
 ```
 
 Deduplicates by `mutant.id` when the duplicates carry the same verdict
@@ -24,6 +24,11 @@ A report from `fermut run --shard i/n` records its slice as
 shard counts (`1/16` with `2/8`), and fails when an index in `1..=n` has no
 report, even one whose mutants were all filtered out. Reports that record no
 shard (unsharded runs, older fermut) skip the missing-index check.
+
+A mutant its shard never started before `--max-time` (`skipped/time-budget`)
+is unresolved too: merge takes a verdict for it from any other input (a
+[leftover wave](run.md#leftover-waves-mutants-from)), and otherwise keeps it
+out of the score and warns. `--require-complete` makes that a failure.
 
 ## Projects (`DIR=REPORT`)
 
@@ -59,3 +64,4 @@ gate.
 | `--project <dir>`     | `.`     | Project root for git sha/branch discovery in the `--history` entry. Defaults to the merge checkout.                                                                                    |
 | `--expect-shards <n>` | —       | Require exactly `n` shards: every input records its shard, all with total `n`, each index once. Catches a duplicated or stray report.                                                    |
 | `--max-errored <n>`   | —       | Fail when more than `n` mutants errored. Reports are still written; the `--history` entry is not.                                                                                       |
+| `--require-complete`  | off     | Fail when a mutant is still `skipped/time-budget`, so the score would cover only part of the universe. Reports are still written; the `--history` entry is not. |

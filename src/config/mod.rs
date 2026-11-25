@@ -107,6 +107,9 @@ pub struct Config {
     pub sample_ratio: Option<f64>,
     pub sample_seed: Option<u64>,
     pub shard: Option<(u32, u32)>,
+    /// `--mutants-from`: a (merged) report whose unresolved mutants
+    /// (`shard`/`time-budget` placeholders) are the only ones this run tests.
+    pub mutants_from: Option<PathBuf>,
     pub runner: RunnerKind,
     /// Resolved Python interpreter to run pytest with (`<python> -m pytest`),
     /// or `None` to spawn a bare `pytest` from `PATH`. Set via `--python` /

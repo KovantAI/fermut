@@ -32,18 +32,19 @@ fn rel_to(root: &Path, p: &Path) -> String {
 /// Format-versioned (`v2|…`) so we can rev the shape without colliding with
 /// older entries; bump the prefix if the inputs ever change.
 pub fn config_hash(cfg: &Config) -> String {
-    hash_with_shard(cfg, cfg.shard)
+    hash_with_shard(cfg, cfg.shard, cfg.mutants_from.as_deref())
 }
 
-/// [`config_hash`] of the whole run, ignoring `--shard`. Every shard of one
+/// [`config_hash`] of the whole run, ignoring `--shard` and `--mutants-from`
+/// (a leftover wave is one more slice of the same run). Every shard of one
 /// run shares it, and it equals an unsharded run's `config_hash`, so it is
 /// what `fermut merge` stamps on the merged entry: the union of all `n` shards
 /// is the whole universe, comparable to an unsharded run.
 pub fn universe_hash(cfg: &Config) -> String {
-    hash_with_shard(cfg, None)
+    hash_with_shard(cfg, None, None)
 }
 
-fn hash_with_shard(cfg: &Config, shard: Option<(u32, u32)>) -> String {
+fn hash_with_shard(cfg: &Config, shard: Option<(u32, u32)>, mutants_from: Option<&Path>) -> String {
     let mut h = Sha256::new();
     // v2: folds in the mutant-universe / comparability inputs the score
     // actually depends on but v1 ignored — parity operators, diff scope
@@ -215,6 +216,12 @@ fn hash_with_shard(cfg: &Config, shard: Option<(u32, u32)>) -> String {
         }
         None => h.update(b"none"),
     }
+    // A leftover wave tests only what its report left unresolved. Fed only
+    // when set, so every hash from before the flag stays the same.
+    if let Some(report) = mutants_from {
+        h.update(b"|mutants_from=");
+        feed(&mut h, report.to_string_lossy().as_bytes());
+    }
     // The ruff/ty filters drop mutants those tools reject before they are ever
     // run, shrinking the denominator. A `--ruff`/`--ty` run is not comparable
     // to one without.
@@ -309,6 +316,7 @@ mod tests {
             sample_ratio: None,
             sample_seed: None,
             shard: None,
+            mutants_from: None,
             runner: RunnerKind::Pytest,
             python: None,
             unittest_pattern: None,
@@ -553,13 +561,21 @@ mod tests {
     }
 
     #[test]
-    fn universe_hash_ignores_shard_only() {
+    fn universe_hash_ignores_shard_and_mutants_from_only() {
         // Every shard of one run, at any shard count, shares the unsharded
         // run's hash — that is what makes a merged run comparable to it.
         let full = config_hash(&cfg());
         for shard in [Some((1, 4)), Some((3, 4)), Some((1, 16)), None] {
             assert_eq!(universe_hash(&Config { shard, ..cfg() }), full);
         }
+        // A leftover wave is one more slice of the same run: same universe,
+        // but its own run hash.
+        let leftover = Config {
+            mutants_from: Some(PathBuf::from("merged.json")),
+            ..cfg()
+        };
+        assert_eq!(universe_hash(&leftover), full);
+        assert_ne!(config_hash(&leftover), full);
         // Anything else still moves it.
         let sampled = Config {
             sample_ratio: Some(0.1),

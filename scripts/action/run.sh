@@ -6,6 +6,7 @@
 # env: FERMUT, PY, SOURCE, TESTS, OUT
 #      DIFF_BASE   diff-scope to this base; empty runs the whole tree
 #      SHARD       optional "i/n"; a shard never gates
+#      MUTANTS_FROM optional merged report: a leftover wave, never gates
 #      FAIL_UNDER  optional threshold
 #      EXTRA_ARGS  word-split extra flags
 # out: rc
@@ -29,6 +30,8 @@ fi
 if [ -n "$SHARD" ]; then
   # A shard sees one slice of the universe; its score gates nothing.
   args+=(--shard "$SHARD" --no-fail)
+elif [ -n "${MUTANTS_FROM:-}" ]; then
+  args+=(--mutants-from "$MUTANTS_FROM" --no-fail)
 elif [ -n "$FAIL_UNDER" ]; then
   args+=(--fail-under "$FAIL_UNDER")
 fi

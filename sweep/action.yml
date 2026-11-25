@@ -219,8 +219,9 @@ runs:
         pattern: ${{ inputs.artifact-name }}-shard-*
         path: ${{ steps.setup.outputs.out }}/shards
 
-    # Every later step checks `count != '0'`: empty (no leftovers mode) runs
-    # them as usual, "0" (nothing left) skips the rest of the job.
+    # In leftovers mode, count "0" (nothing left) skips the rest of the job.
+    # Later steps check `inputs.leftovers` first: a skipped step's output is
+    # null, and Actions coerces null == '0' to true.
     - name: Find leftovers
       id: leftovers
       if: inputs.leftovers == 'true'
@@ -232,7 +233,7 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/../scripts/action/leftovers.sh"
 
     - name: Post-install setup
-      if: inputs.post-install-command != '' && steps.leftovers.outputs.count != '0'
+      if: inputs.post-install-command != '' && (inputs.leftovers != 'true' || steps.leftovers.outputs.count != '0')
       shell: bash
       working-directory: ${{ steps.setup.outputs.wd }}
       env:
@@ -242,7 +243,7 @@ runs:
     # Each shard keeps its own verdict file: shards test disjoint mutants, and
     # a shared key would let the first shard to finish win the save.
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-      if: inputs.cache == 'true' && steps.leftovers.outputs.count != '0'
+      if: inputs.cache == 'true' && (inputs.leftovers != 'true' || steps.leftovers.outputs.count != '0')
       with:
         path: |
           ${{ steps.setup.outputs.wd }}/.fermut/cache.json
@@ -253,7 +254,7 @@ runs:
           ${{ inputs.cache-key-prefix }}-verdicts-
 
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-      if: inputs.cache == 'true' && steps.leftovers.outputs.count != '0'
+      if: inputs.cache == 'true' && (inputs.leftovers != 'true' || steps.leftovers.outputs.count != '0')
       with:
         path: |
           ${{ steps.setup.outputs.wd }}/.coverage
@@ -263,7 +264,7 @@ runs:
           ${{ inputs.cache-key-prefix }}-coverage-${{ steps.setup.outputs.scope }}${{ runner.os }}-
 
     - name: Build per-test coverage
-      if: steps.leftovers.outputs.count != '0'
+      if: (inputs.leftovers != 'true' || steps.leftovers.outputs.count != '0')
       shell: bash
       working-directory: ${{ steps.setup.outputs.wd }}
       env:
@@ -275,7 +276,7 @@ runs:
 
     - name: Run fermut
       id: run
-      if: steps.leftovers.outputs.count != '0'
+      if: (inputs.leftovers != 'true' || steps.leftovers.outputs.count != '0')
       shell: bash
       working-directory: ${{ steps.setup.outputs.wd }}
       env:

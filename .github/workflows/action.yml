@@ -124,6 +124,65 @@ jobs:
           SCORED: ${{ steps.fermut.outputs.scored }}
         run: test "$SCORED" -gt 0
 
+  budget-shard:
+    # Shard 1 runs out of time before testing anything, the way a slow runner
+    # under max-time does; the leftovers job then tests its mutants.
+    needs: [build, warm]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - *bin
+      - *path
+      - uses: ./sweep
+        with:
+          shard: ${{ matrix.shard }}/2
+          working-directory: ${{ env.SAMPLE }}
+          fermut-version: project
+          install-command: ${{ env.INSTALL }}
+          artifact-name: selftest-budget
+          args: ${{ matrix.shard == 1 && '--max-time 0' || '' }}
+
+  leftovers:
+    needs: [build, budget-shard]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - *bin
+      - *path
+      - uses: ./sweep
+        with:
+          leftovers: true
+          working-directory: ${{ env.SAMPLE }}
+          fermut-version: project
+          install-command: ${{ env.INSTALL }}
+          artifact-name: selftest-budget
+
+  trend-complete:
+    needs: [build, leftovers]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - *bin
+      - *path
+      - id: fermut
+        uses: ./trend
+        with:
+          working-directory: ${{ env.SAMPLE }}
+          fermut-version: project
+          artifact-name: selftest-budget
+          require-complete: true
+          history-branch: ""
+      - name: Assert the leftover wave completed the sweep
+        env:
+          RECORDED: ${{ steps.fermut.outputs.recorded }}
+          JSON: ${{ steps.fermut.outputs.report-json }}
+        run: |
+          test "$RECORDED" = true
+          jq -e '[.outcomes[] | select(.filter == "time-budget" or .filter == "shard")] | length == 0' "$JSON"
+
   project:
     # Monorepo aggregation: pkg_a sharded, pkg_b whole, pooled by merge.
     needs: build

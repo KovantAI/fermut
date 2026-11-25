@@ -10,6 +10,8 @@
 #                   (sweep/ only): becomes the working directory and names
 #                   the artifact `<ARTIFACT>-proj-<slug>[-shard-i-of-n]`
 #      SHARD        optional "i/n"
+#      LEFTOVERS    "true": the leftover wave of a shard matrix (sweep/ only),
+#                   artifact `<ARTIFACT>-shard-leftover`
 #      ARTIFACT     report artifact name
 #      BRANCH       default branch, when the action needs one (trend/ only)
 # out: out, out_abs, artifact, wd, scope
@@ -52,6 +54,12 @@ if [ -n "${SHARD:-}" ]; then
   [[ "$SHARD" =~ ^[1-9][0-9]*/[1-9][0-9]*$ ]] || die "shard must look like \"i/n\", got \"$SHARD\"."
   [ "${SHARD%/*}" -le "${SHARD#*/}" ] || die "shard index ${SHARD%/*} exceeds total ${SHARD#*/}."
   artifact="$artifact-shard-${SHARD%/*}-of-${SHARD#*/}"
+fi
+if [ "${LEFTOVERS:-false}" = "true" ]; then
+  [ -z "${SHARD:-}" ] && [ -z "${PROJECT:-}" ] \
+    || die "leftovers runs after a shard matrix as its own job: set neither shard nor project."
+  # Matches the trend merge's `<artifact>-shard-*` download, so it merges in.
+  artifact="$artifact-shard-leftover"
 fi
 
 # Reports live outside the project so `fermut run` never mutates or scans

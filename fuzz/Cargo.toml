@@ -13,7 +13,7 @@ libfuzzer-sys = "0.4"
 # OOMs the sanitizer build.
 fermut = { path = "..", default-features = false }
 # Same tag as the main crate (keep in lockstep).
-ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.17.5" }
+ruff_python_parser = { git = "https://github.com/astral-sh/ruff", tag = "0.17.6" }
 
 # Own workspace so the fuzz crate stays out of the main build / Cargo.lock.
 [workspace]

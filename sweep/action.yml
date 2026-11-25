@@ -17,6 +17,21 @@
 # the shards with KovantAI/fermut/merge (or KovantAI/fermut/trend) in a job
 # that `needs:` this one.
 #
+# Shards that set `--max-time` (args) to stay under the job limit can leave
+# mutants untested on a slow runner. A leftover job tests them, and the trend
+# merge (with `require-complete: true`) refuses to record a sweep that still
+# has any:
+#
+#   leftovers:
+#     needs: shard
+#     steps:
+#       - uses: actions/checkout@<sha>
+#       - uses: KovantAI/fermut/sweep@v0.8.1
+#         with:
+#           leftovers: true
+#   trend:
+#     needs: [shard, leftovers]
+#
 # Monorepo: set `project` to the project's repo-relative dir (sharded or not).
 # The run uploads `<artifact-name>-proj-<slug>[-shard-<i>-of-<n>]`, never
 # gates, and merge/trend with the same `projects` list pool every project
@@ -104,6 +119,15 @@ inputs:
     description: "Extra arguments appended to `fermut run`."
     required: false
     default: ""
+  leftovers:
+    description: >-
+      "true" makes this job the leftover wave of a shard matrix: run it after
+      the shards (no `shard`), with the same artifact-name. It merges their
+      reports and tests only the mutants a shard didn't start before
+      `--max-time`, uploading `<artifact-name>-shard-leftover` for the trend
+      merge to pick up. With none left it stops after installing the project.
+    required: false
+    default: "false"
 
 outputs:
   score:
@@ -137,6 +161,8 @@ runs:
       env:
         BOOL_blocking: ${{ inputs.blocking }}
         BOOL_cache: ${{ inputs.cache }}
+        BOOL_leftovers: ${{ inputs.leftovers }}
+        LEFTOVERS: ${{ inputs.leftovers }}
         FAIL_UNDER: ${{ inputs.fail-under }}
         WD: ${{ inputs.working-directory }}
         PROJECT: ${{ inputs.project }}
@@ -187,8 +213,27 @@ runs:
         NEED_COV: "true"
       run: bash "$GITHUB_ACTION_PATH/../scripts/action/resolve-env.sh"
 
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      if: inputs.leftovers == 'true'
+      with:
+        pattern: ${{ inputs.artifact-name }}-shard-*
+        path: ${{ steps.setup.outputs.out }}/shards
+
+    # In leftovers mode, count "0" (nothing left) skips the rest of the job.
+    # Later steps check `inputs.leftovers` first: a skipped step's output is
+    # null, and Actions coerces null == '0' to true.
+    - name: Find leftovers
+      id: leftovers
+      if: inputs.leftovers == 'true'
+      shell: bash
+      env:
+        FERMUT: ${{ steps.env.outputs.bin }}
+        OUT: ${{ steps.setup.outputs.out_abs }}
+        ARTIFACT: ${{ inputs.artifact-name }}
+      run: bash "$GITHUB_ACTION_PATH/../scripts/action/leftovers.sh"
+
     - name: Post-install setup
-      if: inputs.post-install-command != ''
+      if: inputs.post-install-command != '' && (inputs.leftovers != 'true' || steps.leftovers.outputs.count != '0')
       shell: bash
       working-directory: ${{ steps.setup.outputs.wd }}
       env:
@@ -198,7 +243,7 @@ runs:
     # Each shard keeps its own verdict file: shards test disjoint mutants, and
     # a shared key would let the first shard to finish win the save.
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-      if: inputs.cache == 'true'
+      if: inputs.cache == 'true' && (inputs.leftovers != 'true' || steps.leftovers.outputs.count != '0')
       with:
         path: |
           ${{ steps.setup.outputs.wd }}/.fermut/cache.json
@@ -209,7 +254,7 @@ runs:
           ${{ inputs.cache-key-prefix }}-verdicts-
 
     - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-      if: inputs.cache == 'true'
+      if: inputs.cache == 'true' && (inputs.leftovers != 'true' || steps.leftovers.outputs.count != '0')
       with:
         path: |
           ${{ steps.setup.outputs.wd }}/.coverage
@@ -219,6 +264,7 @@ runs:
           ${{ inputs.cache-key-prefix }}-coverage-${{ steps.setup.outputs.scope }}${{ runner.os }}-
 
     - name: Build per-test coverage
+      if: (inputs.leftovers != 'true' || steps.leftovers.outputs.count != '0')
       shell: bash
       working-directory: ${{ steps.setup.outputs.wd }}
       env:
@@ -230,6 +276,7 @@ runs:
 
     - name: Run fermut
       id: run
+      if: (inputs.leftovers != 'true' || steps.leftovers.outputs.count != '0')
       shell: bash
       working-directory: ${{ steps.setup.outputs.wd }}
       env:
@@ -239,6 +286,7 @@ runs:
         TESTS: ${{ inputs.tests }}
         DIFF_BASE: ""
         SHARD: ${{ inputs.shard }}
+        MUTANTS_FROM: ${{ inputs.leftovers == 'true' && format('{0}/merged.json', steps.setup.outputs.out_abs) || '' }}
         FAIL_UNDER: ${{ inputs.fail-under }}
         EXTRA_ARGS: ${{ inputs.args }}
         OUT: ${{ steps.setup.outputs.out_abs }}
@@ -250,7 +298,7 @@ runs:
       shell: bash
       env:
         OUT: ${{ steps.setup.outputs.out_abs }}
-        HEADING: ${{ (inputs.shard != '' || inputs.project != '') && format('fermut {0} {1}', inputs.project, inputs.shard) || '' }}
+        HEADING: ${{ (inputs.shard != '' || inputs.project != '') && format('fermut {0} {1}', inputs.project, inputs.shard) || (inputs.leftovers == 'true' && 'fermut leftovers' || '') }}
       run: bash "$GITHUB_ACTION_PATH/../scripts/action/stats.sh"
 
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -263,7 +311,7 @@ runs:
         if-no-files-found: error
 
     - name: Enforce gate
-      if: ${{ !cancelled() && steps.stats.outcome == 'success' && inputs.shard == '' && inputs.project == '' }}
+      if: ${{ !cancelled() && steps.stats.outcome == 'success' && inputs.shard == '' && inputs.project == '' && inputs.leftovers != 'true' }}
       shell: bash
       env:
         RC: ${{ steps.run.outputs.rc }}

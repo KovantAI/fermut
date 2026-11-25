@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Appends the merged run's history entry to the persisted history, then
 # publishes the trend. Refuses to record a point that would corrupt the trend:
-# an empty denominator (a vacuous 100%), too many errored mutants, or a history
-# file fermut cannot fully read (appending to it would hide the damage).
+# an empty denominator (a vacuous 100%), too many errored mutants, mutants no
+# shard got to (with REQUIRE_COMPLETE), or a history file fermut cannot fully
+# read (appending to it would hide the damage).
 #
 # env: FERMUT, ENTRY (entry written by merge.sh), HISTORY (absolute path)
 #      SCORED, ERRORED, MAX_ERRORED, LIMIT, BLOCKING
+#      REPORT (merged report), REQUIRE_COMPLETE
 # out: recorded (true|false), delta (points vs the previous comparable entry;
 #      empty when there is none)
 source "$(dirname "$0")/lib.sh"
@@ -24,6 +26,12 @@ if [[ "$MAX_ERRORED" == *% ]]; then
   fi
 elif [ -n "$MAX_ERRORED" ] && [ "$ERRORED" -gt "$MAX_ERRORED" ]; then
   gate_fail "$ERRORED mutant(s) errored (max-errored $MAX_ERRORED) — refusing to record an untrustworthy score in the trend."
+fi
+if [ "${REQUIRE_COMPLETE:-false}" = "true" ]; then
+  untested="$(jq '[.outcomes[] | select(.status == "skipped" and .filter == "time-budget")] | length' "$REPORT")"
+  if [ "$untested" != 0 ]; then
+    gate_fail "$untested mutant(s) were never tested (a shard hit --max-time) — refusing to record a partial sweep in the trend. Add a leftovers job (KovantAI/fermut/sweep with leftovers: true)."
+  fi
 fi
 [ -s "$ENTRY" ] || die "fermut merge wrote no history entry at $ENTRY."
 

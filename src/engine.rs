@@ -37,6 +37,21 @@ pub const TIME_BUDGET_FILTER: &str = "time-budget";
 
 /// Reorder `mutants` in place, highest-value first, for a budgeted run.
 ///
+/// Drop mutants from operators the run didn't ask for: experimental, parity,
+/// and those outside the operator profile. They're the catalogue, not the
+/// run's universe, so they stay out of the report rather than landing as
+/// `skipped` and inflating `total` (a default run counted ~108k parity skips).
+fn retain_requested_ops(mutants: &mut Vec<Arc<Mutant>>, cfg: &Config) {
+    let gates: [Box<dyn Filter>; 3] = [
+        Box::new(filter::experimental::ExperimentalFilter::new(
+            cfg.experimental,
+        )),
+        Box::new(filter::parity::ParityFilter::new(cfg.parity)),
+        Box::new(filter::profile::ProfileFilter::new(cfg.operator_profile)),
+    ];
+    mutants.retain(|m| gates.iter().all(|f| f.admits(m).unwrap_or(true)));
+}
+
 /// v1 value signal: a mutant is "covered" when the coverage context maps it to
 /// at least one test. Covered mutants sort ahead of uncovered ones so the
 /// budget is spent on mutants that can actually be reached — an uncovered
@@ -85,6 +100,7 @@ pub fn run(cfg: &Config) -> Result<(Report, Option<HistoryEntry>)> {
             .map(Arc::new)
             .collect();
     info!(count = mutants.len(), "mutations generated");
+    retain_requested_ops(&mut mutants, cfg);
 
     // `--sample` scales only the TESTING phase: every mutant above was still
     // generated, and the `ty` pre-filter (below) still type-checks the whole
@@ -1838,6 +1854,29 @@ mod tests {
             stmt_line: 1,
             site: None,
         }
+    }
+
+    #[test]
+    fn unrequested_ops_never_reach_the_report() {
+        let op = |o: Operator| {
+            let mut m = arith_mutant("return x + 0", "+", "-");
+            m.operator = o;
+            Arc::new(m)
+        };
+        let all = vec![op(Operator::ArithOpSwap), op(Operator::ExprToNone)];
+
+        let mut mutants = all.clone();
+        retain_requested_ops(&mut mutants, &base_test_config());
+        assert_eq!(mutants.len(), 1);
+        assert_eq!(mutants[0].operator, Operator::ArithOpSwap);
+
+        let mut mutants = all;
+        let cfg = Config {
+            parity: true,
+            ..base_test_config()
+        };
+        retain_requested_ops(&mut mutants, &cfg);
+        assert_eq!(mutants.len(), 2);
     }
 
     #[test]

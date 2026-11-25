@@ -90,12 +90,11 @@ SURVIVED  src/age.py:2@50 [number-shift] `18` → `17`
 SURVIVED  src/age.py:2@50 [number-to-zero] `18` → `0`
 SURVIVED  src/age.py:2@50 [number-to-neg] `18` → `-18`
 
-13 mutants — killed: 1, survived: 5, timeout: 0, skipped: 7 (profile 5, experimental 1, ty 1), equivalent: 0, errored: 0  | score: 16.7%
+7 mutants — killed: 1, survived: 5, timeout: 0, skipped: 1 (ty 1), equivalent: 0, errored: 0  | score: 16.7%
 ```
 
-Thirteen mutants were generated from one line; seven were filtered
-before any test ran (profile-gated and experimental operators, plus
-one the ty filter proved type-invalid). Of the six that ran, only
+Seven mutants were generated from one line; one was filtered before
+any test ran (the ty filter proved it type-invalid). Of the six that ran, only
 `compare-op-swap` (`>=` → `<=`) was killed.
 
 Inspect the boundary survivor (`4` is its index in the report):
@@ -136,7 +135,7 @@ def test_boundary():
 Re-run:
 
 ```
-13 mutants — killed: 6, survived: 0, timeout: 0, skipped: 7 (profile 5, experimental 1, ty 1), equivalent: 0, errored: 0  | score: 100.0%
+7 mutants — killed: 6, survived: 0, timeout: 0, skipped: 1 (ty 1), equivalent: 0, errored: 0  | score: 100.0%
 ```
 
 The new test pins behaviour on both sides of the boundary. Each

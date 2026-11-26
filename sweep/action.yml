@@ -8,7 +8,7 @@
 #     runs-on: ubuntu-latest
 #     steps:
 #       - uses: actions/checkout@<sha>
-#       - uses: KovantAI/fermut/sweep@v0.8.1
+#       - uses: KovantAI/fermut/sweep@v0.9.0
 #         with:
 #           shard: ${{ matrix.shard }}/4
 #
@@ -26,7 +26,7 @@
 #     needs: shard
 #     steps:
 #       - uses: actions/checkout@<sha>
-#       - uses: KovantAI/fermut/sweep@v0.8.1
+#       - uses: KovantAI/fermut/sweep@v0.9.0
 #         with:
 #           leftovers: true
 #   trend:
@@ -41,7 +41,7 @@
 #       project: [packages/auth, packages/billing]
 #       shard: [1, 2]
 #     ...
-#       - uses: KovantAI/fermut/sweep@v0.8.1
+#       - uses: KovantAI/fermut/sweep@v0.9.0
 #         with:
 #           project: ${{ matrix.project }}
 #           shard: ${{ matrix.shard }}/2

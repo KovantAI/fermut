@@ -8,6 +8,8 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-26
+
 ### Added
 - `fermut hom` runs on schemata: each pair is one case of its function's
   switch (a `--cross-function` pair, one case in each of its two functions),
@@ -585,7 +587,8 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 
 Baseline release. Earlier history is recorded in the git log and release notes.
 
-[Unreleased]: https://github.com/KovantAI/fermut/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/KovantAI/fermut/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/KovantAI/fermut/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/KovantAI/fermut/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/KovantAI/fermut/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/KovantAI/fermut/compare/v0.6.1...v0.7.0

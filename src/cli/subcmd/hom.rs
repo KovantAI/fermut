@@ -41,6 +41,9 @@ use crate::cli::build_config::build_config;
 use crate::cli::RunConfigArgs;
 use crate::config::RunnerKind;
 use crate::mutator::{self, Mutant};
+use crate::runner::exit::{
+    classify_exit, is_collection_failure, is_project_config_error, ExitVerdict, TestTool,
+};
 use crate::runner::process_group::kill_group;
 use crate::runner::pytest::wait_draining_stdout;
 use crate::runner::{apply_patch, configure_mirror_cmd, Mirror};
@@ -445,9 +448,11 @@ fn apply_both(
 /// Run `tests` against the already-patched `mirror` with `-x` and report whether
 /// any failed. `-x` short-circuits at the first failure, so this is a cheap
 /// "any killer?" probe. Both stages of a pair are classified alike here and on
-/// the schemata path: a failing (1) or interrupting (2) test is a kill, and
-/// anything else pytest exits with (3 internal error, 4 ids not collected, 5
-/// nothing ran, a signal) fails the pair rather than counting as one.
+/// the schemata path, as the main runner does: a failing (1) or interrupting
+/// (2) test or a signal is a kill. Exit 3 or 4 is a kill only when the pair
+/// broke an import (pytest can't resolve the node ids, or a 9.2+ `-p` plugin
+/// import fails), checked by re-running with `--collect-only`; otherwise it,
+/// like exit 5 (nothing ran), fails the pair rather than counting as one.
 fn any_test_fails(
     mirror: &Mirror,
     private_home: bool,
@@ -456,24 +461,58 @@ fn any_test_fails(
     timeout: Duration,
     tests: &[String],
 ) -> Result<bool> {
-    let mut cmd = crate::runner::pytest::framework_command(python, exe);
-    cmd.arg("-x").arg("--tb=no").arg("-q");
-    crate::runner::pytest::single_worker(&mut cmd, exe, &[]);
-    for t in tests {
-        cmd.arg(t);
-    }
-    configure_mirror_cmd(&mut cmd, mirror, private_home)?;
+    let command = |extra: Option<&str>| -> Result<std::process::Command> {
+        let mut cmd = crate::runner::pytest::framework_command(python, exe);
+        cmd.arg("-x").arg("--tb=no").arg("-q");
+        cmd.args(extra);
+        crate::runner::pytest::single_worker(&mut cmd, exe, &[]);
+        cmd.args(tests);
+        configure_mirror_cmd(&mut cmd, mirror, private_home)?;
+        Ok(cmd)
+    };
+    let mut cmd = command(None)?;
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
 
     let child = cmd.spawn().context("spawning HOM test run")?;
     let (status, _output) = wait_draining_stdout(child, timeout, kill_group)?;
     // A timeout (`None`) counts as not-killed for this stage — conservative:
     // it can only understate a kill, never fabricate one.
-    match status.map(|s| s.code()) {
-        None | Some(Some(0)) => Ok(false),
-        Some(Some(1 | 2)) => Ok(true),
-        Some(code) => anyhow::bail!("{exe} exited {code:?}"),
+    let Some(status) = status else {
+        return Ok(false);
+    };
+    match classify_exit(TestTool::Pytest, status.code()) {
+        ExitVerdict::Survived => Ok(false),
+        ExitVerdict::Killed => Ok(true),
+        ExitVerdict::Anomaly(3 | 4)
+            if import_broke(command(Some("--collect-only"))?, mirror, timeout) =>
+        {
+            Ok(true)
+        }
+        ExitVerdict::Anomaly(code) => anyhow::bail!("{exe} exited {code}"),
     }
+}
+
+/// Run `cmd` (the stage's `--collect-only` twin) and report whether a selected
+/// module failed to collect or project code raised while pytest configured
+/// itself — the main runner's broken-import check. Any probe failure (spawn
+/// error, timeout, unreadable output) answers `false`.
+fn import_broke(mut cmd: std::process::Command, mirror: &Mirror, timeout: Duration) -> bool {
+    let mut probe = || -> Result<bool> {
+        let log = tempfile::NamedTempFile::new().context("creating collection probe log")?;
+        cmd.stdout(log.as_file().try_clone()?)
+            .stderr(log.as_file().try_clone()?);
+        let child = cmd.spawn().context("spawning HOM collection probe")?;
+        if wait_draining_stdout(child, timeout, kill_group)?
+            .0
+            .is_none()
+        {
+            return Ok(false);
+        }
+        let out = std::fs::read(log.path()).context("reading collection probe log")?;
+        let out = String::from_utf8_lossy(&out);
+        Ok(is_collection_failure(&out) || is_project_config_error(&out, &mirror.root))
+    };
+    probe().unwrap_or(false)
 }
 
 fn load_kill_sets(path: &Path) -> Result<HashMap<String, Vec<String>>> {
@@ -739,7 +778,7 @@ def outer():
 
     #[cfg(unix)]
     #[test]
-    fn spawn_stage_kills_only_on_a_failing_test() {
+    fn spawn_stage_kills_on_a_failing_test_or_broken_import() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().canonicalize().unwrap();
         std::fs::create_dir_all(dir.join("tests")).unwrap();
@@ -747,9 +786,18 @@ def outer():
         let mirror =
             crate::runner::build_mirror(&dir.join("tests"), crate::config::IsolationMode::Copy)
                 .unwrap();
-        // A fake interpreter exiting with the code its "test id" names.
+        // A fake interpreter exiting with the code its "test id" names; an id
+        // `N:broken` also reports a broken import under `--collect-only`, and
+        // `sig` dies by a signal.
         let fake = dir.join("fake-python");
-        std::fs::write(&fake, "#!/bin/sh\nfor a; do last=$a; done; exit $last\n").unwrap();
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nfor a; do [ \"$a\" = --collect-only ] && probe=1; last=$a; done\n\
+             [ \"$last\" = sig ] && kill -KILL $$\n\
+             case \"$last\" in *:broken) [ -n \"$probe\" ] && echo 'ImportError while loading conftest';; esac\n\
+             exit ${last%%:*}\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
         let run = |code: &str| {
@@ -763,8 +811,12 @@ def outer():
             )
         };
         assert!(!run("0").unwrap());
-        assert!(run("1").unwrap() && run("2").unwrap());
-        for code in ["3", "4", "5"] {
+        assert!(run("1").unwrap() && run("2").unwrap() && run("sig").unwrap());
+        assert!(
+            run("3:broken").unwrap() && run("4:broken").unwrap(),
+            "import broke: a kill"
+        );
+        for code in ["3", "4", "5", "5:broken"] {
             assert!(run(code).is_err(), "exit {code} fails the pair");
         }
     }

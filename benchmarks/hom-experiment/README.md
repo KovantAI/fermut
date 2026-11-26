@@ -63,6 +63,50 @@ interactions are high-value test-writing targets — not compute reduction.
 Caveats: markupsafe is a tiny sample (19 FOMs → 47.4% is noisy); reduction is a
 greedy set-cover upper bound over the killed set; one module per repo.
 
+## Schemata vs spawn (2026-11-17, fermut 0.8.0+)
+
+`hom` now runs each pair's stages on the schemata template (backlog #74).
+Re-recorded FOM kill sets with the current catalogue (so pair counts differ
+from the tables above), same-function gate, no `--max-pairs` cut. Pair
+classes joined on `(f1_id, f2_id)` with `hom_diff.py`.
+
+| module | pairs | SSHOMs | schemata | spawn run 1 / 2 | diffs spawn/spawn | diffs spawn/schemata |
+|---|---|---|---|---|---|---|
+| pyjwt `api_jws` | 4189 | 210 | 74 s | 264 / 156 s | 0 | 0 |
+| markupsafe `_native` | 180 | 61 | 3.5 s | 6.1 / 6.1 s | 0 | 0 |
+| more-itertools `recipes` | 3781 | 1692 | 166 s | 228 / 229 s | 0 | 0 |
+
+`--cross-function` (Phase 2), full pairs, 0 class diffs spawn/spawn and
+spawn/schemata on both:
+
+| module | pairs | SSHOMs | schemata | spawn run 1 / 2 |
+|---|---|---|---|---|
+| pyjwt `api_jws` | 19,606 | 248 | 233 s | 838 s / 6,243 s (outlier, cause not checked) |
+| more-itertools `recipes` | 5,968 | 1,891 | 532 s | 495 / 488 s |
+
+Schemata doesn't pay on more-itertools cross-function: the template serves
+97% of stages, but forks run no faster than spawned pytest there. Not
+dispatch: bisecting big `match`es (`sieve` holds 1,313 cases) changed
+nothing (520 s), so it was reverted. Likely test-bound stages plus kill
+confirmations, whose test lists rarely repeat across cross-function pairs.
+
+**Cost in wall time.** The cost column above (8.5–12.3×) counts test runs:
+`(FOM runs + HOM runs) / FOM runs`, which schemata doesn't change. In wall
+time, `(FOM pass + hom) / FOM pass`, same-function gate, FOM pass with
+`--record-kill-sets` (2026-11-18, 0 class diffs in every hom run):
+
+| module | FOM pass (schemata / spawn) | hom (schemata / spawn) | cost schemata | cost spawn |
+|---|---|---|---|---|
+| pyjwt `api_jws` | 15.1 / 17.2 s | 46.8 / 161.0 s | **4.1×** | 10.4× |
+| markupsafe `_native` | 2.9 / 2.7 s | 3.7 / 6.1 s | **2.3×** | 3.3× |
+| more-itertools `recipes` | 24.2 / 28.1 s | 193.1 / 278.0 s | **9.0×** | 10.9× |
+
+Schemata cuts the cost 1.2–2.5×, but it stays far above break-even (a
+16–47% FOM reduction pays back only under ~1.2–1.5×). The PIVOT verdict
+holds.
+Since then, `hom` counts only pytest exit 1|2 as a kill (it used to count any
+non-zero exit). No pair in these runs exited otherwise.
+
 ## Definitions
 
 For first-order mutants (FOMs) `f1`, `f2` and the second-order mutant

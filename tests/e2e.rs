@@ -2635,22 +2635,28 @@ fn kill_sets_feed_subsume_only_dominators_and_hom() {
         .count();
     assert!(inferred > 0, "some kills must be inferred: {json:#}");
 
-    let hom_out = sample.join("hom.jsonl");
-    fermut()
-        .arg("hom")
-        .arg(sample.join("src"))
-        .arg("--tests")
-        .arg(sample.join("tests"))
-        .arg("--coverage")
-        .arg(&coverage)
-        .arg("--kill-sets")
-        .arg(&kill_sets)
-        .arg("--out")
-        .arg(&hom_out)
-        .args(["--max-pairs", "5"])
-        .assert()
-        .success();
-    assert!(hom_out.exists(), "hom results written");
+    // Default (schemata where available), spawn-only, and rstest's schema.
+    for extra in [&[][..], &["--no-schemata"], &["--runner", "rstest"]] {
+        let hom_out = sample.join("hom.jsonl");
+        let _ = std::fs::remove_file(&hom_out);
+        fermut()
+            .arg("hom")
+            .arg(sample.join("src"))
+            .arg("--tests")
+            .arg(sample.join("tests"))
+            .arg("--coverage")
+            .arg(&coverage)
+            .arg("--kill-sets")
+            .arg(&kill_sets)
+            .arg("--out")
+            .arg(&hom_out)
+            .args(["--max-pairs", "5"])
+            .args(extra)
+            .assert()
+            .success();
+        let rows = std::fs::read_to_string(&hom_out).unwrap();
+        assert!(rows.lines().count() > 0, "{extra:?}: hom results written");
+    }
 }
 
 /// Write an executable fake `gh` into `dir` that logs its argv + stdin to

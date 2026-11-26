@@ -9,6 +9,10 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
 ## [Unreleased]
 
 ### Added
+- `fermut hom` runs on schemata: each pair is one case of its function's
+  switch (a `--cross-function` pair, one case in each of its two functions),
+  and each stage a fork of the template. `--no-schemata` turns it off; pairs
+  the schema can't hold run the normal way.
 - `fermut run --mutants-from <report>` runs a leftover wave: only the
   mutants a (merged) report left `skipped/time-budget` because a shard hit
   `--max-time`. `fermut merge` fills those gaps from the wave's report.
@@ -17,6 +21,9 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   a full one. Without it, merge warns.
 
 ### Changed
+- `fermut hom` counts a stage as a kill only on pytest exit 1 or 2, as `run`
+  does. Other exits (3, 4, 5, a signal) used to count as kills; they now skip
+  the pair with a warning.
 - Mutants from operators the run didn't ask for (experimental, parity, and
   those outside the operator profile) no longer appear in the report as
   `skipped`. They inflated `total` and `skipped` (and the trend history) by

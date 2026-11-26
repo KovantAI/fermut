@@ -29,6 +29,9 @@ Timeouts become the main cost, since forking can't make a hanging mutant
 finish sooner, so schemata turns on a
 [timeout budget](run.md#timeout-budgets) of `3 × baseline + 5 s` unless you set one.
 
+[`fermut hom`](hom.md#schemata) runs its higher-order mutant pairs on the
+same template.
+
 ## What runs the normal way
 
 A fork isn't a fresh process, so fermut only takes a verdict from it when the

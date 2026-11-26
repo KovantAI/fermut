@@ -480,12 +480,12 @@ pub(crate) fn run_baseline_with_timeout(
     }
 }
 
-/// Pick the configured runner.
-pub fn build(cfg: &Config) -> Box<dyn Runner> {
+/// The pytest runner's config for `exe` (`pytest`, or `rstest`: a
+/// pytest-CLI-compatible drop-in that reuses the pytest runner wholesale).
+fn pytest_config(cfg: &Config, exe: &'static str) -> pytest::PytestConfig {
     let tests = cfg.tests_path();
     let timeout = Duration::from_secs(cfg.timeout_secs);
     let baseline_timeout = Duration::from_secs(cfg.baseline_timeout_secs);
-    let isolation = cfg.isolation;
     // Smart ordering: load the kill-order history once (immutable, shared for
     // no-lock ordering) and a fresh sink the runner appends kills to. When off,
     // the history is empty (ordering no-ops) and no kills are recorded.
@@ -512,16 +512,14 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
             ids.sort();
             ids
         });
-    // `rstest` is a pytest-CLI-compatible drop-in, so it reuses the pytest
-    // runner wholesale — only the framework executable name differs.
-    let pytest_config = |exe: &'static str| pytest::PytestConfig {
-        tests: tests.clone(),
+    pytest::PytestConfig {
+        tests,
         timeout,
         baseline_timeout,
         hypothesis_seed: cfg.hypothesis_seed,
         extra_args: cfg.pytest_args.clone(),
         private_home: cfg.private_home,
-        isolation,
+        isolation: cfg.isolation,
         coverage: cfg.coverage.clone(),
         python: if exe == "rstest" {
             python::rstest_interpreter(cfg.python.as_deref())
@@ -530,16 +528,38 @@ pub fn build(cfg: &Config) -> Box<dyn Runner> {
         },
         exe,
         smart_order: cfg.smart_order,
-        kill_order: kill_order.clone(),
-        kill_sink: kill_sink.clone(),
+        kill_order,
+        kill_sink,
         record_kill_sets,
-        kill_set_sink: kill_set_sink.clone(),
+        kill_set_sink,
         // Only coverage-selected runs can name a killer the cache can use.
         learn_killer: cfg.cache && cfg.coverage.is_some(),
-        key_base: key_base.clone(),
+        key_base,
         plugin: cfg.pytest_plugin,
-        baseline_ids: baseline_ids.clone(),
+        baseline_ids,
+    }
+}
+
+/// The schemata runner `fermut hom` probes higher-order mutants on, when
+/// schemata is on for a pytest-compatible runner.
+#[cfg(unix)]
+pub(crate) fn schema_runner(cfg: &Config) -> Option<schema::SchemaRunner<pytest::PytestRunner>> {
+    let exe = match cfg.runner {
+        RunnerKind::Pytest => "pytest",
+        RunnerKind::Rstest => "rstest",
+        RunnerKind::Unittest => return None,
     };
+    cfg.schemata
+        .then(|| schema::SchemaRunner::new(pytest::PytestRunner::new(pytest_config(cfg, exe))))
+}
+
+/// Pick the configured runner.
+pub fn build(cfg: &Config) -> Box<dyn Runner> {
+    let tests = cfg.tests_path();
+    let timeout = Duration::from_secs(cfg.timeout_secs);
+    let baseline_timeout = Duration::from_secs(cfg.baseline_timeout_secs);
+    let isolation = cfg.isolation;
+    let pytest_config = |exe| pytest_config(cfg, exe);
     let pytest_compatible = |exe: &'static str| -> Box<dyn Runner> {
         Box::new(pytest::PytestRunner::new(pytest_config(exe)))
     };

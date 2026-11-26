@@ -26,6 +26,7 @@ fermut run [PATH] [flags...]
 | `--sample <r>`              | `1.0`                            | Test only this fraction of mutants (0.0–1.0), deterministic.         |
 | `--sample-seed <N>`         | `0`                              | Seed for `--sample` selection.                                       |
 | `--shard <i/n>`             | off                              | Distributed exec: process only the i-th of n disjoint slices.        |
+| `--mutants-from <report>`   | off                              | Leftover wave: test only the mutants a (merged) report left unresolved (`time-budget` skips). See [Leftover waves](#leftover-waves-mutants-from). |
 | `--runner pytest\|rstest\|unittest` | `pytest`                 | Pick the Python test runner. `rstest` is a pytest-CLI-compatible drop-in. |
 | `--python <PATH>`           | auto-discover                    | Interpreter (path) or virtualenv (dir) to run the tests with (pytest, rstest or unittest) — fermut launches the runner through that interpreter, no PATH reliance. Omitted → auto-discovers an active venv / nearby `.venv`; else pytest/rstest fall back to the bare executable on PATH and unittest to `python3`/`python`. See [Choosing the interpreter](#python-interpreter). |
 | `--isolation auto\|copy\|hardlink\|reflink` | `auto` | How worker mirrors are populated. See [Isolation](run-isolation.md). |
@@ -287,6 +288,25 @@ bound — the same floor `--sample` has. Pair with `--no-verify-baseline` in
 CI (where the suite already ran) to keep the whole job under budget.
 
 Set it in config as `max_time` under `[tool.fermut]`.
+
+## Leftover waves (`--mutants-from`) { #leftover-waves-mutants-from }
+
+A sharded sweep whose shards use `--max-time` (to stay under the CI job
+limit) can leave mutants `skipped/time-budget` on a slow runner. They are
+left out of the merged score, so that sweep scores fewer mutants than a
+complete one. Run them in a second wave:
+
+```sh
+fermut merge shard-*.json --json merged.json            # warns: N never tested
+fermut run --mutants-from merged.json --json wave2.json  # only those N
+fermut merge merged.json wave2.json --require-complete --history entry.json
+```
+
+`--mutants-from` tests only the mutants the report left unresolved; every
+other mutant is a `shard` placeholder in its report, so merge fills the
+gaps from it. It combines with `--shard i/n` to split a large wave across
+jobs. It doesn't change the `config_hash` merge checks, so the wave merges
+with the shards' reports.
 
 ## CLI overrides vs config
 

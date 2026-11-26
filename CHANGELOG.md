@@ -13,6 +13,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   switch (a `--cross-function` pair, one case in each of its two functions),
   and each stage a fork of the template. `--no-schemata` turns it off; pairs
   the schema can't hold run the normal way.
+- `fermut run --mutants-from <report>` runs a leftover wave: only the
+  mutants a (merged) report left `skipped/time-budget` because a shard hit
+  `--max-time`. `fermut merge` fills those gaps from the wave's report.
+- `fermut merge --require-complete` fails when a mutant is still
+  `skipped/time-budget`, so a sweep that didn't finish is never recorded as
+  a full one. Without it, merge warns.
 
 ### Changed
 - `fermut hom` counts a stage as a kill only on pytest exit 1 or 2, as `run`
@@ -23,6 +29,12 @@ See [VERSIONING.md](VERSIONING.md) for the crate's stability and MSRV policy.
   `skipped`. They inflated `total` and `skipped` (and the trend history) by
   roughly half on a default run; the score is unchanged. `--experimental`,
   `--parity` and `--operators` still bring them in.
+
+### Fixed
+- `fermut merge` no longer fails with "conflicting verdicts" when a shard
+  hit `--max-time`. Past its deadline a shard records every remaining
+  mutant as `skipped/time-budget`, including other shards' mutants, and
+  merge now lets any other shard's outcome replace that skip.
 
 ## [0.8.1] - 2026-11-18
 

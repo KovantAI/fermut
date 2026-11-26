@@ -225,6 +225,10 @@ pub fn build_chain(cfg: &Config) -> Result<Vec<Box<dyn Filter>>> {
         chain.push(Box::new(shard::ShardFilter::new(index, total)));
     }
 
+    if let Some(report) = &cfg.mutants_from {
+        chain.push(Box::new(shard::MutantsFromFilter::load(report)?));
+    }
+
     if let Some(ratio) = cfg.sample_ratio {
         chain.push(Box::new(sample::SampleFilter::new(
             ratio,
@@ -392,6 +396,7 @@ mod chain_order_tests {
             sample_ratio: None,
             sample_seed: None,
             shard: None,
+            mutants_from: None,
             runner: RunnerKind::Pytest,
             python: None,
             unittest_pattern: None,

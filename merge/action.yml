@@ -4,7 +4,7 @@
 #     needs: shard
 #     runs-on: ubuntu-latest
 #     steps:
-#       - uses: KovantAI/fermut/merge@v0.8.1
+#       - uses: KovantAI/fermut/merge@v0.9.0
 #         with:
 #           fail-under: "70"
 #
